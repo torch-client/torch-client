@@ -1,0 +1,333 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Torch Client</title>
+
+<meta name="description" content="Unofficial Minecraft client to play in your browser">
+<meta property="og:title" content="Torch Client">
+<meta property="og:description" content="Unofficial Minecraft client to play in your browser">
+<meta property="og:type" content="website">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #status {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 0.75rem;
+    font: 14px ui-monospace, monospace; color: #fff; text-align: center;
+    white-space: pre-line; padding: 2rem; background: #000;
+  }
+  #label { min-height: 1.2em; }
+  #bar {
+    width: min(320px, 80vw); height: 10px;
+    border: 1px solid #fff; padding: 1px;
+  }
+  #fill { height: 100%; width: 0%; background: #fff; }
+  #pct { font-variant-numeric: tabular-nums; }
+  #console {
+    width: min(480px, 90vw); max-height: 7em; overflow: hidden;
+    font-size: 11px; line-height: 1.3; color: #888; text-align: left;
+    white-space: pre-wrap; word-break: break-all;
+  }
+
+  #status.overlay {
+    inset: auto 0 0 0; display: flex; flex-direction: column;
+    align-items: stretch; justify-content: flex-start; gap: 0;
+    padding: 0; text-align: left; white-space: normal;
+    background: rgba(0, 0, 0, 0.85); border-top: 1px solid #444;
+    max-height: 45vh; pointer-events: auto;
+  }
+  #status.overlay.quiet { display: none; }
+
+  #logbar { display: none; }
+  #status.overlay #logbar {
+    display: flex; gap: 6px; align-items: center;
+    padding: 5px 6px; border-bottom: 1px solid #333; flex: 0 0 auto;
+  }
+  #logbar button {
+    font: inherit; font-size: 11px; color: #ddd; background: #222;
+    border: 1px solid #555; border-radius: 3px; padding: 4px 8px;
+  }
+  #logbar #count { font-size: 11px; color: #888; margin-left: auto; }
+
+  #status.overlay #console {
+    width: auto; max-height: none; flex: 1 1 auto; min-height: 0;
+    padding: 4px 6px; color: #ff8;
+    overflow-y: auto; touch-action: pan-y;
+    -webkit-user-select: text; user-select: text;
+  }
+</style>
+
+<div id="status">
+  <div id="label">loading…</div>
+  <div id="bar"><div id="fill"></div></div>
+  <div id="pct">0%</div>
+  <div id="logbar">
+    <button id="selectall" type="button">Select all</button>
+    <button id="hide" type="button">Hide</button>
+    <span id="count"></span>
+  </div>
+  <div id="console"></div>
+</div>
+<canvas id="canvas" hidden></canvas>
+
+<script type="module">
+  import init, { start_web, take_web_assets, asset_cache_key } from "./torch-client.js";
+
+  const status = document.getElementById("status");
+  const label = document.getElementById("label");
+  const fill = document.getElementById("fill");
+  const pct = document.getElementById("pct");
+  const consoleEl = document.getElementById("console");
+  const countEl = document.getElementById("count");
+  const canvas = document.getElementById("canvas");
+
+  document.getElementById("selectall").addEventListener("click", () => {
+    const range = document.createRange();
+    range.selectNodeContents(consoleEl);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  let dismissed = false;
+  document.getElementById("hide").addEventListener("click", () => {
+    dismissed = true;
+    status.classList.add("quiet");
+  });
+
+  const params = new URLSearchParams(location.search);
+  const forceLog = params.get("log") === "1";
+
+  const say = (text) => { label.textContent = text; };
+
+  const CONSOLE_LINES = 1000;
+  const tail = [];
+  const logTail = (line, problem) => {
+    tail.push(line);
+    if (tail.length > CONSOLE_LINES) tail.shift();
+    const pinned =
+      consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 24;
+    consoleEl.textContent = tail.join("\n");
+    countEl.textContent = `${tail.length} line${tail.length === 1 ? "" : "s"}`;
+    if (pinned) consoleEl.scrollTop = consoleEl.scrollHeight;
+    if (problem && !dismissed) status.classList.remove("quiet");
+  };
+  const format = (args) => args.map((a) => (a instanceof Error ? a.message : String(a))).join(" ");
+  for (const [method, prefix] of [["log", ""], ["warn", "warn: "], ["error", "error: "]]) {
+    const real = console[method].bind(console);
+    console[method] = (...args) => {
+      real(...args);
+      logTail(prefix + format(args), method === "error");
+    };
+  }
+  window.addEventListener("error", (e) => logTail(`error: ${e.message}`, true));
+  window.addEventListener("unhandledrejection", (e) => logTail(`error: ${e.reason}`, true));
+  canvas.addEventListener("webglcontextlost", (e) => {
+    logTail(`error: WebGL context lost (${e.statusMessage || "no reason given"})`, true);
+  });
+  canvas.addEventListener("webglcontextrestored", () => logTail("WebGL context restored", true));
+
+  const mb = (bytes) => (bytes / 1e6).toFixed(1);
+
+  const progress = (loaded, total) => {
+    if (total > 0) {
+      const p = Math.min(100, Math.round((loaded / total) * 100));
+      fill.style.width = `${p}%`;
+      pct.textContent = `${p}% (${mb(loaded)}/${mb(total)} MB)`;
+    } else {
+      fill.style.width = "100%";
+      pct.textContent = `${mb(loaded)} MB`;
+    }
+  };
+
+  const DB = "torch-client";
+  const STORE = "assets";
+
+  let connection = null;
+  function openDb() {
+    connection ??= new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore(STORE);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    return connection;
+  }
+
+  async function idb(mode, run) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const request = run(db.transaction(STORE, mode).objectStore(STORE));
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function storedAssets() {
+    try {
+      const key = asset_cache_key();
+      for (const stale of await idb("readonly", (store) => store.getAllKeys())) {
+        if (stale === key) continue;
+        await idb("readwrite", (store) => store.delete(stale));
+        console.info(`dropped the stored assets for ${stale}`);
+      }
+      const blob = await idb("readonly", (store) => store.get(key));
+      if (!blob) return null;
+      const stream = new Blob([blob]).stream().pipeThrough(new DecompressionStream("gzip"));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch (e) {
+      console.warn("stored assets unreadable:", e);
+      return null;
+    }
+  }
+
+  window.clearStoredAssets = async () => {
+    try {
+      await idb("readwrite", (store) => store.clear());
+      console.info("cleared the stored assets");
+    } catch (e) {
+      console.warn("could not clear the stored assets:", e);
+    }
+    location.reload();
+  };
+
+  const RETRY_KEY = "assets-retried";
+  function mayRetry() {
+    try {
+      if (sessionStorage.getItem(RETRY_KEY)) return false;
+      sessionStorage.setItem(RETRY_KEY, "1");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function keepAssets() {
+    for (let attempt = 0; attempt < 600; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const bytes = take_web_assets();
+      if (!bytes) continue;
+      try {
+        const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
+        const packed = await new Response(stream).blob();
+        const key = asset_cache_key();
+        await idb("readwrite", (store) => store.put(packed, key));
+        console.info(`stored ${(packed.size / 1048576).toFixed(1)} MB of assets as ${key}`);
+      } catch (e) {
+        console.warn("could not store the assets:", e);
+      }
+      return;
+    }
+  }
+
+  async function fetchWithProgress(url, onProgress) {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`${url}: HTTP ${response.status}`);
+    }
+    const total = Number(response.headers.get("content-length")) || 0;
+    if (!response.body) {
+      const buffer = await response.arrayBuffer();
+      onProgress(buffer.byteLength, total);
+      return buffer;
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      onProgress(loaded, total);
+    }
+    const buffer = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) {
+      buffer.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return buffer.buffer;
+  }
+
+  const MODULE = "torch-client_bg.wasm.gz";
+  const MODULE_BASE = "torch-client_bg.wasm";
+
+  async function fetchModule(onProgress) {
+    let packed = null;
+    let failure = null;
+    for (const name of new Set([MODULE, `${MODULE_BASE}.gz`, MODULE_BASE])) {
+      packed = await fetchWithProgress(`./${name}`, onProgress).catch((e) => {
+        failure = e;
+        return null;
+      });
+      if (packed) break;
+    }
+    if (!packed) throw failure;
+    const head = new Uint8Array(packed, 0, Math.min(2, packed.byteLength));
+    if (head[0] !== 0x1f || head[1] !== 0x8b) {
+      return packed;
+    }
+    say("decompressing the client…");
+    const stream = new Blob([packed]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return await new Response(stream).arrayBuffer();
+  }
+
+  const user = params.get("user") ?? "";
+  const server = params.get("server") ?? "";
+
+  try {
+    say("loading the client…");
+    const wasmBytes = await fetchModule(progress);
+    await init(wasmBytes);
+
+    say("downloading assets…");
+    progress(0, 1);
+    let assets = await storedAssets();
+    const fromStore = assets !== null;
+    if (assets) {
+      say(`using the ${(assets.length / 1048576).toFixed(1)} MB stored earlier…`);
+    } else {
+      const assetBytes = await fetchWithProgress("./assets.bin", progress).catch(() => null);
+      assets = assetBytes ? new Uint8Array(assetBytes) : new Uint8Array();
+    }
+
+    say("initializing client, this may take a moment…");
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+
+    canvas.hidden = false;
+    try {
+      start_web(assets, user, server);
+    } catch (e) {
+      if (fromStore && mayRetry()) {
+        console.warn("the stored assets did not start the client; clearing them", e);
+        await window.clearStoredAssets();
+        await new Promise(() => {});
+      }
+      throw e;
+    }
+    if (assets.length === 0) keepAssets();
+    label.remove();
+    document.getElementById("bar").remove();
+    pct.remove();
+    status.classList.add("overlay");
+    if (!forceLog) status.classList.add("quiet");
+  } catch (e) {
+    canvas.hidden = true;
+    say(`failed to start:\n\n${e}\n\nThe browser console has the detail.`);
+    throw e;
+  }
+
+  window.addEventListener("beforeunload", (event) => {
+    event.preventDefault();
+    event.returnValue = "";
+  });
+
+  document.addEventListener("paste", (event) => {
+    const text = event.clipboardData?.getData("text") ?? "";
+    if (text) {
+      import("./torch-client.js").then((m) => m.on_paste?.(text));
+    }
+  });
+</script>

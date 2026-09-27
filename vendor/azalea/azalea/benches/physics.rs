@@ -1,0 +1,89 @@
+use std::hint::black_box;
+
+use azalea::{
+    Vec3,
+    pathfinder::simulation::{SimulatedPlayerBundle, SimulationSet},
+};
+use azalea_block::BlockState;
+use azalea_core::position::{ChunkBlockPos, ChunkPos};
+use azalea_physics::collision::BlockWithShape;
+use azalea_registry::builtin::BlockKind;
+use azalea_world::{Chunk, ChunkStorage, PartialChunkStorage};
+use criterion::{BatchSize, Bencher, Criterion, criterion_group, criterion_main};
+
+#[allow(dead_code)]
+fn generate_world(partial_chunks: &mut PartialChunkStorage, size: u32) -> ChunkStorage {
+    let size = size as i32;
+
+    let mut chunks = ChunkStorage::default();
+    for chunk_x in -size..size {
+        for chunk_z in -size..size {
+            let chunk_pos = ChunkPos::new(chunk_x, chunk_z);
+            partial_chunks.set(&chunk_pos, Some(Chunk::default()), &mut chunks);
+        }
+    }
+
+    for chunk_x in -size..size {
+        for chunk_z in -size..size {
+            let chunk_pos = ChunkPos::new(chunk_x, chunk_z);
+            let chunk = chunks.get(&chunk_pos).unwrap();
+            let mut chunk = chunk.write();
+            for x in 0..16_u8 {
+                for z in 0..16_u8 {
+                    chunk.set_block_state(
+                        &ChunkBlockPos::new(x, 1, z),
+                        BlockKind::Stone.into(),
+                        chunks.min_y(),
+                    );
+                }
+            }
+        }
+    }
+
+    chunks
+}
+
+fn run_physics_benchmark(b: &mut Bencher<'_>) {
+    let mut partial_chunks = PartialChunkStorage::new(32);
+
+    let world = generate_world(&mut partial_chunks, 4);
+
+    let mut simulation_set = SimulationSet::new(world);
+
+    b.iter(|| {
+        let entity = simulation_set.spawn(SimulatedPlayerBundle::new(Vec3::new(0.5, 2.0, 0.5)));
+        for _ in 0..200 {
+            simulation_set.tick();
+        }
+        simulation_set.despawn(entity);
+    })
+}
+
+fn bench_physics(c: &mut Criterion) {
+    c.bench_function("physics", |b| {
+        run_physics_benchmark(b);
+    });
+
+    c.bench_function("is_collision_shape_full", |b| {
+        b.iter_batched(
+            || {
+                let mut blocks = Vec::new();
+                for _ in 0..1024 {
+                    let id = rand::random_range(0..=BlockState::MAX_STATE);
+                    let block = BlockState::try_from(id).unwrap();
+                    blocks.push(block);
+                }
+                blocks
+            },
+            |blocks| {
+                for block in blocks {
+                    black_box(block.is_collision_shape_full());
+                }
+            },
+            BatchSize::LargeInput,
+        );
+    });
+}
+
+criterion_group!(benches, bench_physics);
+criterion_main!(benches);

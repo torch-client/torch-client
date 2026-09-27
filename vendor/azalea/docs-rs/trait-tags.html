@@ -1,0 +1,148 @@
+<script>
+
+    const bevyTraits = [
+        'Plugin',
+        'PluginGroup',
+        'Component',
+        'Resource',
+        'Asset',
+        'Event',
+        'Message',
+        'ScheduleLabel',
+        'SystemSet',
+        'SystemParam',
+        'Relationship',
+        'RelationshipTarget'
+    ];
+
+    const implementedBevyTraits = findImplementedBevyTraits(document);
+
+    if (implementedBevyTraits.size > 0) {
+        const heading = document.body.querySelector(".main-heading h1");
+        const tagContainer = document.createElement('div');
+        tagContainer.className = 'bevy-tag-container';
+        heading.appendChild(tagContainer);
+
+        const associatedTypeHeader = document.querySelectorAll(".trait-impl.associatedtype .code-header");
+        const isImmutable = [...associatedTypeHeader].some(el => el.innerText.includes('type Mutability = Immutable'));
+
+        for (let [tagName, href] of implementedBevyTraits) {
+            if (tagName == 'Component' & isImmutable) {
+                tagName = 'Immutable Component';
+            }
+
+            tagContainer.appendChild(createBevyTag(tagName, href));
+        }
+    }
+
+    function findImplementedBevyTraits(doc) {
+        const implementedTraits = new Map();
+
+        const allTraitHeaders = doc.body.querySelectorAll(
+            '#trait-implementations-list .impl .code-header, #blanket-implementations-list .impl .code-header'
+        );
+
+        for (const header of allTraitHeaders) {
+            const traitName = removeGenerics(header.innerText).split(' ')[1].trim();
+
+            const traitLinkEl = [...header.children].find(el => el.getAttribute('href')?.includes(`trait.${traitName}.html`));
+            const href = traitLinkEl?.getAttribute('href');
+
+            implementedTraits.set(traitName, href);
+        }
+
+        const implementedBevyTraits = new Map(
+            [...implementedTraits].filter(([traitName, _]) => bevyTraits.find((x) => x == traitName))
+        );
+
+        return implementedBevyTraits;
+    }
+
+    function removeGenerics(str) {
+        const newStr = str.replace(/<([^<>])*>/g, '');
+
+        if (newStr !== str) {
+            return removeGenerics(newStr);
+        }
+
+        return newStr;
+    }
+
+    function createBevyTag(tagName, href) {
+        const el = document.createElement('a');
+        const kebabCaseName = tagName.toLowerCase().replace(' ', '-');
+
+        if (href) {
+            el.setAttribute('href', href);
+        }
+
+        el.innerText = tagName;
+        el.className = `bevy-tag ${kebabCaseName}-tag`;
+        return el;
+    }
+</script>
+
+<style>
+    .bevy-tag-container {
+        padding: 0.5rem 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    .bevy-tag {
+        display: flex;
+        align-items: center;
+        width: fit-content;
+        height: 1.5rem;
+        padding: 0 0.5rem;
+        border-radius: 0.75rem;
+        font-size: 1rem;
+        font-weight: normal;
+        color: white;
+    }
+
+    .bevy-tag {
+        background-color: var(--tag-color);
+    }
+
+    .component-tag,
+    .immutable-component-tag {
+        --tag-color: oklch(50% 27% 80);
+    }
+
+    .resource-tag {
+        --tag-color: oklch(50% 27% 110);
+    }
+
+    .asset-tag {
+        --tag-color: oklch(50% 27% 0);
+    }
+
+    .event-tag {
+        --tag-color: oklch(50% 27% 310);
+    }
+
+    .message-tag {
+        --tag-color: oklch(50% 27% 190);
+    }
+
+    .plugin-tag,
+    .plugingroup-tag {
+        --tag-color: oklch(50% 27% 50);
+    }
+
+    .schedulelabel-tag,
+    .systemset-tag {
+        --tag-color: oklch(50% 27% 270);
+    }
+
+    .systemparam-tag {
+        --tag-color: oklch(50% 27% 240);
+    }
+
+    .relationship-tag,
+    .relationshiptarget-tag {
+        --tag-color: oklch(50% 27% 150);
+    }
+</style>

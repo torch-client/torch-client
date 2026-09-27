@@ -1,0 +1,6 @@
+__pycache__
+*.tmp
+
+downloads
+__cache__
+venv

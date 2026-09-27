@@ -1,0 +1,16 @@
+.idea/
+.vscode/
+doc/
+target/
+rustc-ice-*
+
+example_cache.json
+
+azalea.log
+
+flamegraph.svg
+perf.data
+perf.data.old
+heaptrack.*
+*.mm_profdata
+chrome_profiler.json

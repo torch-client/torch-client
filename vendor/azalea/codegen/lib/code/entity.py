@@ -1,0 +1,729 @@
+from lib.utils import to_camel_case, to_snake_case, get_dir_location, upper_first_letter
+from typing import Optional
+import re
+
+METADATA_RS_DIR = get_dir_location("../azalea-entity/src/metadata.rs")
+DATA_RS_DIR = get_dir_location("../azalea-entity/src/data.rs")
+DIMENSIONS_RS_DIR = get_dir_location("../azalea-entity/src/dimensions.rs")
+
+def generate_metadata_names(burger_dataserializers: dict):
+    serializer_names: list[Optional[str]] = [None] * len(burger_dataserializers)
+    for burger_serializer in burger_dataserializers.values():
+        print(burger_serializer)
+
+        mojmap_name = burger_serializer["field"].lower()
+
+        if mojmap_name == "component":
+            mojmap_name = "formatted_text"
+        elif mojmap_name == "optional_component":
+            mojmap_name = "optional_formatted_text"
+
+        serializer_names[burger_serializer["id"]] = upper_first_letter(
+            to_camel_case(mojmap_name)
+        )
+    return serializer_names
+
+def parse_metadata_types_from_code():
+    with open(DATA_RS_DIR, "r") as f:
+        lines = f.read().splitlines()
+
+    data = []
+
+    in_enum = False
+    for line in lines:
+        if line == "pub enum EntityDataValue {":
+            in_enum = True
+        elif line == "}":
+            in_enum = False
+        elif in_enum:
+            line = line.strip()
+            if line.startswith("//"):
+                continue
+            name, type = line.rstrip("),").split("(")
+            is_var = False
+            if type.startswith("#[var] "):
+                is_var = True
+                type = type[len("#[var] ") :]
+            data.append({"name": name, "type": type, "var": is_var})
+    print(data)
+    return data
+
+def generate_entity_metadata(burger_entities_data: dict):
+    burger_entity_metadata = burger_entities_data["entity"]
+
+    new_metadata_names = generate_metadata_names(
+        burger_entities_data["dataserializers"]
+    )
+    parsed_metadata_types = parse_metadata_types_from_code()
+
+    parsed_metadata_names = []
+    for t in parsed_metadata_types:
+        parsed_metadata_names.append(t["name"])
+
+    with open(DATA_RS_DIR, "r") as f:
+        lines = f.read().splitlines()
+    added_metadata_names = []
+    for n in new_metadata_names:
+        if n not in parsed_metadata_names:
+            added_metadata_names.append(n)
+    if added_metadata_names != []:
+        in_enum = False
+        for i, line in enumerate(list(lines)):
+            if line == "pub enum EntityDataValue {":
+                in_enum = True
+            elif in_enum and line == "}":
+                in_enum = False
+                for n in added_metadata_names:
+                    lines.insert(i, f"{n}(TODO),")
+                    i += 1
+        print(lines)
+        with open(DATA_RS_DIR, "w") as f:
+            f.write("\n".join(lines))
+        print("Expected metadata types:\n" + "\n".join(new_metadata_names))
+        print(
+            "Updated metadata types in azalea-entity/src/data.rs, go make sure they're correct (check EntityDataSerializers.java) and then press enter"
+        )
+        input()
+
+    metadata_types = parse_metadata_types_from_code()
+
+    code_header = []
+    code_header.append("// This file is @generated from codegen/lib/code/entity.py.")
+    code_header.append("// Don't change it manually!")
+    code_header.append("")
+
+    code_header.append("""//! Metadata fields stored on entities.
+//!
+//! Also see the [protocol wiki documentation](https://minecraft.wiki/w/Java_Edition_protocol/Entity_metadata).
+//!
+//! # Entities
+//!
+//! Azalea creates a marker ECS component for every entity and abstract entity.
+//! You can use these to check if an entity is of a given type with an ECS
+//! filter, such as `With<AbstractMonster>`.
+//!
+//! All marker components are shown as a tree structure below:
+//!""")
+
+    code = []
+    code.append("""use azalea_chat::FormattedText;
+use azalea_core::{
+    direction::Direction,
+    position::{BlockPos, Vec3f32},
+};
+use azalea_inventory::{ItemStack, components};
+use azalea_registry::{DataRegistry, builtin::EntityKind};
+use bevy_ecs::{bundle::Bundle, component::Component};
+use derive_more::{Deref, DerefMut};
+use thiserror::Error;
+use uuid::Uuid;
+
+use super::{
+    ArmadilloStateKind, CopperGolemStateKind, EntityDataItem, EntityDataValue, OptionalUnsignedInt,
+    Pose, Quaternion, Rotations, SnifferStateKind, VillagerData, WeatheringCopperStateKind,
+};
+use crate::{HumanoidArm, particle::Particle};
+
+#[derive(Error, Debug)]
+pub enum UpdateMetadataError {
+    #[error("Wrong type ({0:?})")]
+    WrongType(EntityDataValue),
+}
+impl From<EntityDataValue> for UpdateMetadataError {
+    fn from(value: EntityDataValue) -> Self {
+        Self::WrongType(value)
+    }
+}
+""")
+
+    single_use_imported_types = {"particle", "pose"}
+
+    added_metadata_fields = set()
+
+    field_name_map = {}
+
+    previous_field_names = set()
+    duplicate_field_names = set()
+
+    duplicate_field_names.add("state")
+    duplicate_field_names.add("crouching")
+
+    duplicate_field_names.add("shift_key_down")
+
+    entity_ids_to_children_ids = {}
+
+    for entity_id in burger_entity_metadata.keys():
+        field_name_map[entity_id] = {}
+        for field_name_or_bitfield in get_entity_metadata_names(
+            entity_id, burger_entity_metadata
+        ).values():
+            if isinstance(field_name_or_bitfield, str):
+                if field_name_or_bitfield in previous_field_names:
+                    duplicate_field_names.add(field_name_or_bitfield)
+                else:
+                    previous_field_names.add(field_name_or_bitfield)
+            else:
+                for mask, name in field_name_or_bitfield.items():
+                    if name in previous_field_names:
+                        duplicate_field_names.add(name)
+                    else:
+                        previous_field_names.add(name)
+
+        duplicate_field_names.add(entity_id)
+
+        parent_id = get_entity_parent(entity_id, burger_entity_metadata)
+        if parent_id not in entity_ids_to_children_ids:
+            entity_ids_to_children_ids[parent_id] = []
+        entity_ids_to_children_ids[parent_id].append(entity_id)
+
+    for name in single_use_imported_types:
+        if name in duplicate_field_names:
+            raise Exception(f"{name} should only exist once")
+
+    for entity_id in burger_entity_metadata.keys():
+        for index, field_name_or_bitfield in get_entity_metadata_names(
+            entity_id, burger_entity_metadata
+        ).items():
+            if isinstance(field_name_or_bitfield, str):
+                new_field_name = field_name_or_bitfield
+                if new_field_name == "type":
+                    new_field_name = "kind"
+                if field_name_or_bitfield in duplicate_field_names:
+                    field_name_map[entity_id][field_name_or_bitfield] = (
+                        f"{entity_id.strip('~')}_{new_field_name}"
+                    )
+            else:
+                for mask, name in field_name_or_bitfield.items():
+                    new_field_name = name
+                    if new_field_name == "type":
+                        new_field_name = "kind"
+                    if name in duplicate_field_names:
+                        field_name_map[entity_id][name] = (
+                            f"{entity_id.strip('~')}_{new_field_name}"
+                        )
+
+    def new_entity(entity_id: str):
+
+        all_field_names_or_bitfields = []
+        entity_ids_for_all_field_names_or_bitfields = []
+        entity_metadatas = []
+
+        def maybe_rename_field(name: str, index: int) -> str:
+            if (
+                name
+                in field_name_map[entity_ids_for_all_field_names_or_bitfields[index]]
+            ):
+                return field_name_map[
+                    entity_ids_for_all_field_names_or_bitfields[index]
+                ][name]
+            return name
+
+        parents = get_entity_parents(entity_id, burger_entity_metadata)
+        for parent_id in list(reversed(parents)):
+            for index, name_or_bitfield in get_entity_metadata_names(
+                parent_id, burger_entity_metadata
+            ).items():
+                assert index == len(all_field_names_or_bitfields)
+                all_field_names_or_bitfields.append(name_or_bitfield)
+                entity_ids_for_all_field_names_or_bitfields.append(parent_id)
+            entity_metadatas.extend(
+                get_entity_metadata(parent_id, burger_entity_metadata)
+            )
+        parent_id = parents[1] if len(parents) > 1 else None
+
+        entity_struct_name = entity_id_to_struct_name(entity_id)
+        code_header_indent = "  " * (len(parents) - 1)
+        code_header.append(f"//! {code_header_indent}- [{entity_struct_name}]")
+
+        entity_metadata_doc_code = []
+
+        for index, name_or_bitfield in enumerate(all_field_names_or_bitfields):
+            hashable_name_or_bitfield = (
+                str(name_or_bitfield)
+                + entity_ids_for_all_field_names_or_bitfields[index]
+            )
+            if hashable_name_or_bitfield in added_metadata_fields:
+                continue
+            added_metadata_fields.add(hashable_name_or_bitfield)
+
+            if isinstance(name_or_bitfield, str):
+                if name_or_bitfield in single_use_imported_types:
+                    continue
+
+                name_or_bitfield = maybe_rename_field(name_or_bitfield, index)
+
+                struct_name = upper_first_letter(to_camel_case(name_or_bitfield))
+                type_id = next(filter(lambda i: i["index"] == index, entity_metadatas))[
+                    "type_id"
+                ]
+                metadata_type_data = metadata_types[type_id]
+                rust_type = metadata_type_data["type"]
+
+                code.append(f"/// A metadata field for [{entity_struct_name}].")
+                code.append("#[derive(Component, Deref, DerefMut, Clone, PartialEq)]")
+                code.append(f"pub struct {struct_name}(pub {rust_type});")
+                entity_metadata_doc_code.append(f"/// - [{struct_name}]")
+            else:
+                for mask, name in name_or_bitfield.items():
+                    name = maybe_rename_field(name, index)
+                    struct_name = upper_first_letter(to_camel_case(name))
+                    code.append(
+                        "#[derive(Component, Deref, DerefMut, Clone, Copy, PartialEq)]"
+                    )
+                    code.append(f"/// A metadata field for [{entity_struct_name}].")
+                    code.append(f"pub struct {struct_name}(pub bool);")
+                    entity_metadata_doc_code.append(f"/// - [{struct_name}]")
+
+        if entity_id == "~abstract_entity":
+            code.append("/// The root entity marker component.")
+            code.append("///")
+            code.append(
+                "/// All entities that have had their metadata sent by the server will have this component."
+            )
+        elif entity_id.startswith("~"):
+            code.append("/// An abstract entity marker component.")
+        else:
+            code.append(
+                f"/// The marker component for entities of type `minecraft:{entity_id}`."
+            )
+
+        code.append("///")
+        code.append("/// # Metadata")
+        code.append("///")
+        if len(entity_metadata_doc_code) == 0:
+            code.append(
+                "/// This entity type does not add any additional metadata. It will still have metadata from parent types."
+            )
+        else:
+            code.append(
+                f"/// These are the metadata components that all `{entity_struct_name}` entities are guaranteed to have, in addition to the metadata components from parent types:"
+            )
+            code.append("///")
+            code.extend(entity_metadata_doc_code)
+
+        if len(parents) > 1:
+            code.append("///")
+            code.append("/// # Parents")
+            code.append("///")
+            code.append(
+                f"/// Entities with `{entity_struct_name}` will also have the following marker components and their metadata fields:"
+            )
+            code.append("///")
+            for parent_entity_id in parents[1:]:
+                code.append(f"/// - [{entity_id_to_struct_name(parent_entity_id)}]")
+
+        code.append("///")
+        code.append("/// # Children")
+        code.append("///")
+
+        def add_children_recursively(current_entity_id, indentation=""):
+            for child_entity_id in entity_ids_to_children_ids.get(
+                current_entity_id, []
+            ):
+                code.append(
+                    f"/// {indentation}- [{entity_id_to_struct_name(child_entity_id)}]"
+                )
+                add_children_recursively(child_entity_id, indentation + "  ")
+
+        children_entity_ids = entity_ids_to_children_ids.get(entity_id)
+        if children_entity_ids:
+            add_children_recursively(entity_id)
+        else:
+            code.append("/// This entity type has no children types.")
+
+        code.append("#[derive(Component)]")
+        code.append(f"pub struct {entity_struct_name};")
+
+        parent_struct_name = (
+            upper_first_letter(to_camel_case(parent_id.lstrip("~")))
+            if parent_id
+            else None
+        )
+
+        code.append(f"impl {entity_struct_name} {{")
+        code.append(
+            "    fn apply_metadata(entity: &mut bevy_ecs::system::EntityCommands, d: EntityDataItem) -> Result<(), UpdateMetadataError> {"
+        )
+        code.append("        match d.index {")
+
+        parent_last_index = -1
+        for index, name_or_bitfield in enumerate(all_field_names_or_bitfields):
+            is_from_parent = (
+                entity_ids_for_all_field_names_or_bitfields[index] != entity_id
+            )
+            if is_from_parent:
+                parent_last_index = index
+        if parent_last_index != -1:
+            code.append(
+                f"            0..={parent_last_index} => {parent_struct_name}::apply_metadata(entity, d)?,"
+            )
+
+        for index, name_or_bitfield in enumerate(all_field_names_or_bitfields):
+            if index <= parent_last_index:
+                continue
+            if isinstance(name_or_bitfield, str):
+                name_or_bitfield = maybe_rename_field(name_or_bitfield, index)
+
+                field_struct_name = upper_first_letter(to_camel_case(name_or_bitfield))
+                if name_or_bitfield in single_use_imported_types:
+                    field_struct_name = ""
+
+                type_id = next(filter(lambda i: i["index"] == index, entity_metadatas))[
+                    "type_id"
+                ]
+                metadata_type_data = metadata_types[type_id]
+                rust_type = metadata_type_data["type"]
+                type_name = metadata_type_data["name"]
+
+                type_name_field = to_snake_case(type_name)
+                read_field_code = (
+                    f"{field_struct_name}(d.value.into_{type_name_field}()?)"
+                    if field_struct_name
+                    else f"d.value.into_{type_name_field}()?"
+                )
+                code.append(
+                    f"            {index} => {{ entity.insert({read_field_code}); }},"
+                )
+            else:
+                code.append(f"                {index} => {{")
+                code.append("let bitfield = d.value.into_byte()?;")
+                for mask, name in name_or_bitfield.items():
+                    name = maybe_rename_field(name, index)
+                    field_struct_name = upper_first_letter(to_camel_case(name))
+
+                    code.append(
+                        f"entity.insert({field_struct_name}(bitfield & {mask} != 0));"
+                    )
+                code.append("            },")
+        code.append("            _ => {}")
+        code.append("        }")
+        code.append("        Ok(())")
+        code.append("    }")
+        code.append("}")
+        code.append("")
+
+        bundle_struct_name = f"{entity_struct_name}MetadataBundle"
+        code.append("")
+        code.append(f"/// The metadata bundle for [{entity_struct_name}].")
+        code.append("///")
+        code.append("/// This type should generally not be used directly.")
+        code.append("#[derive(Bundle)]")
+        code.append(f"pub struct {bundle_struct_name} {{")
+        code.append(f"    _marker: {entity_struct_name},")
+        if parent_struct_name:
+            code.append(f"    parent: {parent_struct_name}MetadataBundle,")
+        for index, name_or_bitfield in get_entity_metadata_names(
+            entity_id, burger_entity_metadata
+        ).items():
+            if isinstance(name_or_bitfield, str):
+                name_or_bitfield = maybe_rename_field(name_or_bitfield, index)
+                struct_name = upper_first_letter(to_camel_case(name_or_bitfield))
+                code.append(f"    {name_or_bitfield}: {struct_name},")
+            else:
+                for mask, name in name_or_bitfield.items():
+                    name = maybe_rename_field(name, index)
+
+                    struct_name = upper_first_letter(to_camel_case(name))
+                    code.append(f"    {name}: {struct_name},")
+        code.append("}")
+
+        code.append(f"impl Default for {bundle_struct_name} {{")
+        code.append("    fn default() -> Self {")
+
+        def generate_fields(this_entity_id: str):
+
+            this_entity_struct_name = upper_first_letter(
+                to_camel_case(this_entity_id.lstrip("~"))
+            )
+            code.append(f"            _marker: {this_entity_struct_name},")
+
+            this_entity_parent_ids = get_entity_parents(
+                this_entity_id, burger_entity_metadata
+            )
+            this_entity_parent_id = (
+                this_entity_parent_ids[1] if len(this_entity_parent_ids) > 1 else None
+            )
+            if this_entity_parent_id:
+                code.append("            parent: Default::default(),")
+
+            for index, name_or_bitfield in get_entity_metadata_names(
+                this_entity_id, burger_entity_metadata
+            ).items():
+                default = next(
+                    filter(lambda i: i["index"] == index, entity_metadatas)
+                ).get("default", "Default::default()")
+                if isinstance(name_or_bitfield, str):
+                    type_id = next(
+                        filter(lambda i: i["index"] == index, entity_metadatas)
+                    )["type_id"]
+                    metadata_type_data = metadata_types[type_id]
+                    type_name = metadata_type_data["name"]
+
+                    name = maybe_rename_field(name_or_bitfield, index)
+
+                    if default is None:
+                        if type_name == "CompoundTag":
+                            default = "simdnbt::owned::NbtCompound::default()"
+                        elif type_name.endswith("Variant"):
+                            default = f"azalea_registry::data::{type_name}::new_raw(0)"
+                        elif type_name == "VillagerData":
+                            default = "VillagerData { kind: azalea_registry::builtin::VillagerKind::Plains, profession: azalea_registry::builtin::VillagerProfession::None, level: 0 }"
+                        else:
+                            default = (
+                                f"{type_name}::default()"
+                                if name in single_use_imported_types
+                                else "Default::default()"
+                            )
+                    else:
+                        if type_name == "Boolean":
+                            default = "true" if default else "false"
+                        elif type_name == "String":
+                            string_escaped = default.replace('"', '\\"')
+                            default = f'"{string_escaped}".into()'
+                        elif type_name == "BlockPos":
+                            default = f"BlockPos::new{default}"
+                        elif type_name == "OptionalBlockPos":
+                            default = (
+                                f"Some(BlockPos::new{default})"
+                                if default != "Empty"
+                                else "None"
+                            )
+                        elif type_name == "OptionalLivingEntityReference":
+                            default = (
+                                f"Some(uuid::uuid!({default}))"
+                                if default != "Empty"
+                                else "None"
+                            )
+                        elif type_name == "OptionalUnsignedInt":
+                            default = (
+                                f"OptionalUnsignedInt(Some({default}))"
+                                if default != "Empty"
+                                else "OptionalUnsignedInt(None)"
+                            )
+                        elif type_name == "ItemStack":
+                            default = (
+                                f"ItemStack::Present({default})"
+                                if default != "Empty"
+                                else "ItemStack::Empty"
+                            )
+                        elif type_name == "BlockState":
+                            default = (
+                                f"{default}"
+                                if default != "Empty"
+                                else "azalea_block::BlockState::AIR"
+                            )
+                        elif type_name == "OptionalBlockState":
+                            default = (
+                                f"{default}"
+                                if default != "Empty"
+                                else "azalea_block::BlockState::AIR"
+                            )
+                        elif type_name == "OptionalFormattedText":
+                            default = (
+                                f"Some({default})" if default != "Empty" else "None"
+                            )
+                        elif type_name == "CompoundTag":
+                            default = (
+                                f"simdnbt::owned::NbtCompound({default})"
+                                if default != "Empty"
+                                else "simdnbt::owned::NbtCompound::default()"
+                            )
+                        elif type_name == "Quaternion":
+                            default = f"Quaternion {{ x: {float(default['x'])}, y: {float(default['y'])}, z: {float(default['z'])}, w: {float(default['w'])} }}"
+                        elif type_name == "Vector3":
+                            default = f"Vec3f32 {{ x: {float(default['x'])}, y: {float(default['y'])}, z: {float(default['z'])} }}"
+                        elif type_name == "Byte":
+                            if default < 0:
+                                default += 128
+                    if name in single_use_imported_types:
+                        code.append(f"            {name}: {default},")
+                    else:
+                        code.append(
+                            f"            {name}: {upper_first_letter(to_camel_case(name))}({default}),"
+                        )
+                else:
+                    for mask, name in name_or_bitfield.items():
+                        name = maybe_rename_field(name, index)
+                        mask = int(mask, 0)
+                        if default is None:
+                            bit_default = "false"
+                        else:
+                            bit_default = "true" if (default & mask != 0) else "false"
+                        code.append(
+                            f"            {name}: {upper_first_letter(to_camel_case(name))}({bit_default}),"
+                        )
+
+        code.append("        Self {")
+        generate_fields(entity_id)
+        code.append("        }")
+        code.append("    }")
+        code.append("}")
+        code.append("")
+
+    def new_entity_recursive(entity_id: str):
+        new_entity(entity_id)
+
+        for child_entity_id in entity_ids_to_children_ids.get(entity_id, []):
+            new_entity_recursive(child_entity_id)
+
+    new_entity_recursive("~abstract_entity")
+
+    code.append(
+        """pub fn apply_metadata(
+    entity: &mut bevy_ecs::system::EntityCommands,
+    entity_kind: EntityKind,
+    items: Vec<EntityDataItem>,
+) -> Result<(), UpdateMetadataError> {
+    match entity_kind {"""
+    )
+    for entity_id in burger_entity_metadata:
+        if entity_id.startswith("~"):
+            continue
+        struct_name: str = upper_first_letter(to_camel_case(entity_id))
+        code.append(f"        EntityKind::{struct_name} => {{")
+        code.append("            for d in items {")
+        code.append(f"                {struct_name}::apply_metadata(entity, d)?;")
+        code.append("            }")
+        code.append("        },")
+    code.append("    }")
+    code.append("    Ok(())")
+    code.append("}")
+    code.append("")
+
+    code.append(
+        "pub fn apply_default_metadata(entity: &mut bevy_ecs::system::EntityCommands, kind: EntityKind) {"
+    )
+    code.append("    match kind {")
+    for entity_id in burger_entity_metadata:
+        if entity_id.startswith("~"):
+            continue
+        struct_name: str = upper_first_letter(to_camel_case(entity_id))
+        code.append(f"        EntityKind::{struct_name} => {{")
+        code.append(
+            f"            entity.insert({struct_name}MetadataBundle::default());"
+        )
+        code.append("        },")
+    code.append("    }")
+    code.append("}")
+    code.append("")
+
+    code_header.append("")
+    code_header.append("#![allow(clippy::single_match, non_snake_case)]")
+
+    with open(METADATA_RS_DIR, "w") as f:
+        f.write("\n".join(code_header) + "\n\n")
+        f.write("\n".join(code))
+
+def entity_id_to_struct_name(entity_id: str) -> str:
+    return upper_first_letter(to_camel_case(entity_id.lstrip("~")))
+
+def generate_entity_dimensions(burger_entities_data: dict):
+    new_match_lines = []
+    for entity_id, entity_data in burger_entities_data["entity"].items():
+        if entity_id.startswith("~"):
+            continue
+        variant_name: str = upper_first_letter(to_camel_case(entity_id))
+        width = entity_data["width"]
+        height = entity_data["height"]
+        expr = f"EntityDimensions::new({width}, {height})"
+        if "eye_height" in entity_data:
+            expr += f".eye_height({entity_data['eye_height']})"
+        new_match_lines.append(f"        EntityKind::{variant_name} => {expr},")
+
+    with open(DIMENSIONS_RS_DIR, "r") as f:
+        lines = f.read().split("\n")
+    new_lines = []
+
+    in_match = False
+    for i, line in enumerate(lines):
+        if not in_match:
+            new_lines.append(line)
+            if line.strip() == "match entity {":
+                in_match = True
+        else:
+            if line == "        }":
+                new_lines.extend(new_match_lines)
+                new_lines.extend(lines[i:])
+                break
+
+    with open(DIMENSIONS_RS_DIR, "w") as f:
+        f.write("\n".join(new_lines))
+
+def get_entity_parents(entity_id: str, burger_entity_metadata: dict):
+    parents = []
+    while entity_id:
+        parents.append(entity_id)
+        entity_id = get_entity_parent(entity_id, burger_entity_metadata)
+    return parents
+
+def get_entity_parent(entity_id: str, burger_entity_metadata: dict):
+    entity_metadata = burger_entity_metadata[entity_id]["metadata"]
+    first_metadata = entity_metadata[0]
+    return first_metadata.get("entity")
+
+def get_entity_metadata(entity_id: str, burger_entity_metadata: dict):
+    entity_metadata = burger_entity_metadata[entity_id]["metadata"]
+    entity_useful_metadata = []
+    for metadata_item in entity_metadata:
+        if "data" in metadata_item:
+            for metadata_attribute in metadata_item["data"]:
+                entity_useful_metadata.append(
+                    {
+                        "index": metadata_attribute["index"],
+                        "type_id": metadata_attribute["serializer_id"],
+                        "default": metadata_attribute.get("default"),
+                    }
+                )
+    return entity_useful_metadata
+
+def get_entity_metadata_names(entity_id: str, burger_entity_metadata: dict):
+    entity_metadata = burger_entity_metadata[entity_id]["metadata"]
+    mapped_metadata_names = {}
+
+    for metadata_item in entity_metadata:
+        if "data" in metadata_item:
+
+            first_byte_index = None
+
+            for metadata_attribute in metadata_item["data"]:
+                mojang_field = metadata_attribute["field"]
+                pretty_mojang_name = prettify_mojang_field(mojang_field)
+                mapped_metadata_names[metadata_attribute["index"]] = pretty_mojang_name
+
+                if (
+                    metadata_attribute["serializer"] == "Byte"
+                    and first_byte_index is None
+                ):
+                    first_byte_index = metadata_attribute["index"]
+
+            if metadata_item["bitfields"] and first_byte_index is not None:
+                clean_bitfield = {}
+                for bitfield_item in metadata_item["bitfields"]:
+                    mojang_bitfield_item_name = bitfield_item["method"]
+                    bitfield_item_name = prettify_mojang_method(
+                        mojang_bitfield_item_name
+                    )
+                    bitfield_hex_mask = hex(bitfield_item["mask"])
+                    clean_bitfield[bitfield_hex_mask] = bitfield_item_name
+                mapped_metadata_names[first_byte_index] = clean_bitfield
+    return mapped_metadata_names
+
+def prettify_mojang_field(mojang_field: str):
+    better_name = mojang_field
+    if better_name.startswith("DATA_"):
+        better_name = better_name[5:]
+
+    if better_name.endswith("_ID"):
+        better_name = better_name[:-3]
+    if better_name.startswith("ID_"):
+        better_name = better_name[3:]
+
+    return better_name.lower()
+
+def prettify_mojang_method(mojang_method: str):
+    better_name = mojang_method
+    if better_name.endswith("()"):
+        better_name = better_name[:-2]
+    if re.match(r"is[A-Z]", better_name):
+        better_name = better_name[2:]
+    return to_snake_case(better_name)

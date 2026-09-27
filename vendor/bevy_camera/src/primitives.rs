@@ -1,0 +1,699 @@
+use core::borrow::Borrow;
+
+use bevy_ecs::{component::Component, entity::EntityHashMap, reflect::ReflectComponent};
+use bevy_math::{
+    bounding::{Aabb3d, BoundingVolume},
+    Affine3A, Mat3A, Mat4, Vec3, Vec3A, Vec4, Vec4Swizzles,
+};
+use bevy_mesh::{Mesh, VertexAttributeValues};
+use bevy_reflect::prelude::*;
+
+pub trait MeshAabb {
+    fn compute_aabb(&self) -> Option<Aabb>;
+}
+
+impl MeshAabb for Mesh {
+    fn compute_aabb(&self) -> Option<Aabb> {
+        if let Some(aabb) = self.final_aabb {
+            return Some(aabb.into());
+        }
+
+        let Ok(VertexAttributeValues::Float32x3(values)) =
+            self.try_attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            return None;
+        };
+
+        Aabb::enclosing(values.iter().map(|p| Vec3::from_slice(p)))
+    }
+}
+
+#[derive(Component, Clone, Copy, Debug, Default, Reflect, PartialEq)]
+#[reflect(Component, Default, Debug, PartialEq, Clone)]
+pub struct Aabb {
+    pub center: Vec3A,
+    pub half_extents: Vec3A,
+}
+
+impl Aabb {
+    #[inline]
+    pub fn from_min_max(minimum: Vec3, maximum: Vec3) -> Self {
+        let minimum = Vec3A::from(minimum);
+        let maximum = Vec3A::from(maximum);
+        let center = 0.5 * (maximum + minimum);
+        let half_extents = 0.5 * (maximum - minimum);
+        Self {
+            center,
+            half_extents,
+        }
+    }
+
+    pub fn enclosing<T: Borrow<Vec3>>(iter: impl IntoIterator<Item = T>) -> Option<Self> {
+        let mut iter = iter.into_iter().map(|p| *p.borrow());
+        let mut min = iter.next()?;
+        let mut max = min;
+        for v in iter {
+            min = Vec3::min(min, v);
+            max = Vec3::max(max, v);
+        }
+        Some(Self::from_min_max(min, max))
+    }
+
+    #[inline]
+    pub fn relative_radius(&self, p_normal: &Vec3A, world_from_local: &Mat3A) -> f32 {
+        let half_extents = self.half_extents;
+        Vec3A::new(
+            p_normal.dot(world_from_local.x_axis),
+            p_normal.dot(world_from_local.y_axis),
+            p_normal.dot(world_from_local.z_axis),
+        )
+        .abs()
+        .dot(half_extents)
+    }
+
+    #[inline]
+    pub fn min(&self) -> Vec3A {
+        self.center - self.half_extents
+    }
+
+    #[inline]
+    pub fn max(&self) -> Vec3A {
+        self.center + self.half_extents
+    }
+
+    #[inline]
+    pub fn is_in_half_space(&self, half_space: &HalfSpace, world_from_local: &Affine3A) -> bool {
+        let half_extents_world = world_from_local.matrix3.abs() * self.half_extents.abs();
+        let p_normal = half_space.normal();
+        let r = half_extents_world.dot(p_normal.abs());
+        let aabb_center_world = world_from_local.transform_point3a(self.center);
+        let signed_distance = p_normal.dot(aabb_center_world) + half_space.d();
+        signed_distance > r
+    }
+
+    #[inline]
+    pub fn is_in_half_space_identity(&self, half_space: &HalfSpace) -> bool {
+        let p_normal = half_space.normal();
+        let r = self.half_extents.abs().dot(p_normal.abs());
+        let signed_distance = p_normal.dot(self.center) + half_space.d();
+        signed_distance > r
+    }
+}
+
+impl From<Aabb3d> for Aabb {
+    fn from(aabb: Aabb3d) -> Self {
+        Self {
+            center: aabb.center(),
+            half_extents: aabb.half_size(),
+        }
+    }
+}
+
+impl From<Aabb> for Aabb3d {
+    fn from(aabb: Aabb) -> Self {
+        Self {
+            min: aabb.min(),
+            max: aabb.max(),
+        }
+    }
+}
+
+impl From<Sphere> for Aabb {
+    #[inline]
+    fn from(sphere: Sphere) -> Self {
+        Self {
+            center: sphere.center,
+            half_extents: Vec3A::splat(sphere.radius),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Sphere {
+    pub center: Vec3A,
+    pub radius: f32,
+}
+
+impl Sphere {
+    #[inline]
+    pub fn intersects_obb(&self, aabb: &Aabb, world_from_local: &Affine3A) -> bool {
+        let aabb_center_world = world_from_local.transform_point3a(aabb.center);
+        let v = aabb_center_world - self.center;
+        let d = v.length();
+        let relative_radius = aabb.relative_radius(&(v / d), &world_from_local.matrix3);
+        d < self.radius + relative_radius
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HalfSpace {
+    normal_d: Vec4,
+}
+
+impl HalfSpace {
+    #[inline]
+    pub fn new(normal_d: Vec4) -> Self {
+        Self {
+            normal_d: normal_d * normal_d.xyz().length_recip(),
+        }
+    }
+
+    #[inline]
+    pub fn normal(&self) -> Vec3A {
+        Vec3A::from_vec4(self.normal_d)
+    }
+
+    #[inline]
+    pub fn d(&self) -> f32 {
+        self.normal_d.w
+    }
+
+    #[inline]
+    pub fn normal_d(&self) -> Vec4 {
+        self.normal_d
+    }
+}
+
+#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+#[reflect(Component, Default, Debug, Clone)]
+pub struct Frustum {
+    #[reflect(ignore, clone)]
+    pub half_spaces: [HalfSpace; 6],
+}
+
+impl Frustum {
+    pub const NEAR_PLANE_IDX: usize = 4;
+    const FAR_PLANE_IDX: usize = 5;
+    const INACTIVE_HALF_SPACE: Vec4 = Vec4::new(0.0, 0.0, 0.0, f32::INFINITY);
+
+    #[inline]
+    pub fn from_clip_from_world(clip_from_world: &Mat4) -> Self {
+        let mut frustum = Frustum::from_clip_from_world_no_far(clip_from_world);
+        frustum.half_spaces[Self::FAR_PLANE_IDX] = HalfSpace::new(clip_from_world.row(2));
+        frustum
+    }
+
+    #[inline]
+    pub fn from_clip_from_world_custom_far(
+        clip_from_world: &Mat4,
+        view_translation: &Vec3,
+        view_backward: &Vec3,
+        far: f32,
+    ) -> Self {
+        let mut frustum = Frustum::from_clip_from_world_no_far(clip_from_world);
+        let far_center = *view_translation - far * *view_backward;
+        frustum.half_spaces[Self::FAR_PLANE_IDX] =
+            HalfSpace::new(view_backward.extend(-view_backward.dot(far_center)));
+        frustum
+    }
+
+    fn from_clip_from_world_no_far(clip_from_world: &Mat4) -> Self {
+        let row0 = clip_from_world.row(0);
+        let row1 = clip_from_world.row(1);
+        let row2 = clip_from_world.row(2);
+        let row3 = clip_from_world.row(3);
+
+        Self {
+            half_spaces: [
+                HalfSpace::new(row3 + row0),
+                HalfSpace::new(row3 - row0),
+                HalfSpace::new(row3 + row1),
+                HalfSpace::new(row3 - row1),
+                HalfSpace::new(row3 + row2),
+                HalfSpace::new(Self::INACTIVE_HALF_SPACE),
+            ],
+        }
+    }
+
+    #[inline]
+    pub fn intersects_sphere(&self, sphere: &Sphere, intersect_far: bool) -> bool {
+        let sphere_center = sphere.center.extend(1.0);
+        let max = if intersect_far {
+            Self::FAR_PLANE_IDX
+        } else {
+            Self::NEAR_PLANE_IDX
+        };
+        for half_space in &self.half_spaces[..=max] {
+            if half_space.normal_d().dot(sphere_center) + sphere.radius <= 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline]
+    pub fn intersects_obb(
+        &self,
+        aabb: &Aabb,
+        world_from_local: &Affine3A,
+        intersect_near: bool,
+        intersect_far: bool,
+    ) -> bool {
+        let aabb_center_world = world_from_local.transform_point3a(aabb.center).extend(1.0);
+
+        for (idx, half_space) in self.half_spaces.into_iter().enumerate() {
+            if (idx == Self::NEAR_PLANE_IDX && !intersect_near)
+                || (idx == Self::FAR_PLANE_IDX && !intersect_far)
+            {
+                continue;
+            }
+            let p_normal = half_space.normal();
+            let relative_radius = aabb.relative_radius(&p_normal, &world_from_local.matrix3);
+            if half_space.normal_d().dot(aabb_center_world) + relative_radius <= 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline]
+    pub fn intersects_obb_identity(&self, aabb: &Aabb) -> bool {
+        let aabb_center_world = aabb.center.extend(1.0);
+        for half_space in self.half_spaces.iter() {
+            let p_normal = half_space.normal();
+            let relative_radius = aabb.half_extents.abs().dot(p_normal.abs());
+            if half_space.normal_d().dot(aabb_center_world) + relative_radius <= 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline]
+    pub fn contains_aabb(&self, aabb: &Aabb, world_from_local: &Affine3A) -> bool {
+        for half_space in &self.half_spaces {
+            if !aabb.is_in_half_space(half_space, world_from_local) {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline]
+    pub fn contains_aabb_identity(&self, aabb: &Aabb) -> bool {
+        for half_space in &self.half_spaces {
+            if !aabb.is_in_half_space_identity(half_space) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+pub struct CubeMapFace {
+    pub target: Vec3,
+    pub up: Vec3,
+}
+
+pub const CUBE_MAP_FACES: [CubeMapFace; 6] = [
+    CubeMapFace {
+        target: Vec3::X,
+        up: Vec3::Y,
+    },
+    CubeMapFace {
+        target: Vec3::NEG_X,
+        up: Vec3::Y,
+    },
+    CubeMapFace {
+        target: Vec3::Y,
+        up: Vec3::Z,
+    },
+    CubeMapFace {
+        target: Vec3::NEG_Y,
+        up: Vec3::NEG_Z,
+    },
+    CubeMapFace {
+        target: Vec3::NEG_Z,
+        up: Vec3::Y,
+    },
+    CubeMapFace {
+        target: Vec3::Z,
+        up: Vec3::Y,
+    },
+];
+
+pub fn face_index_to_name(face_index: usize) -> &'static str {
+    match face_index {
+        0 => "+x",
+        1 => "-x",
+        2 => "+y",
+        3 => "-y",
+        4 => "+z",
+        5 => "-z",
+        _ => "invalid",
+    }
+}
+
+#[derive(Component, Clone, Debug, Default, Reflect)]
+#[reflect(Component, Default, Debug, Clone)]
+pub struct CubemapFrusta {
+    #[reflect(ignore, clone)]
+    pub frusta: [Frustum; 6],
+}
+
+impl CubemapFrusta {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Frustum> {
+        self.frusta.iter()
+    }
+    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Frustum> {
+        self.frusta.iter_mut()
+    }
+}
+
+#[derive(Default, Reflect, Debug, Clone, Copy)]
+pub enum CubemapLayout {
+    #[default]
+    CrossVertical = 0,
+    CrossHorizontal = 1,
+    SequenceVertical = 2,
+    SequenceHorizontal = 3,
+}
+
+#[derive(Component, Debug, Default, Reflect, Clone)]
+#[reflect(Component, Default, Debug, Clone)]
+pub struct CascadesFrusta {
+    #[reflect(ignore, clone)]
+    pub frusta: EntityHashMap<Vec<Frustum>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use core::f32::consts::PI;
+
+    use bevy_math::{ops, Quat};
+    use bevy_transform::components::GlobalTransform;
+
+    use crate::{CameraProjection, PerspectiveProjection};
+
+    use super::*;
+
+    fn big_frustum() -> Frustum {
+        Frustum {
+            half_spaces: [
+                HalfSpace::new(Vec4::new(-0.9701, -0.2425, -0.0000, 7.7611)),
+                HalfSpace::new(Vec4::new(-0.0000, 1.0000, -0.0000, 4.0000)),
+                HalfSpace::new(Vec4::new(-0.0000, -0.2425, -0.9701, 2.9104)),
+                HalfSpace::new(Vec4::new(-0.0000, -1.0000, -0.0000, 4.0000)),
+                HalfSpace::new(Vec4::new(-0.0000, -0.2425, 0.9701, 2.9104)),
+                HalfSpace::new(Vec4::new(0.9701, -0.2425, -0.0000, -1.9403)),
+            ],
+        }
+    }
+
+    #[test]
+    fn intersects_sphere_big_frustum_outside() {
+        let frustum = big_frustum();
+        let sphere = Sphere {
+            center: Vec3A::new(0.9167, 0.0000, 0.0000),
+            radius: 0.7500,
+        };
+        assert!(!frustum.intersects_sphere(&sphere, true));
+    }
+
+    #[test]
+    fn intersects_sphere_big_frustum_intersect() {
+        let frustum = big_frustum();
+        let sphere = Sphere {
+            center: Vec3A::new(7.9288, 0.0000, 2.9728),
+            radius: 2.0000,
+        };
+        assert!(frustum.intersects_sphere(&sphere, true));
+    }
+
+    fn frustum() -> Frustum {
+        Frustum {
+            half_spaces: [
+                HalfSpace::new(Vec4::new(-0.9701, -0.2425, -0.0000, 0.7276)),
+                HalfSpace::new(Vec4::new(-0.0000, 1.0000, -0.0000, 1.0000)),
+                HalfSpace::new(Vec4::new(-0.0000, -0.2425, -0.9701, 0.7276)),
+                HalfSpace::new(Vec4::new(-0.0000, -1.0000, -0.0000, 1.0000)),
+                HalfSpace::new(Vec4::new(-0.0000, -0.2425, 0.9701, 0.7276)),
+                HalfSpace::new(Vec4::new(0.9701, -0.2425, -0.0000, 0.7276)),
+            ],
+        }
+    }
+
+    #[test]
+    fn intersects_sphere_frustum_surrounding() {
+        let frustum = frustum();
+        let sphere = Sphere {
+            center: Vec3A::new(0.0000, 0.0000, 0.0000),
+            radius: 3.0000,
+        };
+        assert!(frustum.intersects_sphere(&sphere, true));
+    }
+
+    #[test]
+    fn intersects_sphere_frustum_contained() {
+        let frustum = frustum();
+        let sphere = Sphere {
+            center: Vec3A::new(0.0000, 0.0000, 0.0000),
+            radius: 0.7000,
+        };
+        assert!(frustum.intersects_sphere(&sphere, true));
+    }
+
+    #[test]
+    fn intersects_sphere_frustum_intersects_plane() {
+        let frustum = frustum();
+        let sphere = Sphere {
+            center: Vec3A::new(0.0000, 0.0000, 0.9695),
+            radius: 0.7000,
+        };
+        assert!(frustum.intersects_sphere(&sphere, true));
+    }
+
+    #[test]
+    fn intersects_sphere_frustum_intersects_2_planes() {
+        let frustum = frustum();
+        let sphere = Sphere {
+            center: Vec3A::new(1.2037, 0.0000, 0.9695),
+            radius: 0.7000,
+        };
+        assert!(frustum.intersects_sphere(&sphere, true));
+    }
+
+    #[test]
+    fn intersects_sphere_frustum_intersects_3_planes() {
+        let frustum = frustum();
+        let sphere = Sphere {
+            center: Vec3A::new(1.2037, -1.0988, 0.9695),
+            radius: 0.7000,
+        };
+        assert!(frustum.intersects_sphere(&sphere, true));
+    }
+
+    #[test]
+    fn intersects_sphere_frustum_dodges_1_plane() {
+        let frustum = frustum();
+        let sphere = Sphere {
+            center: Vec3A::new(-1.7020, 0.0000, 0.0000),
+            radius: 0.7000,
+        };
+        assert!(!frustum.intersects_sphere(&sphere, true));
+    }
+
+    fn long_frustum() -> Frustum {
+        Frustum {
+            half_spaces: [
+                HalfSpace::new(Vec4::new(-0.9998, -0.0222, -0.0000, -1.9543)),
+                HalfSpace::new(Vec4::new(-0.0000, 1.0000, -0.0000, 45.1249)),
+                HalfSpace::new(Vec4::new(-0.0000, -0.0168, -0.9999, 2.2718)),
+                HalfSpace::new(Vec4::new(-0.0000, -1.0000, -0.0000, 45.1249)),
+                HalfSpace::new(Vec4::new(-0.0000, -0.0168, 0.9999, 2.2718)),
+                HalfSpace::new(Vec4::new(0.9998, -0.0222, -0.0000, 7.9528)),
+            ],
+        }
+    }
+
+    #[test]
+    fn intersects_sphere_long_frustum_outside() {
+        let frustum = long_frustum();
+        let sphere = Sphere {
+            center: Vec3A::new(-4.4889, 46.9021, 0.0000),
+            radius: 0.7500,
+        };
+        assert!(!frustum.intersects_sphere(&sphere, true));
+    }
+
+    #[test]
+    fn intersects_sphere_long_frustum_intersect() {
+        let frustum = long_frustum();
+        let sphere = Sphere {
+            center: Vec3A::new(-4.9957, 0.0000, -0.7396),
+            radius: 4.4094,
+        };
+        assert!(frustum.intersects_sphere(&sphere, true));
+    }
+
+    #[test]
+    fn aabb_enclosing() {
+        assert_eq!(Aabb::enclosing([] as [Vec3; 0]), None);
+        assert_eq!(
+            Aabb::enclosing(vec![Vec3::ONE]).unwrap(),
+            Aabb::from_min_max(Vec3::ONE, Vec3::ONE)
+        );
+        assert_eq!(
+            Aabb::enclosing(&[Vec3::Y, Vec3::X, Vec3::Z][..]).unwrap(),
+            Aabb::from_min_max(Vec3::ZERO, Vec3::ONE)
+        );
+        assert_eq!(
+            Aabb::enclosing([
+                Vec3::NEG_X,
+                Vec3::X * 2.0,
+                Vec3::NEG_Y * 5.0,
+                Vec3::Z,
+                Vec3::ZERO
+            ])
+            .unwrap(),
+            Aabb::from_min_max(Vec3::new(-1.0, -5.0, 0.0), Vec3::new(2.0, 0.0, 1.0))
+        );
+    }
+
+    fn contains_aabb_test_frustum() -> Frustum {
+        let proj = PerspectiveProjection {
+            fov: 90.0_f32.to_radians(),
+            aspect_ratio: 1.0,
+            near: 1.0,
+            far: 100.0,
+            ..PerspectiveProjection::default()
+        };
+        proj.compute_frustum(&GlobalTransform::from_translation(Vec3::new(2.0, 2.0, 0.0)))
+    }
+
+    fn contains_aabb_test_frustum_with_rotation() -> Frustum {
+        let half_extent_world = (((49.5 * 49.5) * 0.5) as f32).sqrt() + 0.5f32.sqrt();
+        let near = 50.5 - half_extent_world;
+        let far = near + 2.0 * half_extent_world;
+        let fov = 2.0 * ops::atan(half_extent_world / near);
+        let proj = PerspectiveProjection {
+            aspect_ratio: 1.0,
+            near,
+            far,
+            fov,
+            ..PerspectiveProjection::default()
+        };
+        proj.compute_frustum(&GlobalTransform::IDENTITY)
+    }
+
+    #[test]
+    fn aabb_inside_frustum() {
+        let frustum = contains_aabb_test_frustum();
+        let aabb = Aabb {
+            center: Vec3A::ZERO,
+            half_extents: Vec3A::new(0.99, 0.99, 49.49),
+        };
+        let model = Affine3A::from_translation(Vec3::new(2.0, 2.0, -50.5));
+        assert!(frustum.contains_aabb(&aabb, &model));
+    }
+
+    #[test]
+    fn aabb_intersect_frustum() {
+        let frustum = contains_aabb_test_frustum();
+        let aabb = Aabb {
+            center: Vec3A::ZERO,
+            half_extents: Vec3A::new(0.99, 0.99, 49.6),
+        };
+        let model = Affine3A::from_translation(Vec3::new(2.0, 2.0, -50.5));
+        assert!(!frustum.contains_aabb(&aabb, &model));
+    }
+
+    #[test]
+    fn aabb_outside_frustum() {
+        let frustum = contains_aabb_test_frustum();
+        let aabb = Aabb {
+            center: Vec3A::ZERO,
+            half_extents: Vec3A::new(0.99, 0.99, 0.99),
+        };
+        let model = Affine3A::from_translation(Vec3::new(0.0, 0.0, 49.6));
+        assert!(!frustum.contains_aabb(&aabb, &model));
+    }
+
+    #[test]
+    fn aabb_inside_frustum_rotation() {
+        let frustum = contains_aabb_test_frustum_with_rotation();
+        let aabb = Aabb {
+            center: Vec3A::new(0.0, 0.0, 0.0),
+            half_extents: Vec3A::new(0.99, 0.99, 49.49),
+        };
+
+        let model = Affine3A::from_rotation_translation(
+            Quat::from_rotation_x(PI / 4.0),
+            Vec3::new(0.0, 0.0, -50.5),
+        );
+        assert!(frustum.contains_aabb(&aabb, &model));
+    }
+
+    #[test]
+    fn aabb_intersect_frustum_rotation() {
+        let frustum = contains_aabb_test_frustum_with_rotation();
+        let aabb = Aabb {
+            center: Vec3A::new(0.0, 0.0, 0.0),
+            half_extents: Vec3A::new(0.99, 0.99, 49.6),
+        };
+
+        let model = Affine3A::from_rotation_translation(
+            Quat::from_rotation_x(PI / 4.0),
+            Vec3::new(0.0, 0.0, -50.5),
+        );
+        assert!(!frustum.contains_aabb(&aabb, &model));
+    }
+
+    #[test]
+    fn test_identity_optimized_equivalence() {
+        let cases = vec![
+            (
+                Aabb {
+                    center: Vec3A::ZERO,
+                    half_extents: Vec3A::splat(1.0),
+                },
+                HalfSpace::new(Vec4::new(1.0, 0.0, 0.0, -0.5)),
+            ),
+            (
+                Aabb {
+                    center: Vec3A::new(2.0, -1.0, 0.5),
+                    half_extents: Vec3A::new(1.0, 2.0, 0.5),
+                },
+                HalfSpace::new(Vec4::new(1.0, 1.0, 1.0, -1.0).normalize()),
+            ),
+            (
+                Aabb {
+                    center: Vec3A::new(1.0, 1.0, 1.0),
+                    half_extents: Vec3A::ZERO,
+                },
+                HalfSpace::new(Vec4::new(0.0, 0.0, 1.0, -2.0)),
+            ),
+        ];
+        for (aabb, half_space) in cases {
+            let general = aabb.is_in_half_space(&half_space, &Affine3A::IDENTITY);
+            let identity = aabb.is_in_half_space_identity(&half_space);
+            assert_eq!(general, identity,);
+        }
+    }
+
+    #[test]
+    fn intersects_obb_identity_matches_standard_true_true() {
+        let frusta = [frustum(), long_frustum(), big_frustum()];
+        let aabbs = [
+            Aabb {
+                center: Vec3A::ZERO,
+                half_extents: Vec3A::new(0.5, 0.5, 0.5),
+            },
+            Aabb {
+                center: Vec3A::new(1.0, 0.0, 0.5),
+                half_extents: Vec3A::new(0.9, 0.9, 0.9),
+            },
+            Aabb {
+                center: Vec3A::new(100.0, 100.0, 100.0),
+                half_extents: Vec3A::new(1.0, 1.0, 1.0),
+            },
+        ];
+        for fr in &frusta {
+            for aabb in &aabbs {
+                let standard = fr.intersects_obb(aabb, &Affine3A::IDENTITY, true, true);
+                let optimized = fr.intersects_obb_identity(aabb);
+                assert_eq!(standard, optimized);
+            }
+        }
+    }
+}

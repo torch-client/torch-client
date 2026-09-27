@@ -1,0 +1,23 @@
+use super::argument_builder::{ArgumentBuilder, ArgumentBuilderType};
+
+#[derive(Clone, Debug, Default)]
+pub struct Literal {
+    pub value: String,
+}
+impl Literal {
+    pub fn new(value: &str) -> Self {
+        Self {
+            value: value.to_owned(),
+        }
+    }
+}
+
+impl<S, R> From<Literal> for ArgumentBuilderType<S, R> {
+    fn from(literal: Literal) -> Self {
+        Self::Literal(literal)
+    }
+}
+
+pub fn literal<S, R>(value: &str) -> ArgumentBuilder<S, R> {
+    ArgumentBuilder::new(ArgumentBuilderType::Literal(Literal::new(value)))
+}

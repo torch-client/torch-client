@@ -1,0 +1,233 @@
+[package]
+name = "torch-client"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "torch_client"
+crate-type = ["rlib"]
+
+[features]
+default = ["asset_download", "multiversion", "full_font", "skins", "online_mode"]
+
+skins = ["dep:reqwest", "dep:rustls"]
+
+full_font = []
+profiling = ["bevy/trace"]
+
+deadlock-detection = ["parking_lot/deadlock_detection"]
+
+alloc_diag = []
+
+budget = []
+
+mobile_ui = ["bevy/touch"]
+
+click_gui = []
+
+builtin_shaders = ["bevy/bevy_anti_alias", "bevy/bevy_post_process"]
+
+shader_support = ["dep:flate2", "dep:naga"]
+
+webgpu = ["bevy/webgpu"]
+
+online_mode = [
+    "dep:azalea-auth",
+    "dep:reqwest",
+    "dep:rustls",
+    "azalea-auth/online-mode",
+    "azalea/online-mode",
+    "uuid/v4",
+]
+
+asset_download = ["dep:flate2", "dep:reqwest", "dep:rustls"]
+multiversion = ["azalea/multiversion"]
+
+audio = ["asset_download", "dep:rodio"]
+
+eagler = [
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:azalea-auth",
+    "dep:rustls",
+]
+
+[profile.dev]
+debug = 0
+opt-level = 1
+incremental = false
+
+[profile.web]
+inherits = "release"
+opt-level = 3
+strip = false
+
+[profile.android]
+inherits = "release"
+strip = false
+
+[profile.dev.package."*"]
+debug = 0
+opt-level = 3
+
+[dependencies]
+azalea = { path = "vendor/azalea/azalea", default-features = false, features = ["log", "serde", "packet-trace"] }
+azalea-inventory = { path = "vendor/azalea/azalea-inventory" }
+azalea-protocol = { path = "vendor/azalea/azalea-protocol", default-features = false }
+azalea-world = { path = "vendor/azalea/azalea-world" }
+azalea-physics = { path = "vendor/azalea/azalea-physics" }
+azalea-core = { path = "vendor/azalea/azalea-core" }
+azalea-buf = { path = "vendor/azalea/azalea-buf" }
+azalea-chat = { path = "vendor/azalea/azalea-chat", features = ["simdnbt"] }
+azalea-registry = { path = "vendor/azalea/azalea-registry" }
+simdnbt = "0.10"
+parking_lot = "0.12"
+offset-allocator = "0.2"
+bytemuck = { version = "1", features = ["derive"] }
+
+eyre = "0.6"
+bevy = { version = "0.18", default-features = false, features = [
+    "std",
+    "async_executor",
+    "bevy_asset",
+    "bevy_log",
+    "bevy_state",
+    "bevy_color",
+    "bevy_window",
+    "bevy_winit",
+    "custom_cursor",
+    "bevy_input_focus",
+    "keyboard",
+    "mouse",
+    "bevy_camera",
+    "bevy_render",
+    "bevy_shader",
+    "bevy_mesh",
+    "bevy_image",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_light",
+    "tonemapping_luts",
+    "ktx2",
+    "zstd_rust",
+    "reflect_auto_register",
+] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+
+azalea-auth = { path = "vendor/azalea/azalea-auth", default-features = false, optional = true }
+uuid = "1"
+
+reqwest = { version = "0.13", default-features = false, optional = true }
+
+rodio = { version = "0.20", default-features = false, features = [
+    "vorbis",
+], optional = true }
+
+flate2 = { version = "1", optional = true }
+naga = { version = "27", default-features = false, features = [
+    "glsl-in",
+    "wgsl-out",
+], optional = true }
+
+tokio-tungstenite = { version = "0.30", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+], optional = true }
+futures-util = { version = "0.3", default-features = false, features = [
+    "sink",
+], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+azalea-auth = { path = "vendor/azalea/azalea-auth", default-features = false }
+uuid = "1"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Location",
+    "Storage",
+    "Navigator",
+    "Clipboard",
+    "Document",
+    "Element",
+    "EventTarget",
+    "HtmlElement",
+    "HtmlInputElement",
+    "CssStyleDeclaration",
+    "Event",
+    "KeyboardEvent",
+    "VisualViewport",
+    "WebSocket",
+    "BinaryType",
+    "MessageEvent",
+    "CloseEvent",
+    "ErrorEvent",
+    "Worker",
+    "WorkerOptions",
+    "WorkerType",
+    "DedicatedWorkerGlobalScope",
+    "console",
+    "Response",
+    "Headers",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "Request",
+    "RequestInit",
+] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[patch.crates-io]
+bevy_camera = { path = "vendor/bevy_camera" }
+simdnbt = { path = "vendor/simdnbt" }
+
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies.bevy]
+version = "0.18"
+default-features = false
+features = ["multi_threaded", "x11", "wayland"]
+
+[target.'cfg(target_os = "android")'.dependencies.bevy]
+version = "0.18"
+default-features = false
+features = ["multi_threaded", "android-native-activity"]
+
+[target.'cfg(target_os = "android")'.dependencies.jni]
+version = "0.22"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.bevy]
+version = "0.18"
+default-features = false
+features = ["webgl2"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.tokio]
+version = "1"
+features = ["full"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.tokio]
+version = "1"
+default-features = false
+features = ["sync", "macros", "rt", "time"]
+
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
+arboard = { version = "3.6", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = [
+    "blocking",
+    "rustls-no-provider",
+], optional = true }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.azalea-protocol]
+path = "vendor/azalea/azalea-protocol"
+default-features = false
+features = ["dns"]

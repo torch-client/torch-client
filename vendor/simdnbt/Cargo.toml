@@ -1,0 +1,126 @@
+[package]
+edition = "2024"
+name = "simdnbt"
+version = "0.10.0"
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "an unnecessarily fast nbt decoder"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/azalea-rs/simdnbt"
+resolver = "2"
+
+[features]
+default = [
+    "derive",
+    "serde",
+]
+derive = ["dep:simdnbt-derive"]
+serde = ["dep:serde"]
+
+[lib]
+name = "simdnbt"
+path = "src/lib.rs"
+
+[[example]]
+name = "hypixel"
+path = "examples/hypixel.rs"
+
+[[example]]
+name = "hypixel_no_derive"
+path = "examples/hypixel_no_derive.rs"
+
+[[example]]
+name = "read_and_write"
+path = "examples/read_and_write.rs"
+
+[[example]]
+name = "registry"
+path = "examples/registry.rs"
+
+[[bench]]
+name = "compare"
+path = "benches/compare.rs"
+harness = false
+
+[[bench]]
+name = "compare_hypixel"
+path = "benches/compare_hypixel.rs"
+harness = false
+
+[[bench]]
+name = "mutf8"
+path = "benches/mutf8.rs"
+harness = false
+
+[[bench]]
+name = "nbt_borrow"
+path = "benches/nbt_borrow.rs"
+harness = false
+
+[[bench]]
+name = "nbt_owned"
+path = "benches/nbt_owned.rs"
+harness = false
+
+[dependencies.byteorder]
+version = "1.5.0"
+
+[dependencies.flate2]
+version = "^1.1.2"
+
+[dependencies.serde]
+version = "1.0.219"
+optional = true
+
+[dependencies.simd_cesu8]
+version = "1.1.0"
+
+[dependencies.simdnbt-derive]
+version = "0.10.0"
+optional = true
+
+[dependencies.thiserror]
+version = "2.0.15"
+
+[dev-dependencies.crab_nbt]
+version = "0.2.11"
+
+[dev-dependencies.criterion]
+version = "0.7.0"
+features = ["html_reports"]
+
+[dev-dependencies.fastnbt]
+version = "2.5.0"
+
+[dev-dependencies.graphite_binary]
+version = "0.1.0"
+
+[dev-dependencies.hematite-nbt]
+version = "0.5.2"
+default-features = false
+
+[dev-dependencies.mimalloc]
+version = "0.1.47"
+
+[dev-dependencies.shen-nbt5]
+version = "0.4.6"
+
+[dev-dependencies.ussr-nbt]
+version = "0.2.1"
+
+[dev-dependencies.valence_nbt]
+version = "0.8.0"
+features = ["binary"]
+
+[profile.bench]
+lto = true
+debug = 2
+
+[profile.release]
+lto = true
+debug = 0

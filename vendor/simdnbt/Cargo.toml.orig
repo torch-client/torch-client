@@ -1,0 +1,62 @@
+[package]
+name = "simdnbt"
+version = "0.10.0"
+edition = "2024"
+description = "an unnecessarily fast nbt decoder"
+license = "MIT"
+repository = "https://github.com/azalea-rs/simdnbt"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+byteorder = "1.5.0"
+flate2 = "^1.1.2"
+serde = { version = "1.0.219", optional = true }
+simd_cesu8 = { version = "1.1.0" }
+simdnbt-derive = { version = "0.10.0", path = "../simdnbt-derive", optional = true }
+thiserror = "2.0.15"
+
+[dev-dependencies]
+criterion = { version = "0.7.0", features = ["html_reports"] }
+mimalloc = "0.1.47"
+
+graphite_binary = "0.1.0"
+valence_nbt = { version = "0.8.0", features = ["binary"] }
+fastnbt = "2.5.0"
+azalea-nbt = { git = "https://github.com/azalea-rs/azalea", rev = "84e036ce3752ecf57904b0f5aff1f33d43e95a32" }
+hematite-nbt = { version = "0.5.2", default-features = false }
+shen-nbt5 = "0.4.6"
+crab_nbt = "0.2.11"
+ussr-nbt = "0.2.1"
+
+[features]
+default = ["derive", "serde"]
+derive = ["dep:simdnbt-derive"]
+serde = ["dep:serde"]
+
+[profile.release]
+lto = true
+debug = false
+
+[profile.bench]
+lto = true
+debug = true
+
+[[bench]]
+harness = false
+name = "nbt_borrow"
+[[bench]]
+harness = false
+name = "nbt_owned"
+
+[[bench]]
+harness = false
+name = "compare"
+
+[[bench]]
+harness = false
+name = "compare_hypixel"
+
+[[bench]]
+harness = false
+name = "mutf8"

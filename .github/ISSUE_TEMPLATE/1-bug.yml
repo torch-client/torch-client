@@ -1,0 +1,57 @@
+name: Bug
+description: Something works wrong or looks wrong.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what you expected instead.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - Windows
+        - macOS
+        - Web (browser)
+        - Android
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / browser version
+      description: For example "Windows 11 24H2", "Ubuntu 24.04", "Firefox 131" or "Android 15, Pixel 8".
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce (if applicable)
+      placeholder: |
+        1.
+        2.
+        3.
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (if applicable)
+      description: |
+        Desktop: the terminal output.
+        Web: the browser console (F12).
+        Android: `adb logcat -s torch-client:V RustStdoutStderr:V`.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: This wasn't already reported (I have searched the issues on GitHub).
+          required: true

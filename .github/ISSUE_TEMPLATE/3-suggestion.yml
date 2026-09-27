@@ -1,0 +1,20 @@
+name: Suggestion
+description: An idea for something to add or change.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What you would like added or changed, and why.
+    validations:
+      required: true
+
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: This wasn't already reported (I have searched the issues on GitHub).
+          required: true

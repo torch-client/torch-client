@@ -1,0 +1,68 @@
+[package]
+name = "azalea-client"
+description = "A headless Minecraft client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+azalea-auth.workspace = true
+azalea-block.workspace = true
+azalea-buf.workspace = true
+azalea-chat.workspace = true
+azalea-core.workspace = true
+azalea-crypto.workspace = true
+azalea-entity.workspace = true
+azalea-inventory.workspace = true
+azalea-physics.workspace = true
+azalea-protocol = { workspace = true, features = ["connecting", "bevy_ecs"] }
+azalea-registry.workspace = true
+azalea-world.workspace = true
+bevy_app.workspace = true
+bevy_platform.workspace = true
+bevy_ecs.workspace = true
+bevy_log = { workspace = true, optional = true }
+bevy_tasks.workspace = true
+bevy_time.workspace = true
+chrono = { workspace = true, features = ["now"] }
+derive_more = { workspace = true, features = ["deref", "deref_mut"] }
+indexmap.workspace = true
+minecraft_folder_path.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+reqwest = { workspace = true, optional = true, features = ["socks"] }
+simdnbt.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+uuid.workspace = true
+bevy_utils = { workspace = true, features = ["debug"] }
+
+[dev-dependencies]
+eyre.workspace = true
+
+[features]
+default = ["log", "packet-event", "online-mode"]
+log = ["bevy_log"]
+packet-event = []
+multiversion = []
+packet-trace = ["azalea-protocol/packet-trace"]
+packet-trace-recv = ["packet-trace"]
+online-mode = [
+    "azalea-auth/online-mode",
+    "azalea-protocol/online-mode",
+    "dep:reqwest",
+]
+
+[lints]
+workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+async-compat.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-time = "1"

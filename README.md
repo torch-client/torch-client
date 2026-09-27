@@ -5,7 +5,7 @@
 **Supported versions:** `26.1.1` and `1.21.11`. One build joins both; there is no separate install per version.
 
 > [!WARNING]
-> Torch is in early development. Some features are missing and things will break. [Report a bug or suggest a feature](https://github.com/torch-client/client/issues/new/choose).
+> Torch is in early development. Some features are missing and things will break. [Report a bug or suggest a feature](https://github.com/torch-client/torch-client/issues/new/choose).
 
 
 <img width="960" height="526" alt="preview" src="https://github.com/user-attachments/assets/7139ff66-3257-4841-b810-75796659f7b3" />
@@ -20,7 +20,7 @@ Measured on 26.1.1 at a 32 chunk render distance. Results vary by system.
 
 ## Download
 
-Builds for Linux and Windows are on the [releases page](https://github.com/torch-client/client/releases).
+Builds for Linux and Windows are on the [releases page](https://github.com/torch-client/torch-client/releases).
 
 ## Build from source
 
@@ -32,7 +32,7 @@ cargo build --release
 
 See [CONTRIBUTING.md](.github/CONTRIBUTING.md#feature-system) to find out more about the projects cargo features
 
-[Suggest a feature](https://github.com/torch-client/client/issues/new/choose)
+[Suggest a feature](https://github.com/torch-client/torch-client/issues/new/choose)
 
 ## Linux persistence
 

@@ -5,7 +5,7 @@
 **Supported versions:** `26.1.1` and `1.21.11`. One build joins both; there is no separate install per version.
 
 > [!WARNING]
-> Torch is in early development. Some features are missing and things will break. [Report a bug or suggest a feature](https://github.com/torch-client/torch-client/issues/new/choose).
+> Torch is in early development. Some features are missing and things will break. [Report a bug or suggest a feature](https://github.com/torch-client/torch-client/issues/new/choose). Or join [the discord server](https://discord.gg/qqXSHEYXaq)
 
 
 <img width="960" height="526" alt="preview" src="https://github.com/user-attachments/assets/7139ff66-3257-4841-b810-75796659f7b3" />
@@ -55,7 +55,6 @@ Go to:
 Make sure you downloaded a release with `clickgui` in the file name. Builds without it do not include the click GUI.
 
 </details>
-
 
 ## License
 

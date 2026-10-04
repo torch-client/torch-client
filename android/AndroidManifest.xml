@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.torchclient.game">
+    package="com.torchclient.game"
+    android:versionCode="1"
+    android:versionName="0.1.0">
 
     <uses-permission android:name="android.permission.INTERNET" />
 
@@ -17,11 +19,11 @@
 
     <application
         android:label="Torch Client"
+        android:icon="@mipmap/ic_launcher"
         android:enableOnBackInvokedCallback="false"
         android:allowNativeHeapPointerTagging="false"
         android:extractNativeLibs="false"
-        android:hardwareAccelerated="true"
-        android:debuggable="true">
+        android:hardwareAccelerated="true">
 
         <activity
             android:name="android.app.NativeActivity"

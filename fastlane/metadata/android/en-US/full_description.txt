@@ -1,0 +1,16 @@
+Torch is a Minecraft client rebuilt in Rust.
+It supports 26.1.1 and 1.21.11 servers.
+
+Requirements:
+- 64-bit ARM device
+- Android 9 or newer
+
+Network use:
+- On first launch Torch downloads the game's assets (textures, models, language files) from Mojang's asset server.
+- Optional sign in using Minecraft account connects to Microsoft/Mojang's servers to authenticate
+- Player skins and capes are downloaded from Mojang's servers (during gameplay)
+
+Torch is in early development. Some features are missing and things might be broken.
+https://github.com/torch-client/torch-client/issues
+
+Torch is not affiliated with Mojang Studios or Microsoft.

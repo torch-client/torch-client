@@ -106,15 +106,26 @@ javac -nowarn --release 11 \
   --output "$STAGE" \
   $(find "$STAGE/classes" -name '*.class')
 
+echo "==> aapt2 compile"
+"$BUILD_TOOLS/aapt2" compile --dir android/res -o "$STAGE/res.zip"
+
+# `--debug-mode` marks the APK debuggable, which is what lets
+# `adb shell run-as` reach the app's files. Only the debug-signed sideload
+# build gets it; F-Droid will not publish a debuggable APK.
+link_args=()
+if [ "${UNSIGNED:-0}" != 1 ]; then
+  link_args+=(--debug-mode)
+fi
+
 echo "==> aapt2 link"
 "$BUILD_TOOLS/aapt2" link \
   -o "$STAGE/base.apk" \
+  "$STAGE/res.zip" \
   -I "$PLATFORM/android.jar" \
   --manifest android/AndroidManifest.xml \
   --min-sdk-version "$MIN_SDK" \
   --target-sdk-version "$TARGET_SDK" \
-  --version-code 1 \
-  --version-name "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+  ${link_args[@]+"${link_args[@]}"}
 
 # Stored, not deflated, and both entries need it for different reasons. The
 # manifest says `extractNativeLibs="false"`, so the loader maps the .so
@@ -129,6 +140,14 @@ echo "==> zip"
 echo "==> zipalign"
 # -P 16: 16 KB page alignment for the libraries, matching max-page-size above.
 "$BUILD_TOOLS/zipalign" -P 16 -f 4 "$STAGE/base.apk" "$STAGE/aligned.apk"
+
+# F-Droid signs with its own key, so its build stops here.
+if [ "${UNSIGNED:-0}" = 1 ]; then
+  cp "$STAGE/aligned.apk" dist/torch-client-unsigned.apk
+  echo
+  ls -lh dist/torch-client-unsigned.apk
+  exit 0
+fi
 
 echo "==> apksigner"
 # The debug key Android Studio generates on first run, with the passwords the

@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::humanoid::skeleton;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -98,30 +99,30 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn skeleton_texture(_st: &EntityState) -> String {
-    "entity/skeleton/skeleton".to_string()
+fn skeleton_texture(_st: &EntityState) -> TexturePath {
+    "entity/skeleton/skeleton".into()
 }
 
-fn wither_skeleton_texture(_st: &EntityState) -> String {
-    "entity/skeleton/wither_skeleton".to_string()
+fn wither_skeleton_texture(_st: &EntityState) -> TexturePath {
+    "entity/skeleton/wither_skeleton".into()
 }
 
-fn stray_texture(_st: &EntityState) -> String {
-    "entity/skeleton/stray".to_string()
+fn stray_texture(_st: &EntityState) -> TexturePath {
+    "entity/skeleton/stray".into()
 }
 
-fn stray_overlay_texture(_st: &EntityState) -> String {
-    "entity/skeleton/stray_overlay".to_string()
+fn stray_overlay_texture(_st: &EntityState) -> TexturePath {
+    "entity/skeleton/stray_overlay".into()
 }
 
-fn bogged_texture(_st: &EntityState) -> String {
-    "entity/skeleton/bogged".to_string()
+fn bogged_texture(_st: &EntityState) -> TexturePath {
+    "entity/skeleton/bogged".into()
 }
 
-fn bogged_overlay_texture(_st: &EntityState) -> String {
-    "entity/skeleton/bogged_overlay".to_string()
+fn bogged_overlay_texture(_st: &EntityState) -> TexturePath {
+    "entity/skeleton/bogged_overlay".into()
 }
 
-fn parched_texture(_st: &EntityState) -> String {
-    "entity/skeleton/parched".to_string()
+fn parched_texture(_st: &EntityState) -> TexturePath {
+    "entity/skeleton/parched".into()
 }

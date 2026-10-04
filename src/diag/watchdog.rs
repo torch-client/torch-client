@@ -1,34 +1,37 @@
 use crate::platform::time::Instant;
 use crate::{log_error, log_info, log_warn};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use super::stats::{Stat, bump, counts, get};
+use super::stats::{Stat, bump, bump_counted, counts};
 
 struct Session {
     connected_at: Option<Instant>,
-    first_chunk_at: Option<Instant>,
     spawned: bool,
 }
 
-const REPORT_COUNT: usize = 8;
-const R_NO_CHUNKS: usize = 0;
-const R_NOT_SPAWNED: usize = 1;
-const R_NO_MESHES: usize = 2;
-const R_LIGHT_DEAD: usize = 3;
-const R_BOT_STALLED: usize = 4;
-const R_TICK_STUCK: usize = 5;
-const R_BOT_KILLED: usize = 6;
-const R_RENDER_STALLED: usize = 7;
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum Report {
+    NoChunks,
+    NotSpawned,
+    NoMeshes,
+    LightDead,
+    BotStalled,
+    TickStuck,
+    BotKilled,
+    RenderStalled,
+}
 
-static REPORTED: [AtomicBool; REPORT_COUNT] = [const { AtomicBool::new(false) }; REPORT_COUNT];
+static REPORTED: AtomicU8 = AtomicU8::new(0);
 
 static SESSION: Mutex<Session> = Mutex::new(Session {
     connected_at: None,
-    first_chunk_at: None,
     spawned: false,
 });
+
+static FIRST_CHUNK_MS: AtomicU64 = AtomicU64::new(0);
 
 static LIGHT_DEAD: AtomicBool = AtomicBool::new(false);
 
@@ -40,12 +43,10 @@ pub fn on_connected() {
     let mut s = SESSION.lock().unwrap();
     *s = Session {
         connected_at: Some(Instant::now()),
-        first_chunk_at: None,
         spawned: false,
     };
-    for flag in REPORTED.iter() {
-        flag.store(false, Ordering::Relaxed);
-    }
+    FIRST_CHUNK_MS.store(0, Ordering::Relaxed);
+    REPORTED.store(0, Ordering::Relaxed);
     super::stats::reset();
     WINDOW_RADIUS.store(-1, Ordering::Relaxed);
     LIGHT_DEAD.store(false, Ordering::Relaxed);
@@ -60,6 +61,7 @@ pub fn on_disconnected() {
     s.connected_at = None;
     s.spawned = false;
     drop(s);
+    FIRST_CHUNK_MS.store(0, Ordering::Relaxed);
 
     azalea_protocol::traffic::reset();
     super::runtime::reset_sampler();
@@ -67,9 +69,13 @@ pub fn on_disconnected() {
 
 pub fn on_chunk_received() {
     bump(Stat::ChunksReceived);
-    let mut s = SESSION.lock().unwrap();
-    if s.first_chunk_at.is_none() {
-        s.first_chunk_at = Some(Instant::now());
+    if FIRST_CHUNK_MS.load(Ordering::Relaxed) == 0 {
+        let _ = FIRST_CHUNK_MS.compare_exchange(
+            0,
+            now_ms().max(1),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -90,8 +96,7 @@ pub fn note_chunk_packet(pos: (i32, i32), in_window: bool, center: (i32, i32), r
     if in_window {
         return;
     }
-    let n = get(Stat::ChunkPacketsOutOfWindow);
-    bump(Stat::ChunkPacketsOutOfWindow);
+    let n = bump_counted(Stat::ChunkPacketsOutOfWindow);
     if n >= LOUD_REJECTS && (n + 1) % REJECT_EVERY != 0 {
         return;
     }
@@ -186,8 +191,7 @@ const LOUD_REJECTS: u64 = 5;
 const REJECT_EVERY: u64 = 200;
 
 pub fn note_cache_center(center: (i32, i32)) {
-    let n = get(Stat::CacheCenterMoves);
-    bump(Stat::CacheCenterMoves);
+    let n = bump_counted(Stat::CacheCenterMoves);
     if n == 0 {
         log_info!(
             "view",
@@ -283,18 +287,17 @@ static EVENT_NANOS: AtomicU64 = AtomicU64::new(0);
 static PACKET_COUNT: AtomicU64 = AtomicU64::new(0);
 static PACKET_NANOS: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Copy)]
-#[repr(usize)]
-pub enum Phase {
-    Nearest,
-    Meta,
-    World,
-    Anim,
-    Tick,
-    Snapshot,
+counted! {
+    pub enum Phase / PHASE_COUNT {
+        Nearest,
+        Meta,
+        World,
+        Anim,
+        Tick,
+        Snapshot,
+    }
 }
 
-const PHASE_COUNT: usize = Phase::Snapshot as usize + 1;
 static PHASE_NANOS: [AtomicU64; PHASE_COUNT] = [const { AtomicU64::new(0) }; PHASE_COUNT];
 
 static LAST_REPORT: Mutex<Option<Instant>> = Mutex::new(None);
@@ -372,16 +375,6 @@ fn report_event_load() {
     );
 }
 
-static SESSION_KILLED: AtomicBool = AtomicBool::new(false);
-
-pub fn session_killed() -> bool {
-    SESSION_KILLED.load(Ordering::Relaxed)
-}
-
-pub fn clear_session_killed() {
-    SESSION_KILLED.store(false, Ordering::Relaxed);
-}
-
 pub fn force_disconnect_pending() -> bool {
     FORCE_DISCONNECT.load(Ordering::Relaxed)
 }
@@ -419,7 +412,7 @@ fn check_bot_liveness() {
     let stall_ms = BOT_STALL_AFTER.as_millis() as u64;
 
     let entered = TICK_ENTERED_MS.load(Ordering::Relaxed);
-    if entered != 0 && now.saturating_sub(entered) > stall_ms && !latch(R_TICK_STUCK) {
+    if entered != 0 && now.saturating_sub(entered) > stall_ms && !latch(Report::TickStuck) {
         log_error!(
             "net",
             "the per-tick handler has been running for {:.0}s and has not returned, so the bot \
@@ -432,7 +425,7 @@ fn check_bot_liveness() {
     }
 
     let frame = RENDER_LAST_FRAME_MS.load(Ordering::Relaxed);
-    if frame != 0 && now.saturating_sub(frame) > stall_ms && !latch(R_RENDER_STALLED) {
+    if frame != 0 && now.saturating_sub(frame) > stall_ms && !latch(Report::RenderStalled) {
         log_error!(
             "render",
             "the render thread has not completed a frame in {:.0}s, so the window is frozen \
@@ -449,7 +442,7 @@ fn check_bot_liveness() {
     }
 
     let last = BOT_LAST_UPDATE_MS.load(Ordering::Relaxed);
-    if last != 0 && now.saturating_sub(last) > stall_ms && !latch(R_BOT_STALLED) {
+    if last != 0 && now.saturating_sub(last) > stall_ms && !latch(Report::BotStalled) {
         log_error!(
             "net",
             "the bot app has not completed an update in {:.0}s, so it has stopped reading \
@@ -462,7 +455,7 @@ fn check_bot_liveness() {
     if let Some(kill) = bot_kill_after() {
         let kill_ms = kill.as_millis() as u64;
         let stalled = |stamp: u64| stamp != 0 && now.saturating_sub(stamp) > kill_ms;
-        if (stalled(last) || stalled(entered)) && !latch(R_BOT_KILLED) {
+        if (stalled(last) || stalled(entered)) && !latch(Report::BotKilled) {
             FORCE_DISCONNECT.store(true, Ordering::Relaxed);
             log_error!(
                 "net",
@@ -490,6 +483,7 @@ fn start_watchdog_thread() {
             let mut failed_teardowns: u32 = 0;
             let mut passes: u32 = 0;
             loop {
+                park_until_watching();
                 std::thread::sleep(WATCHDOG_INTERVAL);
                 watchdog();
                 passes += 1;
@@ -498,14 +492,13 @@ fn start_watchdog_thread() {
                 }
                 if force_disconnect_pending() {
                     if crate::client::bot::force_disconnect() {
-                        SESSION_KILLED.store(true, Ordering::Relaxed);
                         clear_force_disconnect();
                         failed_teardowns = 0;
                         log_warn!(
                             "net",
-                            "session cleared and marked dead; the bot thread may still be \
-                             working through its backlog, but nothing it does can put this \
-                             client back in the world."
+                            "session cleared; the bot thread may still be working through its \
+                             backlog, but its generation is stale, so nothing it does can put \
+                             this client back in the world."
                         );
                     } else {
                         failed_teardowns += 1;
@@ -530,6 +523,27 @@ fn start_watchdog_thread() {
             "the watchdog thread could not be started, so a wedged bot or render thread will \
              now fail silently: no stall report, and no automatic disconnect."
         );
+    }
+}
+
+static WATCHING: parking_lot::Mutex<bool> = parking_lot::Mutex::new(false);
+static WAKE: parking_lot::Condvar = parking_lot::Condvar::new();
+
+pub fn set_watching(on: bool) {
+    *WATCHING.lock() = on;
+    WAKE.notify_all();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn park_until_watching() {
+    if *WATCHING.lock() {
+        return;
+    }
+    clear_force_disconnect();
+    crate::diag::alloc::trim();
+    let mut watching = WATCHING.lock();
+    while !*watching {
+        WAKE.wait(&mut watching);
     }
 }
 
@@ -577,7 +591,7 @@ pub fn watchdog() {
     check_leaked_threads();
     report_event_load();
 
-    if LIGHT_DEAD.load(Ordering::Relaxed) && !latch(R_LIGHT_DEAD) {
+    if LIGHT_DEAD.load(Ordering::Relaxed) && !latch(Report::LightDead) {
         log_error!(
             "light",
             "the light engine thread is dead, so no chunk will ever be meshed; \
@@ -588,18 +602,19 @@ pub fn watchdog() {
     let (connected_for, first_chunk_for, spawned) = {
         let Ok(s) = SESSION.try_lock() else { return };
         let Some(at) = s.connected_at else { return };
+        let first_chunk = FIRST_CHUNK_MS.load(Ordering::Relaxed);
         (
             at.elapsed(),
-            s.first_chunk_at.map(|t| t.elapsed()),
+            (first_chunk != 0).then(|| Duration::from_millis(now_ms().saturating_sub(first_chunk))),
             s.spawned,
         )
     };
 
     let c = counts();
 
-    if !spawned && connected_for >= NOT_SPAWNED_AFTER && !latch(R_NOT_SPAWNED) {
+    if !spawned && connected_for >= NOT_SPAWNED_AFTER && !latch(Report::NotSpawned) {
         let (center, player) = view_pair();
-        if c.chunk_packets_seen == 0 {
+        if c[Stat::ChunkPacketsSeen] == 0 {
             log_warn!(
                 "net",
                 "{:.0}s after joining, the server has not sent a single chunk packet \
@@ -607,9 +622,9 @@ pub fn watchdog() {
                  nothing has stalled: the world is not being streamed at all, so the \
                  login and configuration sequence is where to look, not the renderer.",
                 connected_for.as_secs_f32(),
-                c.cache_center_moves
+                c[Stat::CacheCenterMoves]
             );
-        } else if c.chunks_received == 0 {
+        } else if c[Stat::ChunksReceived] == 0 {
             log_warn!(
                 "view",
                 "{:.0}s after joining, the server sent {} chunk packets and azalea \
@@ -617,8 +632,8 @@ pub fn watchdog() {
                  {},{} with radius {} while the player is in chunk {},{}. The window \
                  is the problem, not the server and not the renderer.",
                 connected_for.as_secs_f32(),
-                c.chunk_packets_seen,
-                c.chunk_packets_out_of_window,
+                c[Stat::ChunkPacketsSeen],
+                c[Stat::ChunkPacketsOutOfWindow],
                 center.0,
                 center.1,
                 window_radius()
@@ -637,9 +652,9 @@ pub fn watchdog() {
                  only kept if it is inside that window, and the player's own column \
                  has to be one of them.",
                 connected_for.as_secs_f32(),
-                c.chunk_packets_seen,
-                c.chunks_received,
-                c.chunk_packets_out_of_window,
+                c[Stat::ChunkPacketsSeen],
+                c[Stat::ChunksReceived],
+                c[Stat::ChunkPacketsOutOfWindow],
                 player.0,
                 player.1,
                 center.0,
@@ -653,8 +668,8 @@ pub fn watchdog() {
 
     if let Some(since_first) = first_chunk_for
         && since_first >= NO_MESH_AFTER
-        && c.sections_uploaded == 0
-        && !latch(R_NO_MESHES)
+        && c[Stat::SectionsUploaded] == 0
+        && !latch(Report::NoMeshes)
     {
         log_warn!(
             "mesh",
@@ -662,24 +677,24 @@ pub fn watchdog() {
              GPU: {} columns lit, {} mesh jobs queued, {} sections meshed, {} worker \
              panics, {} light jobs dropped. The first of those that is zero is the \
              stage that stopped.",
-            c.chunks_received,
+            c[Stat::ChunksReceived],
             since_first.as_secs_f32(),
-            c.columns_lit,
-            c.mesh_jobs,
-            c.sections_meshed,
-            c.mesh_panics,
-            c.light_jobs_dropped
+            c[Stat::ColumnsLit],
+            c[Stat::MeshJobs],
+            c[Stat::SectionsMeshed],
+            c[Stat::MeshPanics],
+            c[Stat::LightJobsDropped]
         );
     }
 
-    if c.chunks_dropped > 0 && c.chunks_received > 0 && !latch(R_NO_CHUNKS) {
+    if c[Stat::ChunksDropped] > 0 && c[Stat::ChunksReceived] > 0 && !latch(Report::NoChunks) {
         let (center, player) = view_pair();
         log_warn!(
             "view",
             "azalea has dropped {} chunk columns for falling outside its window \
              (centred {},{}, player in {},{}); those columns will not be sent again \
              and will read as air until the server resends them.",
-            c.chunks_dropped,
+            c[Stat::ChunksDropped],
             center.0,
             center.1,
             player.0,
@@ -688,6 +703,7 @@ pub fn watchdog() {
     }
 }
 
-fn latch(which: usize) -> bool {
-    REPORTED[which].swap(true, Ordering::Relaxed)
+fn latch(which: Report) -> bool {
+    let bit = 1 << which as u8;
+    REPORTED.fetch_or(bit, Ordering::Relaxed) & bit != 0
 }

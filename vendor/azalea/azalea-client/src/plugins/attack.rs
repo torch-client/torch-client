@@ -29,6 +29,7 @@ impl Plugin for AttackPlugin {
                     increment_ticks_since_last_attack,
                     update_attack_strength_scale.after(PhysicsSystems),
                     handle_attack_queued
+                        .after(super::inventory::ensure_has_sent_carried_item)
                         .before(super::movement::send_sprinting_if_needed)
                         .before(super::tick_end::game_tick_packet)
                         .before(super::movement::send_position),

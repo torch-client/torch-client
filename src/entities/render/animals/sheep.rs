@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::sheep;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -58,26 +59,26 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn adult_texture(_st: &EntityState) -> String {
-    "entity/sheep/sheep".to_string()
+fn adult_texture(_st: &EntityState) -> TexturePath {
+    "entity/sheep/sheep".into()
 }
 
-fn baby_texture(_st: &EntityState) -> String {
-    "entity/sheep/sheep_baby".to_string()
+fn baby_texture(_st: &EntityState) -> TexturePath {
+    "entity/sheep/sheep_baby".into()
 }
 
-fn undercoat_texture(_st: &EntityState) -> String {
-    "entity/sheep/sheep_wool_undercoat".to_string()
+fn undercoat_texture(_st: &EntityState) -> TexturePath {
+    "entity/sheep/sheep_wool_undercoat".into()
 }
 
-fn wool_texture(st: &EntityState) -> String {
+fn wool_texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/sheep/sheep_wool_baby".to_string()
+        "entity/sheep/sheep_wool_baby".into()
     } else {
-        "entity/sheep/sheep_wool".to_string()
+        "entity/sheep/sheep_wool".into()
     }
 }
 
 fn undercoat_visible(st: &EntityState) -> bool {
-    !st.extras.is_baby && (st.extras.magic_name_jeb || st.extras.wool_color != 0)
+    !st.extras.is_baby && (st.extras.magic_name_jeb() || st.extras.wool_color != 0)
 }

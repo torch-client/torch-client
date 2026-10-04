@@ -71,6 +71,8 @@ pub struct CellLight {
     pub floor: [f32; 3],
     pub block: [f32; 3],
     pub sky: [f32; 3],
+    #[cfg(feature = "shader_support")]
+    pub levels: [u8; 2],
 }
 
 impl CellLight {
@@ -80,6 +82,8 @@ impl CellLight {
             floor: [0.0; 3],
             block: [0.0; 3],
             sky: [1.0; 3],
+            #[cfg(feature = "shader_support")]
+            levels: [15, 15],
         }
     }
 }
@@ -102,6 +106,8 @@ pub fn cell_light_with_floor(state: &State, block: u8, sky: u8, floor: [f32; 3])
         floor,
         block: separate(light_color(state, block, 0)),
         sky: separate(light_color(state, 0, sky)),
+        #[cfg(feature = "shader_support")]
+        levels: [block, sky],
     }
 }
 

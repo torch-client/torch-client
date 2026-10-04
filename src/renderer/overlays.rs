@@ -2,8 +2,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
+use super::frame_view::FrameView;
 use super::systems::BlockTileMap;
-use super::systems::Shared;
 use crate::renderer::{ATLAS_COLS, TILE_PX};
 use crate::session::{BreakingBlock, TargetedBlock};
 
@@ -15,7 +15,7 @@ pub(super) struct BlockOutline {
 }
 
 #[derive(Component)]
-pub(super) struct BlockOutlineMarker;
+pub(crate) struct BlockOutlineMarker;
 
 #[derive(Resource)]
 pub struct BreakOverlay {
@@ -26,7 +26,7 @@ pub struct BreakOverlay {
 }
 
 #[derive(Component)]
-pub(super) struct BreakOverlayMarker;
+pub(crate) struct BreakOverlayMarker;
 
 #[derive(Resource)]
 pub(super) struct ChunkBorderOverlay {
@@ -93,6 +93,8 @@ fn line_mesh(positions: Vec<[f32; 3]>, colors: Option<Vec<[f32; 4]>>) -> Mesh {
 
     if let Some(colors) = colors {
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    } else if cfg!(feature = "shader_support") {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0f32, 1.0, 1.0, 1.0]; n]);
     }
 
     mesh
@@ -258,6 +260,11 @@ pub(super) fn crumbling_mesh(boxes: &[[f32; 6]], tile: u32, atlas_rows: u32) -> 
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     );
+    #[cfg(feature = "shader_support")]
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        vec![[1.0f32, 1.0, 1.0, 1.0]; pos.len()],
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nrm);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -266,7 +273,7 @@ pub(super) fn crumbling_mesh(boxes: &[[f32; 6]], tile: u32, atlas_rows: u32) -> 
 }
 
 pub(super) fn update_break_overlay(
-    shared: Res<Shared>,
+    view: Res<FrameView>,
     mut overlay: ResMut<BreakOverlay>,
     mut meshes: ResMut<Assets<Mesh>>,
     tile_map: Res<BlockTileMap>,
@@ -285,10 +292,10 @@ pub(super) fn update_break_overlay(
         "destroy_stage_9",
     ];
 
-    let breaking = shared.0.lock().unwrap().session.breaking.clone();
-    if breaking == overlay.shown {
+    if view.breaking == overlay.shown {
         return;
     }
+    let breaking = view.breaking.clone();
     let Ok((mut transform, mut visibility)) = targets.get_mut(overlay.entity) else {
         return;
     };
@@ -312,7 +319,7 @@ pub(super) fn update_break_overlay(
 }
 
 pub(super) fn update_block_outline(
-    shared: Res<Shared>,
+    view: Res<FrameView>,
     state: Res<crate::gui::GuiState>,
     mut outline: ResMut<BlockOutline>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -321,7 +328,10 @@ pub(super) fn update_block_outline(
     let target = if state.hide_gui {
         None
     } else {
-        shared.0.lock().unwrap().session.targeted_block.clone()
+        if view.targeted_block == outline.shown {
+            return;
+        }
+        view.targeted_block.clone()
     };
     if target == outline.shown {
         return;
@@ -465,19 +475,19 @@ pub(super) fn empty_esp_mesh() -> Mesh {
 
 #[cfg(feature = "click_gui")]
 pub(super) fn update_esp(
-    shared: Res<Shared>,
+    view: Res<FrameView>,
     mut overlay: ResMut<EspOverlay>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut targets: Query<&mut Visibility, With<EspMarker>>,
 ) {
-    let frame = shared.0.lock().unwrap().session.esp.clone();
     if overlay
         .shown
         .as_ref()
-        .is_some_and(|shown| std::sync::Arc::ptr_eq(shown, &frame))
+        .is_some_and(|shown| std::sync::Arc::ptr_eq(shown, &view.esp))
     {
         return;
     }
+    let frame = view.esp.clone();
     let Ok(mut visibility) = targets.get_mut(overlay.entity) else {
         return;
     };
@@ -493,15 +503,13 @@ pub(super) fn update_esp(
 }
 
 pub(super) fn update_chunk_borders(
-    shared: Res<Shared>,
+    view: Res<FrameView>,
     state: Res<crate::gui::GuiState>,
     mut overlay: ResMut<ChunkBorderOverlay>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut targets: Query<(&mut Transform, &mut Visibility), With<ChunkBorderMarker>>,
 ) {
-    let pos = state
-        .chunk_borders
-        .then(|| shared.0.lock().unwrap().session.player_pos);
+    let pos = state.chunk_borders.then_some(view.player_pos);
     let dim = super::dimension::current();
     let key = pos.map(|p| {
         let (cx, cz) = (

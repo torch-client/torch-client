@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -13,7 +12,7 @@ use super::engine::{LightEngine, LightWorld};
 use super::props;
 use super::sources::SkySources;
 use super::storage::Layer;
-use super::{ColumnPos, SectionPos};
+use super::{ColumnPos, FastMap, FastSet, SectionPos};
 
 pub struct SectionLight {
     pub block: DataLayer,
@@ -28,9 +27,9 @@ pub struct ServerLight {
 
 #[derive(Default)]
 pub struct LightMap {
-    sections: HashMap<SectionPos, Arc<SectionLight>>,
-    top: HashMap<ColumnPos, i32>,
-    lit: HashSet<ColumnPos>,
+    sections: FastMap<SectionPos, Arc<SectionLight>>,
+    top: FastMap<ColumnPos, i32>,
+    lit: FastSet<ColumnPos>,
     lowest: i32,
 }
 
@@ -181,7 +180,7 @@ pub fn engine_bytes() -> (u64, usize) {
 
 struct WorldView {
     world: Arc<RwLock<World>>,
-    chunks: HashMap<ColumnPos, Option<Arc<RwLock<Chunk>>>>,
+    chunks: FastMap<ColumnPos, Option<Arc<RwLock<Chunk>>>>,
     min_y: i32,
     height: u32,
 }
@@ -194,7 +193,7 @@ impl WorldView {
         };
         Self {
             world,
-            chunks: HashMap::new(),
+            chunks: FastMap::default(),
             min_y,
             height,
         }
@@ -402,20 +401,9 @@ impl LevelLight {
         &mut self,
         view: &std::cell::RefCell<WorldView>,
         col: ColumnPos,
-        light: &ServerLight,
+        light: ServerLight,
     ) {
-        let bottom = self.bottom_section();
-        for i in 0..=(self.section_count + 1) {
-            let sec = col.section(bottom - 1 + i);
-            let idx = i as usize;
-            self.sky
-                .storage
-                .queue_section_data(sec, light.sky.get(idx).cloned().flatten());
-            self.block
-                .storage
-                .queue_section_data(sec, light.block.get(idx).cloned().flatten());
-        }
-
+        self.queue_server_light(col, light);
         self.register_sections(view, col);
         self.sky.storage.install_queued(&[col]);
         self.block.storage.install_queued(&[col]);
@@ -425,23 +413,27 @@ impl LevelLight {
         self.block.storage.set_light_enabled(col, true);
     }
 
-    fn apply_light_update(&mut self, col: ColumnPos, light: &ServerLight) {
-        let bottom = self.bottom_section();
-        for i in 0..=(self.section_count + 1) {
-            let sec = col.section(bottom - 1 + i);
-            let idx = i as usize;
-            self.sky
-                .storage
-                .queue_section_data(sec, light.sky.get(idx).cloned().flatten());
-            self.block
-                .storage
-                .queue_section_data(sec, light.block.get(idx).cloned().flatten());
-        }
-
+    fn apply_light_update(&mut self, col: ColumnPos, light: ServerLight) {
+        self.queue_server_light(col, light);
         self.sky.storage.install_queued(&[col]);
         self.block.storage.install_queued(&[col]);
         self.sky.storage.set_light_enabled(col, true);
         self.block.storage.set_light_enabled(col, true);
+    }
+
+    fn queue_server_light(&mut self, col: ColumnPos, light: ServerLight) {
+        let bottom = self.bottom_section();
+        let mut sky = light.sky.into_iter();
+        let mut block = light.block.into_iter();
+        for i in 0..=(self.section_count + 1) {
+            let sec = col.section(bottom - 1 + i);
+            self.sky
+                .storage
+                .queue_section_data(sec, sky.next().flatten());
+            self.block
+                .storage
+                .queue_section_data(sec, block.next().flatten());
+        }
     }
 
     fn bytes(&self) -> (u64, usize) {
@@ -636,7 +628,7 @@ impl LightWorker {
                         LevelLight::new(b.min_y, b.height)
                     });
                     match light {
-                        Some(light) => lv.apply_server_light(v, col, &light),
+                        Some(light) => lv.apply_server_light(v, col, light),
                         None => lv.add_chunk(v, col),
                     }
                     columns_added.push(col);
@@ -644,7 +636,7 @@ impl LightWorker {
                 LightJob::Light { col, light } => {
                     crate::prof_span!("light:server_update");
                     if let Some(lv) = level.as_mut() {
-                        lv.apply_light_update(col, &light);
+                        lv.apply_light_update(col, light);
                     }
                 }
                 LightJob::Block { world, pos } => {
@@ -659,7 +651,7 @@ impl LightWorker {
             }
         }
 
-        {
+        if level.is_none() || view.is_none() {
             use std::sync::atomic::Ordering::Relaxed;
             let (bytes, sections) = level.as_ref().map(LevelLight::bytes).unwrap_or((0, 0));
             ENGINE_BYTES.store(bytes, Relaxed);
@@ -678,6 +670,12 @@ impl LightWorker {
             crate::prof_span!("light:publish");
             publish(lv, map, &columns_added, &columns_removed)
         };
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            let (bytes, sections) = lv.bytes();
+            ENGINE_BYTES.store(bytes, Relaxed);
+            ENGINE_SECTIONS.store(sections as u64, Relaxed);
+        }
         crate::diag::add(crate::diag::Stat::ColumnsLit, columns_added.len() as u64);
         crate::log_debug!(
             "light",

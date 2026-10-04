@@ -1,48 +1,139 @@
+mod atomics;
+mod builtins;
+pub(crate) mod declarations;
+mod indices;
+mod interface;
 pub(crate) mod lexer;
+mod loops;
+mod samplers;
+mod scalars;
+mod storage;
+mod wrap;
 
-use std::collections::BTreeMap;
+pub(crate) use indices::parity_only;
+pub(crate) use interface::{PACK_ATTRIBUTES, Varying};
+pub(crate) use samplers::Sampler;
+pub(crate) use storage::{Image, ImageAccess, StorageBuffer, untyped};
 
-use lexer::{Kind, Token};
+use declarations::PackUniform;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stage {
     Vertex,
     Fragment,
+    Compute,
 }
 
-const TARGET_VERSION: u32 = 450;
+pub(crate) const TARGET_VERSION: u32 = 450;
 
 pub(crate) const UNIFORM_BINDING: u32 = 0;
 
-const LOC_POSITION: u32 = 0;
-const LOC_UV0: u32 = 1;
-const LOC_UV2: u32 = 2;
-const LOC_COLOR: u32 = 3;
-const LOC_NORMAL: u32 = 4;
+fn sampler_binding(index: u32) -> u32 {
+    UNIFORM_BINDING + 1 + 2 * index
+}
 
-const PACK_ATTRIBUTES: &[(&str, u32)] = &[
-    ("mc_Entity", 5),
-    ("mc_midTexCoord", 6),
-    ("at_tangent", 7),
-    ("at_midBlock", 8),
-];
-
-const LOC_UNKNOWN_BASE: u32 = 9;
+fn first_image_binding(shared: &Shared) -> u32 {
+    sampler_binding(shared.samplers.len() as u32)
+}
 
 pub(crate) const UNIFORMS: &[(&str, &str)] = &[
     ("iris_ModelViewMatrix", "mat4"),
     ("iris_ProjectionMatrix", "mat4"),
+    ("iris_ModelViewProjectionMatrix", "mat4"),
     ("iris_CameraPosition", "vec4"),
     ("iris_ScreenSize", "vec4"),
     ("iris_Time", "vec4"),
 ];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Sampler {
-    pub(crate) name: String,
-    pub(crate) dimension: String,
-    pub(crate) texture_binding: u32,
-    pub(crate) sampler_binding: u32,
+pub(crate) const ALPHA_TEST_DEFINE: &str = "IRIS_ALPHA_TEST";
+
+pub(crate) const ALPHA_OP_DEFINE: &str = "IRIS_ALPHA_OP";
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Target<'a> {
+    pub(crate) set: u32,
+    pub(crate) vertex_prelude: &'a str,
+    pub(crate) fragment_prelude: &'a str,
+    pub(crate) vertex_end: &'a str,
+    pub(crate) vertex_begin: &'a str,
+    pub(crate) frame_parity: Option<u32>,
+    pub(crate) image_formats: &'a [(&'a str, &'a str)],
+    pub(crate) linear_output: bool,
+    pub(crate) outputs: Option<u32>,
+    pub(crate) gl_clip: bool,
+    pub(crate) upright: bool,
+    pub(crate) attribute_defaults: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Shared {
+    pub(crate) varyings: Vec<Varying>,
+    pub(crate) varying_end: u32,
+    pub(crate) samplers: Vec<String>,
+    pub(crate) uniforms: Vec<PackUniform>,
+    pub(crate) images: Vec<String>,
+    pub(crate) problems: Vec<String>,
+}
+
+impl Shared {
+    pub(crate) fn of(vertex_source: &str, fragment_source: &str) -> Shared {
+        let vertex = normalize(vertex_source);
+        let fragment = normalize(fragment_source);
+        let (varyings, varying_end) = interface::interface(&vertex);
+        let mut shared = Shared {
+            varyings,
+            varying_end,
+            ..Shared::default()
+        };
+        for tokens in [&vertex, &fragment] {
+            for name in samplers::sampler_names(tokens) {
+                if !shared.samplers.contains(&name) {
+                    shared.samplers.push(name);
+                }
+            }
+            for name in storage::image_names(tokens) {
+                if !shared.images.contains(&name) {
+                    shared.images.push(name);
+                }
+            }
+            for (_, _, uniform) in declarations::loose_uniforms(tokens) {
+                let uniform = match uniform.and_then(|u| u.size().map(|_| u)) {
+                    Ok(uniform) => uniform,
+                    Err(problem) => {
+                        if !shared.problems.contains(&problem) {
+                            shared.problems.push(problem);
+                        }
+                        continue;
+                    }
+                };
+                match shared.uniforms.iter().position(|u| u.name == uniform.name) {
+                    None => shared.uniforms.push(uniform),
+                    Some(known) if shared.uniforms[known].same_member(&uniform) => {
+                        let known = &mut shared.uniforms[known];
+                        known.initial = known.initial.take().or(uniform.initial);
+                    }
+                    Some(known) => {
+                        let problem = format!(
+                            "uniform {} is declared as {} and as {}",
+                            uniform.name, shared.uniforms[known].ty, uniform.ty
+                        );
+                        shared.problems.push(problem);
+                    }
+                }
+            }
+        }
+        shared
+    }
+
+    pub(crate) fn of_compute(source: &str) -> Shared {
+        Shared::of("", source)
+    }
+}
+
+fn normalize(source: &str) -> Vec<lexer::Token> {
+    let mut tokens = declarations::split_declarator_tokens(lexer::lex(source));
+    declarations::rename_texture_sampler_tokens(&mut tokens);
+    tokens
 }
 
 #[derive(Clone, Debug, Default)]
@@ -50,6 +141,9 @@ pub(crate) struct Interface {
     pub(crate) samplers: Vec<Sampler>,
     pub(crate) attributes: Vec<u32>,
     pub(crate) outputs: u32,
+    pub(crate) uniforms: Vec<PackUniform>,
+    pub(crate) images: Vec<Image>,
+    pub(crate) buffers: Vec<StorageBuffer>,
 }
 
 #[derive(Clone, Debug)]
@@ -58,18 +152,55 @@ pub(crate) struct Transformed {
     pub(crate) interface: Interface,
 }
 
-pub(crate) fn transform(source: &str, stage: Stage, varyings: &[String], set: u32) -> Transformed {
-    let mut tokens = lexer::lex(source);
-    let mut interface = Interface::default();
+pub(crate) fn transform(
+    source: &str,
+    stage: Stage,
+    shared: &Shared,
+    target: &Target,
+) -> Transformed {
+    let mut tokens = normalize(source);
+    let mut interface = Interface {
+        uniforms: shared.uniforms.clone(),
+        ..Interface::default()
+    };
 
-    version(&mut tokens);
-    keywords(&mut tokens, stage, varyings);
-    let used = builtins(&mut tokens, stage, &mut interface);
-    split_samplers(&mut tokens, &mut interface, set);
-    outputs(&mut tokens, &mut interface);
-    prune_attributes(&mut tokens, stage);
-    pack_attributes(&mut tokens, stage, &mut interface);
-    preamble(&mut tokens, stage, &interface, &used, set);
+    wrap::version(&mut tokens);
+    if let Some(parity) = target.frame_parity {
+        indices::fold_frame_parity(&mut tokens, parity);
+    }
+    indices::drop_unreachable(&mut tokens);
+    scalars::scalar_swizzles(&mut tokens);
+    atomics::lower_image_atomics(&mut tokens);
+    loops::sequence_increments(&mut tokens);
+    interface::keywords(&mut tokens, stage, &shared.varyings);
+    builtins::unsigned_literals(&mut tokens);
+    declarations::gather_uniforms(&mut tokens);
+    declarations::size_unsized_arrays(&mut tokens);
+    indices::clamp_array_indices(&mut tokens, &shared.uniforms);
+    let used = builtins::builtins(&mut tokens, stage);
+    if stage != Stage::Fragment {
+        builtins::explicit_lod(&mut tokens);
+    }
+    samplers::split_samplers(&mut tokens, &mut interface, &shared.samplers, target.set);
+    storage::bind_images(&mut tokens, &mut interface, shared, target);
+    storage::bind_buffers(&mut tokens, &mut interface, shared, target);
+    samplers::split_parameters(&mut tokens);
+    builtins::outputs(&mut tokens, &mut interface, stage);
+    interface::prune_attributes(&mut tokens, stage);
+    interface::pack_attributes(&mut tokens, stage, &mut interface, target);
+    declarations::hoist_initializers(&mut tokens);
+    match stage {
+        Stage::Fragment => wrap::epilogue(&mut tokens, &interface, target),
+        Stage::Vertex if target.gl_clip => wrap::vertex_epilogue(
+            &mut tokens,
+            target.upright,
+            target.vertex_begin,
+            target.vertex_end,
+        ),
+        Stage::Vertex | Stage::Compute => {}
+    }
+    let guarded = loops::guard_loops(&mut tokens);
+    wrap::preamble(&mut tokens, stage, &interface, &used, target, guarded);
 
     Transformed {
         source: lexer::render(&tokens),
@@ -77,414 +208,55 @@ pub(crate) fn transform(source: &str, stage: Stage, varyings: &[String], set: u3
     }
 }
 
-fn version(tokens: &mut Vec<Token>) {
-    let line = format!("#version {TARGET_VERSION}");
-    match tokens
-        .iter_mut()
-        .find(|t| t.kind == Kind::Directive && t.text.trim_start().starts_with("#version"))
-    {
-        Some(directive) => directive.text = line,
-        None => {
-            tokens.insert(0, Token::directive(&line));
-            tokens.insert(1, Token::newline());
-        }
-    }
-}
+#[cfg(test)]
+const TEST_SET: u32 = 3;
 
-pub(crate) fn varyings(vertex_source: &str) -> Vec<String> {
-    let tokens = lexer::lex(vertex_source);
-    let mut names = Vec::new();
-    let mut depth = 0i32;
+#[cfg(test)]
+const TEST_PRELUDE: &str = "layout(location = 0) in vec3 test_Position;\n\
+    vec3 iris_position() { return test_Position; }\n\
+    vec2 iris_uv0() { return vec2(0.0); }\n\
+    vec2 iris_light() { return vec2(240.0); }\n\
+    vec4 iris_color() { return vec4(1.0); }\n\
+    vec3 iris_normal() { return vec3(0.0, 1.0, 0.0); }\n\
+    vec4 iris_entity() { return vec4(-1.0, 0.0, 0.0, 1.0); }\n\
+    vec4 iris_tangent() { return vec4(1.0, 0.0, 0.0, 1.0); }\n\
+    vec4 iris_mid_uv() { return vec4(0.0, 0.0, 0.0, 1.0); }\n\
+    vec4 iris_mid_block() { return vec4(0.0); }";
 
-    for at in 0..tokens.len() {
-        if tokens[at].is_punct('{') {
-            depth += 1;
-        } else if tokens[at].is_punct('}') {
-            depth -= 1;
-        }
-        if depth != 0 || !(tokens[at].is_word("varying") || tokens[at].is_word("out")) {
-            continue;
-        }
-        if let Some([_ty, name, end]) = lexer::solid_run::<3>(&tokens, at + 1)
-            && tokens[name].kind == Kind::Word
-            && tokens[end].is_punct(';')
-        {
-            names.push(tokens[name].text.clone());
-        }
-    }
-    names.dedup();
-    names
-}
-
-fn keywords(tokens: &mut [Token], stage: Stage, varyings: &[String]) {
-    let keyword = match stage {
-        Stage::Vertex => "out",
-        Stage::Fragment => "in",
-    };
-    let mut depth = 0i32;
-
-    for at in 0..tokens.len() {
-        if tokens[at].is_punct('{') {
-            depth += 1;
-        } else if tokens[at].is_punct('}') {
-            depth -= 1;
-        }
-        if tokens[at].is_word("attribute") {
-            tokens[at].text = "in".to_owned();
-            continue;
-        }
-        let is_varying = tokens[at].is_word("varying");
-        if depth != 0 || !(is_varying || tokens[at].is_word(keyword)) {
-            continue;
-        }
-        let Some([_ty, name, end]) = lexer::solid_run::<3>(tokens, at + 1) else {
-            continue;
-        };
-        if tokens[name].kind != Kind::Word || !tokens[end].is_punct(';') {
-            continue;
-        }
-        let Some(location) = varyings.iter().position(|v| *v == tokens[name].text) else {
-            if is_varying {
-                tokens[at].text = keyword.to_owned();
-            }
-            continue;
-        };
-        tokens[at].text = format!("layout(location = {location}) {keyword}");
-    }
-}
-
-fn split_samplers(tokens: &mut Vec<Token>, interface: &mut Interface, set: u32) {
-    let mut declarations: Vec<(usize, String, String)> = Vec::new();
-    let mut binding = UNIFORM_BINDING + 1;
-
-    for at in 0..tokens.len() {
-        if !tokens[at].is_word("uniform") {
-            continue;
-        }
-        let Some([ty, name]) = lexer::solid_run::<2>(tokens, at + 1) else {
-            continue;
-        };
-        let Some(dimension) = tokens[ty]
-            .text
-            .strip_prefix("sampler")
-            .filter(|d| matches!(*d, "1D" | "2D" | "3D" | "Cube"))
-        else {
-            continue;
-        };
-        if tokens[name].kind != Kind::Word {
-            continue;
-        }
-        let dimension = dimension.to_owned();
-        interface.samplers.push(Sampler {
-            name: tokens[name].text.clone(),
-            dimension: dimension.clone(),
-            texture_binding: binding,
-            sampler_binding: binding + 1,
-        });
-        declarations.push((ty, tokens[name].text.clone(), dimension));
-        binding += 2;
-    }
-
-    if interface.samplers.is_empty() {
-        return;
-    }
-
-    let declared: Vec<usize> = declarations
-        .iter()
-        .filter_map(|(ty, _, _)| lexer::next_solid(tokens, ty + 1))
-        .collect();
-    for at in 0..tokens.len() {
-        if declared.contains(&at) || tokens[at].kind != Kind::Word {
-            continue;
-        }
-        if let Some(sampler) = interface
-            .samplers
-            .iter()
-            .find(|s| s.name == tokens[at].text)
-        {
-            tokens[at].text = format!(
-                "sampler{}({}, {}_sampler)",
-                sampler.dimension, sampler.name, sampler.name
-            );
-        }
-    }
-
-    for (ty, name, dimension) in declarations.into_iter().rev() {
-        let sampler = interface
-            .samplers
-            .iter()
-            .find(|s| s.name == name)
-            .expect("just recorded");
-        tokens[ty].text = format!("texture{dimension}");
-        let uniform = (0..ty).rev().find(|at| tokens[*at].is_word("uniform"));
-        if let Some(uniform) = uniform {
-            tokens[uniform].text = format!(
-                "layout(set = {set}, binding = {}) uniform",
-                sampler.texture_binding
-            );
-        }
-        if let Some(semi) = (ty..tokens.len()).find(|at| tokens[*at].is_punct(';')) {
-            tokens.insert(
-                semi + 1,
-                Token::raw(&format!(
-                    "\nlayout(set = {set}, binding = {}) uniform sampler {name}_sampler;",
-                    sampler.sampler_binding
-                )),
-            );
-        }
-    }
-}
-
-fn prune_attributes(tokens: &mut Vec<Token>, stage: Stage) {
-    if stage != Stage::Vertex {
-        return;
-    }
-    let mut depth = 0i32;
-    let mut doomed: Vec<(usize, usize)> = Vec::new();
-
-    for at in 0..tokens.len() {
-        if tokens[at].is_punct('{') {
-            depth += 1;
-        } else if tokens[at].is_punct('}') {
-            depth -= 1;
-        }
-        if depth != 0 || !tokens[at].is_word("in") {
-            continue;
-        }
-        let Some([_ty, name, end]) = lexer::solid_run::<3>(tokens, at + 1) else {
-            continue;
-        };
-        if tokens[name].kind != Kind::Word || !tokens[end].is_punct(';') {
-            continue;
-        }
-        let uses = tokens
-            .iter()
-            .filter(|t| t.kind == Kind::Word && t.text == tokens[name].text)
-            .count();
-        if uses == 1 {
-            doomed.push((at, end));
-        }
-    }
-
-    for (from, to) in doomed.into_iter().rev() {
-        tokens.drain(from..=to);
-    }
-}
-
-fn pack_attributes(tokens: &mut [Token], stage: Stage, interface: &mut Interface) {
-    if stage != Stage::Vertex {
-        return;
-    }
-    let mut depth = 0i32;
-    let mut next_unknown = LOC_UNKNOWN_BASE;
-
-    for at in 0..tokens.len() {
-        if tokens[at].is_punct('{') {
-            depth += 1;
-        } else if tokens[at].is_punct('}') {
-            depth -= 1;
-        }
-        if depth != 0 || !tokens[at].is_word("in") {
-            continue;
-        }
-        let Some([_ty, name, end]) = lexer::solid_run::<3>(tokens, at + 1) else {
-            continue;
-        };
-        if tokens[name].kind != Kind::Word || !tokens[end].is_punct(';') {
-            continue;
-        }
-
-        let location = match PACK_ATTRIBUTES
-            .iter()
-            .find(|(known, _)| *known == tokens[name].text)
-        {
-            Some((_, location)) => *location,
-            None => {
-                next_unknown += 1;
-                next_unknown - 1
-            }
-        };
-        tokens[at].text = format!("layout(location = {location}) in");
-        interface.attributes.push(location);
-    }
-
-    interface.attributes.sort_unstable();
-    interface.attributes.dedup();
-}
-
-#[derive(Debug, Default)]
-struct Used {
-    ftransform: bool,
-}
-
-fn builtins(tokens: &mut Vec<Token>, stage: Stage, interface: &mut Interface) -> Used {
-    let mut used = Used::default();
-    let mut attributes = Vec::new();
-
-    texture_matrix(tokens);
-
-    for token in tokens.iter_mut() {
-        if token.kind != Kind::Word {
-            continue;
-        }
-        let replacement = match token.text.as_str() {
-            "ftransform" => {
-                used.ftransform = true;
-                attributes.push(LOC_POSITION);
-                "iris_ftransform"
-            }
-            "gl_Vertex" if stage == Stage::Vertex => {
-                attributes.push(LOC_POSITION);
-                "vec4(iris_Position, 1.0)"
-            }
-            "gl_Normal" if stage == Stage::Vertex => {
-                attributes.push(LOC_NORMAL);
-                "iris_Normal"
-            }
-            "gl_Color" if stage == Stage::Vertex => {
-                attributes.push(LOC_COLOR);
-                "iris_Color"
-            }
-            "gl_MultiTexCoord0" if stage == Stage::Vertex => {
-                attributes.push(LOC_UV0);
-                "vec4(iris_UV0, 0.0, 1.0)"
-            }
-            "gl_MultiTexCoord1" | "gl_MultiTexCoord2" if stage == Stage::Vertex => {
-                attributes.push(LOC_UV2);
-                "vec4(iris_UV2, 0.0, 1.0)"
-            }
-            "gl_ModelViewMatrix" => "iris_ModelViewMatrix",
-            "gl_ProjectionMatrix" => "iris_ProjectionMatrix",
-            "gl_ModelViewProjectionMatrix" => "(iris_ProjectionMatrix * iris_ModelViewMatrix)",
-            "texture2D" | "texture3D" | "textureCube" => "texture",
-            "texture2DLod" | "texture3DLod" => "textureLod",
-            "texture2DProj" => "textureProj",
-            _ => continue,
-        };
-        token.text = replacement.to_owned();
-    }
-
-    attributes.sort_unstable();
-    attributes.dedup();
-    interface.attributes = attributes;
-    used
-}
-
-fn texture_matrix(tokens: &mut Vec<Token>) {
-    let mut at = 0;
-    while at < tokens.len() {
-        if !tokens[at].is_word("gl_TextureMatrix") {
-            at += 1;
-            continue;
-        }
-        match lexer::solid_run::<3>(tokens, at + 1) {
-            Some([open, _, close]) if tokens[open].is_punct('[') && tokens[close].is_punct(']') => {
-                tokens.drain(at..=close);
-                tokens.insert(at, Token::raw("mat4(1.0)"));
-            }
-            _ => tokens[at].text = "mat4(1.0)".to_owned(),
-        }
-        at += 1;
-    }
-}
-
-fn outputs(tokens: &mut Vec<Token>, interface: &mut Interface) {
-    let mut highest: Option<u32> = None;
-    let mut at = 0;
-
-    while at < tokens.len() {
-        if tokens[at].is_word("gl_FragColor") {
-            tokens[at].text = "iris_FragData0".to_owned();
-            highest = Some(highest.unwrap_or(0).max(0));
-            at += 1;
-            continue;
-        }
-        if !tokens[at].is_word("gl_FragData") {
-            at += 1;
-            continue;
-        }
-        let Some([open, index, close]) = lexer::solid_run::<3>(tokens, at + 1) else {
-            at += 1;
-            continue;
-        };
-        if !tokens[open].is_punct('[') || !tokens[close].is_punct(']') {
-            at += 1;
-            continue;
-        }
-        let Ok(n) = tokens[index].text.parse::<u32>() else {
-            at += 1;
-            continue;
-        };
-        tokens.drain(at..=close);
-        tokens.insert(at, Token::raw(&format!("iris_FragData{n}")));
-        highest = Some(highest.unwrap_or(0).max(n));
-        at += 1;
-    }
-
-    interface.outputs = highest.map_or(0, |n| n + 1);
-}
-
-fn preamble(tokens: &mut Vec<Token>, stage: Stage, interface: &Interface, used: &Used, set: u32) {
-    let mut out = String::new();
-    out.push_str("\n// Inserted by shaderpack::transform.\n");
-
-    out.push_str(&format!(
-        "layout(set = {set}, binding = {UNIFORM_BINDING}) uniform IrisFrame {{\n"
-    ));
-    for (name, ty) in UNIFORMS {
-        out.push_str(&format!("    {ty} {name};\n"));
-    }
-    out.push_str("};\n");
-
-    if stage == Stage::Vertex {
-        let declarations: BTreeMap<u32, &str> = [
-            (LOC_POSITION, "in vec3 iris_Position;"),
-            (LOC_UV0, "in vec2 iris_UV0;"),
-            (LOC_UV2, "in vec2 iris_UV2;"),
-            (LOC_COLOR, "in vec4 iris_Color;"),
-            (LOC_NORMAL, "in vec3 iris_Normal;"),
-        ]
-        .into_iter()
-        .collect();
-        for location in &interface.attributes {
-            if let Some(declaration) = declarations.get(location) {
-                out.push_str(&format!("layout(location = {location}) {declaration}\n"));
-            }
-        }
-        if used.ftransform {
-            out.push_str(
-                "vec4 iris_ftransform() {\n    \
-                 return iris_ProjectionMatrix * iris_ModelViewMatrix * vec4(iris_Position, 1.0);\n\
-                 }\n",
-            );
-        }
-    }
-
-    for n in 0..interface.outputs {
-        out.push_str(&format!(
-            "layout(location = {n}) out vec4 iris_FragData{n};\n"
-        ));
-    }
-
-    let after = tokens
-        .iter()
-        .position(|t| t.kind == Kind::Directive && t.text.starts_with("#version"))
-        .map_or(0, |at| at + 1);
-    tokens.insert(after, Token::raw(&out));
-}
+#[cfg(test)]
+pub(crate) const TEST_TARGET: Target<'static> = Target {
+    set: TEST_SET,
+    vertex_prelude: TEST_PRELUDE,
+    fragment_prelude: "",
+    vertex_end: "",
+    vertex_begin: "",
+    frame_parity: None,
+    image_formats: &[],
+    linear_output: false,
+    outputs: None,
+    gl_clip: false,
+    upright: false,
+    attribute_defaults: false,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const TEST_SET: u32 = 3;
+    const TARGET: Target<'static> = TEST_TARGET;
 
     fn vertex(source: &str) -> String {
-        transform(source, Stage::Vertex, &varyings(source), TEST_SET).source
+        transform(source, Stage::Vertex, &Shared::of(source, ""), &TARGET).source
     }
 
     fn fragment(source: &str) -> String {
-        transform(source, Stage::Fragment, &varyings(source), TEST_SET).source
+        transform(
+            source,
+            Stage::Fragment,
+            &Shared::of(source, source),
+            &TARGET,
+        )
+        .source
     }
 
     #[test]
@@ -515,6 +287,303 @@ mod tests {
     }
 
     #[test]
+    fn outputs_are_capped_and_the_clip_position_is_converted() {
+        let fsh = "#version 130\nvoid main() { gl_FragData[0] = vec4(1.0); gl_FragData[1] = vec4(0.0); }\n";
+        let target = Target {
+            outputs: Some(1),
+            ..TARGET
+        };
+        let out = transform(fsh, Stage::Fragment, &Shared::default(), &target).source;
+        assert!(out.contains("out vec4 iris_Out0;"), "{out}");
+        assert!(!out.contains("out vec4 iris_Out1;"), "{out}");
+        assert!(out.contains("vec4 iris_FragData1;"), "{out}");
+
+        let vsh = "#version 130\nvoid main() { gl_Position = ftransform(); }\n";
+        let target = Target {
+            gl_clip: true,
+            ..TARGET
+        };
+        let out = transform(vsh, Stage::Vertex, &Shared::of(vsh, ""), &target).source;
+        assert!(out.contains("void iris_main()"), "{out}");
+        assert!(
+            out.contains("gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;"),
+            "{out}"
+        );
+        assert_eq!(out.matches("void main()").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn a_compute_program_reaches_wgsl() {
+        let csh = "#version 430 compatibility\nlayout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;\n\
+                   uniform int frameCounter;\nuniform usampler3D voxelSampler;\nwriteonly uniform image3D light_img;\n\
+                   void main() { ivec3 pos = ivec3(gl_GlobalInvocationID); uint v = texelFetch(voxelSampler, pos, 0).r;\n\
+                   imageStore(light_img, pos, vec4(float(v) + float(frameCounter))); }\n";
+        let shared = Shared::of("", csh);
+        let target = Target {
+            image_formats: &[("light_img", "rgba16f")],
+            ..TARGET
+        };
+        let out = transform(csh, Stage::Compute, &shared, &target);
+        let wgsl = crate::shaderpack::backend::to_wgsl(
+            &out.source,
+            crate::shaderpack::backend::ShaderStage::Compute,
+            &[],
+        )
+        .unwrap_or_else(|e| panic!("{e}\n\n{}", out.source));
+        assert!(wgsl.contains("@compute @workgroup_size(8, 8, 8)"), "{wgsl}");
+        assert!(
+            wgsl.contains("texture_storage_3d<rgba16float,write>"),
+            "{wgsl}"
+        );
+    }
+
+    #[test]
+    fn a_storage_buffer_is_rebound() {
+        let csh = "#version 430\nlayout (local_size_x = 1) in;\nlayout(std430, binding = 2) readonly buffer Data { vec4 values[]; } data;\n\
+                   uniform sampler2D tex;\nwriteonly uniform image2D out_img;\n\
+                   void main() { imageStore(out_img, ivec2(0), data.values[0] + texelFetch(tex, ivec2(0), 0)); }\n";
+        let shared = Shared::of("", csh);
+        let target = Target {
+            image_formats: &[("out_img", "rgba16f")],
+            ..TARGET
+        };
+        let out = transform(csh, Stage::Compute, &shared, &target);
+        assert_eq!(out.interface.buffers.len(), 1, "{}", out.source);
+        let buffer = &out.interface.buffers[0];
+        assert_eq!((buffer.index, buffer.read_only), (2, true));
+        assert_eq!(buffer.binding, UNIFORM_BINDING + 1 + 2 + 1 + 2);
+        let wgsl = crate::shaderpack::backend::to_wgsl(
+            &out.source,
+            crate::shaderpack::backend::ShaderStage::Compute,
+            &[],
+        )
+        .unwrap_or_else(|e| panic!("{e}\n\n{}", out.source));
+        assert!(wgsl.contains("var<storage> data"), "{wgsl}");
+    }
+
+    #[test]
+    fn vertex_sampling_gets_an_explicit_level() {
+        let vsh = "#version 130\nuniform sampler2D noisetex;\nvoid main() { gl_Position = vec4(texture2D(noisetex, vec2(0.5)).r); }\n";
+        let out = transform(vsh, Stage::Vertex, &Shared::of(vsh, ""), &TARGET);
+        assert!(out.source.contains("textureLod("), "{}", out.source);
+        crate::shaderpack::backend::to_wgsl(
+            &out.source,
+            crate::shaderpack::backend::ShaderStage::Vertex,
+            &[],
+        )
+        .unwrap_or_else(|e| panic!("{e}\n\n{}", out.source));
+    }
+
+    #[test]
+    fn a_literal_beside_a_uint_is_made_unsigned() {
+        let out = fragment(
+            "#version 430\nuint f(uint id) { return max(id - 1, 1); }\nint g(int n) { return max(n, 1); }\n\
+             void main() { gl_FragData[0] = vec4(float(f(3u)) + float(g(2))); }\n",
+        );
+        assert!(out.contains("max(id - 1, 1u)"), "{out}");
+        assert!(out.contains("max(n, 1)"), "{out}");
+    }
+
+    #[test]
+    fn an_image_gets_its_format_and_binding() {
+        let vsh = "#version 430 compatibility\nwriteonly uniform uimage3D voxel_img;\nuniform sampler2D tex;\n\
+                   void main() { imageStore(voxel_img, ivec3(1, 2, 3), uvec4(7u)); gl_Position = vec4(texture2DLod(tex, vec2(0.0), 0.0).x); }\n";
+        let shared = Shared::of(vsh, "");
+        assert_eq!(shared.images, ["voxel_img"]);
+        let target = Target {
+            image_formats: &[("voxel_img", "r8ui")],
+            ..TARGET
+        };
+        let out = transform(vsh, Stage::Vertex, &shared, &target);
+        assert_eq!(out.interface.images.len(), 1);
+        assert_eq!(out.interface.images[0].binding, UNIFORM_BINDING + 3);
+        assert_eq!(out.interface.images[0].access, ImageAccess::Write);
+        let wgsl = crate::shaderpack::backend::to_wgsl(
+            &out.source,
+            crate::shaderpack::backend::ShaderStage::Vertex,
+            &[],
+        )
+        .unwrap_or_else(|e| panic!("{e}\n\n{}", out.source));
+        assert!(wgsl.contains("texture_storage_3d<r8uint"), "{wgsl}");
+    }
+
+    #[test]
+    fn a_format_attribute_takes_a_default_when_asked() {
+        let vsh = "#version 130\nattribute vec4 mc_Entity;\nattribute vec4 at_tangent;\nvarying float id;\n\
+                   void main() { id = mc_Entity.x + at_tangent.w; gl_Position = vec4(0.0); }\n";
+        let target = Target {
+            attribute_defaults: true,
+            ..TARGET
+        };
+        let result = transform(vsh, Stage::Vertex, &Shared::of(vsh, ""), &target);
+        assert!(
+            result.interface.attributes.is_empty(),
+            "{:?}",
+            result.interface.attributes
+        );
+        assert!(
+            result.source.contains("mc_Entity = vec4(iris_entity());"),
+            "{}",
+            result.source
+        );
+        assert!(
+            result.source.contains("at_tangent = vec4(iris_tangent());"),
+            "{}",
+            result.source
+        );
+        assert!(
+            !result.source.contains("in vec4 mc_Entity"),
+            "{}",
+            result.source
+        );
+    }
+
+    #[test]
+    fn a_comma_increment_keeps_every_part() {
+        let out = fragment(
+            "#version 130\nvoid main() { float a = 0.0; vec3 p = vec3(0.0);\n\
+             for (int i = 0; i < 4; i++, p += vec3(1.0), a += 1.0) {\n\
+                 if (a > 2.0) continue;\n\
+                 for (int j = 0; j < 2; j++) { continue; }\n\
+             }\n\
+             for (int k = 0; k < 3; k++, a += 2.0) a -= 1.0;\n\
+             gl_FragData[0] = vec4(p, a); }\n",
+        );
+        assert!(
+            out.contains("i < 4) && (iris_LoopBudget-- > 0); a += 1.0)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("if (a > 2.0) { i++; p += vec3(1.0); continue; }"),
+            "{out}"
+        );
+        assert!(out.contains("j++) { continue; }"), "{out}");
+        assert!(out.contains("i++; p += vec3(1.0); }"), "{out}");
+        assert!(out.contains("a += 2.0) { a -= 1.0;k++;  }"), "{out}");
+        crate::shaderpack::backend::to_wgsl(
+            &out,
+            crate::shaderpack::backend::ShaderStage::Fragment,
+            &[],
+        )
+        .unwrap_or_else(|e| panic!("{e}\n{out}"));
+    }
+
+    #[test]
+    fn loops_are_bounded_by_one_budget() {
+        let out = fragment(
+            "#version 130\nvoid main() { float a = 0.0;\n\
+             for (int i = 0; i < n; i++) a += 1.0;\n\
+             if (a > 0.0) while (a > 1.0) a -= 1.0;\n\
+             for (;;) break;\n\
+             do { a += 1.0; } while (a < 3.0);\n\
+             gl_FragData[0] = vec4(a); }\n",
+        );
+        assert!(out.contains("int iris_LoopBudget = 4096;"), "{out}");
+        assert!(
+            out.contains("for (int i = 0; (i < n) && (iris_LoopBudget-- > 0); i++)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("if (a > 0.0) while ((a > 1.0) && (iris_LoopBudget-- > 0))"),
+            "{out}"
+        );
+        assert!(out.contains("for (; iris_LoopBudget-- > 0;)"), "{out}");
+        assert!(
+            out.contains("while ((a < 3.0) && (iris_LoopBudget-- > 0));"),
+            "{out}"
+        );
+        crate::shaderpack::backend::to_wgsl(
+            &out,
+            crate::shaderpack::backend::ShaderStage::Fragment,
+            &[("n", "4")],
+        )
+        .unwrap_or_else(|e| panic!("{e}\n{out}"));
+    }
+
+    #[test]
+    fn a_shader_without_loops_declares_no_budget() {
+        assert!(
+            !fragment("#version 130\nvoid main() { gl_FragData[0] = vec4(1.0); }\n")
+                .contains("iris_LoopBudget")
+        );
+    }
+
+    #[test]
+    fn names_inside_a_define_body_are_rewritten() {
+        let out = fragment(
+            "#version 130\nuniform sampler2D gtexture;\n#define ALBEDO(uv) texture2D(gtexture, uv)\n#define texture2D_x 1\n\
+             void main() { gl_FragData[0] = ALBEDO(vec2(0.0)); }\n",
+        );
+        assert!(
+            out.contains("#define ALBEDO(uv) texture(sampler2D(gtexture, gtexture_sampler), uv)"),
+            "{out}"
+        );
+        assert!(out.contains("#define texture2D_x 1"), "{out}");
+    }
+
+    #[test]
+    fn a_local_named_like_a_sampler_is_left_alone() {
+        let out = fragment(
+            "#version 130\nuniform sampler2D specular;\n\
+             vec3 ggx(vec3 n) { vec3 specular = n * 2.0; return specular; }\n\
+             float shine(float specular) { return specular; }\n\
+             void main() { gl_FragData[0] = texture2D(specular, vec2(0.0)) + vec4(ggx(vec3(1.0)), shine(1.0)); }\n",
+        );
+        assert!(
+            out.contains("vec3 specular = n * 2.0; return specular;"),
+            "{out}"
+        );
+        assert!(
+            out.contains("float shine(float specular) { return specular; }"),
+            "{out}"
+        );
+        assert!(
+            out.contains("texture(sampler2D(specular, specular_sampler), vec2(0.0))"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn varying_locations_count_matrices_and_arrays() {
+        let found = interface::interface(&lexer::lex(
+            "out mat4 m;\nout vec3 a[2];\nflat out int id;\n",
+        ))
+        .0;
+        let locations: Vec<(&str, u32)> = found
+            .iter()
+            .map(|v| (v.name.as_str(), v.location))
+            .collect();
+        assert_eq!(locations, [("m", 0), ("a", 4), ("id", 6)]);
+        let out = vertex(
+            "#version 130\nout vec3 a[2];\nout float b;\nvoid main() { a[0] = vec3(0.0); a[1] = vec3(1.0); b = 1.0; }\n",
+        );
+        assert!(out.contains("layout(location = 0) out vec3 a[2];"), "{out}");
+        assert!(out.contains("layout(location = 2) out float b;"), "{out}");
+    }
+
+    #[test]
+    fn an_attribute_used_in_a_macro_is_kept() {
+        let out = transform(
+            "#version 130\nattribute vec4 mc_Entity;\n#define ID (mc_Entity.x)\nvoid main() { gl_Position = vec4(ID); }\n",
+            Stage::Vertex,
+            &Shared::default(),
+            &TARGET,
+        );
+        assert!(out.source.contains("in vec4 mc_Entity;"), "{}", out.source);
+    }
+
+    #[test]
+    fn an_input_nothing_writes_becomes_a_global() {
+        let vsh = "#version 130\nvarying vec2 uv;\nvoid main() { uv = vec2(0.0); }\n";
+        let fsh = "#version 130\nvarying vec2 uv;\nflat in int orphan;\nvoid main() { gl_FragData[0] = vec4(uv, float(orphan), 1.0); }\n";
+        let out = transform(fsh, Stage::Fragment, &Shared::of(vsh, fsh), &TARGET).source;
+        assert!(out.contains("layout(location = 0) in vec2 uv;"), "{out}");
+        assert!(out.contains("int orphan;"), "{out}");
+        assert!(!out.contains("flat"), "{out}");
+        assert!(!out.contains("in int orphan"), "{out}");
+    }
+
+    #[test]
     fn a_combined_sampler_splits_into_two_bindings() {
         let out = fragment(
             "#version 130\nuniform sampler2D gtexture;\nvoid main() { gl_FragData[0] = texture2D(gtexture, vec2(0.0)); }\n",
@@ -530,53 +599,84 @@ mod tests {
     }
 
     #[test]
-    fn fragment_outputs_are_declared_and_counted() {
-        let result = transform(
-            "#version 130\nvoid main() { gl_FragData[0] = vec4(1.0); gl_FragData[2] = vec4(0.0); }\n",
-            Stage::Fragment,
-            &[],
-            TEST_SET,
-        );
-        assert_eq!(result.interface.outputs, 3);
-        assert!(
-            result
-                .source
-                .contains("layout(location = 2) out vec4 iris_FragData2;")
-        );
-        assert!(result.source.contains("iris_FragData0 = vec4(1.0)"));
+    fn a_sampler_has_the_same_binding_in_both_stages() {
+        let vsh = "#version 130\nuniform sampler2D lightmap;\nvoid main() { gl_Position = texture2DLod(lightmap, vec2(0.0), 0.0); }\n";
+        let fsh = "#version 130\nuniform sampler2D gtexture;\nuniform sampler2D lightmap;\n\
+                   void main() { gl_FragData[0] = texture2D(gtexture, vec2(0.0)) * texture2D(lightmap, vec2(0.0)); }\n";
+        let shared = Shared::of(vsh, fsh);
+        assert_eq!(shared.samplers, ["lightmap", "gtexture"]);
+
+        let binding = |source: &str, stage: Stage, name: &str| {
+            transform(source, stage, &shared, &TARGET)
+                .interface
+                .samplers
+                .into_iter()
+                .find(|s| s.name == name)
+                .map(|s| s.texture_binding)
+        };
+        assert_eq!(binding(vsh, Stage::Vertex, "lightmap"), Some(1));
+        assert_eq!(binding(fsh, Stage::Fragment, "lightmap"), Some(1));
+        assert_eq!(binding(fsh, Stage::Fragment, "gtexture"), Some(3));
     }
 
     #[test]
-    fn only_the_attributes_a_program_reads_are_declared() {
-        let bare = transform(
-            "#version 130\nvoid main() { gl_Position = vec4(0.0); }\n",
-            Stage::Vertex,
-            &[],
-            TEST_SET,
-        );
-        assert!(bare.interface.attributes.is_empty());
-        assert!(!bare.source.contains("iris_Color"), "{}", bare.source);
-
-        let source = "#version 130\nvarying vec4 t;\nvoid main() { t = gl_Color; }\n";
-        let colour = transform(source, Stage::Vertex, &varyings(source), TEST_SET);
-        assert_eq!(colour.interface.attributes, [LOC_COLOR]);
+    fn fragment_outputs_are_wrapped_and_counted() {
+        let source = "#version 130\nvoid main() { gl_FragData[0] = vec4(1.0); gl_FragData[2] = vec4(0.0); }\n";
+        let result = transform(source, Stage::Fragment, &Shared::default(), &TARGET);
+        assert_eq!(result.interface.outputs, 3);
+        let out = &result.source;
         assert!(
-            colour
-                .source
-                .contains("layout(location = 3) in vec4 iris_Color;")
+            out.contains("layout(location = 2) out vec4 iris_Out2;"),
+            "{out}"
         );
+        assert!(out.contains("vec4 iris_FragData2;"), "{out}");
+        assert!(out.contains("void iris_main()"), "{out}");
+        assert!(out.contains("iris_FragData0 = vec4(1.0)"), "{out}");
+        assert!(out.contains("iris_Out2 = iris_FragData2;"), "{out}");
+        assert!(
+            out.contains(&format!("#ifdef {ALPHA_TEST_DEFINE}")),
+            "{out}"
+        );
+        assert_eq!(out.matches("void main()").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn the_first_output_is_made_linear_when_asked() {
+        let source = "#version 130\nvoid main() { gl_FragData[0] = vec4(0.5); }\n";
+        let target = Target {
+            linear_output: true,
+            ..TARGET
+        };
+        let out = transform(source, Stage::Fragment, &Shared::default(), &target).source;
+        assert!(out.contains("iris_Out0 = vec4(iris_Linear"), "{out}");
+    }
+
+    #[test]
+    fn the_builtins_are_served_by_the_prelude() {
+        let source =
+            "#version 130\nvarying vec4 t;\nvoid main() { t = gl_Color * gl_MultiTexCoord1; }\n";
+        let result = transform(source, Stage::Vertex, &Shared::of(source, ""), &TARGET);
+        assert!(result.interface.attributes.is_empty());
+        assert!(
+            result
+                .source
+                .contains("t = iris_color() * vec4(iris_light(), 0.0, 1.0);"),
+            "{}",
+            result.source
+        );
+        assert!(result.source.contains(TEST_PRELUDE), "{}", result.source);
     }
 
     #[test]
     fn an_attribute_that_is_never_read_is_dropped() {
         let unused =
             "#version 130\nattribute vec3 mc_Entity;\nvoid main() { gl_Position = vec4(0.0); }\n";
-        let out = transform(unused, Stage::Vertex, &[], TEST_SET);
+        let out = transform(unused, Stage::Vertex, &Shared::default(), &TARGET);
         assert!(!out.source.contains("mc_Entity"), "{}", out.source);
         assert!(out.interface.attributes.is_empty());
 
         let used = "#version 130\nattribute vec3 mc_Entity;\nvoid main() { gl_Position = vec4(mc_Entity, 1.0); }\n";
-        let out = transform(used, Stage::Vertex, &[], TEST_SET);
+        let out = transform(used, Stage::Vertex, &Shared::default(), &TARGET);
         assert!(
             out.source
                 .contains("layout(location = 5) in vec3 mc_Entity;"),
@@ -591,50 +691,154 @@ mod tests {
         let out = vertex("#version 130\nvoid main() { gl_Position = ftransform(); }\n");
         assert!(out.contains("vec4 iris_ftransform()"), "{out}");
         assert!(out.contains("gl_Position = iris_ftransform();"), "{out}");
+        assert!(out.contains("vec4(iris_position(), 1.0)"), "{out}");
+    }
+
+    #[test]
+    fn the_texture_matrix_is_folded_to_a_constant() {
+        let out =
+            vertex("#version 130\nvoid main() { vec4 c = gl_TextureMatrix[0] * vec4(1.0); }\n");
+        assert!(out.contains("mat4(1.0) * vec4(1.0)"), "{out}");
+        assert!(!out.contains("gl_TextureMatrix"), "{out}");
+
+        let out = vertex(
+            "#version 130\nvoid main() { vec4 c = gl_TextureMatrix[1] * gl_MultiTexCoord1; }\n",
+        );
         assert!(
-            out.contains("layout(location = 0) in vec3 iris_Position;"),
+            out.contains("vec4(0.03125, 0.03125, 0.03125, 1.0)"),
             "{out}"
         );
     }
 
     #[test]
-    #[ignore = "needs a shader pack installed"]
-    fn the_minimal_pack_reaches_wgsl() {
+    fn a_program_in_a_packs_dialect_reaches_wgsl() {
         use crate::shaderpack::backend::{self, ShaderStage};
-        use crate::shaderpack::{discover, source::Source};
 
-        let at = discover::dir().join("Minimal");
-        let source = Source::open(&at).expect("the Minimal pack should be installed");
+        let vsh = "#version 130\nattribute vec3 mc_Entity;\nvarying vec2 texcoord;\nvarying vec2 lmcoord;\nvarying vec4 tint;\n\
+                   void main() { gl_Position = ftransform(); texcoord = (gl_TextureMatrix[0] * gl_MultiTexCoord0).xy;\n\
+                   lmcoord = (gl_TextureMatrix[1] * gl_MultiTexCoord1).xy; tint = gl_Color; }\n";
+        let fsh = "#version 130\nuniform sampler2D gtexture;\nuniform sampler2D lightmap;\nvarying vec2 texcoord;\nvarying vec2 lmcoord;\nvarying vec4 tint;\n\
+                   void main() { gl_FragData[0] = texture2D(gtexture, texcoord) * texture2D(lightmap, lmcoord) * tint; }\n";
+        let shared = Shared::of(vsh, fsh);
+        let target = Target {
+            linear_output: true,
+            ..TARGET
+        };
 
-        let vertex_source = source.read_text("/gbuffers_terrain.vsh").expect("vsh");
-        let shared = varyings(&vertex_source);
-        println!("varyings: {shared:?}");
+        let vertex = transform(vsh, Stage::Vertex, &shared, &target);
+        backend::to_wgsl(&vertex.source, ShaderStage::Vertex, &[])
+            .unwrap_or_else(|e| panic!("{e}\n\n{}", vertex.source));
 
-        for (file, stage, naga_stage) in [
-            ("/gbuffers_terrain.vsh", Stage::Vertex, ShaderStage::Vertex),
-            (
-                "/gbuffers_terrain.fsh",
-                Stage::Fragment,
-                ShaderStage::Fragment,
-            ),
+        let fragment = transform(fsh, Stage::Fragment, &shared, &target);
+        for defines in [
+            &[][..],
+            &[(ALPHA_TEST_DEFINE, "0.1")][..],
+            &[(ALPHA_TEST_DEFINE, "0.5"), (ALPHA_OP_DEFINE, ">=")][..],
         ] {
-            let glsl = source.read_text(file).expect(file);
-            let result = transform(&glsl, stage, &shared, TEST_SET);
-            println!("\n=== {file} ===\n{}", result.source);
-
-            match backend::to_wgsl(&result.source, naga_stage) {
-                Ok(wgsl) => println!("--- wgsl ---\n{wgsl}"),
-                Err(e) => panic!("{file}: {e}\n\n{}", result.source),
-            }
-            println!("interface: {:?}", result.interface);
+            let wgsl = backend::to_wgsl(&fragment.source, ShaderStage::Fragment, defines)
+                .unwrap_or_else(|e| panic!("{e}\n\n{}", fragment.source));
+            assert_eq!(wgsl.contains("discard"), !defines.is_empty(), "{wgsl}");
         }
     }
 
+    fn wgsl(source: &str, stage: crate::shaderpack::backend::ShaderStage) -> String {
+        crate::shaderpack::backend::to_wgsl(source, stage, &[])
+            .unwrap_or_else(|e| panic!("{e}\n\n{source}"))
+    }
+
     #[test]
-    fn the_texture_matrix_is_folded_to_identity() {
-        let out =
-            vertex("#version 130\nvoid main() { vec4 c = gl_TextureMatrix[0] * vec4(1.0); }\n");
-        assert!(out.contains("mat4(1.0) * vec4(1.0)"), "{out}");
-        assert!(!out.contains("gl_TextureMatrix"), "{out}");
+    fn a_sized_constructor_array_is_clamped() {
+        let out = fragment(
+            "#version 430\nuniform int k;\nconst vec3[] tints = vec3[](vec3(1.0), vec3(0.5), vec3(0.0));\n\
+             void main() { gl_FragData[0] = vec4(tints[k], 1.0); }\n",
+        );
+        assert!(out.contains("vec3[3] tints = vec3[3]("), "{out}");
+        assert!(out.contains("tints[clamp(int(k), 0, 2)]"), "{out}");
+        wgsl(&out, crate::shaderpack::backend::ShaderStage::Fragment);
+    }
+
+    #[test]
+    fn a_uniform_array_index_is_clamped() {
+        let out = fragment(
+            "#version 430\nuniform vec4 lights[4];\nuniform int k;\nvoid main() { gl_FragData[0] = lights[k]; }\n",
+        );
+        assert!(out.contains("lights[clamp(int(k), 0, 3)]"), "{out}");
+        wgsl(&out, crate::shaderpack::backend::ShaderStage::Fragment);
+    }
+
+    #[test]
+    fn define_bodies_get_every_expression_rewrite() {
+        let out = fragment(
+            "#version 130\n#define WRITE(c) gl_FragData[1] = c\nvoid main() { WRITE(vec4(1.0)); }\n",
+        );
+        assert!(out.contains("#define WRITE(c) iris_FragData1 = c"), "{out}");
+        assert!(
+            out.contains("out vec4 iris_Out1;"),
+            "the output counts: {out}"
+        );
+        wgsl(&out, crate::shaderpack::backend::ShaderStage::Fragment);
+
+        let vsh = "#version 130\nuniform sampler2D noisetex;\n#define LIGHT (gl_TextureMatrix[1] * gl_MultiTexCoord1)\n\
+                   #define NOISE(p) texture2D(noisetex, p)\nvoid main() { gl_Position = LIGHT * NOISE(vec2(0.5)).r; }\n";
+        let out = vertex(vsh);
+        assert!(out.contains("#define LIGHT (mat4(vec4(0.00390625"), "{out}");
+        assert!(
+            out.contains("textureLod(sampler2D(noisetex, noisetex_sampler), p, 0.0)"),
+            "{out}"
+        );
+        wgsl(&out, crate::shaderpack::backend::ShaderStage::Vertex);
+
+        let out = fragment(
+            "#version 430\nuint id = 3u;\n#define PREV max(id - 1, 1)\nvoid main() { gl_FragData[0] = vec4(float(PREV)); }\n",
+        );
+        assert!(out.contains("#define PREV max(id - 1, 1u)"), "{out}");
+    }
+
+    #[test]
+    fn declared_fragment_outputs_are_wrapped() {
+        let out = fragment(
+            "#version 430\nout vec4 color;\nlayout(location = 2) out vec4 data;\n\
+             void main() { color = vec4(1.0); data = vec4(0.5); }\n",
+        );
+        assert!(
+            out.contains("iris_FragData0 = vec4(1.0)")
+                && out.contains("iris_FragData2 = vec4(0.5)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("layout(location = 2) out vec4 iris_Out2;"),
+            "{out}"
+        );
+        assert!(!out.contains("out vec4 color"), "{out}");
+        wgsl(&out, crate::shaderpack::backend::ShaderStage::Fragment);
+    }
+
+    #[test]
+    fn the_preamble_follows_the_extensions() {
+        let out = fragment(
+            "#version 430\n#extension GL_ARB_shader_texture_lod : enable\nvoid main() { gl_FragData[0] = vec4(1.0); }\n",
+        );
+        let extension = out.find("#extension").expect("kept");
+        assert!(
+            extension < out.find("uniform IrisFrame").expect("declared"),
+            "{out}"
+        );
+        wgsl(&out, crate::shaderpack::backend::ShaderStage::Fragment);
+    }
+
+    #[test]
+    fn an_image_with_its_own_layout_reaches_wgsl() {
+        let csh = "#version 430\nlayout (local_size_x = 1) in;\nlayout (r32ui) uniform uimage3D vox;\n\
+                   void main() { imageAtomicMax(vox, ivec3(0), 7u); }\n";
+        let target = Target {
+            image_formats: &[("vox", "r32ui")],
+            ..TARGET
+        };
+        let out = transform(csh, Stage::Compute, &Shared::of("", csh), &target);
+        assert_eq!(out.interface.images[0].access, ImageAccess::ReadWrite);
+        wgsl(
+            &out.source,
+            crate::shaderpack::backend::ShaderStage::Compute,
+        );
     }
 }

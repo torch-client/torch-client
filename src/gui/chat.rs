@@ -34,6 +34,8 @@ const MOBILE_FOCUSED_LINES: usize = 8;
 #[cfg(feature = "mobile_ui")]
 const MOBILE_UNFOCUSED_LINES: usize = 5;
 #[cfg(feature = "mobile_ui")]
+const TEXTING_TOP_GAP: f32 = 4.0;
+#[cfg(feature = "mobile_ui")]
 const MOBILE_FLASH_FRAMES: u32 = 60;
 const MAX_HISTORY: usize = 100;
 const SCROLL_LINES: i32 = 7;
@@ -121,6 +123,10 @@ pub struct ChatState {
     mobile_flash: Option<(u64, u32)>,
     #[cfg(feature = "mobile_ui")]
     mobile_drag_last_y: Option<f32>,
+    #[cfg(feature = "mobile_ui")]
+    texting_lines: usize,
+    #[cfg(feature = "mobile_ui")]
+    texting_size: (f32, f32),
 }
 
 impl Default for ChatState {
@@ -150,6 +156,10 @@ impl Default for ChatState {
             mobile_flash: None,
             #[cfg(feature = "mobile_ui")]
             mobile_drag_last_y: None,
+            #[cfg(feature = "mobile_ui")]
+            texting_lines: 0,
+            #[cfg(feature = "mobile_ui")]
+            texting_size: (0.0, 0.0),
         }
     }
 }
@@ -209,6 +219,9 @@ impl ChatState {
             return None;
         }
         self.add_recent(&msg);
+        self.reset_scroll();
+        self.history_pos = self.history.len();
+        self.history_buffer.clear();
         Some(msg)
     }
 
@@ -234,11 +247,15 @@ impl ChatState {
                 original: e.original.map(Arc::from),
                 added_tick: tick,
             };
-            self.wrap_into_display(&msg, font);
-            self.messages.push_front(msg);
-            while self.messages.len() > MAX_HISTORY {
-                self.messages.pop_back();
-            }
+            self.push_message(msg, font);
+        }
+    }
+
+    fn push_message(&mut self, msg: Message, font: &Font) {
+        self.wrap_into_display(&msg, font);
+        self.messages.push_front(msg);
+        while self.messages.len() > MAX_HISTORY {
+            self.messages.pop_back();
         }
     }
 
@@ -257,12 +274,15 @@ impl ChatState {
             original: None,
             added_tick: tick,
         };
-        self.wrap_into_display(&msg, font);
-        self.messages.push_front(msg);
+        self.push_message(msg, font);
     }
 
     fn wrap_into_display(&mut self, msg: &Message, font: &Font) {
-        let mut width = CHAT_WIDTH;
+        let mut width = if self.wrapped_at > 0.0 {
+            self.wrapped_at
+        } else {
+            CHAT_WIDTH
+        };
         if msg.tag == ChatTag::Modified {
             width -= TAG_ICON_RESERVE;
         }
@@ -306,18 +326,21 @@ impl ChatState {
     }
 
     fn rewrap(&mut self, font: &Font) {
-        let messages: Vec<Message> = self.messages.iter().rev().cloned().collect();
+        let messages = std::mem::take(&mut self.messages);
         self.lines.clear();
         self.selection = None;
-        for msg in &messages {
+        for msg in messages.iter().rev() {
             self.wrap_into_display(msg, font);
         }
+        self.messages = messages;
     }
 
     fn lines_per_page(&self) -> usize {
         #[cfg(feature = "mobile_ui")]
         {
-            if self.field.input.focused {
+            if self.field.input.focused && texting() {
+                self.texting_lines.max(1)
+            } else if self.field.input.focused {
                 MOBILE_FOCUSED_LINES
             } else {
                 MOBILE_UNFOCUSED_LINES
@@ -508,17 +531,59 @@ fn argb(alpha: f32, rgb: u32) -> u32 {
     (a << 24) | (rgb & 0x00FF_FFFF)
 }
 
+#[cfg(feature = "mobile_ui")]
+static TEXTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn texting() -> bool {
+    #[cfg(feature = "mobile_ui")]
+    return TEXTING.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(feature = "mobile_ui"))]
+    false
+}
+
+#[cfg(feature = "mobile_ui")]
+pub fn set_texting(on: bool) {
+    if TEXTING.swap(on, std::sync::atomic::Ordering::Relaxed) == on {
+        return;
+    }
+    crate::platform::orientation::set_portrait(on);
+    crate::platform::keyboard::pin(on);
+}
+
+fn chat_width(vw: f32) -> f32 {
+    if texting() {
+        (vw - MESSAGE_INDENT - 12.0).floor().max(1.0)
+    } else {
+        CHAT_WIDTH
+    }
+}
+
 fn chat_base(ctx: &ScreenCtx) -> f32 {
     let above_keyboard = ctx.vh - keyboard_inset(ctx);
     #[cfg(feature = "mobile_ui")]
     {
-        (MOBILE_TOP_GAP + MOBILE_FOCUSED_LINES as f32 * LINE_HEIGHT + MOBILE_BOTTOM_MARGIN)
-            .min(above_keyboard)
+        if texting() {
+            above_keyboard
+        } else {
+            mobile_base(above_keyboard)
+        }
     }
     #[cfg(not(feature = "mobile_ui"))]
     {
         above_keyboard
     }
+}
+
+#[cfg(feature = "mobile_ui")]
+fn mobile_base(limit: f32) -> f32 {
+    (MOBILE_TOP_GAP + MOBILE_FOCUSED_LINES as f32 * LINE_HEIGHT + MOBILE_BOTTOM_MARGIN).min(limit)
+}
+
+#[cfg(feature = "mobile_ui")]
+pub fn hud_box(vh: f32) -> crate::gui::hud_layout::Rect {
+    let bottom = mobile_base(vh) - MOBILE_BOTTOM_MARGIN;
+    let h = MOBILE_UNFOCUSED_LINES as f32 * LINE_HEIGHT;
+    crate::gui::hud_layout::Rect::new(0.0, bottom - h, CHAT_WIDTH + MESSAGE_INDENT + 8.0, h)
 }
 
 fn chat_bottom(ctx: &ScreenCtx) -> f32 {
@@ -557,8 +622,9 @@ pub fn draw(
     chat.enforces_secure_chat |= enforces_secure_chat;
     chat.signing = signing;
 
-    if chat.wrapped_at != CHAT_WIDTH {
-        chat.wrapped_at = CHAT_WIDTH;
+    let width = chat_width(ctx.vw);
+    if chat.wrapped_at != width {
+        chat.wrapped_at = width;
         if !chat.messages.is_empty() {
             let font = &p.atlas.font;
             chat.rewrap(font);
@@ -573,6 +639,17 @@ pub fn draw(
         let font = &p.atlas.font;
         chat.push_error(&format!("Message not sent: {reason}"), font, tick);
         chat.warning = Some((reason, tick));
+    }
+
+    #[cfg(feature = "mobile_ui")]
+    if texting() && focused {
+        let top = crate::mobile::pad::top_controls_bottom(ctx.vw, ctx.vh) + TEXTING_TOP_GAP;
+        chat.texting_lines = ((chat_bottom(ctx) - top) / LINE_HEIGHT).floor().max(1.0) as usize;
+        let resized = chat.texting_size != (ctx.vw, ctx.vh);
+        chat.texting_size = (ctx.vw, ctx.vh);
+        if resized || ctx.input.left_click {
+            crate::platform::keyboard::reassert();
+        }
     }
 
     let prompt_up = chat.link_prompt.is_some();
@@ -909,7 +986,7 @@ fn draw_lines(p: &mut Painter, chat: &ChatState, ctx: &ScreenCtx, focused: bool)
         p.fill(
             0.0,
             entry_top,
-            CHAT_WIDTH + MESSAGE_INDENT + 8.0,
+            chat.wrapped_at + MESSAGE_INDENT + 8.0,
             LINE_HEIGHT,
             argb(alpha * BG_ALPHA, 0x000000),
         );
@@ -924,7 +1001,7 @@ fn draw_lines(p: &mut Painter, chat: &ChatState, ctx: &ScreenCtx, focused: bool)
             p.fill(
                 0.0,
                 entry_top,
-                CHAT_WIDTH + MESSAGE_INDENT + 8.0,
+                chat.wrapped_at + MESSAGE_INDENT + 8.0,
                 LINE_HEIGHT,
                 argb(left * FLASH_ALPHA, 0x000000),
             );
@@ -1057,7 +1134,7 @@ fn draw_scrollbar(p: &mut Painter, chat: &ChatState, bottom: f32, drawn: usize, 
     } else {
         0x3333AA
     };
-    let x = MESSAGE_INDENT + CHAT_WIDTH + 4.0;
+    let x = MESSAGE_INDENT + chat.wrapped_at + 4.0;
     p.fill(x, top, 2.0, height, (alpha << 24) | rgb);
     p.fill(x + 1.0, top, 1.0, height, (alpha << 24) | 0xCCCCCC);
 }
@@ -1715,7 +1792,6 @@ mod visual {
     use crate::gui::preview::{output_dir, rasterize, upscale};
     use crate::gui::render::GuiInput;
     use crate::gui::{GuiState, Screen};
-    use crate::session::SharedState;
     use bevy::prelude::Vec2;
 
     fn entry(text: &str, color: u32, tag: ChatTag) -> ChatEntry {

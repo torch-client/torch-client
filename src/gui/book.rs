@@ -1,5 +1,6 @@
 use crate::gui::painter::Painter;
 use crate::gui::render::GuiInput;
+use crate::gui::tooltip::label;
 use crate::gui::widgets::{Button, MultiLineTextBox, TextBox, WIDGET_HEIGHT, WIDGET_WIDTH_BIG};
 use crate::gui::{Screen, ScreenCtx, tooltip};
 use crate::session::{Book, EditBookRequest, InteractionHand};
@@ -101,17 +102,6 @@ pub fn page_text(p: &mut Painter, left: f32, top: f32, spans: &[crate::text::Spa
     for (i, line) in lines.iter().take(MAX_LINES).enumerate() {
         p.text(line, left + TEXT_X, top + TEXT_Y + i as f32 * 9.0, false);
     }
-}
-
-fn label(key: &'static str, cell: &'static std::sync::OnceLock<String>) -> &'static str {
-    cell.get_or_init(|| tooltip::translate(key, &[]))
-}
-
-macro_rules! label {
-    ($key:literal) => {{
-        static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        label($key, &CELL)
-    }};
 }
 
 #[derive(Default)]

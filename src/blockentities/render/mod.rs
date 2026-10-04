@@ -29,19 +29,21 @@ mod test_support {
     use crate::blockentities::BeState;
     use crate::blockentities::feed::{BlockEntityData, BlockStateInfo};
 
+    use super::sign::WOODS;
+
     pub fn test_state(block: &str, props: &[(&str, &str)]) -> BeState {
         let kind = kind_for(block);
         BeState {
             pos: [0, 64, 0],
             kind,
-            state: Arc::new(BlockStateInfo {
-                state_id: 0,
-                block: block.to_string(),
-                props: props
+            state: Arc::new(BlockStateInfo::new(
+                0,
+                block.to_string(),
+                props
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect::<HashMap<_, _>>(),
-            }),
+            )),
             data: Arc::new(BlockEntityData::None),
             open: 0.0,
             anim: 0.0,
@@ -63,11 +65,6 @@ mod test_support {
             _ => BlockEntityKind::Sign,
         }
     }
-
-    const WOODS: &[&str] = &[
-        "oak", "spruce", "birch", "acacia", "cherry", "jungle", "dark_oak", "pale_oak", "crimson",
-        "warped", "mangrove", "bamboo",
-    ];
 
     const SKULLS: &[&str] = &[
         "skeleton_skull",

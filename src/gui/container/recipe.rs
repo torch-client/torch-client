@@ -73,7 +73,6 @@ pub fn draw_stonecutter(
         );
         p.item_icon(recipe.result.item, bx, by + 2.0);
         if clicked {
-            ui.selected = cell as i16;
             out.push(InvAction::ButtonClick(cell.min(255) as u8));
         }
     }
@@ -165,7 +164,6 @@ pub fn draw_loom(
         );
         banner::swatch(p, pattern, bx + 4.0, by + 2.0);
         if clicked {
-            ui.selected = cell as i16;
             out.push(InvAction::ButtonClick(cell.min(255) as u8));
         }
     }

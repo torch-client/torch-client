@@ -5,10 +5,9 @@ use std::sync::{Arc, OnceLock};
 
 use parking_lot::RwLock;
 
-use crate::items::model::Assets;
-
 pub mod ambient;
 pub mod bake;
+pub mod facing;
 pub mod rand;
 pub mod rotation;
 pub mod state;
@@ -22,7 +21,6 @@ use state::{ModelRef, Rot, StateDef};
 type ModelKey = (String, Rot);
 
 pub struct Blocks {
-    assets: Assets,
     defs: HashMap<String, StateDef>,
     models: RwLock<HashMap<ModelKey, Arc<BakedModel>>>,
     baked: RwLock<HashMap<u16, Arc<BakedBlock>>>,
@@ -45,7 +43,7 @@ impl Blocks {
     fn load() -> Blocks {
         let started = Instant::now();
         let root = crate::assets_root();
-        let assets = Assets::new(&root);
+        let assets = crate::items::model::shared();
         let mut defs = HashMap::new();
         let dir = root.join("blockstates");
         let blockstates = crate::platform::assets::read_dir(&dir);
@@ -80,7 +78,6 @@ impl Blocks {
             started.elapsed().as_secs_f32() * 1000.0
         );
         Blocks {
-            assets,
             defs,
             models: RwLock::new(HashMap::new()),
             baked: RwLock::new(HashMap::new()),
@@ -129,7 +126,7 @@ impl Blocks {
             return hit.clone();
         }
         let built = Arc::new(bake::bake_model(
-            &self.assets,
+            crate::items::model::shared(),
             &reference.model,
             reference.rot,
             self.atlas_rows,

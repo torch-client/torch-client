@@ -36,6 +36,7 @@ impl Plugin for ParticlePlugin {
                     draw_particles,
                 )
                     .chain()
+                    .after(crate::renderer::FrameViewSystems)
                     .run_if(in_state(AppState::InGame)),
             );
     }
@@ -96,6 +97,23 @@ fn allow_particle(status: ParticleStatus, always_show: bool, rng: &mut JavaRando
         level = ParticleStatus::Minimal;
     }
     level != ParticleStatus::Minimal
+}
+
+#[derive(Clone, Copy)]
+struct SpawnGate {
+    override_limiter: bool,
+    always_show: bool,
+}
+
+impl SpawnGate {
+    const NORMAL: SpawnGate = SpawnGate {
+        override_limiter: false,
+        always_show: false,
+    };
+    const ALWAYS_SHOW: SpawnGate = SpawnGate {
+        override_limiter: false,
+        always_show: true,
+    };
 }
 
 #[derive(Resource)]
@@ -403,7 +421,7 @@ pub(crate) fn spawn_block_break(
 }
 
 fn spawn_crit_particles(
-    shared: Res<Shared>,
+    view: Res<crate::renderer::FrameView>,
     gui: Res<crate::gui::GuiState>,
     atlas: Res<ParticleAtlas>,
     mut live: ResMut<LiveParticles>,
@@ -418,17 +436,15 @@ fn spawn_crit_particles(
     };
     let status = gui.options.particles;
 
-    let targets: Vec<(Vec3, f32, bool)> = {
-        let state = shared.0.lock().unwrap();
-        let partial = crate::renderer::systems::partial_ticks(&state);
-        hits.into_iter()
-            .filter_map(|(id, magic)| {
-                let anim = state.session.entities.iter().find(|e| e.id == id)?;
-                let sample = anim.sample(partial);
-                Some((Vec3::from(sample.pos), sample.bounding_box_height, magic))
-            })
-            .collect()
-    };
+    let partial = view.partial;
+    let targets = hits.into_iter().filter_map(|(id, magic)| {
+        let anim = view.entities.iter().find(|e| e.id == id)?;
+        Some((
+            Vec3::from(anim.position(partial)),
+            anim.bounding_box_height(),
+            magic,
+        ))
+    });
 
     for (base, height, magic) in targets {
         for _round in 0..3 {
@@ -498,6 +514,10 @@ fn spawn_level_particle(
     rng: &mut JavaRandom,
 ) {
     let base = Vec3::new(emit.pos[0] as f32, emit.pos[1] as f32, emit.pos[2] as f32);
+    let gate = SpawnGate {
+        override_limiter: emit.override_limiter,
+        always_show: emit.always_show,
+    };
     if emit.count == 0 {
         let arg = Vec3::new(
             emit.dist[0] * emit.max_speed,
@@ -511,8 +531,7 @@ fn spawn_level_particle(
             rng,
             status,
             &emit.particle,
-            emit.override_limiter,
-            emit.always_show,
+            gate,
             base,
             arg,
             eye,
@@ -541,8 +560,7 @@ fn spawn_level_particle(
             rng,
             status,
             &emit.particle,
-            emit.override_limiter,
-            emit.always_show,
+            gate,
             pos,
             arg,
             eye,
@@ -558,17 +576,16 @@ fn add_level_particle(
     rng: &mut JavaRandom,
     status: ParticleStatus,
     particle_kind: &azalea::entity::particle::Particle,
-    override_limiter: bool,
-    always_show: bool,
+    gate: SpawnGate,
     pos: Vec3,
     arg: Vec3,
     eye: Vec3,
 ) {
-    if !override_limiter {
+    if !gate.override_limiter {
         if eye.distance_squared(pos) > PARTICLE_CULL_DISTANCE_SQ {
             return;
         }
-        if !allow_particle(status, always_show, rng) {
+        if !allow_particle(status, gate.always_show, rng) {
             return;
         }
     }
@@ -731,8 +748,11 @@ impl Emitter<'_> {
             self.rng,
             self.status,
             kind,
-            always,
-            false,
+            if always {
+                SpawnGate::ALWAYS_SHOW
+            } else {
+                SpawnGate::NORMAL
+            },
             pos,
             velocity,
             self.eye,
@@ -753,7 +773,7 @@ impl Emitter<'_> {
 
     pub(crate) fn solid(&self, cell: [i32; 3]) -> bool {
         self.block(cell)
-            .is_some_and(|s| crate::util::block_model::block_visual(s).is_solid)
+            .is_some_and(crate::util::block_model::is_solid)
     }
 
     pub(crate) fn below(&mut self, kind: &P) {
@@ -774,7 +794,7 @@ pub(crate) fn rel(cell: [i32; 3], offset: [f32; 3]) -> Vec3 {
 
 fn open_cell(world: &azalea_world::World, cell: [i32; 3]) -> bool {
     block_at(world, cell).is_none_or(|s| {
-        !crate::util::block_model::block_visual(s).is_solid
+        !crate::util::block_model::is_solid(s)
             && azalea::block::fluid_state::FluidState::from(s).is_empty()
     })
 }
@@ -2079,7 +2099,7 @@ fn is_solid_at(world: Option<&azalea_world::World>, pos: Vec3) -> bool {
     };
     world
         .get_block_state(block_pos)
-        .is_some_and(|state| crate::util::block_model::block_visual(state).is_solid)
+        .is_some_and(crate::util::block_model::is_solid)
 }
 
 fn advance_one_tick(p: &mut Particle, world: Option<&azalea_world::World>) {
@@ -2158,7 +2178,7 @@ fn tick_particles(time: Res<Time>, mut live: ResMut<LiveParticles>) {
 }
 
 #[derive(Component)]
-struct ParticleBatch;
+pub(crate) struct ParticleBatch;
 
 fn draw_particles(
     lightmap: Res<LightmapState>,
@@ -2578,6 +2598,7 @@ fn tint_ratio(
         TintKind::Grass => crate::util::biome_color::grass_ratio(idx),
         TintKind::Foliage => crate::util::biome_color::foliage_ratio(idx),
         TintKind::DryFoliage => crate::util::biome_color::dry_foliage_ratio(idx),
+        TintKind::Water => crate::util::biome_color::water_ratio(idx),
     }
 }
 

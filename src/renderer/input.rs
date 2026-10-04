@@ -15,10 +15,16 @@ pub(crate) struct CameraAngles {
     pub(crate) pitch: f32,
 }
 
+impl CameraAngles {
+    pub(crate) fn rotation(&self) -> Quat {
+        Quat::from_rotation_y(self.yaw.to_radians())
+            * Quat::from_rotation_x(self.pitch.to_radians())
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct FreecamState {
     pub active: bool,
-    pub(super) pos: Vec3,
 }
 
 #[derive(Resource, Default)]
@@ -46,6 +52,35 @@ fn save_on_session_end() {
     crate::gui::command_history::save();
 }
 
+fn reset_session_gui(
+    state: &mut crate::gui::GuiState,
+    #[cfg(feature = "skins")] faces: &mut crate::gui::player_faces::PlayerFaces,
+) {
+    save_on_session_end();
+    state.chat.reset_for_session();
+    state.hud = Default::default();
+    state.hud_overlays = Default::default();
+    state.toasts = Default::default();
+    #[cfg(feature = "skins")]
+    faces.reset();
+}
+
+struct NavPoll {
+    ended: Option<Option<Vec<crate::text::Span>>>,
+    container_id: i32,
+    container_kind: crate::session::ContainerKind,
+    sign_editor_open: Option<crate::session::SignEditRequest>,
+    signing_prompt: bool,
+    book_open: Option<crate::session::InteractionHand>,
+    book_edit_open: Option<crate::session::BookEditRequest>,
+    command_block_open: Option<crate::session::CommandBlockOpen>,
+    dialog_show: Option<std::sync::Arc<crate::play::dialog::Dialog>>,
+    dialog_clear: bool,
+    sleeping: bool,
+    dead: bool,
+    death_opening: Option<(Option<Vec<crate::text::Span>>, i32, bool)>,
+}
+
 pub(super) fn apply_gui_nav(
     shared: Res<Shared>,
     mut state: ResMut<crate::gui::GuiState>,
@@ -61,53 +96,59 @@ pub(super) fn apply_gui_nav(
     }
     if std::mem::take(&mut state.disconnect) {
         crate::client::bot::request_disconnect();
-        save_on_session_end();
-        state.chat.reset_for_session();
-        state.hud = Default::default();
-        state.hud_overlays = Default::default();
-        state.toasts = Default::default();
-        #[cfg(feature = "skins")]
-        faces.reset();
+        reset_session_gui(
+            &mut state,
+            #[cfg(feature = "skins")]
+            &mut faces,
+        );
     }
-    let ended = {
+    use crate::gui::Screen;
+    let poll = {
         let mut s = shared.0.lock().unwrap();
-        std::mem::replace(&mut s.disconnected_pending, false).then(|| {
-            (
-                s.disconnect_reason.take(),
-                std::mem::take(&mut s.disconnect_by_player),
-            )
-        })
+        let ended = std::mem::replace(&mut s.disconnected_pending, false)
+            .then(|| s.disconnect_reason.take());
+        let dead = s.session.dead;
+        let death_opening = dead
+            && (state.screen == Screen::None || state.screen.is_modal())
+            && s.session.show_death_screen;
+        NavPoll {
+            ended,
+            container_id: s.session.container_id,
+            container_kind: s.session.container_kind,
+            sign_editor_open: s.session.sign_editor_open.take(),
+            signing_prompt: std::mem::take(&mut s.session.chat_signing_prompt),
+            book_open: s.session.book_open.take(),
+            book_edit_open: s.session.book_edit_open.take(),
+            command_block_open: s.session.command_block_open.take(),
+            dialog_show: s.session.dialog_show.take(),
+            dialog_clear: std::mem::take(&mut s.session.dialog_clear),
+            sleeping: s.session.sleeping,
+            dead,
+            death_opening: death_opening.then(|| {
+                (
+                    s.session.death_cause.clone(),
+                    s.session.death_score,
+                    s.session.hardcore,
+                )
+            }),
+        }
     };
-    if let Some((reason, by_player)) = ended
-        && state.screen != crate::gui::Screen::Title
-    {
-        save_on_session_end();
-        state.nav = Some(if by_player {
-            crate::gui::Screen::Title
-        } else {
-            crate::gui::Screen::Disconnected
-        });
+    if let Some(reason) = poll.ended {
+        reset_session_gui(
+            &mut state,
+            #[cfg(feature = "skins")]
+            &mut faces,
+        );
+        state.nav = Some(crate::gui::Screen::Disconnected);
         state.disconnect_reason = reason;
-        state.chat.reset_for_session();
-        state.hud = Default::default();
-        state.hud_overlays = Default::default();
-        state.toasts = Default::default();
-        #[cfg(feature = "skins")]
-        faces.reset();
     }
     if let Some(address) = state.connect.take() {
         crate::client::bot::start_bot(address);
         let mut s = shared.0.lock().unwrap();
-        s.disconnect_by_player = false;
         s.render_distance_sent = None;
         s.skin_prefs_sent = None;
     }
-    use crate::gui::Screen;
-    use crate::session::ContainerKind;
-    let (container_id, kind) = {
-        let s = shared.0.lock().unwrap();
-        (s.session.container_id, s.session.container_kind)
-    };
+    let (container_id, kind) = (poll.container_id, poll.container_kind);
     if container_id != *last_container_id && container_id != 0 {
         if kind.is_some() {
             crate::renderer::systems::reset_menu_state(&mut state);
@@ -121,27 +162,24 @@ pub(super) fn apply_gui_nav(
     }
     *last_container_id = container_id;
 
-    let (sign_editor_open, signing_prompt, book_open, book_edit_open, command_block_open) = {
-        let mut s = shared.0.lock().unwrap();
-        (
-            s.session.sign_editor_open.take(),
-            std::mem::take(&mut s.session.chat_signing_prompt),
-            s.session.book_open.take(),
-            s.session.book_edit_open.take(),
-            s.session.command_block_open.take(),
-        )
-    };
+    let sign_editor_open = poll.sign_editor_open;
+    let signing_prompt = poll.signing_prompt;
+    let book_open = poll.book_open;
+    let book_edit_open = poll.book_edit_open;
+    let command_block_open = poll.command_block_open;
     if let Some(req) = command_block_open {
         state.command_block.open(req.pos, req.mode, req.conditional);
         state.nav = Some(Screen::CommandBlock);
     }
     if let Some(req) = sign_editor_open {
+        let pos = req.pos;
         if state.screen == Screen::SignEdit {
-            shared.0.lock().unwrap().session.sign_update = Some(state.sign_edit.submit());
+            let mut s = shared.0.lock().unwrap();
+            s.session.sign_update = Some(state.sign_edit.close(None));
         }
-        state.sign_edit.open(req.pos, req.front, req.lines);
+        state.sign_edit.open(req);
         state.nav = Some(Screen::SignEdit);
-        shared.0.lock().unwrap().session.sign_edit_open_pos = Some(req.pos);
+        shared.0.lock().unwrap().session.sign_edit_open_pos = Some(pos);
     }
 
     if book_open.is_some() || book_edit_open.is_some() {
@@ -169,15 +207,12 @@ pub(super) fn apply_gui_nav(
         }
     }
 
-    let dialog_show = shared.0.lock().unwrap().session.dialog_show.take();
-    if let Some(dialog) = dialog_show {
+    if let Some(dialog) = poll.dialog_show {
         let current = state.screen;
         state.dialog.show(dialog, current);
         state.nav = Some(Screen::Dialog);
     }
-    if std::mem::take(&mut shared.0.lock().unwrap().session.dialog_clear)
-        && state.screen == Screen::Dialog
-    {
+    if poll.dialog_clear && state.screen == Screen::Dialog {
         state.nav = Some(state.dialog.clear());
     }
 
@@ -186,25 +221,8 @@ pub(super) fn apply_gui_nav(
     }
 
     if state.nav.is_none() {
-        let (sleeping, dead, opening) = {
-            let s = shared.0.lock().unwrap();
-            let dead = s.session.dead;
-            let opening = dead
-                && (state.screen == Screen::None || state.screen.is_modal())
-                && s.session.show_death_screen;
-            (
-                s.session.sleeping,
-                dead,
-                opening.then(|| {
-                    (
-                        s.session.death_cause.clone(),
-                        s.session.death_score,
-                        s.session.hardcore,
-                    )
-                }),
-            )
-        };
-        if let Some((cause, score, hardcore)) = opening {
+        let (sleeping, dead) = (poll.sleeping, poll.dead);
+        if let Some((cause, score, hardcore)) = poll.death_opening {
             state.death.open(cause, score, hardcore);
             state.nav = Some(Screen::Death);
         } else if !dead && state.screen == Screen::Death {
@@ -240,7 +258,12 @@ pub(super) fn apply_gui_nav(
     }
     if state.screen == Screen::SignEdit && next != Screen::SignEdit {
         let mut s = shared.0.lock().unwrap();
-        s.session.sign_update = Some(state.sign_edit.submit());
+        let rev = s
+            .session
+            .block_entities
+            .get(&state.sign_edit.key())
+            .map(|info| info.rev);
+        s.session.sign_update = Some(state.sign_edit.close(rev));
         s.session.sign_edit_open_pos = None;
     }
     enter_screen(next, &mut state, &shared, &mut windows);
@@ -306,8 +329,7 @@ pub(crate) fn apply_look(
     angles.yaw -= dx;
     angles.pitch = (angles.pitch - dy).clamp(-89., 89.);
     if let Ok(mut t) = camera.single_mut() {
-        t.rotation = Quat::from_rotation_y(angles.yaw.to_radians())
-            * Quat::from_rotation_x(angles.pitch.to_radians());
+        t.rotation = angles.rotation();
     }
     if freecam_active {
         return;
@@ -420,6 +442,18 @@ pub(super) fn window_focus_cursor(
     }
 }
 
+pub(super) fn track_lifecycle(
+    mut lifecycle: bevy::ecs::message::MessageReader<bevy::window::AppLifecycle>,
+) {
+    for event in lifecycle.read() {
+        match event {
+            bevy::window::AppLifecycle::Suspended => crate::platform::notify::suspended(),
+            bevy::window::AppLifecycle::Running => crate::platform::notify::resumed(),
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn web_pointer_lock(
     buttons: Res<ButtonInput<MouseButton>>,
     shared: Res<Shared>,
@@ -493,14 +527,14 @@ pub(super) fn poll_module_binds(
     if state.screen.is_open() {
         return;
     }
-    for i in 0..crate::modules::registry::COUNT {
-        let pressed = match store().bind_at(i) {
+    for id in crate::modules::registry::Id::ALL {
+        let pressed = match store().bind(id) {
             Bound::Unbound => false,
             Bound::Key(code) => keys.just_pressed(code),
             Bound::Mouse(button) => buttons.just_pressed(button),
         };
         if pressed {
-            store().toggle_at(i);
+            store().toggle(id);
         }
     }
 }
@@ -541,18 +575,13 @@ pub(super) fn toggle_freecam(
 
     if want != freecam.active {
         freecam.active = want;
-        if freecam.active {
-            if let Ok(t) = camera.single() {
-                freecam.pos = t.translation;
-            }
-        } else {
+        if !freecam.active {
             let s = shared.0.lock().unwrap();
             angles.yaw = s.camera_yaw;
             angles.pitch = s.camera_pitch;
             drop(s);
             if let Ok(mut t) = camera.single_mut() {
-                t.rotation = Quat::from_rotation_y(angles.yaw.to_radians())
-                    * Quat::from_rotation_x(angles.pitch.to_radians());
+                t.rotation = angles.rotation();
             }
         }
     }
@@ -771,12 +800,13 @@ pub(super) fn handle_hotbar_scroll(
     if state.screen.is_open() {
         return;
     }
-    if shared.0.lock().unwrap().session.gamemode == Gamemode::Spectator {
-        return;
-    }
     let notches = wheel_notches(&wheel);
     let (dx, dy) = (notches.x as f64, notches.y as f64);
     if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    let mut s = shared.0.lock().unwrap();
+    if s.session.gamemode == Gamemode::Spectator {
         return;
     }
     let (wx, wy) = accumulate_scroll(&mut acc, dx, dy);
@@ -785,7 +815,6 @@ pub(super) fn handle_hotbar_scroll(
     }
     let notches = if wy == 0 { -wx } else { wy };
 
-    let mut s = shared.0.lock().unwrap();
     let current = s.session.hotbar_target.unwrap_or(s.session.hotbar_selected) as i32;
     let next = next_scroll_selection(notches as f64, current, HOTBAR_SLOTS);
     if next != current {
@@ -866,6 +895,26 @@ pub(super) fn toggle_screen(
         }
     }
 
+    #[cfg(feature = "hud_editor")]
+    {
+        let hud_key = state.keybinds.just(Action::HudEditor, &keys, &buttons);
+        if state.screen == Screen::HudEditor {
+            let escape =
+                (keys.just_pressed(KeyCode::Escape) || field_escape) && !state.hud_state.escape();
+            if hud_key || escape {
+                let back = state.hud_state.parent;
+                enter_screen(back, &mut state, &shared, &mut windows);
+            }
+            return;
+        }
+        if hud_key && (state.screen == Screen::None || state.screen.is_menu()) {
+            state.hud_state.parent = state.screen;
+            state.hud_state.over_menu = state.screen.is_menu();
+            enter_screen(Screen::HudEditor, &mut state, &shared, &mut windows);
+            return;
+        }
+    }
+
     let creative_search_focused =
         state.screen == Screen::Creative && state.creative.search_focused();
     let toggle_key = state.keybinds.just(Action::Inventory, &keys, &buttons)
@@ -877,7 +926,8 @@ pub(super) fn toggle_screen(
             Screen::BookView | Screen::BookEdit | Screen::BookSign
         )
         && !state.screen.is_local_overlay()
-        && !creative_search_focused;
+        && !creative_search_focused
+        && !state.anvil_typing();
     let close_key = keys.just_pressed(KeyCode::Escape) || field_escape;
     #[cfg(target_arch = "wasm32")]
     let pause_key = state.keybinds.just(Action::Pause, &keys, &buttons);
@@ -927,8 +977,12 @@ pub(super) fn toggle_screen(
                 let mut locked = shared.0.lock().unwrap();
                 locked.session.outgoing_chat.push(line);
             }
-            state.chat.close();
-            Some(Screen::None)
+            if submit_key && crate::gui::chat::texting() {
+                None
+            } else {
+                state.chat.close();
+                Some(Screen::None)
+            }
         } else {
             None
         }

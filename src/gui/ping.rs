@@ -89,7 +89,7 @@ fn icons() -> &'static Mutex<Icons> {
     ICONS.get_or_init(Default::default)
 }
 
-fn note_icon(address: &str, pixels: IconPixels) {
+pub(crate) fn note_icon(address: &str, pixels: IconPixels) {
     if pixels.len() != ICON_BYTES {
         return;
     }

@@ -6,22 +6,24 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::items::mesh::{ItemMeshes, Transform as ItemTransform};
+use crate::items::model::{DisplayContext, DisplayTransforms};
 
 #[derive(Clone)]
 pub struct ItemGpu {
     pub mesh: Handle<Mesh>,
     pub material: Handle<StandardMaterial>,
     pub texture: Handle<Image>,
-    pub display: HashMap<String, ItemTransform>,
+    pub display: DisplayTransforms,
     pub bounds: (Vec3, Vec3),
 }
 
 impl ItemGpu {
     pub fn transform(&self, slot: &str) -> ItemTransform {
-        self.display
-            .get(slot)
-            .copied()
-            .unwrap_or(ItemTransform::NONE)
+        self.display.get_named(slot).unwrap_or(ItemTransform::NONE)
+    }
+
+    pub fn for_context(&self, ctx: DisplayContext) -> ItemTransform {
+        self.display.for_context(ctx)
     }
 }
 
@@ -36,7 +38,7 @@ pub struct ItemAssets {
 impl ItemAssets {
     pub fn new() -> ItemAssets {
         ItemAssets {
-            builder: ItemMeshes::new(&crate::assets_root()),
+            builder: ItemMeshes::new(crate::items::model::shared()),
             built: HashMap::new(),
             contextual: HashMap::new(),
             using_sensitive: HashMap::new(),

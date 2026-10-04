@@ -3,7 +3,7 @@ use crate::session::{MerchantOffer, MerchantOffers};
 
 use super::{
     ContainerUi, Digits, GuiState, InvAction, Layout, Painter, ScreenCtx, Scroller, SlotStack,
-    Snapshot, dim_background, draw_inventory_label_at, draw_title, first_row, hovering,
+    Snapshot, TitleCache, dim_background, draw_inventory_label_at, draw_title, first_row, hovering,
     scroll_rows, slots, window_origin,
 };
 
@@ -206,8 +206,11 @@ fn restock_label() -> &'static str {
 }
 
 fn titled_with_level<'a>(ui: &'a mut ContainerUi, snap: &Snapshot, level: u32) -> &'a str {
-    let key = (snap.container_id, level);
-    if !matches!(&ui.merchant_title, Some((id, l, _)) if (*id, *l) == key) {
+    let fresh = ui
+        .merchant_title
+        .as_ref()
+        .is_some_and(|c| c.container_id == snap.container_id && c.level == level);
+    if !fresh {
         let plain: String = snap
             .container_title
             .iter()
@@ -217,11 +220,13 @@ fn titled_with_level<'a>(ui: &'a mut ContainerUi, snap: &Snapshot, level: u32) -
         level_key.push_str(Digits::new(level).as_str());
         let level_name = tooltip::translate(&level_key, &[]);
         let text = tooltip::translate("merchant.title", &[plain, level_name]);
-        ui.merchant_title = Some((key.0, key.1, text));
+        ui.merchant_title = Some(TitleCache {
+            container_id: snap.container_id,
+            level,
+            text,
+        });
     }
-    ui.merchant_title
-        .as_ref()
-        .map_or("", |(_, _, t)| t.as_str())
+    ui.merchant_title.as_ref().map_or("", |c| c.text.as_str())
 }
 
 fn draw_cost_a(p: &mut Painter, offer: &MerchantOffer, x: f32, y: f32) {

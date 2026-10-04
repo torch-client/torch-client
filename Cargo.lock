@@ -6347,6 +6347,8 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+ "webpki-roots 1.0.9",
+ "wgpu",
 ]
 
 [[package]]

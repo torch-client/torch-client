@@ -147,6 +147,20 @@ impl HeldItem {
             None => self.id.to_string(),
         }
     }
+
+    pub fn same_model(&self, other: &HeldItem) -> bool {
+        fn layers(item: &HeldItem) -> Option<&[crate::blockentities::banner::BannerLayer]> {
+            item.layers.as_deref().filter(|l| !l.is_empty())
+        }
+        if self.id != other.id {
+            return false;
+        }
+        match (layers(self), layers(other)) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => self.tint == other.tint,
+            _ => false,
+        }
+    }
 }
 
 pub fn arm_pose_for(item: &HeldItem, using: bool, swinging: bool) -> ArmPose {

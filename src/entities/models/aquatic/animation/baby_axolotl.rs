@@ -1,7 +1,8 @@
 #![allow(clippy::excessive_precision)]
 
-use crate::entities::keyframe::{AnimationDefinition, Channel, Interpolation, Keyframe, Target};
-use crate::entities::models::aquatic::animation::{degree_vec, pos_vec, scale_vec};
+use crate::entities::keyframe::{
+    AnimationDefinition, Channel, Interpolation, Keyframe, Target, degree_vec, pos_vec, scale_vec,
+};
 
 static BABY_AXOLOTL_IDLE_FLOOR_0_BODY_ROTATION: &[Keyframe] = &[
     Keyframe::new(0.0, degree_vec(0.0, 0.0, 0.0), Interpolation::CatmullRom),

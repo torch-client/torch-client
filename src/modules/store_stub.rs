@@ -1,5 +1,5 @@
-use super::registry::{Id, Kind, module};
-use super::value::Value;
+use super::registry::{Id, Kind, Options, SETTINGS, handle};
+use super::value;
 use crate::gui::keybinds::Bound;
 
 pub struct Store;
@@ -13,14 +13,14 @@ pub fn store() -> &'static Store {
 
 pub fn save() {}
 
+#[inline(always)]
+fn bits(slot: u16) -> u64 {
+    value::default_bits(SETTINGS[slot as usize].kind)
+}
+
 impl Store {
     #[inline(always)]
     pub fn enabled(&self, _: Id) -> bool {
-        false
-    }
-
-    #[inline(always)]
-    pub fn enabled_at(&self, _: usize) -> bool {
         false
     }
 
@@ -33,54 +33,40 @@ impl Store {
     pub fn set_enabled(&self, _: Id, _: bool) {}
 
     #[inline(always)]
-    pub fn toggle_at(&self, _: usize) {}
+    pub fn toggle(&self, _: Id) {}
 
     #[inline(always)]
-    pub fn toggle_count(&self, _: usize) -> u32 {
+    pub fn toggle_count(&self, _: Id) -> u32 {
         0
     }
 
     #[inline(always)]
-    pub fn bind_at(&self, _: usize) -> Bound {
+    pub fn bind(&self, _: Id) -> Bound {
         Bound::Unbound
     }
 
     #[inline(always)]
-    fn default(&self, id: Id, n: usize) -> Value {
-        Value::default_of(module(id).settings[n].kind)
+    pub fn flag(&self, h: handle::Toggle) -> bool {
+        value::flag(bits(h.0))
     }
 
     #[inline(always)]
-    pub fn num(&self, id: Id, n: usize) -> f32 {
-        match self.default(id, n) {
-            Value::Num(v) => v,
-            _ => 0.0,
-        }
+    pub fn num(&self, h: handle::Slider) -> f32 {
+        value::num(bits(h.0))
     }
 
     #[inline(always)]
-    pub fn flag(&self, id: Id, n: usize) -> bool {
-        matches!(self.default(id, n), Value::Bool(true))
+    pub fn range(&self, h: handle::Range) -> (f32, f32) {
+        value::range(bits(h.0))
     }
 
     #[inline(always)]
-    pub fn range(&self, id: Id, n: usize) -> (f32, f32) {
-        match self.default(id, n) {
-            Value::Range(lo, hi) => (lo, hi),
-            _ => (0.0, 0.0),
-        }
+    pub fn choice<T: Options>(&self, h: handle::Enum<T>) -> T {
+        T::from_index(value::choice(bits(h.0)))
     }
 
-    #[inline(always)]
-    pub fn choice(&self, id: Id, n: usize) -> u8 {
-        match self.default(id, n) {
-            Value::Choice(c) => c,
-            _ => 0,
-        }
-    }
-
-    pub fn text(&self, id: Id, n: usize) -> String {
-        match module(id).settings[n].kind {
+    pub fn text(&self, h: handle::Text) -> String {
+        match SETTINGS[h.0 as usize].kind {
             Kind::Text { default, .. } => default.to_string(),
             _ => String::new(),
         }

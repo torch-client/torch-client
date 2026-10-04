@@ -3,6 +3,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::{Quat, Vec3};
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::shulker;
 use crate::entities::registry::Registry;
 use crate::entities::state::{Direction, EntityState};
@@ -15,7 +16,7 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     const COLORS: [&str; 16] = [
         "white",
         "orange",
@@ -35,8 +36,8 @@ fn texture(st: &EntityState) -> String {
         "black",
     ];
     match COLORS.get(st.extras.color as usize) {
-        Some(color) => format!("entity/shulker/shulker_{color}"),
-        None => "entity/shulker/shulker".to_string(),
+        Some(color) => format!("entity/shulker/shulker_{color}").into(),
+        None => "entity/shulker/shulker".into(),
     }
 }
 

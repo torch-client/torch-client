@@ -1,4 +1,4 @@
-use crate::gui::keybinds::Bound;
+use crate::gui::widgets::TextBox;
 use crate::modules::list::BitList;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -9,6 +9,7 @@ pub enum Row {
 
 pub struct Picker {
     pub list: &'static BitList,
+    pub query: TextBox,
     pub open: u32,
     pub channels: Option<u32>,
     pub rows: Vec<Row>,
@@ -17,8 +18,12 @@ pub struct Picker {
 
 impl Picker {
     pub fn new(list: &'static BitList) -> Picker {
+        let mut query = TextBox::new(32, "Search");
+        query.browser_keyboard = false;
+        query.focused = true;
         Picker {
             list,
+            query,
             open: 0,
             channels: None,
             rows: Vec::with_capacity(64),
@@ -34,7 +39,8 @@ impl Picker {
         self.open ^= 1 << g;
     }
 
-    pub fn rebuild(&mut self, query: &str, dirty: bool) {
+    pub fn rebuild(&mut self, dirty: bool) {
+        let query = self.query.text.as_str();
         let key = (self.open, self.list.generation(), query.len());
         if !dirty && self.built == Some(key) {
             return;
@@ -75,9 +81,3 @@ pub fn contains_ci(hay: &str, needle: &str) -> bool {
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
     })
 }
-
-#[allow(
-    dead_code,
-    reason = "the bind type is re-exported for the picker's own row"
-)]
-pub type UnusedBound = Bound;

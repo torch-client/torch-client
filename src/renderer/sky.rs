@@ -20,7 +20,7 @@ use bevy::{
 
 use super::AppState;
 use super::dimension::{self, Skybox};
-use super::systems::{Shared, WorldCamera};
+use super::systems::WorldCamera;
 use super::timeline::{self, Argb, HORIZON_HEIGHT, SkyState};
 
 const SKY_SCALE: f32 = 16.0;
@@ -42,7 +42,7 @@ const DISC_SIDES: usize = 8;
 const DISC_RINGS: usize = 16;
 
 #[cfg(feature = "builtin_shaders")]
-#[derive(Clone, Copy, ShaderType)]
+#[derive(Clone, Copy, PartialEq, ShaderType)]
 pub struct SkyParams {
     pub sun: Vec4,
     pub tuning: Vec4,
@@ -139,8 +139,12 @@ impl Plugin for SkyPlugin {
 #[derive(Component)]
 pub struct SkyRoot;
 
+fn dome_sky() -> bool {
+    crate::renderer::terrain::builtin_world_shading()
+}
+
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
-enum SkyPart {
+pub(crate) enum SkyPart {
     SkyDisc,
     DarkDisc,
     Sun,
@@ -452,6 +456,8 @@ fn disc_mesh(yy: f32, sky: Argb, fog: Argb, sky_end: f32) -> Mesh {
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
+    #[cfg(feature = "shader_support")]
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; positions.len()]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
@@ -478,6 +484,8 @@ fn celestial_quad(mirrored: bool) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.to_vec());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 4]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs.to_vec());
+    #[cfg(feature = "shader_support")]
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0f32, 1.0, 1.0, 1.0]; 4]);
     mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
     mesh
 }
@@ -549,6 +557,8 @@ fn sunrise_mesh() -> Mesh {
     let n = positions.len();
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; n]);
+    #[cfg(feature = "shader_support")]
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; n]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
@@ -599,6 +609,11 @@ fn star_mesh() -> Mesh {
     let n = positions.len();
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; n]);
+    #[cfg(feature = "shader_support")]
+    {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; n]);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0f32, 1.0, 1.0, 1.0]; n]);
+    }
     mesh.insert_indices(Indices::U32(indices));
     mesh
 }
@@ -611,7 +626,7 @@ const LAVA_FOG_RANGE: (f32, f32) = (0.25, 1.0);
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_sky(
-    shared: Res<Shared>,
+    view: Res<super::frame_view::FrameView>,
     env: Res<super::environment::Environment>,
     mut assets: ResMut<SkyAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -640,15 +655,7 @@ fn update_sky(
     >,
 ) {
     crate::prof_span!("render:update_sky");
-    let (eye_x, eye_y, eye_z) = {
-        let state = shared.0.lock().unwrap();
-        let eye_height = super::systems::session_eye_height(&state.session) as f64;
-        (
-            state.session.player_pos[0] as f64,
-            state.session.player_pos[1] as f64 + eye_height,
-            state.session.player_pos[2] as f64,
-        )
-    };
+    let [eye_x, eye_y, eye_z] = view.tick_eye();
     let dim = dimension::current();
     let skybox = dim.skybox();
     let mut sky = env.sky;
@@ -712,13 +719,13 @@ fn update_sky(
 
     #[cfg(feature = "builtin_shaders")]
     if let Ok((handle, mut dome_visibility)) = dome.single_mut() {
-        let fancy = crate::renderer::terrain::builtin_shaders_enabled();
+        let fancy = dome_sky();
         *dome_visibility = if skybox == Skybox::Overworld && fancy {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
-        if fancy && let Some(material) = sky_materials.get_mut(&handle.0) {
+        if fancy {
             let to_sun = (yaw * Quat::from_rotation_x(sky.sun_angle)) * Vec3::Y;
             let sky_rgba = sky.sky_color.to_rgba_f32();
             let fog_rgba = sky.fog_color.to_rgba_f32();
@@ -730,7 +737,7 @@ fn update_sky(
                     1.0,
                 )
             };
-            material.params = SkyParams {
+            let params = SkyParams {
                 sun: to_sun.extend(to_sun.y.max(0.0)),
                 tuning: Vec4::new(
                     ((to_sun.y + 0.15) * 3.0).clamp(0.0, 1.0),
@@ -741,6 +748,13 @@ fn update_sky(
                 sky_color: linear(sky_rgba),
                 fog_color: linear(fog_rgba),
             };
+            if sky_materials
+                .get(&handle.0)
+                .is_some_and(|m| m.params != params)
+                && let Some(material) = sky_materials.get_mut(&handle.0)
+            {
+                material.params = params;
+            }
         }
     }
 
@@ -757,9 +771,7 @@ fn update_sky(
             *visibility = Visibility::Hidden;
             continue;
         }
-        if crate::renderer::terrain::builtin_shaders_enabled()
-            && matches!(part, SkyPart::SkyDisc | SkyPart::DarkDisc)
-        {
+        if dome_sky() && matches!(part, SkyPart::SkyDisc | SkyPart::DarkDisc) {
             *visibility = Visibility::Hidden;
             continue;
         }
@@ -788,9 +800,13 @@ fn update_sky(
                     Visibility::Hidden
                 };
                 transform.rotation = yaw * Quat::from_rotation_x(sky.star_angle);
-                if let Some(material) = materials.get_mut(&assets.star_material) {
-                    material.base_color =
-                        Color::srgba(brightness, brightness, brightness, brightness);
+                let want = Color::srgba(brightness, brightness, brightness, brightness);
+                if materials
+                    .get(&assets.star_material)
+                    .is_some_and(|m| m.base_color != want)
+                    && let Some(material) = materials.get_mut(&assets.star_material)
+                {
+                    material.base_color = want;
                 }
             }
             SkyPart::SunriseFan => {
@@ -808,8 +824,13 @@ fn update_sky(
                     transform.rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)
                         * Quat::from_rotation_z((flip + 90.0).to_radians());
                     transform.scale = Vec3::new(1.0, 1.0, sunrise_alpha);
-                    if let Some(material) = materials.get_mut(&assets.sunrise_material) {
-                        material.base_color = sky.sunrise_color.to_color();
+                    let want = sky.sunrise_color.to_color();
+                    if materials
+                        .get(&assets.sunrise_material)
+                        .is_some_and(|m| m.base_color != want)
+                        && let Some(material) = materials.get_mut(&assets.sunrise_material)
+                    {
+                        material.base_color = want;
                     }
                 }
             }
@@ -830,6 +851,36 @@ fn rebuild_discs(assets: &mut SkyAssets, meshes: &mut Assets<Mesh>, sky: &SkySta
     }
     if let Some(mesh) = meshes.get_mut(&assets.dark_disc_mesh) {
         *mesh = disc_mesh(-SKY_DISC_HEIGHT, Argb(0xFF00_0000), sky.fog_color, sky_end);
+    }
+}
+
+#[cfg(all(test, feature = "shader_support"))]
+mod pack_tests {
+    use super::*;
+
+    #[test]
+    fn every_sky_mesh_has_the_entity_pass_attributes() {
+        let white = Argb(0xFFFF_FFFF);
+        let wanted = [
+            Mesh::ATTRIBUTE_POSITION.id,
+            Mesh::ATTRIBUTE_NORMAL.id,
+            Mesh::ATTRIBUTE_UV_0.id,
+            Mesh::ATTRIBUTE_COLOR.id,
+        ];
+        for mesh in [
+            disc_mesh(SKY_DISC_HEIGHT, white, white, SKY_DISC_RADIUS),
+            celestial_quad(false),
+            end_sky_mesh(),
+            sunrise_mesh(),
+            star_mesh(),
+        ] {
+            let mut ids: Vec<_> = mesh
+                .attributes()
+                .map(|(attribute, _)| attribute.id)
+                .collect();
+            ids.sort();
+            assert_eq!(ids, wanted);
+        }
     }
 }
 

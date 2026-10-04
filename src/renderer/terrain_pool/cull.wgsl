@@ -8,7 +8,7 @@ struct SlotMeta {
     solid_count: u32,
     flags: u32,
     pool: u32,
-    pad: u32,
+    cutout_first: u32,
 }
 
 struct DrawIndexedIndirectArgs {
@@ -20,19 +20,29 @@ struct DrawIndexedIndirectArgs {
 }
 
 struct CullView {
-    planes: array<vec4<f32>, 6>,
+    planes: array<vec4<f32>, 13>,
+    within_min: vec4<f32>,
+    within_max: vec4<f32>,
+    always_min: vec4<f32>,
+    always_max: vec4<f32>,
     slot_cap: u32,
     view_index: u32,
     pool_count: u32,
     compact: u32,
+    flags: u32,
+    plane_count: u32,
+    pad0: u32,
+    pad1: u32,
 }
 
 const STREAM_SOLID: u32 = 0u;
 const STREAM_CUTOUT: u32 = 1u;
-const STREAM_WATER: u32 = 2u;
 const STREAMS: u32 = 3u;
 const META_LIVE: u32 = 1u;
 const META_WATER: u32 = 2u;
+const VIEW_UNOCCLUDED: u32 = 2u;
+const VIEW_WITHIN: u32 = 4u;
+const VIEW_ALWAYS: u32 = 8u;
 
 @group(0) @binding(0) var<storage, read> metas: array<SlotMeta>;
 @group(0) @binding(1) var<storage, read> vis: array<u32>;
@@ -41,7 +51,15 @@ const META_WATER: u32 = 2u;
 @group(0) @binding(4) var<uniform> cull: CullView;
 
 fn in_frustum(lo: vec3<f32>, hi: vec3<f32>) -> bool {
-    for (var i = 0u; i < 6u; i = i + 1u) {
+    if (cull.flags & VIEW_WITHIN) != 0u
+        && (any(hi < cull.within_min.xyz) || any(lo > cull.within_max.xyz)) {
+        return false;
+    }
+    if (cull.flags & VIEW_ALWAYS) != 0u
+        && all(hi >= cull.always_min.xyz) && all(lo <= cull.always_max.xyz) {
+        return true;
+    }
+    for (var i = 0u; i < cull.plane_count; i = i + 1u) {
         let p = cull.planes[i];
         let v = select(lo, hi, p.xyz > vec3<f32>(0.0));
         if (dot(p.xyz, v) + p.w < 0.0) {
@@ -73,7 +91,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var live = false;
     var visible = false;
     var m: SlotMeta;
-    if ((vis[slot / 32u] >> (slot % 32u)) & 1u) != 0u {
+    let word = slot / 32u;
+    if (cull.flags & VIEW_UNOCCLUDED) != 0u || word >= arrayLength(&vis) || ((vis[word] >> (slot % 32u)) & 1u) != 0u {
         visible = true;
     }
     if (slot < arrayLength(&metas)) {
@@ -94,7 +113,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let is_water = draws && (m.flags & META_WATER) != 0u;
     let has_solid = draws && !is_water && m.solid_count > 0u;
     let has_cutout = draws && !is_water && m.index_count > m.solid_count;
-    let draw_water = is_water && cull.view_index == 0u;
 
     if (!compact) {
         for (var pool = 0u; pool < cull.pool_count; pool = pool + 1u) {
@@ -106,20 +124,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                     write_zero(base + STREAM_SOLID, slot);
                 }
                 if (has_cutout) {
-                    write_cmd(base + STREAM_CUTOUT, slot, m.first_index + m.solid_count,
+                    write_cmd(base + STREAM_CUTOUT, slot, m.cutout_first,
                         m.index_count - m.solid_count, m.base_vertex, slot);
                 } else {
                     write_zero(base + STREAM_CUTOUT, slot);
                 }
-                if (draw_water) {
-                    write_cmd(base + STREAM_WATER, slot, m.first_index, m.index_count, m.base_vertex, slot);
-                } else {
-                    write_zero(base + STREAM_WATER, slot);
-                }
             } else {
                 write_zero(base + STREAM_SOLID, slot);
                 write_zero(base + STREAM_CUTOUT, slot);
-                write_zero(base + STREAM_WATER, slot);
             }
         }
         return;
@@ -137,11 +149,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (has_cutout) {
         let region = base + STREAM_CUTOUT;
         let k = atomicAdd(&counts[region], 1u);
-        write_cmd(region, k, m.first_index + m.solid_count, m.index_count - m.solid_count, m.base_vertex, slot);
-    }
-    if (draw_water) {
-        let region = base + STREAM_WATER;
-        let k = atomicAdd(&counts[region], 1u);
-        write_cmd(region, k, m.first_index, m.index_count, m.base_vertex, slot);
+        write_cmd(region, k, m.cutout_first, m.index_count - m.solid_count, m.base_vertex, slot);
     }
 }

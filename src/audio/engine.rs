@@ -37,7 +37,7 @@ pub(super) fn play(sound: Play) {
 }
 
 fn run(index_id: &str) {
-    let pack = match Pack::open(index_id) {
+    let mut pack = match Pack::open(index_id) {
         Ok(pack) => pack,
         Err(e) => {
             crate::log_warn!("audio", "the sound pack will not open: {e}");
@@ -92,7 +92,7 @@ fn run(index_id: &str) {
             crate::log_warn!("audio", "no such sound in the pack: {}", sound.key);
             continue;
         };
-        let cursor = std::io::Cursor::new(bytes.to_vec());
+        let cursor = std::io::Cursor::new(bytes);
         let decoder = match rodio::Decoder::new(cursor) {
             Ok(decoder) => decoder,
             Err(e) => {

@@ -1,23 +1,31 @@
 pub(crate) struct Slot(pub &'static str);
 
-pub(crate) const SERVERS: Slot = Slot("servers.json");
-pub(crate) const OPTIONS: Slot = Slot("options.json");
-pub(crate) const KEYBINDS: Slot = Slot("keybinds.json");
-pub(crate) const PROFILE: Slot = Slot("profile.json");
-pub(crate) const MODULES: Slot = Slot("modules.json");
-pub(crate) const ACCOUNTS: Slot = Slot("accounts.json");
-pub(crate) const COMMAND_HISTORY: Slot = Slot("command_history.txt");
+macro_rules! slots {
+    ($($(#[doc = $doc:literal])* $(#[cfg($cfg:meta)])? $name:ident = $file:literal;)*) => {
+        $(
+            $(#[doc = $doc])*
+            $(#[cfg($cfg)])?
+            pub(crate) const $name: Slot = Slot($file);
+        )*
 
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) const ALL: &[Slot] = &[
-    SERVERS,
-    OPTIONS,
-    KEYBINDS,
-    MODULES,
-    PROFILE,
-    ACCOUNTS,
-    COMMAND_HISTORY,
-];
+        #[cfg(not(target_arch = "wasm32"))]
+        pub(crate) const ALL: &[Slot] = &[$($(#[cfg($cfg)])? $name,)*];
+    };
+}
+
+slots! {
+    SERVERS = "servers.json";
+    OPTIONS = "options.json";
+    KEYBINDS = "keybinds.json";
+    MODULES = "modules.json";
+    PROFILE = "profile.json";
+    ACCOUNTS = "accounts.json";
+    COMMAND_HISTORY = "command_history.txt";
+    #[cfg(feature = "hud_editor")]
+    HUD = "hud.json";
+    #[cfg(resource_packs)]
+    RESOURCE_PACKS = "resourcepacks.json";
+}
 
 impl Slot {
     pub(crate) fn load(&self) -> Option<String> {

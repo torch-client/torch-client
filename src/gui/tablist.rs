@@ -10,6 +10,8 @@ const MAX_ROWS_PER_COL: usize = 20;
 
 const LINE: f32 = 9.0;
 
+const HEAD: f32 = 9.0;
+
 const PANEL: u32 = 0x8000_0000;
 
 const ROW: u32 = 0x20FF_FFFF;
@@ -57,8 +59,11 @@ pub const DEFAULT_SKINS: [DefaultSkin; 18] = [
 pub struct TabListState {
     health: HashMap<u128, HealthState>,
     visible: bool,
+    #[cfg(feature = "mobile_ui")]
+    scroll: f32,
 }
 
+#[cfg_attr(feature = "mobile_ui", allow(dead_code))]
 pub fn draw(
     p: &mut Painter,
     ctx: &ScreenCtx,
@@ -66,35 +71,15 @@ pub fn draw(
     state: &mut TabListState,
     #[cfg(feature = "skins")] faces: &mut crate::gui::player_faces::PlayerFaces,
 ) {
-    if !state.visible {
-        state.visible = true;
-        state.health.clear();
-    }
+    let (max_name_width, width_for_score) = begin(p, list, state);
     let tick = p.frame as u64;
 
     let atlas = p.atlas;
     let font = &atlas.font;
+    let width_of = |spans: &[Span]| font.width(spans).ceil();
     let screen_w = ctx.vw;
     let rows = &list.rows;
     let slots = rows.len();
-
-    if !state.health.is_empty() {
-        state
-            .health
-            .retain(|uuid, _| rows.iter().any(|r| r.uuid == *uuid));
-    }
-
-    let width_of = |spans: &[Span]| font.width(spans).ceil();
-    let spacer = font.width_str(" ").ceil();
-    let mut max_name_width: f32 = 0.0;
-    let mut max_score_width: f32 = 0.0;
-    for row in rows {
-        max_name_width = max_name_width.max(width_of(&row.name));
-        let score = width_of(&row.score_text);
-        if score > 0.0 {
-            max_score_width = max_score_width.max(spacer + score);
-        }
-    }
 
     let mut cols = 1usize;
     let mut rows_per_col = slots;
@@ -102,14 +87,6 @@ pub fn draw(
         cols += 1;
         rows_per_col = slots.div_ceil(cols);
     }
-
-    const HEAD: f32 = 9.0;
-
-    let width_for_score = match &list.objective {
-        Some(o) if o.hearts => 90.0,
-        Some(_) => max_score_width,
-        None => 0.0,
-    };
 
     let half = |v: f32| (v / 2.0).floor();
     let mid = half(screen_w);
@@ -162,55 +139,22 @@ pub fn draw(
         let line = (i % rows_per_col.max(1)) as f32;
         let xo = xxo + col * slot_width + col * 5.0;
         let yo = yyo + line * LINE;
-        p.fill(xo, yo, slot_width, 8.0, ROW);
-
-        #[cfg(feature = "skins")]
-        let drawn = match faces
-            .slot_of(row.uuid)
-            .and_then(|slot| p.atlas.player_face(slot))
-        {
-            Some((face, hat)) => {
-                p.atlas_region_flipped(face, xo, yo, 8.0, 8.0, row.upside_down);
-                if row.show_hat {
-                    p.atlas_region_flipped(hat, xo, yo, 8.0, 8.0, row.upside_down);
-                }
-                true
-            }
-            None => false,
-        };
-        #[cfg(not(feature = "skins"))]
-        let drawn = false;
-        if !drawn {
-            let skin = &DEFAULT_SKINS[(row.skin as usize).min(DEFAULT_SKINS.len() - 1)];
-            p.skin_face(
-                skin.face,
-                row.show_hat.then_some(skin.hat),
-                xo,
-                yo,
-                8.0,
-                row.upside_down,
-            );
-        }
-        let name_x = xo + HEAD;
-
-        let alpha = if row.spectator { SPECTATOR_ALPHA } else { 1.0 };
-        p.text_faded(&row.name, name_x, yo, true, alpha);
-
-        if let Some(objective) = &list.objective
-            && !row.spectator
-        {
-            let left = name_x + max_name_width + 1.0;
-            let right = left + width_for_score;
-            if right - left > 5.0 {
-                if objective.hearts {
-                    hearts(p, state, row, yo, left, right, tick);
-                } else if !row.score_text.is_empty() {
-                    p.text(&row.score_text, right - width_of(&row.score_text), yo, true);
-                }
-            }
-        }
-
-        ping_icon(p, slot_width, xo, yo, row.latency);
+        draw_row(
+            p,
+            state,
+            list,
+            row,
+            xo,
+            yo,
+            Columns {
+                slot_width,
+                max_name_width,
+                width_for_score,
+            },
+            tick,
+            #[cfg(feature = "skins")]
+            faces,
+        );
     }
 
     if !footer_lines.is_empty() {
@@ -230,10 +174,278 @@ pub fn draw(
     }
 }
 
+fn begin(p: &Painter, list: &TabList, state: &mut TabListState) -> (f32, f32) {
+    if !state.visible {
+        state.visible = true;
+        state.health.clear();
+    }
+    let rows = &list.rows;
+
+    if !state.health.is_empty() {
+        state
+            .health
+            .retain(|uuid, _| rows.iter().any(|r| r.uuid == *uuid));
+    }
+
+    let font = &p.atlas.font;
+    let width_of = |spans: &[Span]| font.width(spans).ceil();
+    let spacer = font.width_str(" ").ceil();
+    let mut max_name_width: f32 = 0.0;
+    let mut max_score_width: f32 = 0.0;
+    for row in rows {
+        max_name_width = max_name_width.max(width_of(&row.name));
+        let score = width_of(&row.score_text);
+        if score > 0.0 {
+            max_score_width = max_score_width.max(spacer + score);
+        }
+    }
+
+    let width_for_score = match &list.objective {
+        Some(o) if o.hearts => 90.0,
+        Some(_) => max_score_width,
+        None => 0.0,
+    };
+    (max_name_width, width_for_score)
+}
+
+#[derive(Clone, Copy)]
+struct Columns {
+    slot_width: f32,
+    max_name_width: f32,
+    width_for_score: f32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_row(
+    p: &mut Painter,
+    state: &mut TabListState,
+    list: &TabList,
+    row: &TabRow,
+    xo: f32,
+    yo: f32,
+    cols: Columns,
+    tick: u64,
+    #[cfg(feature = "skins")] faces: &mut crate::gui::player_faces::PlayerFaces,
+) {
+    let Columns {
+        slot_width,
+        max_name_width,
+        width_for_score,
+    } = cols;
+    p.fill(xo, yo, slot_width, 8.0, ROW);
+
+    #[cfg(feature = "skins")]
+    let drawn = match faces
+        .slot_of(row.uuid)
+        .and_then(|slot| p.atlas.player_face(slot))
+    {
+        Some((face, hat)) => {
+            p.atlas_region_flipped(face, xo, yo, 8.0, 8.0, row.upside_down);
+            if row.show_hat {
+                p.atlas_region_flipped(hat, xo, yo, 8.0, 8.0, row.upside_down);
+            }
+            true
+        }
+        None => false,
+    };
+    #[cfg(not(feature = "skins"))]
+    let drawn = false;
+    if !drawn {
+        let skin = &DEFAULT_SKINS[(row.skin as usize).min(DEFAULT_SKINS.len() - 1)];
+        p.skin_face(
+            skin.face,
+            row.show_hat.then_some(skin.hat),
+            xo,
+            yo,
+            8.0,
+            row.upside_down,
+        );
+    }
+    let name_x = xo + HEAD;
+
+    let alpha = if row.spectator { SPECTATOR_ALPHA } else { 1.0 };
+    p.text_faded(&row.name, name_x, yo, true, alpha);
+
+    if let Some(objective) = &list.objective
+        && !row.spectator
+    {
+        let left = name_x + max_name_width + 1.0;
+        let right = left + width_for_score;
+        if right - left > 5.0 {
+            if objective.hearts {
+                hearts(p, state, row, yo, left, right, tick);
+            } else if !row.score_text.is_empty() {
+                let w = p.atlas.font.width(&row.score_text).ceil();
+                p.text(&row.score_text, right - w, yo, true);
+            }
+        }
+    }
+
+    ping_icon(p, slot_width, xo, yo, row.latency);
+}
+
+#[cfg(feature = "mobile_ui")]
+const SIDE_MARGIN: f32 = 4.0;
+
+#[cfg(feature = "mobile_ui")]
+const SIDE_MIN_SCALE: f32 = 0.5;
+
+#[cfg(feature = "mobile_ui")]
+pub fn draw_side(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    list: &TabList,
+    state: &mut TabListState,
+    right: f32,
+    #[cfg(feature = "skins")] faces: &mut crate::gui::player_faces::PlayerFaces,
+) {
+    let avail_w = right - 2.0 * SIDE_MARGIN;
+    let avail_h = ctx.vh - 2.0 * SIDE_MARGIN;
+    if avail_w <= 0.0 || avail_h <= 0.0 {
+        hide(state);
+        return;
+    }
+
+    let (max_name_width, width_for_score) = begin(p, list, state);
+    let tick = p.frame as u64;
+    let atlas = p.atlas;
+    let font = &atlas.font;
+    let width_of = |spans: &[Span]| font.width(spans).ceil();
+
+    let wrap_width = ctx.vw - 50.0;
+    let header_lines = wrap(font, &list.header, wrap_width);
+    let footer_lines = wrap(font, &list.footer, wrap_width);
+
+    let slot_width = HEAD + max_name_width + width_for_score + 13.0;
+    let mut inner_w = slot_width;
+    for line in header_lines.iter().chain(footer_lines.iter()) {
+        inner_w = inner_w.max(width_of(line));
+    }
+    let panel_w = inner_w + 2.0;
+
+    let scale = (avail_w / panel_w).clamp(SIDE_MIN_SCALE, 1.0);
+    let w = panel_w.min(avail_w / scale).floor();
+    let local_h = avail_h / scale;
+
+    let block = |lines: usize| {
+        if lines == 0 {
+            0.0
+        } else {
+            lines as f32 * LINE + 1.0
+        }
+    };
+    let header_h = block(header_lines.len());
+    let footer_h = block(footer_lines.len());
+    let content_h = list.rows.len() as f32 * LINE;
+    let view_h = content_h
+        .min(local_h - header_h - footer_h - 1.0)
+        .max(0.0)
+        .floor();
+    let max_scroll = (content_h - view_h).max(0.0);
+
+    let view_x = SIDE_MARGIN;
+    let view_y = SIDE_MARGIN + (header_h + 1.0) * scale;
+    let view_sw = w * scale;
+    let view_sh = view_h * scale;
+    let max_scroll_screen = max_scroll * scale;
+    if ctx.input.scroll != 0.0 && ctx.hovering(view_x, view_y, view_sw, view_sh) {
+        state.scroll -= ctx.input.scroll * LINE * scale;
+    }
+    crate::gui::options::content_drag_in(
+        &mut state.scroll,
+        ctx,
+        view_x,
+        view_y,
+        view_sw,
+        view_sh,
+        false,
+        max_scroll_screen,
+    );
+    state.scroll = state.scroll.clamp(0.0, max_scroll_screen);
+    let offset = (state.scroll / scale).round();
+
+    let total_h = header_h + view_h + 1.0 + footer_h;
+    let centred = |lw: f32| ((w - lw) / 2.0).floor().max(1.0);
+
+    p.scaled(scale, SIDE_MARGIN, SIDE_MARGIN, |p| {
+        let outer = p.push_clip(0.0, 0.0, w, total_h);
+
+        let mut y = 0.0;
+        if header_h > 0.0 {
+            p.fill(0.0, y, w, header_h, PANEL);
+            for (i, line) in header_lines.iter().enumerate() {
+                p.text(
+                    line,
+                    centred(width_of(line)),
+                    y + 1.0 + i as f32 * LINE,
+                    true,
+                );
+            }
+            y += header_h;
+        }
+
+        p.fill(0.0, y, w, view_h + 1.0, PANEL);
+        let rows_top = y + 1.0;
+        let inner = p.push_clip(0.0, rows_top, w, view_h);
+        let xo = centred(slot_width);
+        let cols = Columns {
+            slot_width,
+            max_name_width,
+            width_for_score,
+        };
+        let first = (offset / LINE).floor() as usize;
+        let last = ((offset + view_h) / LINE).ceil() as usize;
+        for (i, row) in list.rows.iter().enumerate().take(last).skip(first) {
+            let yo = rows_top + i as f32 * LINE - offset;
+            draw_row(
+                p,
+                state,
+                list,
+                row,
+                xo,
+                yo,
+                cols,
+                tick,
+                #[cfg(feature = "skins")]
+                faces,
+            );
+        }
+        p.pop_clip(inner);
+
+        if max_scroll > 0.0 && view_h > 0.0 {
+            let thumb_h = (view_h * view_h / content_h).max(4.0).min(view_h);
+            let thumb_y = rows_top + (view_h - thumb_h) * offset / max_scroll;
+            p.fill(w - 1.0, thumb_y.floor(), 1.0, thumb_h.floor(), SCROLL_THUMB);
+        }
+        y += view_h + 1.0;
+
+        if footer_h > 0.0 {
+            p.fill(0.0, y, w, footer_h, PANEL);
+            for (i, line) in footer_lines.iter().enumerate() {
+                p.text(
+                    line,
+                    centred(width_of(line)),
+                    y + 1.0 + i as f32 * LINE,
+                    true,
+                );
+            }
+        }
+
+        p.pop_clip(outer);
+    });
+}
+
+#[cfg(feature = "mobile_ui")]
+const SCROLL_THUMB: u32 = 0x80FF_FFFF;
+
 pub fn hide(state: &mut TabListState) {
     if state.visible {
         state.visible = false;
         state.health.clear();
+        #[cfg(feature = "mobile_ui")]
+        {
+            state.scroll = 0.0;
+        }
     }
 }
 

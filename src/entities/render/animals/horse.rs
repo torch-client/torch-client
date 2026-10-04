@@ -1,5 +1,6 @@
 use azalea_registry::builtin::EntityKind;
 
+use crate::entities::TexturePath;
 use crate::entities::models::animals::equine;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -83,16 +84,16 @@ const COATS: [&str; 7] = [
     "darkbrown",
 ];
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     let coat = COATS[coat(st)];
     if st.extras.is_baby {
-        format!("entity/horse/horse_{coat}_baby")
+        format!("entity/horse/horse_{coat}_baby").into()
     } else {
-        format!("entity/horse/horse_{coat}")
+        format!("entity/horse/horse_{coat}").into()
     }
 }
 
-fn markings_texture(st: &EntityState) -> String {
+fn markings_texture(st: &EntityState) -> TexturePath {
     let name = match markings(st) {
         2 => "whitefield",
         3 => "whitedots",
@@ -100,9 +101,9 @@ fn markings_texture(st: &EntityState) -> String {
         _ => "white",
     };
     if st.extras.is_baby {
-        format!("entity/horse/horse_markings_{name}_baby")
+        format!("entity/horse/horse_markings_{name}_baby").into()
     } else {
-        format!("entity/horse/horse_markings_{name}")
+        format!("entity/horse/horse_markings_{name}").into()
     }
 }
 
@@ -115,11 +116,11 @@ pub fn armor_material(st: &EntityState) -> Option<&'static str> {
         .find(|known| *known == material)
 }
 
-fn armor_texture(st: &EntityState) -> String {
+fn armor_texture(st: &EntityState) -> TexturePath {
     let material = armor_material(st).unwrap_or("iron");
-    format!("entity/equipment/horse_body/{material}")
+    format!("entity/equipment/horse_body/{material}").into()
 }
 
-fn saddle_texture(_st: &EntityState) -> String {
-    "entity/equipment/horse_saddle/saddle".to_string()
+fn saddle_texture(_st: &EntityState) -> TexturePath {
+    "entity/equipment/horse_saddle/saddle".into()
 }

@@ -1,5 +1,6 @@
 use azalea_registry::builtin::EntityKind;
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::creaking;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -23,12 +24,12 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/creaking/creaking".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/creaking/creaking".into()
 }
 
-fn eyes_texture(_st: &EntityState) -> String {
-    "entity/creaking/creaking_eyes".to_string()
+fn eyes_texture(_st: &EntityState) -> TexturePath {
+    "entity/creaking/creaking_eyes".into()
 }
 
 fn eyes_glowing(st: &EntityState) -> bool {

@@ -54,6 +54,12 @@ mod seam {
 
     pub(crate) fn note_backlog(_sections: usize) {}
 
+    pub(crate) fn sweep_parked(_partial: &crate::client::viewwindow::PartialWorldRef) {}
+
+    pub(crate) fn take_died() -> bool {
+        false
+    }
+
     pub(crate) fn sync_options(_lighting: bool, _smooth: bool) {}
 }
 
@@ -68,10 +74,11 @@ mod seam {
     use super::msg::ToWorker;
     use super::*;
 
-    pub(crate) use host::{active, spawn};
+    pub(crate) use host::{active, spawn, take_died};
 
     thread_local! {
-        static PARKED: RefCell<HashMap<(i32, i32), Vec<u8>>> = RefCell::new(HashMap::new());
+        static PARKED: RefCell<HashMap<(i32, i32), (Vec<u8>, u32)>> = RefCell::new(HashMap::new());
+        static PARK_TICK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         static SENT_LEVEL: RefCell<Option<(u8, i32, u32)>> = const { RefCell::new(None) };
         static SENT_BIOMES: RefCell<Option<std::sync::Arc<Vec<u8>>>> =
             const { RefCell::new(None) };
@@ -92,7 +99,8 @@ mod seam {
             );
             return false;
         }
-        PARKED.with(|parked| parked.borrow_mut().insert((p.x, p.z), bytes));
+        let tick = PARK_TICK.with(std::cell::Cell::get);
+        PARKED.with(|parked| parked.borrow_mut().insert((p.x, p.z), (bytes, tick)));
         true
     }
 
@@ -124,6 +132,7 @@ mod seam {
         send_biomes(world);
         let packet = PARKED
             .with(|parked| parked.borrow_mut().remove(&(cx, cz)))
+            .map(|(bytes, _)| bytes)
             .unwrap_or_default();
         host::send(&ToWorker::Chunk {
             cx,
@@ -228,6 +237,33 @@ mod seam {
             *sent = sections;
             host::send(&ToWorker::Backlog(sections));
         });
+    }
+
+    pub(crate) fn sweep_parked(partial: &crate::client::viewwindow::PartialWorldRef) {
+        const PARK_TTL: u32 = 40;
+        let now = PARK_TICK.with(|t| {
+            let now = t.get().wrapping_add(1);
+            t.set(now);
+            now
+        });
+        PARKED.with(|parked| {
+            let mut parked = parked.borrow_mut();
+            if parked.is_empty() {
+                return;
+            }
+            let partial = partial.read();
+            parked.retain(|&(x, z), (_, at)| {
+                if now.wrapping_sub(*at) < PARK_TTL {
+                    return true;
+                }
+                let pos = azalea_core::position::ChunkPos::new(x, z);
+                partial.chunks.in_range(&pos) && partial.chunks.limited_get(&pos).is_some()
+            });
+        });
+    }
+
+    pub(crate) fn resend_backlog() {
+        SENT_BACKLOG.with(|sent| *sent.borrow_mut() = u32::MAX);
     }
 
     pub(crate) fn sync_options(lighting: bool, smooth: bool) {

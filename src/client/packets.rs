@@ -185,12 +185,11 @@ fn read_section_list(
 }
 
 fn layer_from_bytes(bytes: &[u8]) -> Option<DataLayer> {
-    let Ok(boxed): Result<Box<[u8; LAYER_SIZE]>, _> = bytes.to_vec().into_boxed_slice().try_into()
-    else {
+    let Ok(array): Result<&[u8; LAYER_SIZE], _> = bytes.try_into() else {
         note_bad_light_layer(bytes.len());
         return None;
     };
-    Some(DataLayer::from_bytes(boxed))
+    Some(DataLayer::from_wire(array))
 }
 
 static BAD_LIGHT_LAYERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -327,8 +326,6 @@ fn stonecutter_recipes(
     world: &WorldHolder,
     p: &azalea_protocol::packets::game::c_update_recipes::ClientboundUpdateRecipes,
 ) -> Vec<crate::session::StonecutterRecipe> {
-    use crate::play::inventory_bridge::slot_stack;
-
     let world = world.shared.read();
     let registries = Some(&world.registries);
 
@@ -395,6 +392,9 @@ fn chunk_accounting(world: &WorldHolder, packet: &ClientboundGamePacket) {
 fn server_lighting(world: &WorldHolder, packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::LevelChunkWithLight(p) => {
+            if crate::client::mesh_worker::offer_chunk_packet(p) {
+                return;
+            }
             if !world
                 .partial
                 .read()
@@ -403,9 +403,7 @@ fn server_lighting(world: &WorldHolder, packet: &ClientboundGamePacket) {
             {
                 return;
             }
-            if !crate::client::mesh_worker::offer_chunk_packet(p) {
-                worldsync::stash_server_light(p.x, p.z, server_light(&p.light_data));
-            }
+            worldsync::stash_server_light(p.x, p.z, server_light(&p.light_data));
         }
         ClientboundGamePacket::LightUpdate(p) => {
             if !crate::client::mesh_worker::offer_light_update(p.x, p.z, &p.light_data) {
@@ -713,31 +711,48 @@ fn session_state(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &Client
                 p.event_id - entity_event::PERMISSION_LEVEL_ALL;
         }
         ClientboundGamePacket::OpenSignEditor(p) => {
-            use crate::blockentities::feed::BlockEntityData;
+            use crate::blockentities::feed::{BlockEntityData, SignFace};
+            use crate::session::SignEditKind;
+            let world_block = {
+                use azalea::block::BlockTrait;
+                world
+                    .shared
+                    .read()
+                    .get_block_state(p.pos)
+                    .map(|state| Box::<dyn BlockTrait>::from(state).id().to_string())
+            };
             let mut s = shared.lock().unwrap();
             let key = [p.pos.x, p.pos.y, p.pos.z];
-            let lines = s
-                .session
-                .block_entities
-                .get(&key)
+            let entry = s.session.block_entities.get(&key);
+            let Some((kind, wood)) = entry
+                .and_then(|info| SignEditKind::from_block(&info.state.block))
+                .or_else(|| world_block.as_deref().and_then(SignEditKind::from_block))
+            else {
+                crate::log_warn!(
+                    "sign",
+                    "ignoring OpenSignEditor at {:?}: no sign there",
+                    p.pos
+                );
+                return;
+            };
+            let face = entry
                 .and_then(|info| match &*info.data {
                     BlockEntityData::Sign(sign) => Some(if p.is_front_text {
-                        &sign.front
+                        sign.front.clone()
                     } else {
-                        &sign.back
+                        sign.back.clone()
                     }),
                     #[cfg(feature = "skins")]
                     BlockEntityData::Skull(_) => None,
                     BlockEntityData::Banner(_) | BlockEntityData::None => None,
                 })
-                .map(|face| {
-                    std::array::from_fn(|i| face.lines[i].iter().map(|s| s.text.as_str()).collect())
-                })
-                .unwrap_or_default();
+                .unwrap_or_else(SignFace::default);
             s.session.sign_editor_open = Some(crate::session::SignEditRequest {
                 pos: p.pos,
                 front: p.is_front_text,
-                lines,
+                kind,
+                wood,
+                face,
             });
         }
         ClientboundGamePacket::OpenBook(p) => {

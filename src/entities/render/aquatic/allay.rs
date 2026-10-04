@@ -1,5 +1,6 @@
 use azalea_registry::builtin::EntityKind;
 
+use crate::entities::TexturePath;
 use crate::entities::models::aquatic::allay;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -13,6 +14,6 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/allay/allay".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/allay/allay".into()
 }

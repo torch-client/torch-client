@@ -38,6 +38,7 @@ pub enum Layout {
     BrewingStand,
     Merchant,
     Horse(u8),
+    Anvil,
 }
 
 fn standard_inventory(k: usize, x: f32, y: f32) -> (f32, f32) {
@@ -48,88 +49,301 @@ fn standard_inventory(k: usize, x: f32, y: f32) -> (f32, f32) {
     }
 }
 
-impl Layout {
-    pub fn size(self) -> (f32, f32) {
+#[derive(Clone, Copy, Debug)]
+enum SlotRule {
+    Any,
+    Output,
+    One,
+    Only(&'static [&'static str]),
+    OneOnly(&'static [&'static str]),
+}
+
+impl SlotRule {
+    fn may_place(self, item: &str) -> bool {
         match self {
-            Layout::PlayerMenu
-            | Layout::Crafting
-            | Layout::Furnace
-            | Layout::Grindstone
-            | Layout::Enchantment
-            | Layout::Loom
-            | Layout::Stonecutter
-            | Layout::Cartography
-            | Layout::Smithing
-            | Layout::BrewingStand
-            | Layout::Horse(_) => (INV_W, INV_H),
+            SlotRule::Any | SlotRule::One => true,
+            SlotRule::Output => false,
+            SlotRule::Only(items) | SlotRule::OneOnly(items) => items.contains(&item),
+        }
+    }
+
+    fn one_only(self) -> bool {
+        matches!(self, SlotRule::One | SlotRule::OneOnly(_))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SlotDef {
+    pos: (f32, f32),
+    icon: Option<&'static str>,
+    rule: SlotRule,
+}
+
+const fn slot(x: f32, y: f32) -> SlotDef {
+    SlotDef {
+        pos: (x, y),
+        icon: None,
+        rule: SlotRule::Any,
+    }
+}
+
+const fn output(x: f32, y: f32) -> SlotDef {
+    SlotDef {
+        pos: (x, y),
+        icon: None,
+        rule: SlotRule::Output,
+    }
+}
+
+const fn special(x: f32, y: f32, icon: Option<&'static str>, rule: SlotRule) -> SlotDef {
+    SlotDef {
+        pos: (x, y),
+        icon,
+        rule,
+    }
+}
+
+#[derive(Debug)]
+struct MenuDef {
+    size: (f32, f32),
+    own: &'static [SlotDef],
+    inv: (f32, f32),
+    past_end: Option<(f32, f32)>,
+}
+
+impl MenuDef {
+    fn slot_count(&self) -> usize {
+        self.own.len() + PLAYER_SLOTS
+    }
+
+    fn slot_pos(&self, i: usize) -> (f32, f32) {
+        if let Some(def) = self.own.get(i) {
+            return def.pos;
+        }
+        match self.past_end {
+            Some(pos) if i >= self.slot_count() => pos,
+            _ => standard_inventory(i - self.own.len(), self.inv.0, self.inv.1),
+        }
+    }
+
+    fn rule(&self, i: usize) -> SlotRule {
+        self.own.get(i).map_or(SlotRule::Any, |def| def.rule)
+    }
+}
+
+static CRAFTING: MenuDef = MenuDef {
+    size: (INV_W, INV_H),
+    own: &[
+        output(124.0, 35.0),
+        slot(30.0, 17.0),
+        slot(48.0, 17.0),
+        slot(66.0, 17.0),
+        slot(30.0, 35.0),
+        slot(48.0, 35.0),
+        slot(66.0, 35.0),
+        slot(30.0, 53.0),
+        slot(48.0, 53.0),
+        slot(66.0, 53.0),
+    ],
+    inv: (8.0, 84.0),
+    past_end: Some((77.0, 62.0)),
+};
+
+static FURNACE: MenuDef = MenuDef {
+    size: (INV_W, INV_H),
+    own: &[slot(56.0, 17.0), slot(56.0, 53.0), output(116.0, 35.0)],
+    inv: (8.0, 84.0),
+    past_end: Some((77.0, 62.0)),
+};
+
+static HOPPER: MenuDef = MenuDef {
+    size: (INV_W, 133.0),
+    own: &[
+        slot(44.0, 20.0),
+        slot(62.0, 20.0),
+        slot(80.0, 20.0),
+        slot(98.0, 20.0),
+        slot(116.0, 20.0),
+    ],
+    inv: (8.0, 51.0),
+    past_end: None,
+};
+
+static GRINDSTONE: MenuDef = MenuDef {
+    size: (INV_W, INV_H),
+    own: &[slot(49.0, 19.0), slot(49.0, 40.0), output(129.0, 34.0)],
+    inv: (8.0, 84.0),
+    past_end: None,
+};
+
+static ENCHANTMENT: MenuDef = MenuDef {
+    size: (INV_W, INV_H),
+    own: &[
+        special(15.0, 47.0, None, SlotRule::One),
+        special(
+            35.0,
+            47.0,
+            Some("container/slot/lapis_lazuli"),
+            SlotRule::Only(&["lapis_lazuli"]),
+        ),
+    ],
+    inv: (8.0, 84.0),
+    past_end: None,
+};
+
+static LOOM: MenuDef = MenuDef {
+    size: (INV_W, INV_H),
+    own: &[
+        special(13.0, 26.0, Some("container/slot/banner"), SlotRule::Any),
+        special(33.0, 26.0, Some("container/slot/dye"), SlotRule::Any),
+        special(
+            23.0,
+            45.0,
+            Some("container/slot/banner_pattern"),
+            SlotRule::Any,
+        ),
+        output(143.0, 57.0),
+    ],
+    inv: (8.0, 84.0),
+    past_end: None,
+};
+
+static STONECUTTER: MenuDef = MenuDef {
+    size: (INV_W, INV_H),
+    own: &[slot(20.0, 33.0), output(143.0, 33.0)],
+    inv: (8.0, 84.0),
+    past_end: None,
+};
+
+static CARTOGRAPHY: MenuDef = MenuDef {
+    size: (INV_W, INV_H),
+    own: &[slot(15.0, 15.0), slot(15.0, 52.0), output(145.0, 39.0)],
+    inv: (8.0, 84.0),
+    past_end: None,
+};
+
+static SMITHING: MenuDef = MenuDef {
+    size: (INV_W, INV_H),
+    own: &[
+        special(
+            8.0,
+            48.0,
+            Some("container/slot/smithing_template_armor_trim"),
+            SlotRule::Any,
+        ),
+        slot(26.0, 48.0),
+        slot(44.0, 48.0),
+        output(98.0, 48.0),
+    ],
+    inv: (8.0, 84.0),
+    past_end: None,
+};
+
+static ANVIL: MenuDef = MenuDef {
+    size: (INV_W, INV_H),
+    own: &[slot(27.0, 47.0), slot(76.0, 47.0), output(134.0, 47.0)],
+    inv: (8.0, 84.0),
+    past_end: None,
+};
+
+static BEACON: MenuDef = MenuDef {
+    size: (230.0, 219.0),
+    own: &[special(
+        136.0,
+        110.0,
+        None,
+        SlotRule::OneOnly(&BEACON_PAYMENT_ITEMS),
+    )],
+    inv: (36.0, 137.0),
+    past_end: None,
+};
+
+static BREWING_STAND: MenuDef = MenuDef {
+    size: (INV_W, INV_H),
+    own: &[
+        special(
+            56.0,
+            51.0,
+            Some("container/slot/potion"),
+            SlotRule::OneOnly(&POTION_SLOT_ITEMS),
+        ),
+        special(
+            79.0,
+            58.0,
+            Some("container/slot/potion"),
+            SlotRule::OneOnly(&POTION_SLOT_ITEMS),
+        ),
+        special(
+            102.0,
+            51.0,
+            Some("container/slot/potion"),
+            SlotRule::OneOnly(&POTION_SLOT_ITEMS),
+        ),
+        slot(79.0, 17.0),
+        special(
+            17.0,
+            17.0,
+            Some("container/slot/brewing_fuel"),
+            SlotRule::Only(&BREWING_FUEL),
+        ),
+    ],
+    inv: (8.0, 84.0),
+    past_end: None,
+};
+
+static MERCHANT: MenuDef = MenuDef {
+    size: (276.0, INV_H),
+    own: &[slot(136.0, 37.0), slot(162.0, 37.0), output(220.0, 37.0)],
+    inv: (108.0, 84.0),
+    past_end: None,
+};
+
+impl Layout {
+    fn def(self) -> Option<&'static MenuDef> {
+        Some(match self {
+            Layout::PlayerMenu | Layout::Chest(_) | Layout::Horse(_) => return None,
+            Layout::Crafting => &CRAFTING,
+            Layout::Furnace => &FURNACE,
+            Layout::Hopper => &HOPPER,
+            Layout::Grindstone => &GRINDSTONE,
+            Layout::Enchantment => &ENCHANTMENT,
+            Layout::Loom => &LOOM,
+            Layout::Stonecutter => &STONECUTTER,
+            Layout::Cartography => &CARTOGRAPHY,
+            Layout::Smithing => &SMITHING,
+            Layout::Anvil => &ANVIL,
+            Layout::Beacon => &BEACON,
+            Layout::BrewingStand => &BREWING_STAND,
+            Layout::Merchant => &MERCHANT,
+        })
+    }
+
+    pub fn size(self) -> (f32, f32) {
+        if let Some(def) = self.def() {
+            return def.size;
+        }
+        match self {
             Layout::Chest(rows) => (CONTAINER_W, 114.0 + rows as f32 * 18.0),
-            Layout::Hopper => (INV_W, 133.0),
-            Layout::Beacon => (230.0, 219.0),
-            Layout::Merchant => (276.0, INV_H),
+            _ => (INV_W, INV_H),
         }
     }
 
     pub fn slot_count(self) -> usize {
-        PLAYER_SLOTS
-            + match self {
-                Layout::PlayerMenu | Layout::Crafting => return MENU_SLOTS,
-                Layout::Chest(rows) => rows as usize * 9,
-                Layout::Furnace | Layout::Grindstone | Layout::Cartography => 3,
-                Layout::Hopper | Layout::BrewingStand => 5,
-                Layout::Enchantment | Layout::Stonecutter => 2,
-                Layout::Loom | Layout::Smithing => 4,
-                Layout::Beacon => 1,
-                Layout::Merchant => 3,
-                Layout::Horse(columns) => 2 + columns as usize * 3,
-            }
+        if let Some(def) = self.def() {
+            return def.slot_count();
+        }
+        match self {
+            Layout::Chest(rows) => PLAYER_SLOTS + rows as usize * 9,
+            Layout::Horse(columns) => PLAYER_SLOTS + 2 + columns as usize * 3,
+            _ => MENU_SLOTS,
+        }
     }
 
     pub fn slot_pos(self, i: usize) -> (f32, f32) {
-        let tool = |own: &[(f32, f32)], inv_x: f32, inv_y: f32| -> (f32, f32) {
-            match own.get(i) {
-                Some(&p) => p,
-                None => standard_inventory(i - own.len(), inv_x, inv_y),
-            }
-        };
+        if let Some(def) = self.def() {
+            return def.slot_pos(i);
+        }
         match self {
-            Layout::Hopper => tool(
-                &[
-                    (44.0, 20.0),
-                    (62.0, 20.0),
-                    (80.0, 20.0),
-                    (98.0, 20.0),
-                    (116.0, 20.0),
-                ],
-                8.0,
-                51.0,
-            ),
-            Layout::Grindstone => tool(&[(49.0, 19.0), (49.0, 40.0), (129.0, 34.0)], 8.0, 84.0),
-            Layout::Enchantment => tool(&[(15.0, 47.0), (35.0, 47.0)], 8.0, 84.0),
-            Layout::Loom => tool(
-                &[(13.0, 26.0), (33.0, 26.0), (23.0, 45.0), (143.0, 57.0)],
-                8.0,
-                84.0,
-            ),
-            Layout::Stonecutter => tool(&[(20.0, 33.0), (143.0, 33.0)], 8.0, 84.0),
-            Layout::Cartography => tool(&[(15.0, 15.0), (15.0, 52.0), (145.0, 39.0)], 8.0, 84.0),
-            Layout::Smithing => tool(
-                &[(8.0, 48.0), (26.0, 48.0), (44.0, 48.0), (98.0, 48.0)],
-                8.0,
-                84.0,
-            ),
-            Layout::Beacon => tool(&[(136.0, 110.0)], 36.0, 137.0),
-            Layout::BrewingStand => tool(
-                &[
-                    (56.0, 51.0),
-                    (79.0, 58.0),
-                    (102.0, 51.0),
-                    (79.0, 17.0),
-                    (17.0, 17.0),
-                ],
-                8.0,
-                84.0,
-            ),
-            Layout::Merchant => tool(&[(136.0, 37.0), (162.0, 37.0), (220.0, 37.0)], 108.0, 84.0),
             Layout::Horse(columns) => {
                 let chest = columns as usize * 3;
                 match i {
@@ -145,7 +359,14 @@ impl Layout {
                     _ => standard_inventory(i - 2 - chest, 8.0, 84.0),
                 }
             }
-            Layout::PlayerMenu => match i {
+            Layout::Chest(rows) => {
+                let chest_slots = rows as usize * 9;
+                if i < chest_slots {
+                    return (8.0 + (i % 9) as f32 * 18.0, 18.0 + (i / 9) as f32 * 18.0);
+                }
+                standard_inventory(i - chest_slots, 8.0, 18.0 + rows as f32 * 18.0 + 13.0)
+            }
+            _ => match i {
                 0 => (154.0, 28.0),
                 1..=4 => {
                     let k = i - 1;
@@ -159,46 +380,19 @@ impl Layout {
                 36..=44 => (8.0 + (i - 36) as f32 * 18.0, 142.0),
                 _ => (77.0, 62.0),
             },
-            Layout::Chest(rows) => {
-                let chest_slots = rows as usize * 9;
-                if i < chest_slots {
-                    return (8.0 + (i % 9) as f32 * 18.0, 18.0 + (i / 9) as f32 * 18.0);
-                }
-                standard_inventory(i - chest_slots, 8.0, 18.0 + rows as f32 * 18.0 + 13.0)
-            }
-            Layout::Crafting => match i {
-                0 => (124.0, 35.0),
-                1..=9 => {
-                    let k = i - 1;
-                    (30.0 + (k % 3) as f32 * 18.0, 17.0 + (k / 3) as f32 * 18.0)
-                }
-                10..=45 => standard_inventory(i - 10, 8.0, 84.0),
-                _ => (77.0, 62.0),
-            },
-            Layout::Furnace => match i {
-                0 => (56.0, 17.0),
-                1 => (56.0, 53.0),
-                2 => (116.0, 35.0),
-                3..=38 => standard_inventory(i - 3, 8.0, 84.0),
-                _ => (77.0, 62.0),
-            },
         }
     }
 
     pub fn empty_icon(self, i: usize) -> Option<&'static str> {
+        if let Some(def) = self.def() {
+            return def.own.get(i).and_then(|s| s.icon);
+        }
         Some(match (self, i) {
             (Layout::PlayerMenu, 5) => "container/slot/helmet",
             (Layout::PlayerMenu, 6) => "container/slot/chestplate",
             (Layout::PlayerMenu, 7) => "container/slot/leggings",
             (Layout::PlayerMenu, 8) => "container/slot/boots",
             (Layout::PlayerMenu, OFFHAND_SLOT) => "container/slot/shield",
-            (Layout::Enchantment, 1) => "container/slot/lapis_lazuli",
-            (Layout::Loom, 0) => "container/slot/banner",
-            (Layout::Loom, 1) => "container/slot/dye",
-            (Layout::Loom, 2) => "container/slot/banner_pattern",
-            (Layout::BrewingStand, 0..=2) => "container/slot/potion",
-            (Layout::BrewingStand, 4) => "container/slot/brewing_fuel",
-            (Layout::Smithing, 0) => "container/slot/smithing_template_armor_trim",
             (Layout::Horse(_), 0) => "container/slot/saddle",
             (Layout::Horse(_), 1) => "container/slot/horse_armor",
             _ => return None,
@@ -209,19 +403,14 @@ impl Layout {
         if item.is_empty() {
             return false;
         }
+        if let Some(def) = self.def() {
+            return def.rule(slot).may_place(item);
+        }
         match self {
-            Layout::PlayerMenu | Layout::Crafting if slot == 0 => false,
-            Layout::Furnace | Layout::Grindstone | Layout::Cartography if slot == 2 => false,
-            Layout::Loom | Layout::Smithing if slot == 3 => false,
-            Layout::Stonecutter if slot == 1 => false,
-            Layout::Merchant if slot == 2 => false,
+            Layout::PlayerMenu if slot == 0 => false,
             Layout::PlayerMenu if ARMOR_SLOTS.contains(&slot) => {
                 armor_slot_for(item) == Some(8 - slot)
             }
-            Layout::Enchantment if slot == 1 => item == "lapis_lazuli",
-            Layout::Beacon if slot == 0 => BEACON_PAYMENT_ITEMS.contains(&item),
-            Layout::BrewingStand if slot <= 2 => POTION_SLOT_ITEMS.contains(&item),
-            Layout::BrewingStand if slot == 4 => BREWING_FUEL.contains(&item),
             _ => true,
         }
     }
@@ -404,13 +593,13 @@ impl DragKind {
 }
 
 fn slot_capacity(layout: Layout, slot: usize, item: &str) -> u8 {
-    let one_only = match layout {
-        Layout::PlayerMenu => ARMOR_SLOTS.contains(&slot),
-        Layout::Enchantment => slot == 0,
-        Layout::Beacon => slot == 0,
-        Layout::BrewingStand => slot <= 2,
-        Layout::Horse(_) => slot <= 1,
-        _ => false,
+    let one_only = match layout.def() {
+        Some(def) => def.rule(slot).one_only(),
+        None => match layout {
+            Layout::PlayerMenu => ARMOR_SLOTS.contains(&slot),
+            Layout::Horse(_) => slot <= 1,
+            _ => false,
+        },
     };
     let container = if one_only { 1 } else { CONTAINER_MAX_STACK };
     container.min(item_max_stack(item))
@@ -471,6 +660,22 @@ pub fn resolve_slot_clicks(
         }
     }
     out
+}
+
+pub fn takes_slot(op: &ClickOperation, slot: u16) -> bool {
+    match op {
+        ClickOperation::Pickup(PickupClick::Left { slot: s } | PickupClick::Right { slot: s }) => {
+            *s == Some(slot)
+        }
+        ClickOperation::QuickMove(
+            QuickMoveClick::Left { slot: s } | QuickMoveClick::Right { slot: s },
+        ) => *s == slot,
+        ClickOperation::Throw(ThrowClick::Single { slot: s } | ThrowClick::All { slot: s }) => {
+            *s == slot
+        }
+        ClickOperation::Swap(swap) => swap.source_slot == slot,
+        _ => false,
+    }
 }
 
 pub fn click_operation(click: SlotClick, slot: usize) -> ClickOperation {

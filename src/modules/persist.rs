@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use serde_json::{Map, Value as Json, json};
 
 use super::list::{self, BitList};
-use super::registry::{Kind, Mode};
-use super::{Store, Value, flat_modules};
+use super::registry::{Kind, MODULES, Mode};
+use super::{Store, Value};
 use crate::gui::keybinds::Bound;
 use crate::platform::storage;
 
@@ -23,23 +23,22 @@ pub fn load(s: &Store) {
     }
 
     if let Some(mods) = root.get("modules").and_then(Json::as_object) {
-        for (i, m) in flat_modules().enumerate() {
+        for m in &MODULES {
             let Some(saved) = mods.get(m.name).and_then(Json::as_object) else {
                 continue;
             };
             if let Some(on) = saved.get("on").and_then(Json::as_bool) {
-                s.set_enabled_at(i, on);
+                s.set_enabled(m.id, on);
             }
             if let Some(key) = saved.get("bind").and_then(Json::as_str) {
-                s.set_bind_at(i, Bound::from_serialized_name(key));
+                s.set_bind(m.id, Bound::from_serialized_name(key));
             }
             let Some(vals) = saved.get("settings").and_then(Json::as_object) else {
                 continue;
             };
-            let base = s.settings_of(i).start;
-            for (n, def) in m.settings.iter().enumerate() {
+            for (slot, def) in m.slots().zip(m.settings()) {
                 if let Some(v) = vals.get(def.name) {
-                    read_setting(s, base + n, def.kind, v);
+                    read_setting(s, slot, def.kind, v);
                 }
             }
         }
@@ -89,19 +88,18 @@ fn read_setting(s: &Store, idx: usize, kind: Kind, v: &Json) {
 
 pub fn save(s: &Store) {
     let mut mods = Map::new();
-    for (i, m) in flat_modules().enumerate() {
-        let base = s.settings_of(i).start;
+    for m in &MODULES {
         let mut vals = Map::new();
-        for (n, def) in m.settings.iter().enumerate() {
-            if let Some(v) = write_setting(s, base + n, def.kind) {
+        for (slot, def) in m.slots().zip(m.settings()) {
+            if let Some(v) = write_setting(s, slot, def.kind) {
                 vals.insert(def.name.to_string(), v);
             }
         }
         mods.insert(
             m.name.to_string(),
             json!({
-                "on": s.armed_at(i),
-                "bind": s.bind_at(i).serialized_name(),
+                "on": s.armed(m.id),
+                "bind": s.bind(m.id).serialized_name(),
                 "settings": vals,
             }),
         );
@@ -121,14 +119,13 @@ pub fn save(s: &Store) {
     storage::MODULES.store(&Json::Object(root).to_string());
 }
 
-fn write_setting(s: &Store, idx: usize, kind: Kind) -> Option<Json> {
-    Some(match (kind, s.value(idx)) {
-        (Kind::Toggle { .. }, Value::Bool(b)) => json!(b),
-        (Kind::Slider { .. }, Value::Num(x)) => json!(x),
-        (Kind::Range { .. }, Value::Range(lo, hi)) => json!([lo, hi]),
-        (Kind::Enum { options, .. }, Value::Choice(c)) => json!(options.get(c as usize)?),
-        (Kind::Text { .. }, _) => json!(s.text_at(idx)),
-        (Kind::List { .. }, _) => return None,
+fn write_setting(s: &Store, slot: usize, kind: Kind) -> Option<Json> {
+    Some(match (kind, s.value(slot)) {
+        (Kind::Text { .. }, _) => json!(s.text_at(slot)),
+        (_, Some(Value::Bool(b))) => json!(b),
+        (_, Some(Value::Num(x))) => json!(x),
+        (_, Some(Value::Range(lo, hi))) => json!([lo, hi]),
+        (Kind::Enum { options, .. }, Some(Value::Choice(c))) => json!(options.get(c as usize)?),
         _ => return None,
     })
 }

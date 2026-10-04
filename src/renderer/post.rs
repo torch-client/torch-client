@@ -86,14 +86,18 @@ fn follow_camera(
 struct Graded;
 
 #[cfg(feature = "builtin_shaders")]
+fn post_enabled() -> bool {
+    super::terrain::builtin_world_shading()
+}
+
+#[cfg(feature = "builtin_shaders")]
 #[allow(clippy::type_complexity)]
 fn apply_pipeline(
     mut commands: Commands,
     cameras: Query<(Entity, Has<Hdr>), With<Camera>>,
-    hand: Query<(Entity, Has<Graded>), With<HandCamera>>,
-    mut world_camera: Query<&mut Tonemapping, With<WorldCamera>>,
+    mut hand: Query<(Entity, Has<Graded>, &mut Tonemapping), With<HandCamera>>,
 ) {
-    let fancy = super::terrain::builtin_shaders_enabled();
+    let fancy = post_enabled();
     for (entity, hdr) in &cameras {
         if fancy && !hdr {
             commands.entity(entity).insert(Hdr);
@@ -101,7 +105,15 @@ fn apply_pipeline(
             commands.entity(entity).remove::<Hdr>();
         }
     }
-    for (entity, graded) in &hand {
+    let wanted = if fancy {
+        Tonemapping::default()
+    } else {
+        Tonemapping::None
+    };
+    for (entity, graded, mut tonemapping) in &mut hand {
+        if *tonemapping != wanted {
+            *tonemapping = wanted;
+        }
         if fancy && !graded {
             commands.entity(entity).insert((grading(), Graded));
         } else if !fancy && graded {
@@ -109,16 +121,6 @@ fn apply_pipeline(
                 .entity(entity)
                 .insert(ColorGrading::default())
                 .remove::<Graded>();
-        }
-    }
-    let wanted = if fancy {
-        Tonemapping::None
-    } else {
-        Tonemapping::default()
-    };
-    for mut tonemapping in &mut world_camera {
-        if *tonemapping != wanted {
-            *tonemapping = wanted;
         }
     }
 }
@@ -129,8 +131,8 @@ fn apply_bloom(
     gui: Res<crate::gui::GuiState>,
     cameras: Query<(Entity, Has<bevy::post_process::bloom::Bloom>), With<HandCamera>>,
 ) {
-    let wanted = super::terrain::builtin_shaders_enabled()
-        && gui.options.shader_quality == super::terrain::ShaderQuality::Fancy;
+    let wanted =
+        post_enabled() && gui.options.shader_quality == super::terrain::ShaderQuality::Fancy;
     for (entity, present) in &cameras {
         if wanted && !present {
             commands.entity(entity).insert(bloom());

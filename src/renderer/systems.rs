@@ -1,5 +1,5 @@
 use crate::platform::time::Instant;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -31,9 +31,10 @@ const SKY_COLOR: Color = Color::srgb(0.753, 0.847, 1.0);
 
 pub const VANILLA_FOV_DEGREES: f32 = 70.0;
 
+use super::frame_view::{FrameView, FrameViewSystems};
 use super::terrain_pool::{TerrainOp, TerrainOps};
 use super::visgraph::VisibilitySet;
-use super::{ATLAS_COLS, AppState, PendingSection, TILE_PX};
+use super::{AppState, PendingSection};
 use crate::session::SharedMutex;
 use crate::session::SharedState;
 
@@ -60,33 +61,20 @@ pub struct LightmapState {
 }
 
 fn update_environment(
-    shared: Res<Shared>,
+    view: Res<FrameView>,
     mut env: ResMut<super::environment::Environment>,
     time: Res<Time>,
     gui: Res<crate::gui::GuiState>,
 ) {
     crate::prof_span!("render:update_environment");
-    let (ticks, layer, eye) = {
-        let s = shared.0.lock().unwrap();
-        let partial = partial_ticks(&s);
-        let eye_height = session_eye_height(&s.session) as f64;
-        let eye = [
-            s.session.player_pos[0] as f64,
-            s.session.player_pos[1] as f64 + eye_height,
-            s.session.player_pos[2] as f64,
-        ];
-        let layer = match (s.session.env_prev, s.session.env) {
-            (Some(prev), Some(now)) => {
-                Some(super::environment::BiomeLayer::lerp(partial, &prev, &now))
-            }
-            (_, now) => now,
-        };
-        (s.session.day_clock.at(partial), layer, eye)
-    };
+    let ticks = view.day_ticks;
+    let eye = view.tick_eye();
 
     let dim = super::dimension::current();
     let bases = super::environment::Bases::for_dimension(dim);
-    let layer = layer.unwrap_or_else(|| super::environment::BiomeLayer::from(&bases));
+    let layer = view
+        .biome
+        .unwrap_or_else(|| super::environment::BiomeLayer::from(&bases));
     let delta_ticks = time.delta_secs() * 20.0;
     env.resolve(
         dim,
@@ -152,52 +140,25 @@ struct Column {
 
 #[derive(Clone, Copy)]
 pub struct SectionSlot {
-    pub opaque: Option<u32>,
-    pub water: Option<u32>,
+    pub slots: [Option<u32>; 2],
     pub vis: VisibilitySet,
-    pub verts: u32,
-    pub bytes: u32,
 }
+
+pub const LAYER_OPAQUE: usize = 0;
+pub const LAYER_WATER: usize = 1;
 
 impl Default for SectionSlot {
     fn default() -> Self {
         Self {
-            opaque: None,
-            water: None,
+            slots: [None, None],
             vis: VisibilitySet::all(),
-            verts: 0,
-            bytes: 0,
         }
     }
 }
 
 impl ChunkIndex {
-    fn alloc_slot(&mut self) -> u32 {
-        if let Some(slot) = self.free_slots.pop() {
-            return slot;
-        }
-        let slot = self.next_slot;
-        self.next_slot += 1;
-        slot
-    }
-
-    fn release_slot(&mut self, slot: u32) {
-        self.free_slots.push(slot);
-    }
-
     pub fn next_slot(&self) -> u32 {
         self.next_slot
-    }
-
-    fn slot_entry(&mut self, cx: i32, cz: i32, sec_y: i32) -> &mut SectionSlot {
-        self.y_lo = self.y_lo.min(sec_y);
-        self.y_hi = self.y_hi.max(sec_y + 16);
-        self.columns
-            .entry((cx, cz))
-            .or_default()
-            .sections
-            .entry(sec_y)
-            .or_default()
     }
 
     pub fn store_section(
@@ -205,55 +166,63 @@ impl ChunkIndex {
         cx: i32,
         cz: i32,
         sec_y: i32,
-        opaque: super::mesh::MeshBuf,
-        water: super::mesh::MeshBuf,
+        vis: VisibilitySet,
+        meshes: [super::mesh::MeshBuf; 2],
         ops: &TerrainOps,
     ) {
-        let verts = (opaque.verts.len() + water.verts.len()) as u32;
-        let bytes = (opaque.byte_size() + water.byte_size()) as u32;
         let origin = [cx * 16, sec_y, cz * 16];
-        let held = self.slots_of(cx, cz, sec_y);
+        let Self {
+            columns,
+            free_slots,
+            next_slot,
+            generation,
+            y_lo,
+            y_hi,
+        } = self;
+        *y_lo = (*y_lo).min(sec_y);
+        *y_hi = (*y_hi).max(sec_y + 16);
+        let entry = columns
+            .entry((cx, cz))
+            .or_default()
+            .sections
+            .entry(sec_y)
+            .or_default();
+        entry.vis = vis;
 
-        let mut slots = [None, None];
-        for (i, (mesh, is_water)) in [(opaque, false), (water, true)].into_iter().enumerate() {
-            let held = if is_water { held.1 } else { held.0 };
+        for (layer, mesh) in meshes.into_iter().enumerate() {
+            let held = entry.slots[layer];
             if mesh.is_empty() {
                 if let Some(slot) = held {
                     ops.push(TerrainOp::Free { slot });
-                    self.release_slot(slot);
+                    free_slots.push(slot);
                 }
+                entry.slots[layer] = None;
                 continue;
             }
-            let slot = match held {
+            let slot = match held.or_else(|| free_slots.pop()) {
                 Some(slot) => slot,
-                None => self.alloc_slot(),
+                None => {
+                    let slot = *next_slot;
+                    *next_slot += 1;
+                    slot
+                }
             };
             ops.push(TerrainOp::Upload {
                 slot,
                 origin,
-                water: is_water,
+                water: layer == LAYER_WATER,
                 mesh,
             });
-            slots[i] = Some(slot);
+            entry.slots[layer] = Some(slot);
         }
-
-        let entry = self.slot_entry(cx, cz, sec_y);
-        entry.opaque = slots[0];
-        entry.water = slots[1];
-        entry.verts = verts;
-        entry.bytes = bytes;
-        self.generation += 1;
-    }
-
-    pub fn set_visibility(&mut self, cx: i32, cz: i32, sec_y: i32, vis: VisibilitySet) {
-        self.slot_entry(cx, cz, sec_y).vis = vis;
+        *generation += 1;
     }
 
     pub fn slots_of(&self, cx: i32, cz: i32, sec_y: i32) -> (Option<u32>, Option<u32>) {
         self.columns
             .get(&(cx, cz))
             .and_then(|column| column.sections.get(&sec_y))
-            .map(|slot| (slot.opaque, slot.water))
+            .map(|slot| (slot.slots[LAYER_OPAQUE], slot.slots[LAYER_WATER]))
             .unwrap_or((None, None))
     }
 
@@ -263,18 +232,6 @@ impl ChunkIndex {
 
     pub fn len(&self) -> usize {
         self.columns.values().map(|c| c.sections.len()).sum()
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the CPU-side total, for comparing against the pools' own"
-    )]
-    pub fn bytes(&self) -> u64 {
-        self.columns
-            .values()
-            .flat_map(|c| c.sections.values())
-            .map(|s| s.bytes as u64)
-            .sum()
     }
 
     pub fn y_range(&self) -> (i32, i32) {
@@ -315,12 +272,7 @@ impl ChunkIndex {
         let Some(column) = self.columns.remove(&key) else {
             return;
         };
-        for slot in column
-            .sections
-            .values()
-            .flat_map(|s| [s.opaque, s.water])
-            .flatten()
-        {
+        for slot in column.sections.values().flat_map(|s| s.slots).flatten() {
             ops.push(TerrainOp::Free { slot });
             self.free_slots.push(slot);
         }
@@ -338,28 +290,7 @@ pub struct BlockAtlasHandle(pub Handle<Image>);
 struct PendingAtlas(Image);
 
 #[derive(Resource)]
-struct PendingItemAtlas(Image, HashMap<String, u32>);
-
-#[derive(Resource)]
-#[allow(
-    dead_code,
-    reason = "resource holds the handle that keeps the asset alive"
-)]
 pub struct BlockTileMap(pub HashMap<String, u32>);
-
-#[derive(Resource)]
-#[allow(
-    dead_code,
-    reason = "resource holds the handle that keeps the asset alive"
-)]
-struct ItemUiAtlasHandle(Handle<Image>);
-
-#[derive(Resource)]
-#[allow(
-    dead_code,
-    reason = "resource holds the handle that keeps the asset alive"
-)]
-struct ItemUiAtlasLayout(Handle<TextureAtlasLayout>);
 
 #[derive(Resource, Default)]
 struct ProfVisible {
@@ -367,8 +298,6 @@ struct ProfVisible {
     used_as_modifier: bool,
     page: crate::gui::hud::DebugPage,
 }
-
-const FRAME_HISTORY_LEN: usize = 160;
 
 const FPS_WINDOW_MS: f32 = 500.0;
 
@@ -387,16 +316,12 @@ fn setup(
     >,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut cursor_opts: Query<&mut CursorOptions, With<PrimaryWindow>>,
-    pending_atlas: Res<PendingAtlas>,
-    pending_item_atlas: Res<PendingItemAtlas>,
+    mut pending_atlas: ResMut<PendingAtlas>,
     start_screen: Res<crate::gui::render::StartScreen>,
 ) {
-    use bevy::image::ImageSampler;
-    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-
-    let atlas = images.add(pending_atlas.0.clone());
+    let atlas = images.add(std::mem::take(&mut pending_atlas.0));
+    commands.remove_resource::<PendingAtlas>();
     commands.insert_resource(BlockAtlasHandle(atlas.clone()));
     let chunk_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
@@ -532,6 +457,7 @@ fn setup(
             ..default()
         },
         Msaa::Off,
+        Tonemapping::None,
         Projection::Perspective(PerspectiveProjection {
             fov: VANILLA_FOV_DEGREES.to_radians(),
             ..default()
@@ -547,35 +473,6 @@ fn setup(
         Transform::from_xyz(0.0, 64.0, 0.0),
         no_indirect_drawing(),
     ));
-
-    let (item_img, _item_tile_map) = {
-        let src = &pending_item_atlas.0;
-        let mut img = Image::new(
-            Extent3d {
-                width: src.width(),
-                height: src.height(),
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            src.data.as_ref().unwrap().to_vec(),
-            TextureFormat::Rgba8UnormSrgb,
-            RenderAssetUsages::default(),
-        );
-        img.sampler = ImageSampler::nearest();
-        (img, pending_item_atlas.1.clone())
-    };
-    let atlas_rows = (item_img.height() / TILE_PX).max(1);
-    let item_handle: Handle<Image> = images.add(item_img);
-    let layout = TextureAtlasLayout::from_grid(
-        UVec2::new(TILE_PX, TILE_PX),
-        ATLAS_COLS,
-        atlas_rows,
-        None,
-        None,
-    );
-    let layout_handle = atlas_layouts.add(layout);
-    commands.insert_resource(ItemUiAtlasHandle(item_handle.clone()));
-    commands.insert_resource(ItemUiAtlasLayout(layout_handle.clone()));
 }
 
 fn take_budgeted(
@@ -626,6 +523,10 @@ fn poll_shared_state(
     mut index: ResMut<ChunkIndex>,
     mut camera: Query<&mut Transform, With<WorldCamera>>,
     mut last_poll_ms: Local<f32>,
+    mut dedup_seen: Local<HashSet<(i32, i32, i32)>>,
+    mut dedup_keep: Local<Vec<bool>>,
+    gui: Res<crate::gui::GuiState>,
+    mut view: ResMut<FrameView>,
 ) {
     crate::prof_span!("render:poll_shared_state");
     #[cfg(feature = "budget")]
@@ -636,22 +537,18 @@ fn poll_shared_state(
     let mut state = shared.0.lock().unwrap();
     let lock_wait_ms = lock_t0.elapsed().as_secs_f32() * 1000.0;
 
+    sync_bot_options(&mut state, &gui, &third_person, &freecam);
+    view.fill(&state, true);
+
     if !freecam.active {
-        let t = partial_ticks(&state);
-        let prev = state.session.player_pos_prev;
-        let cur = state.session.player_pos;
-        let ix = prev[0] + (cur[0] - prev[0]) * t;
-        let iy = prev[1] + (cur[1] - prev[1]) * t;
-        let iz = prev[2] + (cur[2] - prev[2]) * t;
+        let [ix, iy, iz] = view.player_lerp;
         if let Ok(mut transform) = camera.single_mut() {
-            let eye = Vec3::new(ix, iy + session_eye_height(&state.session), iz);
+            let eye = Vec3::new(ix, iy + view.eye_height, iz);
             if third_person.active {
-                let forward = Quat::from_rotation_y(angles.yaw.to_radians())
-                    * Quat::from_rotation_x(angles.pitch.to_radians())
-                    * Vec3::NEG_Z;
+                let forward = angles.rotation() * Vec3::NEG_Z;
                 transform.translation = eye - forward * THIRD_PERSON_DISTANCE;
-            } else if state.session.sleeping {
-                let mc_yaw = match state.session.bed_orientation {
+            } else if view.sleeping {
+                let mc_yaw = match view.bed_orientation {
                     Some(dir) => dir.to_y_rot() - 180.0,
                     None => 0.0,
                 };
@@ -660,8 +557,7 @@ fn poll_shared_state(
                 transform.rotation = Quat::from_rotation_y(bevy_yaw.to_radians());
             } else {
                 transform.translation = eye;
-                transform.rotation = Quat::from_rotation_y(angles.yaw.to_radians())
-                    * Quat::from_rotation_x(angles.pitch.to_radians());
+                transform.rotation = angles.rotation();
             }
         }
     }
@@ -675,9 +571,11 @@ fn poll_shared_state(
     state.profiling.queue_depth =
         state.session.pending_chunks.len() + state.session.pending_edits.len();
     if let Some(q) = crate::CHUNK_Q.get() {
-        q.set_backlog(state.session.pending_chunks.len());
+        q.set_backlog(state.session.pending_chunks.len() + state.session.pending_edits.len());
     }
-    crate::client::mesh_worker::note_backlog(state.session.pending_chunks.len());
+    crate::client::mesh_worker::note_backlog(
+        state.session.pending_chunks.len() + state.session.pending_edits.len(),
+    );
 
     let unloaded: Vec<(i32, i32)> = std::mem::take(&mut state.session.unloaded_chunks);
     let clear_all = std::mem::take(&mut state.session.clear_chunks);
@@ -726,26 +624,31 @@ fn poll_shared_state(
         }
     }
 
-    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
-    let pending: Vec<PendingSection> = pending
-        .into_iter()
-        .rev()
-        .filter(|c| seen.insert((c.chunk_x, c.chunk_z, c.sec_y)))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+    dedup_seen.clear();
+    dedup_keep.clear();
+    dedup_keep.extend(
+        pending
+            .iter()
+            .rev()
+            .map(|c| dedup_seen.insert((c.chunk_x, c.chunk_z, c.sec_y))),
+    );
+    dedup_keep.reverse();
+    let mut next = 0;
+    pending.retain(|_| {
+        let keep = dedup_keep[next];
+        next += 1;
+        keep
+    });
 
     {
         let _churn = crate::diag::alloc::scope(crate::diag::alloc::Site::Upload);
         for sec in pending {
-            index.set_visibility(sec.chunk_x, sec.chunk_z, sec.sec_y, sec.vis);
             index.store_section(
                 sec.chunk_x,
                 sec.chunk_z,
                 sec.sec_y,
-                sec.opaque,
-                sec.water,
+                sec.vis,
+                [sec.opaque, sec.water],
                 &ops,
             );
             crate::diag::bump(crate::diag::Stat::SectionsUploaded);
@@ -753,6 +656,18 @@ fn poll_shared_state(
     }
 
     *last_poll_ms = poll_start.elapsed().as_secs_f32() * 1000.0;
+}
+
+fn refresh_frame_view(
+    shared: Res<Shared>,
+    gui: Res<crate::gui::GuiState>,
+    third_person: Res<ThirdPersonState>,
+    freecam: Res<FreecamState>,
+    mut view: ResMut<FrameView>,
+) {
+    let mut state = shared.0.lock().unwrap();
+    sync_bot_options(&mut state, &gui, &third_person, &freecam);
+    view.fill(&state, false);
 }
 
 fn env_budget(lock: &'static OnceLock<usize>, name: &str, default: usize) -> usize {
@@ -908,30 +823,45 @@ const NAME_TAG_MAX_SCALE: f32 = 6.0;
 
 const NDC_CULL: f32 = 1.25;
 
-fn collect_nametags(
-    s: &SharedState,
-    partial: f32,
-    camera: &Camera,
-    cam_tf: &Transform,
-    projection: &Projection,
+struct TagProjector {
+    eye: Vec3,
+    forward: Vec3,
+    view_from_world: bevy::math::Affine3A,
+    clip_from_view: Mat4,
+    units_per_block: f32,
     view: Vec2,
-    tags: &mut Vec<crate::gui::hud::NameTag>,
-) {
-    use crate::gui::hud::{NameTag, TagGamemode};
-    use crate::text::Span;
+}
 
-    tags.clear();
+impl TagProjector {
+    fn new(camera: &Camera, cam_tf: &Transform, projection: &Projection, view: Vec2) -> Self {
+        Self {
+            eye: cam_tf.translation,
+            forward: *cam_tf.forward(),
+            view_from_world: cam_tf.compute_affine().inverse(),
+            clip_from_view: camera.clip_from_view(),
+            units_per_block: match projection {
+                Projection::Perspective(p) => view.y / (2.0 * (p.fov * 0.5).tan()),
+                _ => view.y,
+            },
+            view,
+        }
+    }
 
-    let eye = cam_tf.translation;
-    let forward = *cam_tf.forward();
-    let view_from_world = cam_tf.compute_affine().inverse();
-    let clip_from_view = camera.clip_from_view();
-    let units_per_block = match projection {
-        Projection::Perspective(p) => view.y / (2.0 * (p.fov * 0.5).tan()),
-        _ => view.y,
-    };
-
-    let project = |name: &[Span], below: &[Span], world: Vec3, range: f32| -> Option<NameTag> {
+    fn project(
+        &self,
+        name: &[crate::text::Span],
+        below: &[crate::text::Span],
+        world: Vec3,
+        range: f32,
+    ) -> Option<crate::gui::hud::NameTag> {
+        let Self {
+            eye,
+            forward,
+            view_from_world,
+            clip_from_view,
+            units_per_block,
+            view,
+        } = *self;
         let depth = (world - eye).dot(forward);
         if depth <= 0.05 {
             return None;
@@ -947,7 +877,7 @@ fn collect_nametags(
         if ndc.x.abs() > NDC_CULL || ndc.y.abs() > NDC_CULL {
             return None;
         }
-        Some(NameTag {
+        Some(crate::gui::hud::NameTag {
             name: name.to_vec(),
             below: if distance <= BELOW_NAME_RANGE {
                 below.to_vec()
@@ -960,9 +890,18 @@ fn collect_nametags(
             distance,
             health: None,
             max_health: crate::session::VANILLA_MAX_HEALTH,
-            gamemode: TagGamemode::Hidden,
+            gamemode: crate::gui::hud::TagGamemode::Hidden,
         })
-    };
+    }
+}
+
+fn collect_player_tags(
+    players: &[crate::session::OtherPlayerInfo],
+    partial: f32,
+    projector: &TagProjector,
+    tags: &mut Vec<crate::gui::hud::NameTag>,
+) {
+    use crate::gui::hud::TagGamemode;
 
     let (on, scale_mul, constant, want_health, want_gamemode) =
         match crate::modules::nametags::config() {
@@ -975,7 +914,7 @@ fn collect_nametags(
             ),
             None => (false, 1.0, false, false, false),
         };
-    for info in &s.session.other_players {
+    for info in players {
         if info.hidden_by_team && !on {
             continue;
         }
@@ -990,7 +929,8 @@ fn collect_nametags(
             (false, false) => NAME_TAG_RANGE,
         };
         let world = Vec3::new(feet[0], feet[1] + height + 0.5, feet[2]);
-        let Some(mut tag) = project(&info.name_tag, &info.below_name, world, range) else {
+        let Some(mut tag) = projector.project(&info.name_tag, &info.below_name, world, range)
+        else {
             continue;
         };
         if on {
@@ -1005,13 +945,21 @@ fn collect_nametags(
         }
         tags.push(tag);
     }
+}
 
-    for anim in s.session.entities.iter() {
+fn collect_nametags(
+    entities: &[crate::entities::feed::EntityAnim],
+    crosshair_entity: Option<i32>,
+    partial: f32,
+    projector: &TagProjector,
+    tags: &mut Vec<crate::gui::hud::NameTag>,
+) {
+    for anim in entities {
         let extras = anim.shared();
         if extras.name_spans.is_empty() {
             continue;
         }
-        if !extras.name_visible && s.session.crosshair_entity != Some(anim.id) {
+        if !extras.name_visible && crosshair_entity != Some(anim.id) {
             continue;
         }
         if anim.is_invisible() && anim.kind != azalea_registry::builtin::EntityKind::ArmorStand {
@@ -1019,7 +967,7 @@ fn collect_nametags(
         }
         let pos = anim.position(partial);
         let world = Vec3::new(pos[0], pos[1] + anim.bounding_box_height() + 0.5, pos[2]);
-        tags.extend(project(&extras.name_spans, &[], world, NAME_TAG_RANGE));
+        tags.extend(projector.project(&extras.name_spans, &[], world, NAME_TAG_RANGE));
     }
 
     tags.sort_by(|a, b| b.distance.total_cmp(&a.distance));
@@ -1027,6 +975,7 @@ fn collect_nametags(
 
 fn collect_hud_info(
     shared: Res<Shared>,
+    view: Res<FrameView>,
     time: Res<Time>,
     freecam: Res<FreecamState>,
     prof: Res<ProfVisible>,
@@ -1039,12 +988,10 @@ fn collect_hud_info(
     block_entity_rigs: Res<crate::blockentities::BeRigs>,
     images: Res<Assets<Image>>,
     mut state: ResMut<crate::gui::GuiState>,
-    (mut memory_cache, mut frame_history, frame_gate, mut gated_ms, mut budget, mut fps): (
+    (mut memory_cache, frame_gate, mut gated_ms, mut fps): (
         Local<Option<(Instant, crate::gui::hud::MemoryUse)>>,
-        Local<VecDeque<f32>>,
         Res<FrameGate>,
         Local<f32>,
-        Local<crate::diag::Budget>,
         Local<FpsWindow>,
     ),
 ) {
@@ -1053,92 +1000,74 @@ fn collect_hud_info(
     let camera = camera_q.single().ok();
     let mut nametags = std::mem::take(&mut state.hud.nametags);
     nametags.clear();
-    let snapshot = {
+    let mut frame_history = std::mem::take(&mut state.hud.frame_history);
+
+    let (pos, gamemode, flying, in_world) =
+        (view.player_lerp, view.gamemode, view.flying, view.in_world);
+    let projector = match (camera, hud_visible) {
+        (Some((camera, cam_tf, projection)), true) => {
+            Some(TagProjector::new(camera, cam_tf, projection, input.size))
+        }
+        _ => None,
+    };
+    let (status, profiling, active_effects) = if hud_visible || prof.shown {
         let s = {
             crate::prof_span!("hud:lock");
             shared.0.lock().unwrap()
         };
-        let partial = partial_ticks(&s);
-        let prev = s.session.player_pos_prev;
-        let cur = s.session.player_pos;
-        let lerp = |i: usize| prev[i] + (cur[i] - prev[i]) * partial;
-        if let (Some((camera, cam_tf, projection)), true) = (camera, hud_visible) {
-            collect_nametags(
-                &s,
-                partial,
-                camera,
-                cam_tf,
-                projection,
-                input.size,
+        if let Some(projector) = &projector {
+            collect_player_tags(
+                &s.session.other_players,
+                view.partial,
+                projector,
                 &mut nametags,
             );
         }
-        {
-            crate::gui::hud::HudInfo {
-                pos: [lerp(0), lerp(1), lerp(2)],
-                gamemode: s.session.gamemode,
-                yaw: 0.0,
-                pitch: 0.0,
-                flying: s.session.flying,
-                freecam: false,
-                status: if hud_visible {
-                    s.session.status.clone()
-                } else {
-                    String::new()
-                },
-                fps: 0.0,
-                frame_ms: 0.0,
-                debug: false,
-                page: crate::gui::hud::DebugPage::default(),
-                frame_history: Vec::new(),
-                in_world: s.in_world,
-                runtime: crate::diag::Runtime::default(),
-                memory: crate::gui::hud::MemoryUse::default(),
-                profiling: s.profiling.clone(),
-                pipeline: {
-                    crate::prof_span!("hud:counts");
-                    crate::diag::counts()
-                },
-                nametags: Vec::new(),
-                budget: crate::diag::Budget::default(),
-                active_effects: if hud_visible {
-                    s.session.active_effects.clone()
-                } else {
-                    Vec::new()
-                },
-            }
-        }
+        (
+            if hud_visible {
+                s.session.status.clone()
+            } else {
+                None
+            },
+            prof.shown.then(|| s.profiling.clone()),
+            if hud_visible {
+                s.session.active_effects.clone()
+            } else {
+                Vec::new()
+            },
+        )
+    } else {
+        (None, None, Vec::new())
     };
+    if let Some(projector) = &projector {
+        collect_nametags(
+            &view.entities,
+            view.crosshair_entity,
+            view.partial,
+            projector,
+            &mut nametags,
+        );
+    }
 
-    let dt = time.delta_secs();
-    let mut hud = snapshot;
-    hud.yaw = angles.yaw;
-    hud.pitch = angles.pitch;
-    hud.freecam = freecam.active;
-    hud.debug = prof.shown;
-    hud.page = prof.page;
     #[cfg(feature = "budget")]
     crate::diag::budget::note_drawn_entities(rig_node_q.iter().count());
     #[cfg(feature = "budget")]
     if let Some(sampled) = crate::diag::budget::sample() {
-        *budget = sampled;
-        crate::log_debug!("render", "frame budget: {}", budget.line());
+        crate::log_debug!("render", "frame budget: {}", sampled.line());
     }
-    hud.budget = *budget;
-    *gated_ms += dt * 1000.0;
-    hud.frame_ms = if frame_gate.render {
+
+    *gated_ms += time.delta_secs() * 1000.0;
+    let frame_ms = if frame_gate.render {
         std::mem::take(&mut *gated_ms)
     } else {
         0.0
     };
-    if hud.frame_ms > 0.0 {
-        frame_history.push_back(hud.frame_ms);
-        if frame_history.len() > FRAME_HISTORY_LEN {
+    if frame_ms > 0.0 {
+        if frame_history.len() >= crate::gui::hud::FRAME_HISTORY_LEN {
             frame_history.pop_front();
         }
-    }
-    if hud.frame_ms > 0.0 {
-        fps.ms += hud.frame_ms;
+        frame_history.push_back(frame_ms);
+        fps.ms += frame_ms;
         fps.frames += 1;
         if fps.ms >= FPS_WINDOW_MS {
             fps.shown = 1000.0 * fps.frames as f32 / fps.ms;
@@ -1146,22 +1075,18 @@ fn collect_hud_info(
             fps.frames = 0;
         }
     }
-    hud.fps = if fps.shown > 0.0 {
+    let fps_now = if fps.shown > 0.0 {
         fps.shown
-    } else if hud.frame_ms > 0.0 {
-        1000.0 / hud.frame_ms
+    } else if frame_ms > 0.0 {
+        1000.0 / frame_ms
     } else {
         0.0
     };
-    if prof.shown {
-        hud.frame_history = frame_history.iter().copied().collect();
-    }
-    if prof.shown {
-        hud.runtime = crate::diag::runtime();
+
+    let debug = prof.shown.then(|| {
         let now = Instant::now();
-        let stale = memory_cache
-            .map(|(at, _)| now.duration_since(at) >= MEMORY_SAMPLE_WINDOW)
-            .unwrap_or(true);
+        let stale =
+            memory_cache.is_none_or(|(at, _)| now.duration_since(at) >= MEMORY_SAMPLE_WINDOW);
         if stale {
             let fresh = measure_memory(
                 &terrain_stats,
@@ -1172,12 +1097,49 @@ fn collect_hud_info(
             );
             *memory_cache = Some((now, fresh));
         }
-        hud.memory = memory_cache.map(|(_, m)| m).unwrap_or_default();
-    }
+        crate::gui::hud::DebugInfo {
+            page: prof.page,
+            frame_ms,
+            memory: memory_cache.map(|(_, m)| m).unwrap_or_default(),
+            profiling: profiling.unwrap_or_default(),
+            pipeline: {
+                crate::prof_span!("hud:counts");
+                crate::diag::counts()
+            },
+        }
+    });
 
-    hud.nametags = nametags;
+    let ram = {
+        use crate::gui::hud_layout::{ElementId, Visibility};
+        let visibility = state.hud_state.layout.get(ElementId::Ram).visibility;
+        #[cfg(feature = "hud_editor")]
+        let editing = state.screen == crate::gui::Screen::HudEditor;
+        #[cfg(not(feature = "hud_editor"))]
+        let editing = false;
+        crate::diag::MEMORY_METRICS
+            && (visibility == Visibility::Shown || (editing && visibility == Visibility::Hidden))
+    };
+    let runtime = if prof.shown || ram {
+        crate::diag::runtime()
+    } else {
+        crate::diag::Runtime::default()
+    };
 
-    state.hud = hud;
+    state.hud = crate::gui::hud::HudInfo {
+        pos,
+        gamemode,
+        yaw: angles.yaw,
+        flying,
+        freecam: freecam.active,
+        status,
+        fps: fps_now,
+        in_world,
+        runtime,
+        frame_history,
+        nametags,
+        active_effects,
+        debug,
+    };
 }
 
 const MEMORY_SAMPLE_WINDOW: Duration = Duration::from_millis(500);
@@ -1330,10 +1292,11 @@ fn log_frame_rate(
     let focused = windows.single().map(|w| w.focused).unwrap_or(false);
     let drawn = terrain_stats.0.drawn.load(AtomicOrdering::Relaxed);
     let live = terrain_stats.0.live_slots.load(AtomicOrdering::Relaxed);
+    let draws = terrain_stats.0.draws.load(AtomicOrdering::Relaxed);
     crate::log_info!(
         "render",
         "{:.1} fps ({:.1} ms a frame) over {:.0}s, focused {focused}, {} sections indexed, \
-         {drawn}/{live} slots drawn",
+         {drawn}/{live} slots drawn in {draws} draws",
         *frames as f32 / *since,
         *since * 1000.0 / *frames as f32,
         *since,
@@ -1359,16 +1322,16 @@ fn log_frame_rate(
         "render",
         "pipeline: {} packets ({} outside the window), {} columns received ({} dropped), {} lit \
          ({} light jobs dropped), {} mesh jobs, {} sections meshed ({} panicked), {} uploaded",
-        c.chunk_packets_seen,
-        c.chunk_packets_out_of_window,
-        c.chunks_received,
-        c.chunks_dropped,
-        c.columns_lit,
-        c.light_jobs_dropped,
-        c.mesh_jobs,
-        c.sections_meshed,
-        c.mesh_panics,
-        c.sections_uploaded,
+        c[crate::diag::Stat::ChunkPacketsSeen],
+        c[crate::diag::Stat::ChunkPacketsOutOfWindow],
+        c[crate::diag::Stat::ChunksReceived],
+        c[crate::diag::Stat::ChunksDropped],
+        c[crate::diag::Stat::ColumnsLit],
+        c[crate::diag::Stat::LightJobsDropped],
+        c[crate::diag::Stat::MeshJobs],
+        c[crate::diag::Stat::SectionsMeshed],
+        c[crate::diag::Stat::MeshPanics],
+        c[crate::diag::Stat::SectionsUploaded],
     );
     *frames = 0;
     *since = 0.0;
@@ -1442,6 +1405,14 @@ pub(super) fn enter_screen(
     #[cfg(feature = "click_gui")]
     if next == crate::gui::Screen::ClickGui && state.screen != next {
         state.clickgui.opened();
+    }
+    #[cfg(feature = "hud_editor")]
+    if state.screen == crate::gui::Screen::HudEditor && next != state.screen {
+        state.hud_state.close();
+    }
+    #[cfg(feature = "hud_editor")]
+    if next == crate::gui::Screen::HudEditor && state.screen != next {
+        state.hud_state.opened();
     }
     state.screen = next;
     let open = next.is_open();
@@ -1728,11 +1699,11 @@ fn note_frame() {
 }
 
 fn sync_app_state(
-    shared: Res<Shared>,
+    view: Res<FrameView>,
     current: Res<State<AppState>>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    let wanted = if shared.0.lock().unwrap().in_world && !crate::diag::session_killed() {
+    let wanted = if view.in_world {
         AppState::InGame
     } else {
         AppState::Menu
@@ -1747,7 +1718,7 @@ struct ZoomEase(f32);
 
 fn apply_fov(
     state: Res<crate::gui::GuiState>,
-    shared: Res<Shared>,
+    view: Res<FrameView>,
     time: Res<Time>,
     mut ease: Local<ZoomEase>,
     mut camera: Query<&mut Projection, With<WorldCamera>>,
@@ -1756,10 +1727,7 @@ fn apply_fov(
         return;
     };
     if let Projection::Perspective(perspective) = &mut *projection {
-        let modifier = {
-            let s = shared.0.lock().unwrap();
-            s.session.fov.sample(partial_ticks(&s))
-        };
+        let modifier = view.fov_modifier;
 
         let zoom = crate::modules::zoom::settings();
         let (target_fov, target) = (zoom.fov, if zoom.on { 1.0 } else { 0.0 });
@@ -1818,16 +1786,15 @@ fn trace_reextracted_meshes(
 }
 
 fn sync_bot_options(
-    state: Res<crate::gui::GuiState>,
-    shared: Res<Shared>,
-    third_person: Res<ThirdPersonState>,
-    freecam: Res<FreecamState>,
+    s: &mut SharedState,
+    state: &crate::gui::GuiState,
+    third_person: &ThirdPersonState,
+    freecam: &FreecamState,
 ) {
     let wanted = state.options.render_distance;
     let signing = state.options.allow_signed_chat;
     let effects = state.options.fov_effects as f32 / 100.0;
     let first_person = !third_person.active && !freecam.active;
-    let mut s = shared.0.lock().unwrap();
     if s.render_distance_sent != Some(wanted) {
         s.render_distance_sent = Some(wanted);
         s.session.render_distance_request = Some(wanted);
@@ -1896,7 +1863,7 @@ fn sync_lighting_enabled(
     }
 }
 
-#[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 fn sync_vsync(
     state: Res<crate::gui::GuiState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
@@ -1945,8 +1912,7 @@ fn auto_harness(
     }
     angles.yaw += look * time.delta_secs();
     if let Ok(mut t) = camera.single_mut() {
-        t.rotation = Quat::from_rotation_y(angles.yaw.to_radians())
-            * Quat::from_rotation_x(angles.pitch.to_radians());
+        t.rotation = angles.rotation();
     }
     let mut s = shared.0.lock().unwrap();
     s.camera_yaw = angles.yaw;
@@ -2045,12 +2011,12 @@ fn constrained_limits() -> Option<bevy::render::settings::WgpuLimits> {
 }
 
 #[cfg(target_os = "android")]
-fn no_indirect_drawing() -> impl Bundle {
+pub(crate) fn no_indirect_drawing() -> impl Bundle {
     bevy::render::view::NoIndirectDrawing
 }
 
 #[cfg(not(target_os = "android"))]
-fn no_indirect_drawing() -> impl Bundle {}
+pub(crate) fn no_indirect_drawing() -> impl Bundle {}
 
 fn toggle_prof_overlay(
     keys: Res<ButtonInput<KeyCode>>,
@@ -2116,8 +2082,6 @@ pub fn run(
     shared: Arc<SharedMutex>,
     atlas: Image,
     tile_map: HashMap<String, u32>,
-    item_atlas: Image,
-    item_tile_map: HashMap<String, u32>,
     gui_atlas: std::sync::Arc<crate::gui::atlas::GuiAtlas>,
     startup: crate::gui::render::StartupState,
     have_assets: bool,
@@ -2189,7 +2153,6 @@ pub fn run(
     .add_plugins(crate::renderer::world_text::WorldTextPlugin)
     .insert_resource(Shared(shared))
     .insert_resource(PendingAtlas(atlas))
-    .insert_resource(PendingItemAtlas(item_atlas, item_tile_map))
     .insert_resource(BlockTileMap(tile_map))
     .insert_resource(ClearColor(SKY_COLOR))
     .init_resource::<ChunkIndex>()
@@ -2203,16 +2166,29 @@ pub fn run(
     .add_systems(Startup, setup)
     .init_resource::<LightmapState>()
     .init_resource::<super::environment::Environment>()
-    .add_systems(bevy::app::PreUpdate, update_environment)
+    .init_resource::<FrameView>()
+    .add_systems(
+        Update,
+        refresh_frame_view
+            .in_set(FrameViewSystems)
+            .run_if(not(in_state(AppState::InGame))),
+    )
+    .add_systems(
+        Update,
+        update_environment
+            .in_set(FrameViewSystems)
+            .after(refresh_frame_view)
+            .after(poll_shared_state),
+    )
     .add_systems(bevy::app::PostUpdate, skip_redundant_blits)
-    .add_systems(Update, update_lightmap)
-    .add_systems(Update, sync_app_state)
+    .add_systems(Update, update_lightmap.after(FrameViewSystems))
+    .add_systems(Update, sync_app_state.after(FrameViewSystems))
     .add_systems(Update, note_frame)
     .add_systems(
         Update,
         super::screenshot::warm_up.run_if(resource_added::<AssetsReady>),
     )
-    .add_systems(Last, limit_framerate)
+    .add_systems(First, limit_framerate.before(bevy::time::TimeSystems))
     .add_systems(
         Update,
         mesh_on_render_thread
@@ -2222,15 +2198,17 @@ pub fn run(
     .add_systems(
         Update,
         collect_hud_info
-            .after(poll_shared_state)
+            .after(FrameViewSystems)
             .before(crate::gui::render::draw_gui),
     )
     .add_systems(Update, apply_gui_nav)
-    .add_systems(Update, apply_fov.before(collect_hud_info))
-    .add_systems(Update, sync_bot_options);
+    .add_systems(
+        Update,
+        apply_fov.after(FrameViewSystems).before(collect_hud_info),
+    );
     #[cfg(feature = "audio")]
     app.add_systems(Update, sync_audio_listener);
-    #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(Update, sync_vsync);
     app.add_systems(Last, trace_reextracted_meshes)
         .add_systems(Update, sync_smooth_lighting)
@@ -2246,6 +2224,7 @@ pub fn run(
         .add_systems(
             Update,
             poll_shared_state
+                .in_set(FrameViewSystems)
                 .after(mouse_look)
                 .run_if(in_state(AppState::InGame)),
         )
@@ -2260,6 +2239,7 @@ pub fn run(
                 .run_if(in_state(AppState::InGame)),
         )
         .add_systems(Update, window_focus_cursor)
+        .add_systems(Update, crate::renderer::input::track_lifecycle)
         .add_systems(Update, log_window_geometry)
         .add_systems(Update, web_fullscreen)
         .add_systems(
@@ -2272,7 +2252,9 @@ pub fn run(
         .add_systems(Update, {
             #[cfg(feature = "click_gui")]
             {
-                super::overlays::update_esp.run_if(in_state(AppState::InGame))
+                super::overlays::update_esp
+                    .after(FrameViewSystems)
+                    .run_if(in_state(AppState::InGame))
             }
             #[cfg(not(feature = "click_gui"))]
             {
@@ -2305,6 +2287,10 @@ pub fn run(
             crate::renderer::intent::publish
                 .after(bot_movement_input)
                 .after(handle_mouse_input),
+        )
+        .add_systems(
+            Update,
+            crate::renderer::intent::release_on_suspend.after(crate::renderer::intent::publish),
         )
         .add_systems(Update, toggle_prof_overlay)
         .add_systems(Update, select_debug_page)
@@ -2345,15 +2331,13 @@ pub fn run(
         )
         .add_systems(
             Update,
-            update_block_outline.run_if(in_state(AppState::InGame)),
-        )
-        .add_systems(
-            Update,
-            update_chunk_borders.run_if(in_state(AppState::InGame)),
-        )
-        .add_systems(
-            Update,
-            update_break_overlay.run_if(in_state(AppState::InGame)),
+            (
+                update_block_outline,
+                update_chunk_borders,
+                update_break_overlay,
+            )
+                .after(FrameViewSystems)
+                .run_if(in_state(AppState::InGame)),
         );
 
     if have_assets {
@@ -2361,9 +2345,9 @@ pub fn run(
     }
 
     #[cfg(feature = "budget")]
-    app.add_systems(First, budget_frame_start)
+    app.add_systems(First, budget_frame_start.after(limit_framerate))
         .add_systems(Update, report_render_spans)
-        .add_systems(Last, budget_frame_end.before(limit_framerate))
+        .add_systems(Last, budget_frame_end)
         .add_systems(
             PostUpdate,
             (
@@ -2426,7 +2410,7 @@ pub fn run(
         }
     }
     #[cfg(feature = "shader_support")]
-    app.add_plugins(crate::renderer::packmaterial::PackMaterialPlugin);
+    app.add_plugins(crate::renderer::packdraw::ShaderPackPlugin);
 
     #[cfg(target_arch = "wasm32")]
     app.add_systems(Last, super::input::run_exit_tasks_on_exit);
@@ -2435,6 +2419,8 @@ pub fn run(
 
     #[cfg(not(target_arch = "wasm32"))]
     super::input::run_exit_tasks();
+    #[cfg(resource_packs)]
+    crate::resourcepacks::restart_if_requested();
 }
 
 #[cfg(test)]

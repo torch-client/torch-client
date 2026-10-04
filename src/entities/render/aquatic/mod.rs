@@ -209,7 +209,7 @@ mod tests {
             for nectar in [false, true] {
                 for baby in [false, true] {
                     let mut st = EntityState::new(0, EntityKind::Bee);
-                    st.extras.shared_mut().bee_angry = angry;
+                    st.extras.shared_mut().anger_ticks = i32::from(angry);
                     st.extras.shared_mut().has_nectar = nectar;
                     st.extras.shared_mut().is_baby = baby;
                     check(EntityKind::Bee, &st);
@@ -265,7 +265,7 @@ mod tests {
                     st.extras.spinning = flag;
                     st.extras.shared_mut().moving = flag;
                     st.extras.on_ground = flag;
-                    st.extras.shared_mut().is_ridden = flag;
+                    st.extras.shared_mut().ridden = flag;
                     st.extras.bee_roll = if flag { 0.5 } else { 0.0 };
                     st.extras.jump_progress = if flag { 0.5 } else { 0.0 };
                     st.extras.playing_dead_factor = if flag { 1.0 } else { 0.0 };

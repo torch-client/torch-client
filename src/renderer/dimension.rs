@@ -93,6 +93,8 @@ struct Attributes {
     sky_fog_end: f32,
     has_skylight: bool,
     has_ceiling: bool,
+    #[cfg(feature = "shader_support")]
+    logical_height: i32,
     cardinal: &'static [f32; 6],
 }
 
@@ -161,6 +163,18 @@ fn resolve(dimension: Dimension) -> Attributes {
             .and_then(|j| j.get("has_ceiling"))
             .and_then(Value::as_bool)
             .unwrap_or(ceiling_fallback),
+        #[cfg(feature = "shader_support")]
+        logical_height: json
+            .and_then(|j| j.get("logical_height"))
+            .and_then(Value::as_i64)
+            .map_or(
+                match dimension {
+                    Dimension::Overworld => 384,
+                    Dimension::Nether => 128,
+                    Dimension::End => 256,
+                },
+                |v| v as i32,
+            ),
         cardinal: match json
             .and_then(|j| j.get("cardinal_light"))
             .and_then(datapack::bare_id)
@@ -179,6 +193,21 @@ impl Dimension {
             Dimension::Overworld => (-64, 320),
             Dimension::Nether | Dimension::End => (0, 256),
         }
+    }
+
+    #[cfg(feature = "shader_support")]
+    pub fn has_ceiling(self) -> bool {
+        self.attributes().has_ceiling
+    }
+
+    #[cfg(feature = "shader_support")]
+    pub fn has_skylight(self) -> bool {
+        self.attributes().has_skylight
+    }
+
+    #[cfg(feature = "shader_support")]
+    pub fn logical_height(self) -> i32 {
+        self.attributes().logical_height
     }
 
     pub fn ambient_light_color(self) -> Argb {
@@ -271,6 +300,24 @@ pub fn current() -> Dimension {
 
 pub fn set_current(dim: Dimension) {
     CURRENT.store(id_of(dim), Ordering::Relaxed);
+}
+
+static SEA_LEVEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
+
+pub fn set_sea_level(level: i32) {
+    SEA_LEVEL.store(level, Ordering::Relaxed);
+}
+
+#[cfg(feature = "shader_support")]
+pub fn sea_level() -> i32 {
+    match SEA_LEVEL.load(Ordering::Relaxed) {
+        i32::MIN => match current() {
+            Dimension::Overworld => 63,
+            Dimension::Nether => 32,
+            Dimension::End => 0,
+        },
+        level => level,
+    }
 }
 
 pub fn id_of(dim: Dimension) -> u8 {

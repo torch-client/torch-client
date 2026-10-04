@@ -63,6 +63,11 @@ fn is_living(kind: azalea_registry::builtin::EntityKind) -> bool {
             | EntityKind::Snowball
             | EntityKind::Egg
             | EntityKind::EnderPearl
+            | EntityKind::ExperienceBottle
+            | EntityKind::SplashPotion
+            | EntityKind::LingeringPotion
+            | EntityKind::WindCharge
+            | EntityKind::BreezeWindCharge
             | EntityKind::EyeOfEnder
             | EntityKind::Fireball
             | EntityKind::SmallFireball
@@ -215,6 +220,14 @@ struct EntityDeferred {
     sleeping_pos: Option<AzBlockPos>,
     block_pos: AzBlockPos,
     eye_pos: AzBlockPos,
+}
+
+struct Pending {
+    id: i32,
+    kind: azalea_registry::builtin::EntityKind,
+    input: entities::feed::TickInput,
+    deferred: EntityDeferred,
+    fresh: bool,
 }
 
 fn par_map<T: Sync, R: Send + 'static>(items: &[T], f: impl Fn(&T) -> R + Send + Sync) -> Vec<R> {
@@ -440,557 +453,545 @@ pub(crate) fn collect_entities(
     let meta_cache_ref = &*meta_cache_guard;
     let dirty_ref = &*meta_dirty_guard;
 
-    let mut pending: Vec<(i32, EntityKind, TickInput, EntityDeferred, bool)> =
-        par_map(&accepted, |&(entity_ref, id, kind, pos)| {
-            let eref = &EntityView(entity_ref);
+    let mut pending: Vec<Pending> = par_map(&accepted, |&(entity_ref, id, kind, pos)| {
+        let eref = &EntityView(entity_ref);
 
-            let (y_rot, x_rot) = eref
-                .get_component::<LookDirection>()
-                .map(|l| (l.y_rot(), l.x_rot()))
-                .unwrap_or((0.0, 0.0));
+        let (y_rot, x_rot) = eref
+            .get_component::<LookDirection>()
+            .map(|l| (l.y_rot(), l.x_rot()))
+            .unwrap_or((0.0, 0.0));
 
-            if !dirty_ref.contains_key(&id)
-                && let Some(c) = meta_cache_ref.get(&id).filter(|c| c.kind == kind)
-            {
-                let mut input = c.input.clone();
-                input.simulate = true;
-                input.pos = [pos.x, pos.y, pos.z];
-                input.y_rot = y_rot;
-                input.x_rot = x_rot;
-                input.head_rot = heads.get(&id).copied();
-                input.velocity = velocity_map.get(&id).copied();
-                input.on_ground = grounded.get(&id).copied().unwrap_or(false);
-                input.is_passenger = riders.contains(&id);
-                input.walk_halted = matches!(kind, EntityKind::Camel | EntityKind::CamelHusk)
-                    && (input.pose != Pose::Standing || input.shared.dash);
-                input.head_targets = [None; 2];
-                let deferred = EntityDeferred {
-                    variant: c.variant,
-                    head_target_ids: c.head_target_ids,
-                    sleeping_pos: c.sleeping_pos,
-                    block_pos: AzBlockPos::from(pos),
-                    eye_pos: AzBlockPos::from(pos.up(input.eye_height as f64)),
-                };
-                return (id, kind, input, deferred, false);
-            }
-            let pose = eref
-                .get_component::<azalea::entity::Pose>()
-                .map(|p| entity_pose(*p))
-                .unwrap_or_default();
-            let worn = equip.get(&id).cloned().unwrap_or_default();
-
-            let mut eating = false;
-            let health = if is_living(kind) {
-                meta::<metadata::Health>(eref).unwrap_or(1.0)
-            } else {
-                1.0
+        if !dirty_ref.contains_key(&id)
+            && let Some(c) = meta_cache_ref.get(&id).filter(|c| c.kind == kind)
+        {
+            let mut input = c.input.clone();
+            input.simulate = true;
+            input.pos = [pos.x, pos.y, pos.z];
+            input.y_rot = y_rot;
+            input.x_rot = x_rot;
+            input.head_rot = heads.get(&id).copied();
+            input.velocity = velocity_map.get(&id).copied();
+            input.on_ground = grounded.get(&id).copied().unwrap_or(false);
+            input.is_passenger = riders.contains(&id);
+            input.walk_halted = matches!(kind, EntityKind::Camel | EntityKind::CamelHusk)
+                && (input.pose != Pose::Standing || input.shared.dash);
+            input.head_targets = [None; 2];
+            let deferred = EntityDeferred {
+                variant: c.variant,
+                head_target_ids: c.head_target_ids,
+                sleeping_pos: c.sleeping_pos,
+                block_pos: AzBlockPos::from(pos),
+                eye_pos: AzBlockPos::from(pos.up(input.eye_height as f64)),
             };
-            let mut shared = crate::entities::state::ExtrasShared::default();
-
-            if is_living(kind) {
-                shared.is_baby = flag::<metadata::AbstractAgeableBaby>(eref)
-                    || flag::<metadata::ZombieBaby>(eref)
-                    || flag::<metadata::ZoglinBaby>(eref)
-                    || flag::<metadata::PiglinBaby>(eref);
-
-                shared.powered = flag::<metadata::IsPowered>(eref);
-
-                shared.size = meta::<metadata::SlimeSize>(eref)
-                    .or_else(|| meta::<metadata::PhantomSize>(eref))
-                    .unwrap_or(1);
-
-                shared.sheared =
-                    flag::<metadata::SheepSheared>(eref) || flag::<metadata::BoggedSheared>(eref);
-                if kind == EntityKind::Sheep {
-                    shared.wool_color = meta18
-                        .get(&id)
-                        .copied()
-                        .map(entities::feed::sheep_wool_color)
-                        .unwrap_or(0);
-                }
-
-                shared.tame = flag::<metadata::Tame>(eref) || flag::<metadata::Tamed>(eref);
-                shared.sitting = flag::<metadata::InSittingPose>(eref)
-                    || flag::<metadata::FoxSitting>(eref)
-                    || flag::<metadata::PandaSitting>(eref);
-                shared.collar_color = meta::<metadata::WolfCollarColor>(eref)
-                    .or_else(|| meta::<metadata::CatCollarColor>(eref))
-                    .map(|c| c as u8)
-                    .unwrap_or(14);
-
-                shared.variant_id = meta::<metadata::HorseTypeVariant>(eref)
-                    .or_else(|| meta::<metadata::LlamaVariant>(eref))
-                    .or_else(|| meta::<metadata::TropicalFishTypeVariant>(eref))
-                    .or_else(|| meta::<metadata::RabbitKind>(eref))
-                    .or_else(|| meta::<metadata::FoxKind>(eref))
-                    .or_else(|| meta::<metadata::MooshroomKind>(eref))
-                    .or_else(|| meta::<metadata::AxolotlVariant>(eref))
-                    .or_else(|| meta::<metadata::SalmonKind>(eref))
-                    .or_else(|| meta::<metadata::ParrotVariant>(eref))
-                    .unwrap_or(0);
-
-                shared.attach_face = meta::<metadata::AttachFace>(eref)
-                    .map(entity_facing)
-                    .unwrap_or(entities::Direction::Down);
-                shared.color = meta::<metadata::Color>(eref).unwrap_or(16);
-            }
-            let peek_target = if is_living(kind) {
-                meta::<metadata::Peek>(eref).unwrap_or(0) as f32 * 0.01
-            } else {
-                0.0
+            return Pending {
+                id,
+                kind,
+                input,
+                deferred,
+                fresh: false,
             };
+        }
+        let living = is_living(kind);
+        let pose = eref
+            .get_component::<azalea::entity::Pose>()
+            .map(|p| entity_pose(*p))
+            .unwrap_or_default();
+        let worn = equip.get(&id).cloned().unwrap_or_default();
 
-            let open_mouth = is_living(kind)
-                && eref
-                    .get_component::<metadata::AbstractHorseStanding>()
-                    .is_some()
-                && meta18
+        let mut eating = false;
+        let health = if living {
+            meta::<metadata::Health>(eref).unwrap_or(1.0)
+        } else {
+            1.0
+        };
+        let mut shared = crate::entities::state::ExtrasShared::default();
+
+        if living {
+            shared.is_baby = flag::<metadata::AbstractAgeableBaby>(eref)
+                || flag::<metadata::ZombieBaby>(eref)
+                || flag::<metadata::ZoglinBaby>(eref)
+                || flag::<metadata::PiglinBaby>(eref);
+
+            shared.powered = flag::<metadata::IsPowered>(eref);
+
+            shared.size = meta::<metadata::SlimeSize>(eref)
+                .or_else(|| meta::<metadata::PhantomSize>(eref))
+                .unwrap_or(1);
+
+            shared.sheared =
+                flag::<metadata::SheepSheared>(eref) || flag::<metadata::BoggedSheared>(eref);
+            if kind == EntityKind::Sheep {
+                shared.wool_color = meta18
                     .get(&id)
                     .copied()
-                    .is_some_and(entities::feed::horse_open_mouth);
-
-            let lying = is_living(kind) && flag::<metadata::IsLying>(eref);
-            let relax_state_one = is_living(kind) && flag::<metadata::RelaxStateOne>(eref);
-
-            if !is_bare_object(kind) {
-                shared.item = meta::<metadata::ItemItem>(eref)
-                    .or_else(|| meta::<metadata::ItemFrameItem>(eref))
-                    .or_else(|| meta::<metadata::ItemDisplayItemStack>(eref))
-                    .or_else(|| meta::<metadata::FireworksItem>(eref))
-                    .or_else(|| meta::<metadata::AbstractThrownItemProjectileItemStack>(eref))
-                    .or_else(|| meta::<metadata::EyeOfEnderItemStack>(eref))
-                    .or_else(|| meta::<metadata::FireballItemStack>(eref))
-                    .or_else(|| meta::<metadata::SmallFireballItemStack>(eref))
-                    .or_else(|| meta::<metadata::OminousItemSpawnerItem>(eref))
-                    .map(|stack| held_item(&stack))
-                    .unwrap_or_default();
-                shared.item_rotation = meta::<metadata::Rotation>(eref).unwrap_or(0);
-            }
-
-            if matches!(kind, EntityKind::ItemFrame | EntityKind::GlowItemFrame) {
-                let raw = meta::<metadata::ItemFrameDirection>(eref);
-                crate::log_debug!(
-                    "itemframe",
-                    "id={id} kind={kind:?} raw_direction={raw:?} item={:?} item_rotation={:?}",
-                    meta::<metadata::ItemFrameItem>(eref),
-                    meta::<metadata::Rotation>(eref)
-                );
-                shared.item_frame_direction =
-                    raw.map(entity_facing).unwrap_or(entities::Direction::South);
-            }
-
-            if let Some(map) = shared.item.map_id
-                && !has_map(map)
-            {
-                shared.item.map_id = None;
-            }
-
-            if is_living(kind) {
-                if let Some(data) = meta::<metadata::VillagerVillagerData>(eref)
-                    .or_else(|| meta::<metadata::ZombieVillagerVillagerData>(eref))
-                {
-                    shared.villager_kind = Some(data.kind.to_str().to_string());
-                    shared.villager_profession = Some(data.profession.to_str().to_string());
-                    shared.villager_level = data.level;
-                }
-                shared.converting = flag::<metadata::Converting>(eref)
-                    || flag::<metadata::DrownedConversion>(eref)
-                    || flag::<metadata::StrayConversion>(eref);
-
-                shared.interested =
-                    flag::<metadata::WolfInterested>(eref) || flag::<metadata::FoxInterested>(eref);
-                shared.anger_ticks = meta::<metadata::WolfAngerEndTime>(eref)
-                    .or_else(|| meta::<metadata::BeeAngerEndTime>(eref))
-                    .filter(|end| *end > 0)
-                    .map(|end| (end - now).clamp(0, i32::MAX as i64) as i32)
+                    .map(entities::feed::sheep_wool_color)
                     .unwrap_or(0);
             }
 
-            shared.crouching = flag::<metadata::FoxCrouching>(eref)
-                || flag::<metadata::AbstractEntityShiftKeyDown>(eref);
-            if is_living(kind) {
-                shared.sleeping = flag::<metadata::Sleeping>(eref);
-                shared.pouncing = flag::<metadata::Pouncing>(eref);
-                shared.faceplanted = flag::<metadata::Faceplanted>(eref);
-                shared.defending = flag::<metadata::Defending>(eref);
+            shared.tame = flag::<metadata::Tame>(eref) || flag::<metadata::Tamed>(eref);
+            shared.sitting = flag::<metadata::InSittingPose>(eref)
+                || flag::<metadata::FoxSitting>(eref)
+                || flag::<metadata::PandaSitting>(eref);
+            shared.collar_color = meta::<metadata::WolfCollarColor>(eref)
+                .or_else(|| meta::<metadata::CatCollarColor>(eref))
+                .map(|c| c as u8)
+                .unwrap_or(14);
 
-                shared.on_back = flag::<metadata::OnBack>(eref);
-                shared.rolling =
-                    flag::<metadata::PandaRolling>(eref) || flag::<metadata::BeeRolling>(eref);
-                shared.unhappy_counter = meta::<metadata::PandaUnhappyCounter>(eref)
-                    .or_else(|| meta::<metadata::AbstractVillagerUnhappyCounter>(eref))
-                    .unwrap_or(0);
+            shared.variant_id = meta::<metadata::HorseTypeVariant>(eref)
+                .or_else(|| meta::<metadata::LlamaVariant>(eref))
+                .or_else(|| meta::<metadata::TropicalFishTypeVariant>(eref))
+                .or_else(|| meta::<metadata::RabbitKind>(eref))
+                .or_else(|| meta::<metadata::FoxKind>(eref))
+                .or_else(|| meta::<metadata::MooshroomKind>(eref))
+                .or_else(|| meta::<metadata::AxolotlVariant>(eref))
+                .or_else(|| meta::<metadata::SalmonKind>(eref))
+                .or_else(|| meta::<metadata::ParrotVariant>(eref))
+                .unwrap_or(0);
 
-                shared.screaming = flag::<metadata::IsScreamingGoat>(eref);
-                shared.left_horn = meta::<metadata::HasLeftHorn>(eref).unwrap_or(true);
-                shared.right_horn = meta::<metadata::HasRightHorn>(eref).unwrap_or(true);
+            shared.attach_face = meta::<metadata::AttachFace>(eref)
+                .map(entity_facing)
+                .unwrap_or(entities::Direction::Down);
+            shared.color = meta::<metadata::Color>(eref).unwrap_or(16);
+        }
+        let peek_target = if living {
+            meta::<metadata::Peek>(eref).unwrap_or(0) as f32 * 0.01
+        } else {
+            0.0
+        };
 
-                shared.standing = flag::<metadata::PolarBearStanding>(eref);
-                shared.climbing = flag::<metadata::Climbing>(eref);
-                shared.anger_level = meta::<metadata::ClientAngerLevel>(eref).unwrap_or(0);
+        let open_mouth = living
+            && eref
+                .get_component::<metadata::AbstractHorseStanding>()
+                .is_some()
+            && meta18
+                .get(&id)
+                .copied()
+                .is_some_and(entities::feed::horse_open_mouth);
 
-                shared.has_pumpkin = meta::<metadata::HasPumpkin>(eref).unwrap_or(true);
+        let lying = living && flag::<metadata::IsLying>(eref);
+        let relax_state_one = living && flag::<metadata::RelaxStateOne>(eref);
 
-                shared.charged = flag::<metadata::Charged>(eref);
-                shared.attacking = meta::<metadata::AttackTarget>(eref).is_some_and(|t| t != 0)
-                    || flag::<metadata::IsCharging>(eref)
-                    || flag::<metadata::Aggressive>(eref);
-                shared.moving = flag::<metadata::Moving>(eref);
-                shared.inverted = meta::<metadata::Inv>(eref).is_some_and(|inv| inv > 0);
-
-                shared.resting = flag::<metadata::Resting>(eref);
-                shared.dancing =
-                    flag::<metadata::Dancing>(eref) || flag::<metadata::IsDancing>(eref);
-            }
-
-            shared.saddled = worn.saddle.is_some();
-            let ridden = vehicles.contains(&id);
-            shared.ridden = ridden;
-            shared.is_ridden = ridden;
-            shared.passenger = riders.contains(&id);
-            if is_living(kind) {
-                shared.has_chest = flag::<metadata::Chest>(eref);
-                eating = flag::<metadata::Eating>(eref)
-                    || meta::<metadata::EatCounter>(eref).is_some_and(|c| c > 0);
-                shared.rearing = flag::<metadata::AbstractHorseStanding>(eref);
-                shared.dash = flag::<metadata::CamelDash>(eref)
-                    || flag::<metadata::AbstractNautilusDash>(eref);
-
-                shared.sniffer_state = meta::<metadata::SnifferState>(eref)
-                    .map(|s| {
-                        use azalea::entity::SnifferStateKind as S;
-                        match s {
-                            S::Idling => 0,
-                            S::FeelingHappy => 1,
-                            S::Scenting => 2,
-                            S::Sniffing => 3,
-                            S::Searching => 4,
-                            S::Digging => 5,
-                            S::Rising => 6,
-                        }
-                    })
-                    .unwrap_or(0);
-                shared.armadillo_state = meta::<metadata::ArmadilloState>(eref)
-                    .map(|s| {
-                        use azalea::entity::ArmadilloStateKind as S;
-                        match s {
-                            S::Idle => 0,
-                            S::Rolling => 1,
-                            S::Scared => 2,
-                        }
-                    })
-                    .unwrap_or(0);
-                shared.copper_golem_state = meta::<metadata::CopperGolemState>(eref)
-                    .map(|s| {
-                        use azalea::entity::CopperGolemStateKind as S;
-                        match s {
-                            S::Idle => 0,
-                            S::GettingItem => 1,
-                            S::GettingNoItem => 2,
-                            S::DroppingItem => 3,
-                            S::DroppingNoItem => 4,
-                        }
-                    })
-                    .unwrap_or(0);
-                shared.weather_state = meta::<metadata::WeatherState>(eref)
-                    .map(|s| {
-                        use azalea::entity::WeatheringCopperStateKind as S;
-                        match s {
-                            S::Unaffected => 0,
-                            S::Exposed => 1,
-                            S::Weathered => 2,
-                            S::Oxidized => 3,
-                        }
-                    })
-                    .unwrap_or(0);
-                shared.has_egg = flag::<metadata::HasEgg>(eref);
-                shared.laying_egg = flag::<metadata::LayingEgg>(eref);
-                shared.tearing_down = flag::<metadata::IsTearingDown>(eref);
-                shared.active = flag::<metadata::IsActive>(eref);
-
-                shared.puff_state = meta::<metadata::PuffState>(eref).unwrap_or(0);
-
-                shared.carried_block = meta::<metadata::CarryState>(eref).and_then(block_id);
-                shared.creepy = flag::<metadata::Creepy>(eref);
-
-                shared.spell = meta::<metadata::SpellCasting>(eref).unwrap_or(0);
-                shared.charging_crossbow = flag::<metadata::PillagerIsChargingCrossbow>(eref)
-                    || flag::<metadata::PiglinIsChargingCrossbow>(eref);
-                shared.celebrating = flag::<metadata::IsCelebrating>(eref);
-
-                shared.dragon_phase = meta::<metadata::Phase>(eref).unwrap_or(0);
-            }
-
-            let mut paddling_left = false;
-            let mut paddling_right = false;
-            if instance_of::<metadata::AbstractVehicle>(eref) {
-                paddling_left = flag::<metadata::PaddleLeft>(eref);
-                paddling_right = flag::<metadata::PaddleRight>(eref);
-                shared.bubble_time = meta::<metadata::BubbleTime>(eref).unwrap_or(0) as f32;
-                shared.hurt_time = meta::<metadata::Hurt>(eref).unwrap_or(0) as f32;
-                shared.hurt_dir = meta::<metadata::Hurtdir>(eref).unwrap_or(1) as f32;
-                shared.damage = meta::<metadata::Damage>(eref).unwrap_or(0.0);
-                shared.display_block =
-                    meta::<metadata::CustomDisplayBlock>(eref).and_then(block_state_id);
-                shared.display_offset = meta::<metadata::DisplayOffset>(eref).unwrap_or(0);
-            }
-
-            shared.block_state = meta::<metadata::TntBlockState>(eref)
-                .and_then(block_state_id)
-                .or_else(|| {
-                    (kind == EntityKind::FallingBlock)
-                        .then(|| add_entity_data_map.get(&id).copied())
-                        .flatten()
-                        .and_then(|data| azalea::block::BlockState::try_from(data).ok())
-                        .and_then(block_state_id)
-                });
-            shared.fuse = meta::<metadata::Fuse>(eref).unwrap_or(0);
-
-            if instance_of::<metadata::AbstractArrow>(eref) {
-                shared.crit = flag::<metadata::CritArrow>(eref);
-                shared.in_ground = flag::<metadata::InGround>(eref);
-                shared.pierce_level = meta::<metadata::PierceLevel>(eref).unwrap_or(0);
-                shared.arrow_tipped = meta::<metadata::EffectColor>(eref).is_some_and(|c| c > 0);
-            }
-
-            if instance_of::<metadata::ArmorStand>(eref) {
-                shared.small = flag::<metadata::Small>(eref);
-                shared.show_arms = flag::<metadata::ShowArms>(eref);
-                shared.show_base_plate = meta::<metadata::ShowBasePlate>(eref).unwrap_or(true);
-                shared.marker = flag::<metadata::ArmorStandMarker>(eref);
-                let stand_pose = |rot: Option<azalea::entity::Rotations>| {
-                    rot.map(|r| [r.x.to_radians(), r.y.to_radians(), r.z.to_radians()])
-                        .unwrap_or([0.0; 3])
-                };
-                shared.stand_pose = [
-                    stand_pose(meta::<metadata::HeadPose>(eref)),
-                    stand_pose(meta::<metadata::BodyPose>(eref)),
-                    stand_pose(meta::<metadata::LeftArmPose>(eref)),
-                    stand_pose(meta::<metadata::RightArmPose>(eref)),
-                    stand_pose(meta::<metadata::LeftLegPose>(eref)),
-                    stand_pose(meta::<metadata::RightLegPose>(eref)),
-                ];
-            }
-
-            shared.main_hand = worn.main_hand;
-            shared.off_hand = worn.off_hand;
-            shared.helmet = worn.helmet;
-            shared.chestplate = worn.chestplate;
-            shared.leggings = worn.leggings;
-            shared.boots = worn.boots;
-            shared.body_armor = worn.body_armor;
-            if is_living(kind) {
-                shared.left_handed = flag::<metadata::LeftHanded>(eref);
-            }
-
-            let custom_name = meta::<metadata::CustomName>(eref).flatten();
-            shared.name_spans = custom_name
-                .as_ref()
-                .map(|text| crate::client::chat_text::to_spans(text))
+        if !is_bare_object(kind) {
+            shared.item = meta::<metadata::ItemItem>(eref)
+                .or_else(|| meta::<metadata::ItemFrameItem>(eref))
+                .or_else(|| meta::<metadata::ItemDisplayItemStack>(eref))
+                .or_else(|| meta::<metadata::FireworksItem>(eref))
+                .or_else(|| meta::<metadata::AbstractThrownItemProjectileItemStack>(eref))
+                .or_else(|| meta::<metadata::EyeOfEnderItemStack>(eref))
+                .or_else(|| meta::<metadata::FireballItemStack>(eref))
+                .or_else(|| meta::<metadata::SmallFireballItemStack>(eref))
+                .or_else(|| meta::<metadata::OminousItemSpawnerItem>(eref))
+                .map(|stack| held_item(&stack))
                 .unwrap_or_default();
-            shared.name = custom_name.map(|text| text.to_string());
-            shared.name_visible = flag::<metadata::CustomNameVisible>(eref);
-            shared.magic_name_toast = shared.name.as_deref() == Some("Toast");
-            shared.magic_name_jeb = shared.name.as_deref() == Some("jeb_");
+            shared.item_rotation = meta::<metadata::Rotation>(eref).unwrap_or(0);
+        }
 
-            shared.sprinting = flag::<metadata::Sprinting>(eref);
-            if is_living(kind) {
-                shared.sneezing = flag::<metadata::Sneezing>(eref);
-                shared.sneeze_time = meta::<metadata::SneezeCounter>(eref).unwrap_or(0);
-                shared.suffocating = flag::<metadata::Suffocating>(eref);
-                shared.animate_tail = flag::<metadata::AbstractHorseStanding>(eref);
-                shared.can_move = meta::<metadata::CanMove>(eref).unwrap_or(true);
+        if matches!(kind, EntityKind::ItemFrame | EntityKind::GlowItemFrame) {
+            let raw = meta::<metadata::ItemFrameDirection>(eref);
+            crate::log_debug!(
+                "itemframe",
+                "id={id} kind={kind:?} raw_direction={raw:?} item={:?} item_rotation={:?}",
+                meta::<metadata::ItemFrameItem>(eref),
+                meta::<metadata::Rotation>(eref)
+            );
+            shared.item_frame_direction =
+                raw.map(entity_facing).unwrap_or(entities::Direction::South);
+        }
+
+        if let Some(map) = shared.item.map_id
+            && !has_map(map)
+        {
+            shared.item.map_id = None;
+        }
+
+        if living {
+            if let Some(data) = meta::<metadata::VillagerVillagerData>(eref)
+                .or_else(|| meta::<metadata::ZombieVillagerVillagerData>(eref))
+            {
+                shared.villager_kind = Some(data.kind.to_str());
+                shared.villager_profession = Some(data.profession.to_str());
+                shared.villager_level = data.level;
             }
 
-            if matches!(kind, EntityKind::Wolf) {
-                shared.tail_angle = if shared.anger_ticks > 0 {
-                    1.539_380_4
-                } else if shared.tame {
-                    let damaged = (40.0 - health.min(40.0)) / 40.0;
-                    (0.55 - damaged * 0.4) * std::f32::consts::PI
-                } else {
-                    std::f32::consts::FRAC_PI_2
-                };
-            }
+            shared.interested =
+                flag::<metadata::WolfInterested>(eref) || flag::<metadata::FoxInterested>(eref);
+            shared.anger_ticks = meta::<metadata::WolfAngerEndTime>(eref)
+                .or_else(|| meta::<metadata::BeeAngerEndTime>(eref))
+                .filter(|end| *end > 0)
+                .map(|end| (end - now).clamp(0, i32::MAX as i64) as i32)
+                .unwrap_or(0);
+        }
 
-            if is_living(kind) {
-                shared.has_stinger = !flag::<metadata::HasStung>(eref);
-                shared.has_nectar = flag::<metadata::HasNectar>(eref);
-            }
-            shared.bee_angry = shared.anger_ticks > 0;
+        shared.crouching = flag::<metadata::FoxCrouching>(eref)
+            || flag::<metadata::AbstractEntityShiftKeyDown>(eref);
+        if living {
+            shared.sleeping = flag::<metadata::Sleeping>(eref);
+            shared.pouncing = flag::<metadata::Pouncing>(eref);
+            shared.faceplanted = flag::<metadata::Faceplanted>(eref);
 
-            shared.fall_flying = flag::<metadata::FallFlying>(eref);
-            if is_living(kind) {
-                shared.using_item = flag::<metadata::AbstractLivingUsingItem>(eref);
-                shared.use_offhand = flag::<metadata::AbstractLivingUsingOffhand>(eref);
-                shared.aggressive = flag::<metadata::Aggressive>(eref);
-                shared.charging = meta::<metadata::VexFlags>(eref).is_some_and(|f| f & 0x01 != 0);
-            }
+            shared.on_back = flag::<metadata::OnBack>(eref);
+            shared.panda_rolling = flag::<metadata::PandaRolling>(eref);
+            shared.bee_rolling = flag::<metadata::BeeRolling>(eref);
+            shared.unhappy_counter = meta::<metadata::PandaUnhappyCounter>(eref)
+                .or_else(|| meta::<metadata::AbstractVillagerUnhappyCounter>(eref))
+                .unwrap_or(0);
 
-            if is_living(kind) {
-                shared.invulnerable_ticks = meta::<metadata::Inv>(eref).unwrap_or(0) as f32;
-            }
-            let head_target_ids = if is_living(kind) {
-                [
-                    meta::<metadata::TargetB>(eref).unwrap_or(0),
-                    meta::<metadata::TargetC>(eref).unwrap_or(0),
-                ]
+            shared.left_horn = meta::<metadata::HasLeftHorn>(eref).unwrap_or(true);
+            shared.right_horn = meta::<metadata::HasRightHorn>(eref).unwrap_or(true);
+
+            shared.standing = flag::<metadata::PolarBearStanding>(eref);
+            shared.anger_level = meta::<metadata::ClientAngerLevel>(eref).unwrap_or(0);
+
+            shared.has_pumpkin = meta::<metadata::HasPumpkin>(eref).unwrap_or(true);
+
+            shared.charged = flag::<metadata::Charged>(eref);
+            shared.moving = flag::<metadata::Moving>(eref);
+
+            shared.resting = flag::<metadata::Resting>(eref);
+            shared.dancing = flag::<metadata::Dancing>(eref) || flag::<metadata::IsDancing>(eref);
+        }
+
+        shared.saddled = worn.saddle.is_some();
+        let ridden = vehicles.contains(&id);
+        shared.ridden = ridden;
+        shared.passenger = riders.contains(&id);
+        if living {
+            shared.has_chest = flag::<metadata::Chest>(eref);
+            eating = flag::<metadata::Eating>(eref)
+                || meta::<metadata::EatCounter>(eref).is_some_and(|c| c > 0);
+            shared.rearing = flag::<metadata::AbstractHorseStanding>(eref);
+            shared.dash =
+                flag::<metadata::CamelDash>(eref) || flag::<metadata::AbstractNautilusDash>(eref);
+
+            shared.sniffer_state = meta::<metadata::SnifferState>(eref)
+                .map(|s| {
+                    use azalea::entity::SnifferStateKind as S;
+                    match s {
+                        S::Idling => 0,
+                        S::FeelingHappy => 1,
+                        S::Scenting => 2,
+                        S::Sniffing => 3,
+                        S::Searching => 4,
+                        S::Digging => 5,
+                        S::Rising => 6,
+                    }
+                })
+                .unwrap_or(0);
+            shared.armadillo_state = meta::<metadata::ArmadilloState>(eref)
+                .map(|s| {
+                    use azalea::entity::ArmadilloStateKind as S;
+                    match s {
+                        S::Idle => 0,
+                        S::Rolling => 1,
+                        S::Scared => 2,
+                    }
+                })
+                .unwrap_or(0);
+            shared.copper_golem_state = meta::<metadata::CopperGolemState>(eref)
+                .map(|s| {
+                    use azalea::entity::CopperGolemStateKind as S;
+                    match s {
+                        S::Idle => 0,
+                        S::GettingItem => 1,
+                        S::GettingNoItem => 2,
+                        S::DroppingItem => 3,
+                        S::DroppingNoItem => 4,
+                    }
+                })
+                .unwrap_or(0);
+            shared.weather_state = meta::<metadata::WeatherState>(eref)
+                .map(|s| {
+                    use azalea::entity::WeatheringCopperStateKind as S;
+                    match s {
+                        S::Unaffected => 0,
+                        S::Exposed => 1,
+                        S::Weathered => 2,
+                        S::Oxidized => 3,
+                    }
+                })
+                .unwrap_or(0);
+            shared.has_egg = flag::<metadata::HasEgg>(eref);
+            shared.laying_egg = flag::<metadata::LayingEgg>(eref);
+            shared.tearing_down = flag::<metadata::IsTearingDown>(eref);
+            shared.active = flag::<metadata::IsActive>(eref);
+
+            shared.puff_state = meta::<metadata::PuffState>(eref).unwrap_or(0);
+
+            shared.carried_block = meta::<metadata::CarryState>(eref).and_then(block_id);
+            shared.creepy = flag::<metadata::Creepy>(eref);
+
+            shared.spell = meta::<metadata::SpellCasting>(eref).unwrap_or(0);
+            shared.charging_crossbow = flag::<metadata::PillagerIsChargingCrossbow>(eref)
+                || flag::<metadata::PiglinIsChargingCrossbow>(eref);
+            shared.celebrating = flag::<metadata::IsCelebrating>(eref);
+
+            shared.dragon_phase = meta::<metadata::Phase>(eref).unwrap_or(0);
+        }
+
+        let mut paddling_left = false;
+        let mut paddling_right = false;
+        if instance_of::<metadata::AbstractVehicle>(eref) {
+            paddling_left = flag::<metadata::PaddleLeft>(eref);
+            paddling_right = flag::<metadata::PaddleRight>(eref);
+            shared.bubble_time = meta::<metadata::BubbleTime>(eref).unwrap_or(0) as f32;
+            shared.hurt_time = meta::<metadata::Hurt>(eref).unwrap_or(0) as f32;
+            shared.hurt_dir = meta::<metadata::Hurtdir>(eref).unwrap_or(1) as f32;
+            shared.damage = meta::<metadata::Damage>(eref).unwrap_or(0.0);
+            shared.display_block =
+                meta::<metadata::CustomDisplayBlock>(eref).and_then(block_state_id);
+            shared.display_offset = meta::<metadata::DisplayOffset>(eref).unwrap_or(0);
+        }
+
+        shared.block_state = meta::<metadata::TntBlockState>(eref)
+            .and_then(block_state_id)
+            .or_else(|| {
+                (kind == EntityKind::FallingBlock)
+                    .then(|| add_entity_data_map.get(&id).copied())
+                    .flatten()
+                    .and_then(|data| azalea::block::BlockState::try_from(data).ok())
+                    .and_then(block_state_id)
+            });
+        shared.fuse = meta::<metadata::Fuse>(eref).unwrap_or(0);
+
+        if instance_of::<metadata::AbstractArrow>(eref) {
+            shared.in_ground = flag::<metadata::InGround>(eref);
+            shared.arrow_tipped = meta::<metadata::EffectColor>(eref).is_some_and(|c| c > 0);
+        }
+
+        if instance_of::<metadata::ArmorStand>(eref) {
+            shared.small = flag::<metadata::Small>(eref);
+            shared.show_arms = flag::<metadata::ShowArms>(eref);
+            shared.show_base_plate = meta::<metadata::ShowBasePlate>(eref).unwrap_or(true);
+            let stand_pose = |rot: Option<azalea::entity::Rotations>| {
+                rot.map(|r| [r.x.to_radians(), r.y.to_radians(), r.z.to_radians()])
+                    .unwrap_or([0.0; 3])
+            };
+            shared.stand_pose = [
+                stand_pose(meta::<metadata::HeadPose>(eref)),
+                stand_pose(meta::<metadata::BodyPose>(eref)),
+                stand_pose(meta::<metadata::LeftArmPose>(eref)),
+                stand_pose(meta::<metadata::RightArmPose>(eref)),
+                stand_pose(meta::<metadata::LeftLegPose>(eref)),
+                stand_pose(meta::<metadata::RightLegPose>(eref)),
+            ];
+        }
+
+        shared.main_hand = worn.main_hand;
+        shared.off_hand = worn.off_hand;
+        shared.helmet = worn.helmet;
+        shared.chestplate = worn.chestplate;
+        shared.leggings = worn.leggings;
+        shared.boots = worn.boots;
+        shared.body_armor = worn.body_armor;
+        if living {
+            shared.left_handed = flag::<metadata::LeftHanded>(eref);
+        }
+
+        let custom_name = meta::<metadata::CustomName>(eref).flatten();
+        shared.name_spans = custom_name
+            .as_ref()
+            .map(|text| crate::client::chat_text::to_spans(text))
+            .unwrap_or_default();
+        shared.name = custom_name.map(|text| text.to_string());
+        shared.name_visible = flag::<metadata::CustomNameVisible>(eref);
+
+        shared.sprinting = flag::<metadata::Sprinting>(eref);
+        if living {
+            shared.sneezing = flag::<metadata::Sneezing>(eref);
+            shared.sneeze_time = meta::<metadata::SneezeCounter>(eref).unwrap_or(0);
+            shared.suffocating = flag::<metadata::Suffocating>(eref);
+            shared.can_move = meta::<metadata::CanMove>(eref).unwrap_or(true);
+        }
+
+        if matches!(kind, EntityKind::Wolf) {
+            shared.tail_angle = if shared.anger_ticks > 0 {
+                1.539_380_4
+            } else if shared.tame {
+                let damaged = (40.0 - health.min(40.0)) / 40.0;
+                (0.55 - damaged * 0.4) * std::f32::consts::PI
             } else {
-                [0, 0]
+                std::f32::consts::FRAC_PI_2
             };
+        }
 
-            if kind == EntityKind::IronGolem {
-                let fraction = health / 100.0;
-                shared.crackiness = match fraction {
-                    f if f < 0.25 => 3,
-                    f if f < 0.5 => 2,
-                    f if f < 0.75 => 1,
-                    _ => 0,
-                };
-            }
+        if living {
+            shared.has_stinger = !flag::<metadata::HasStung>(eref);
+            shared.has_nectar = flag::<metadata::HasNectar>(eref);
+        }
 
-            if kind == EntityKind::WitherSkull {
-                shared.skull_dangerous = flag::<metadata::Dangerous>(eref);
-            }
-            if kind == EntityKind::EndCrystal {
-                shared.shows_bottom = meta::<metadata::ShowBottom>(eref).unwrap_or(true);
-            }
-            if instance_of::<metadata::AbstractDisplay>(eref) {
-                shared.brightness_override =
-                    meta::<metadata::BrightnessOverride>(eref).unwrap_or(-1);
-                if let Some(block) =
-                    meta::<metadata::BlockDisplayBlockState>(eref).and_then(block_state_id)
-                {
-                    shared.display_block = Some(block);
-                }
-                let quat = |q: azalea::entity::Quaternion| [q.x, q.y, q.z, q.w];
-                let vec3 = |v: azalea_core::position::Vec3f32| [v.x, v.y, v.z];
-                let d = crate::entities::state::Display::default();
-                let mut display = crate::entities::state::Display {
-                    billboard: crate::entities::state::Billboard::from_id(
-                        meta::<metadata::BillboardRenderConstraints>(eref).unwrap_or(0),
-                    ),
-                    translation: meta::<metadata::Translation>(eref)
-                        .map(vec3)
-                        .unwrap_or(d.translation),
-                    scale: meta::<metadata::Scale>(eref).map(vec3).unwrap_or(d.scale),
-                    left_rotation: meta::<metadata::LeftRotation>(eref)
-                        .map(quat)
-                        .unwrap_or(d.left_rotation),
-                    right_rotation: meta::<metadata::RightRotation>(eref)
-                        .map(quat)
-                        .unwrap_or(d.right_rotation),
-                    view_range: meta::<metadata::ViewRange>(eref).unwrap_or(d.view_range),
-                    ..d
-                };
-                if instance_of::<metadata::TextDisplay>(eref) {
-                    display.text = meta::<metadata::Text>(eref)
-                        .map(|text| crate::client::chat_text::to_spans(&text))
-                        .unwrap_or_default();
-                    display.line_width = meta::<metadata::LineWidth>(eref)
-                        .map(|w| w as f32)
-                        .unwrap_or(display.line_width);
-                    display.background = meta::<metadata::BackgroundColor>(eref)
-                        .map(|c| c as u32)
-                        .unwrap_or(display.background);
-                    display.opacity =
-                        meta::<metadata::TextOpacity>(eref).unwrap_or(display.opacity);
-                    display.flags = meta::<metadata::StyleFlags>(eref).unwrap_or(display.flags);
-                }
-                shared.display = Some(Box::new(display));
-            }
-            if is_living(kind) {
-                shared.dark_ticks_remaining =
-                    meta::<metadata::DarkTicksRemaining>(eref).unwrap_or(0);
-            }
+        shared.fall_flying = flag::<metadata::FallFlying>(eref);
+        if living {
+            shared.using_item = flag::<metadata::AbstractLivingUsingItem>(eref);
+            shared.use_offhand = flag::<metadata::AbstractLivingUsingOffhand>(eref);
+            shared.aggressive = flag::<metadata::Aggressive>(eref);
+            shared.charging = meta::<metadata::VexFlags>(eref).is_some_and(|f| f & 0x01 != 0);
+        }
 
-            let dimensions = eref
-                .get_component::<EntityDimensions>()
-                .map(|d| (d.width, d.height, d.eye_height))
-                .unwrap_or_else(|| {
-                    let d = EntityDimensions::from(kind);
-                    (d.width, d.height, d.eye_height)
-                });
+        if living {
+            shared.invulnerable_ticks = meta::<metadata::Inv>(eref).unwrap_or(0) as f32;
+        }
+        let head_target_ids = if living {
+            [
+                meta::<metadata::TargetB>(eref).unwrap_or(0),
+                meta::<metadata::TargetC>(eref).unwrap_or(0),
+            ]
+        } else {
+            [0, 0]
+        };
 
-            let now_pos = [pos.x, pos.y, pos.z];
-            let halted = matches!(kind, EntityKind::Camel | EntityKind::CamelHusk)
-                && (pose != Pose::Standing || shared.dash);
+        if kind == EntityKind::IronGolem {
+            let fraction = health / 100.0;
+            shared.crackiness = match fraction {
+                f if f < 0.25 => 3,
+                f if f < 0.5 => 2,
+                f if f < 0.75 => 1,
+                _ => 0,
+            };
+        }
 
-            let (is_auto_spin_attack, swell_dir, ignited, playing_dead) = if is_living(kind) {
-                (
-                    flag::<metadata::AutoSpinAttack>(eref),
-                    meta::<metadata::SwellDir>(eref).unwrap_or(-1),
-                    flag::<metadata::IsIgnited>(eref),
-                    flag::<metadata::PlayingDead>(eref),
-                )
+        if kind == EntityKind::WitherSkull {
+            shared.skull_dangerous = flag::<metadata::Dangerous>(eref);
+        }
+        if kind == EntityKind::EndCrystal {
+            shared.shows_bottom = meta::<metadata::ShowBottom>(eref).unwrap_or(true);
+        }
+        if instance_of::<metadata::AbstractDisplay>(eref) {
+            shared.brightness_override = meta::<metadata::BrightnessOverride>(eref).unwrap_or(-1);
+            if let Some(block) =
+                meta::<metadata::BlockDisplayBlockState>(eref).and_then(block_state_id)
+            {
+                shared.display_block = Some(block);
+            }
+            let quat = |q: azalea::entity::Quaternion| [q.x, q.y, q.z, q.w];
+            let vec3 = |v: azalea_core::position::Vec3f32| [v.x, v.y, v.z];
+            let d = crate::entities::state::Display::default();
+            let mut display = crate::entities::state::Display {
+                billboard: crate::entities::state::Billboard::from_id(
+                    meta::<metadata::BillboardRenderConstraints>(eref).unwrap_or(0),
+                ),
+                translation: meta::<metadata::Translation>(eref)
+                    .map(vec3)
+                    .unwrap_or(d.translation),
+                scale: meta::<metadata::Scale>(eref).map(vec3).unwrap_or(d.scale),
+                left_rotation: meta::<metadata::LeftRotation>(eref)
+                    .map(quat)
+                    .unwrap_or(d.left_rotation),
+                right_rotation: meta::<metadata::RightRotation>(eref)
+                    .map(quat)
+                    .unwrap_or(d.right_rotation),
+                view_range: meta::<metadata::ViewRange>(eref).unwrap_or(d.view_range),
+                ..d
+            };
+            if instance_of::<metadata::TextDisplay>(eref) {
+                display.text = meta::<metadata::Text>(eref)
+                    .map(|text| crate::client::chat_text::to_spans(&text))
+                    .unwrap_or_default();
+                display.line_width = meta::<metadata::LineWidth>(eref)
+                    .map(|w| w as f32)
+                    .unwrap_or(display.line_width);
+                display.background = meta::<metadata::BackgroundColor>(eref)
+                    .map(|c| c as u32)
+                    .unwrap_or(display.background);
+                display.opacity = meta::<metadata::TextOpacity>(eref).unwrap_or(display.opacity);
+                display.flags = meta::<metadata::StyleFlags>(eref).unwrap_or(display.flags);
+            }
+            shared.display = Some(Box::new(display));
+        }
+        if living {
+            shared.dark_ticks_remaining = meta::<metadata::DarkTicksRemaining>(eref).unwrap_or(0);
+        }
+
+        let dimensions = eref
+            .get_component::<EntityDimensions>()
+            .map(|d| (d.width, d.height, d.eye_height))
+            .unwrap_or_else(|| {
+                let d = EntityDimensions::from(kind);
+                (d.width, d.height, d.eye_height)
+            });
+
+        let now_pos = [pos.x, pos.y, pos.z];
+        let halted = matches!(kind, EntityKind::Camel | EntityKind::CamelHusk)
+            && (pose != Pose::Standing || shared.dash);
+
+        let is_auto_spin_attack = living && flag::<metadata::AutoSpinAttack>(eref);
+        let swell_dir = if living {
+            meta::<metadata::SwellDir>(eref).unwrap_or(-1)
+        } else {
+            -1
+        };
+        let ignited = living && flag::<metadata::IsIgnited>(eref);
+        let playing_dead = living && flag::<metadata::PlayingDead>(eref);
+
+        let input = TickInput {
+            simulate: true,
+            pos: now_pos,
+            y_rot,
+            head_rot: heads.get(&id).copied(),
+            x_rot,
+            is_living: eref.get_component::<metadata::Health>().is_some(),
+            pose,
+            dead: health <= 0.0,
+            is_in_water: false,
+            is_in_lava: false,
+            velocity: velocity_map.get(&id).copied(),
+            is_fully_frozen: meta::<metadata::TicksFrozen>(eref)
+                .is_some_and(|t| t >= TICKS_REQUIRED_TO_FREEZE),
+            is_auto_spin_attack,
+            is_invisible: flag::<metadata::Invisible>(eref),
+            display_fire: flag::<metadata::OnFire>(eref),
+            scale: 1.0,
+            bounding_box_width: dimensions.0,
+            bounding_box_height: dimensions.1,
+            eye_height: dimensions.2,
+            bed_orientation: None,
+            walk_factor: walk_factor(kind),
+            walk_halted: halted,
+            is_passenger: riders.contains(&id),
+            swell_dir,
+            ignited,
+            peek_target,
+            paddling_left,
+            paddling_right,
+            lying,
+            relax_state_one,
+            on_ground: grounded.get(&id).copied().unwrap_or(false),
+            playing_dead,
+            open_mouth,
+            head_targets: [None; 2],
+            shared: std::sync::Arc::new(shared),
+            eating,
+        };
+
+        let deferred = EntityDeferred {
+            head_target_ids,
+            variant: if living {
+                variant_key::<metadata::WolfVariant>(eref)
+                    .or_else(|| variant_key::<metadata::CatVariant>(eref))
+                    .or_else(|| variant_key::<metadata::CowVariant>(eref))
+                    .or_else(|| variant_key::<metadata::PigVariant>(eref))
+                    .or_else(|| variant_key::<metadata::ChickenVariant>(eref))
+                    .or_else(|| variant_key::<metadata::FrogVariant>(eref))
+                    .or_else(|| variant_key::<metadata::PaintingVariant>(eref))
+                    .or_else(|| variant_key::<metadata::ZombieNautilusVariant>(eref))
             } else {
-                (false, -1, false, false)
-            };
-
-            let input = TickInput {
-                simulate: true,
-                pos: now_pos,
-                y_rot,
-                head_rot: heads.get(&id).copied(),
-                x_rot,
-                is_living: eref.get_component::<metadata::Health>().is_some(),
-                pose,
-                dead: health <= 0.0,
-                is_in_water: false,
-                is_in_lava: false,
-                velocity: velocity_map.get(&id).copied(),
-                is_fully_frozen: meta::<metadata::TicksFrozen>(eref)
-                    .is_some_and(|t| t >= TICKS_REQUIRED_TO_FREEZE),
-                is_auto_spin_attack,
-                is_invisible: flag::<metadata::Invisible>(eref),
-                display_fire: flag::<metadata::OnFire>(eref),
-                scale: 1.0,
-                bounding_box_width: dimensions.0,
-                bounding_box_height: dimensions.1,
-                eye_height: dimensions.2,
-                bed_orientation: None,
-                walk_factor: walk_factor(kind),
-                walk_halted: halted,
-                is_passenger: riders.contains(&id),
-                swell_dir,
-                ignited,
-                peek_target,
-                paddling_left,
-                paddling_right,
-                lying,
-                relax_state_one,
-                on_ground: grounded.get(&id).copied().unwrap_or(false),
-                playing_dead,
-                open_mouth,
-                head_targets: [None; 2],
-                shared: std::sync::Arc::new(shared),
-                eating,
-            };
-
-            let deferred = EntityDeferred {
-                head_target_ids,
-                variant: if is_living(kind) {
-                    variant_key::<metadata::WolfVariant>(eref)
-                        .or_else(|| variant_key::<metadata::CatVariant>(eref))
-                        .or_else(|| variant_key::<metadata::CowVariant>(eref))
-                        .or_else(|| variant_key::<metadata::PigVariant>(eref))
-                        .or_else(|| variant_key::<metadata::ChickenVariant>(eref))
-                        .or_else(|| variant_key::<metadata::FrogVariant>(eref))
-                        .or_else(|| variant_key::<metadata::PaintingVariant>(eref))
-                        .or_else(|| variant_key::<metadata::ZombieNautilusVariant>(eref))
-                } else {
-                    variant_key::<metadata::PaintingVariant>(eref)
-                },
-                sleeping_pos: if is_living(kind) {
-                    meta::<metadata::SleepingPos>(eref).flatten()
-                } else {
-                    None
-                },
-                block_pos: AzBlockPos::from(pos),
-                eye_pos: AzBlockPos::from(pos.up(dimensions.2 as f64)),
-            };
-            (id, kind, input, deferred, true)
-        });
+                variant_key::<metadata::PaintingVariant>(eref)
+            },
+            sleeping_pos: if living {
+                meta::<metadata::SleepingPos>(eref).flatten()
+            } else {
+                None
+            },
+            block_pos: AzBlockPos::from(pos),
+            eye_pos: AzBlockPos::from(pos.up(dimensions.2 as f64)),
+        };
+        Pending {
+            id,
+            kind,
+            input,
+            deferred,
+            fresh: true,
+        }
+    });
     drop(ecs);
     drop(_meta_timer);
     drop(heads_guard);
@@ -1003,24 +1004,21 @@ pub(crate) fn collect_entities(
     let cap = max_simulated_entities();
     if pending.len() > cap {
         let eye = origin;
-        let key = |e: &(i32, EntityKind, TickInput, EntityDeferred, bool)| {
-            let p = e.2.pos;
+        let key = |e: &Pending| {
+            let p = e.input.pos;
             let (dx, dy, dz) = (p[0] - eye.x, p[1] - eye.y, p[2] - eye.z);
-            (((dx * dx + dy * dy + dz * dz).sqrt() * 0.5) as i32, e.0)
+            (((dx * dx + dy * dy + dz * dz).sqrt() * 0.5) as i32, e.id)
         };
         pending.select_nth_unstable_by_key(cap, key);
         for entry in pending[cap..].iter_mut() {
-            entry.2.simulate = false;
+            entry.input.simulate = false;
         }
     }
 
-    if pending
-        .iter()
-        .any(|(_, _, _, d, _)| d.head_target_ids != [0, 0])
-    {
+    if pending.iter().any(|p| p.deferred.head_target_ids != [0, 0]) {
         use azalea::ecs::query::With;
         let mut eyes: HashMap<i32, [f64; 3]> = HashMap::with_capacity(pending.len());
-        for (id, _, input, _, _) in &pending {
+        for Pending { id, input, .. } in &pending {
             eyes.insert(
                 *id,
                 [
@@ -1047,7 +1045,12 @@ pub(crate) fn collect_entities(
                 .unwrap_or(EntityDimensions::from(EntityKind::Player).eye_height);
             eyes.insert(pid, [pos.x, pos.y + eye as f64, pos.z]);
         }
-        for (_, _, input, extra, _) in &mut pending {
+        for Pending {
+            input,
+            deferred: extra,
+            ..
+        } in &mut pending
+        {
             for i in 0..2 {
                 let target = extra.head_target_ids[i];
                 input.head_targets[i] = (target != 0).then(|| eyes.get(&target).copied()).flatten();
@@ -1061,7 +1064,14 @@ pub(crate) fn collect_entities(
         let guard = world.as_ref().map(|w| w.read());
         let level = guard.as_deref();
         let registries = level.map(|g| &g.registries);
-        par_for_each_mut(&mut pending, |(_, kind, input, extra, _)| {
+        par_for_each_mut(&mut pending, |entry| {
+            let Pending {
+                kind,
+                input,
+                deferred: extra,
+                fresh,
+                ..
+            } = entry;
             use azalea::block::fluid_state::FluidKind;
             use azalea::entity::dimensions::EntityDimensions;
             let bed = extra
@@ -1081,7 +1091,8 @@ pub(crate) fn collect_entities(
             let eyes = level
                 .and_then(|g| g.get_fluid_state(extra.eye_pos))
                 .map(|f| f.kind);
-            let variant = resolve_variant(registries, extra.variant);
+            let variant = (*fresh || (input.shared.variant.is_none() && extra.variant.is_some()))
+                .then(|| resolve_variant(registries, extra.variant));
 
             input.bed_orientation = bed;
             if bed.is_some() {
@@ -1091,12 +1102,15 @@ pub(crate) fn collect_entities(
             input.is_in_lava = matches!(feet, Some(FluidKind::Lava));
             let on_land = !matches!(feet, Some(FluidKind::Water));
             let under_water = matches!(eyes, Some(FluidKind::Water));
-            if input.shared.variant != variant
+            let variant_moved = variant.as_ref().is_some_and(|v| *v != input.shared.variant);
+            if variant_moved
                 || input.shared.on_land != on_land
                 || input.shared.under_water != under_water
             {
                 let shared = input.shared_mut();
-                shared.variant = variant;
+                if let Some(variant) = variant {
+                    shared.variant = variant;
+                }
                 shared.on_land = on_land;
                 shared.under_water = under_water;
             }
@@ -1105,11 +1119,18 @@ pub(crate) fn collect_entities(
 
     let first_seen: Vec<i32> = pending
         .iter()
-        .filter(|(id, _, _, _, fresh)| *fresh && !meta_cache_ref.contains_key(id))
-        .map(|(id, ..)| *id)
+        .filter(|p| p.fresh && !meta_cache_ref.contains_key(&p.id))
+        .map(|p| p.id)
         .collect();
 
-    for (id, kind, input, extra, fresh) in &pending {
+    for Pending {
+        id,
+        kind,
+        input,
+        deferred: extra,
+        fresh,
+    } in &pending
+    {
         if *fresh {
             if input.shared.anger_ticks == 0 {
                 meta_cache_guard.insert(
@@ -1153,8 +1174,8 @@ pub(crate) fn collect_entities(
     let _tick_timer = crate::diag::timed(crate::diag::Phase::Tick);
 
     let mut at: HashMap<i32, u32> = HashMap::with_capacity(pending.len());
-    for (i, (id, kind, _, _, _)) in pending.iter().enumerate() {
-        let (id, kind) = (*id, *kind);
+    for (i, entry) in pending.iter().enumerate() {
+        let (id, kind) = (entry.id, entry.kind);
         let anim = anims.entry(id).or_insert_with(|| EntityAnim::new(id, kind));
         if anim.kind != kind {
             *anim = EntityAnim::new(id, kind);
@@ -1166,7 +1187,7 @@ pub(crate) fn collect_entities(
     let mut work: Vec<(&mut EntityAnim, &TickInput)> = Vec::with_capacity(ticked.len());
     for (id, anim) in anims.iter_mut() {
         if let Some(&i) = at.get(id) {
-            work.push((anim, &pending[i as usize].2));
+            work.push((anim, &pending[i as usize].input));
         }
     }
     par_for_each_mut(&mut work, |(anim, input)| {

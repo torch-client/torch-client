@@ -1,5 +1,6 @@
 use bevy::math::Vec2;
 
+use crate::gui::hud_layout::{ElementId, Transforms};
 use crate::gui::screens::HotbarGeom;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -57,7 +58,38 @@ pub enum Control {
     Hotbar(u8),
     Chat,
     Look,
+    LookOnly,
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct NoAttackZone {
+    pub lower: (Vec2, f32),
+    pub upper: (Vec2, f32),
+}
+
+impl NoAttackZone {
+    fn around(use_button: Rect) -> Self {
+        let centre = use_button.center();
+        let r = use_button.w * NO_ATTACK_RADIUS;
+        NoAttackZone {
+            lower: (centre, r),
+            upper: (
+                centre - Vec2::new(0.0, use_button.h * NO_ATTACK_UPPER_OFFSET),
+                r * NO_ATTACK_UPPER_WEIGHT,
+            ),
+        }
+    }
+
+    pub fn contains(&self, p: Vec2) -> bool {
+        [self.lower, self.upper]
+            .iter()
+            .any(|&(c, r)| p.distance(c) <= r)
+    }
+}
+
+const NO_ATTACK_RADIUS: f32 = 1.0;
+const NO_ATTACK_UPPER_OFFSET: f32 = 1.5;
+const NO_ATTACK_UPPER_WEIGHT: f32 = 0.75;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Rect {
@@ -116,6 +148,11 @@ impl Stick {
     }
 }
 
+pub fn top_controls_bottom(vw: f32, vh: f32) -> f32 {
+    let close = Layout::new(vw, vh, 0.0, Movement::Buttons).close_button;
+    close.y + close.h
+}
+
 pub struct Layout {
     pub cell: f32,
     pub pad: Vec2,
@@ -125,6 +162,8 @@ pub struct Layout {
     pub round_cells: Option<[(Cell, Vec2); 4]>,
     pub use_button: Rect,
     pub close_button: Rect,
+    pub texting_button: Rect,
+    pub no_attack: NoAttackZone,
     hotbar: HotbarGeom,
     vh: f32,
 }
@@ -202,6 +241,13 @@ impl Layout {
                 w: cell,
                 h: cell,
             },
+            texting_button: Rect {
+                x: vw - margin - cell * 2.0 - margin,
+                y: margin,
+                w: cell,
+                h: cell,
+            },
+            no_attack: NoAttackZone::around(use_button),
             hotbar: HotbarGeom::new(vw, vh),
             vh,
         }
@@ -226,12 +272,18 @@ impl Layout {
         }
     }
 
+    #[cfg(test)]
     pub fn hit(&self, p: Vec2) -> Control {
+        self.hit_in(p, &Transforms::IDENTITY)
+    }
+
+    pub fn hit_in(&self, screen: Vec2, xf: &Transforms) -> Control {
         if let Some(jump) = self.jump_button
-            && jump.contains(p)
+            && jump.contains(xf.to_local(ElementId::JumpButton, screen))
         {
             return Control::Pad(Cell::Jump);
         }
+        let p = xf.to_local(ElementId::Pad, screen);
         if let Some(round) = self.round_cells {
             for (cell, at) in round {
                 if p.distance(at) <= self.cell * 0.5 {
@@ -261,16 +313,29 @@ impl Layout {
                 }
             }
         }
-        if self.use_button.contains(p) {
+        if self
+            .use_button
+            .contains(xf.to_local(ElementId::UseButton, screen))
+        {
             return Control::Use;
         }
-        if self.close_button.contains(p) {
+        if self
+            .close_button
+            .contains(xf.to_local(ElementId::ChatButton, screen))
+        {
             return Control::Chat;
         }
-        for i in 0..9 {
+        let p = xf.to_local(ElementId::Hotbar, screen);
+        for i in (0..9).filter(|_| xf.drawn(ElementId::Hotbar)) {
             if self.hotbar_rect(i).contains(p) {
                 return Control::Hotbar(i as u8);
             }
+        }
+        if self
+            .no_attack
+            .contains(xf.to_local(ElementId::UseButton, screen))
+        {
+            return Control::LookOnly;
         }
         Control::Look
     }
@@ -373,6 +438,25 @@ mod tests {
             l.hit(Vec2::new(l.pad.x + l.cell * 3.0 + 1.0, l.pad.y + 1.0)),
             Control::Look
         );
+    }
+
+    #[test]
+    fn the_teardrop_round_use_looks_without_attacking() {
+        for movement in [Movement::Buttons, Movement::Joystick, Movement::PadStick] {
+            let l = Layout::new(VW, VH, 0.0, movement);
+            let u = l.use_button;
+            let c = u.center();
+            assert_eq!(l.hit(Vec2::new(c.x, u.y - 2.0)), Control::LookOnly);
+            let (upper, r) = l.no_attack.upper;
+            assert_eq!(l.hit(upper), Control::LookOnly);
+            assert_eq!(l.hit(upper - Vec2::new(0.0, r - 1.0)), Control::LookOnly);
+            assert_eq!(l.hit(upper - Vec2::new(0.0, r + 1.0)), Control::Look);
+            assert_eq!(l.hit(Vec2::new(VW / 2.0, VH / 3.0)), Control::Look);
+            assert_eq!(l.hit(u.center()), Control::Use);
+            if let Some(j) = l.jump_button {
+                assert_eq!(l.hit(j.center()), Control::Pad(Cell::Jump));
+            }
+        }
     }
 
     #[test]
@@ -486,6 +570,17 @@ mod tests {
                 !slow.jump_double_tap(i as f32, 0.35),
                 "press {i} should not double"
             );
+        }
+    }
+
+    #[test]
+    fn texting_button_sits_left_of_close() {
+        for (vw, vh) in [(VW, VH), (VH, VW)] {
+            let l = Layout::new(vw, vh, 0.0, Movement::Buttons);
+            let (s, c) = (l.texting_button, l.close_button);
+            assert!(s.x + s.w < c.x);
+            assert_eq!((s.y, s.h), (c.y, c.h));
+            assert!(s.x > 0.0);
         }
     }
 

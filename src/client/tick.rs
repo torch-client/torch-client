@@ -39,7 +39,7 @@ struct TickSnapshot {
     local_skin: crate::client::skins::SkinState,
     entity_anims: std::sync::Arc<Vec<crate::entities::feed::EntityAnim>>,
     menu_slots: Vec<SlotStack>,
-    hotbar: Vec<SlotStack>,
+    hotbar: Arc<[SlotStack]>,
     armor: crate::renderer::Armor,
     carried: SlotStack,
     container_id: i32,
@@ -57,6 +57,8 @@ struct TickSnapshot {
     active_effects: Vec<crate::play::mob_effects::MobEffectInstance>,
     gamemode: Gamemode,
     crouching: bool,
+    fall_flying: bool,
+    swimming: bool,
     sleeping: bool,
     bed_orientation: Option<crate::direction::Direction>,
     attack_strength: f32,
@@ -86,16 +88,14 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
     };
     if let Ok(partial) = bot.partial_world() {
         viewwindow::keep_view_center_on_the_player(&partial, pos);
+        crate::client::mesh_worker::sweep_parked(&partial);
     }
 
     let (other_positions, seen_players) = collect_other_players(bot);
 
-    let local_anim = tick_local_anim(bot, shared, pos);
+    let (local_anim, reads) = tick_local_anim(bot, shared, pos);
     #[cfg(feature = "skins")]
-    let local_skin = {
-        let parts = shared.lock().unwrap().skin_prefs.skin_parts;
-        local_skin(bot, parts)
-    };
+    let local_skin = local_skin(bot, reads.skin_parts);
     let entity_anims = collect_entities(bot, &seen_players);
 
     GAME_TIME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -106,9 +106,7 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
 
     #[cfg(feature = "audio")]
     {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static TRAVELLED: AtomicU32 = AtomicU32::new(0);
-        static LAST_XZ: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+        use std::sync::atomic::Ordering;
 
         let mut last = LAST_XZ.lock().unwrap();
         let (dx, dz) = match *last {
@@ -152,7 +150,7 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
             }
         }
     }
-    let advanced_tooltips = shared.lock().unwrap().session.advanced_tooltips;
+    let advanced_tooltips = reads.advanced_tooltips;
     let (
         menu_slots,
         hotbar,
@@ -179,7 +177,7 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
             .as_ref()
             .map(|inv| inv.inventory_menu.slots())
             .unwrap_or_default();
-        let hotbar: Vec<SlotStack> = player_slots
+        let hotbar: Arc<[SlotStack]> = player_slots
             .get(36..46)
             .map(|slots| {
                 slots
@@ -270,6 +268,17 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
         .component::<azalea::entity::Pose>()
         .map(|p| *p == azalea::entity::Pose::Crouching)
         .unwrap_or(false);
+    let (fall_flying, swimming) = {
+        use azalea::entity::metadata;
+        (
+            bot.component::<metadata::FallFlying>()
+                .map(|c| c.0)
+                .unwrap_or(false),
+            bot.component::<metadata::Swimming>()
+                .map(|c| c.0)
+                .unwrap_or(false),
+        )
+    };
     let sleeping = local_sleeping_pos.is_some();
     let bed_orientation = local_sleeping_pos.and_then(|pos| bed_orientation_at(bot, pos));
 
@@ -290,7 +299,7 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
 
     let fov_modifier = tick_fov(
         bot,
-        shared,
+        &reads,
         hotbar
             .get(hotbar_sel as usize)
             .map_or("", |stack| stack.item),
@@ -323,6 +332,8 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
         active_effects,
         gamemode,
         crouching,
+        fall_flying,
+        swimming,
         sleeping,
         bed_orientation,
         attack_strength,
@@ -382,15 +393,9 @@ fn fov_target(
     1.0 + (modifier - 1.0) * effect_scale
 }
 
-fn tick_fov(bot: &Client, shared: &Arc<SharedMutex>, main_hand: &str, use_ticks: u32) -> f32 {
-    let (previous, effect_scale, first_person) = {
-        let s = shared.lock().unwrap();
-        (
-            s.session.fov.cur,
-            s.session.fov.effects,
-            s.session.fov.first_person,
-        )
-    };
+fn tick_fov(bot: &Client, reads: &TickReads, main_hand: &str, use_ticks: u32) -> f32 {
+    let (previous, effect_scale, first_person) =
+        (reads.fov_previous, reads.fov_effects, reads.first_person);
     let target = fov_target(bot, main_hand, use_ticks, first_person, effect_scale);
     (previous + (target - previous) * FOV_SMOOTHING).clamp(FOV_MODIFIER_MIN, FOV_MODIFIER_MAX)
 }
@@ -399,13 +404,6 @@ const DEFAULT_ATTACK_DELAY: f32 = 5.0;
 
 fn attack_strength_ticker(bot: &Client, hotbar: &[SlotStack], hotbar_sel: u8) -> u32 {
     use azalea::attack::TicksSinceLastAttack;
-
-    #[derive(Default)]
-    struct Ticker {
-        ticks: u32,
-        main_hand: &'static str,
-    }
-    static TICKER: std::sync::OnceLock<std::sync::Mutex<Ticker>> = std::sync::OnceLock::new();
 
     let held = hotbar
         .get(hotbar_sel as usize)
@@ -443,6 +441,42 @@ static MOVEMENT_WRITE_REPORTED: std::sync::atomic::AtomicBool =
 
 pub(crate) fn reset_movement_warning() {
     MOVEMENT_WRITE_REPORTED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[derive(Default)]
+struct Ticker {
+    ticks: u32,
+    main_hand: &'static str,
+}
+static TICKER: std::sync::OnceLock<std::sync::Mutex<Ticker>> = std::sync::OnceLock::new();
+
+#[cfg(feature = "audio")]
+static TRAVELLED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(feature = "audio")]
+static LAST_XZ: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+pub(crate) fn reset_session_locals(blocking: bool) {
+    let ticker = TICKER.get_or_init(Default::default);
+    let ticker = if blocking {
+        ticker.lock().ok()
+    } else {
+        ticker.try_lock().ok()
+    };
+    if let Some(mut ticker) = ticker {
+        *ticker = Ticker::default();
+    }
+    #[cfg(feature = "audio")]
+    {
+        TRAVELLED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let last = if blocking {
+            LAST_XZ.lock().ok()
+        } else {
+            LAST_XZ.try_lock().ok()
+        };
+        if let Some(mut last) = last {
+            *last = None;
+        }
+    }
 }
 
 fn note_movement_write(what: &str, e: impl std::fmt::Display) {
@@ -504,7 +538,7 @@ fn apply_local_trades(session: &mut crate::session::SessionState, actions: &[Inv
         let InvAction::Click(op) = action else {
             continue;
         };
-        if !takes_merchant_result(op) {
+        if !crate::gui::slots::takes_slot(op, 2) {
             trace_trade("click did not take the result slot");
             continue;
         }
@@ -544,22 +578,17 @@ fn trace_trade(what: &str) {
     eprintln!("[trade] {what}");
 }
 
-fn takes_merchant_result(op: &azalea_inventory::operations::ClickOperation) -> bool {
-    use azalea_inventory::operations::{
-        ClickOperation as Op, PickupClick, QuickMoveClick, ThrowClick,
+fn block_distance_sqr(pos: AzBlockPos, point: [f64; 3]) -> f64 {
+    let axis = |min: i32, p: f64| {
+        let min = min as f64;
+        (min - p).max(p - (min + 1.0)).max(0.0)
     };
-    const RESULT: u16 = 2;
-    match op {
-        Op::Pickup(PickupClick::Left { slot } | PickupClick::Right { slot }) => {
-            *slot == Some(RESULT)
-        }
-        Op::QuickMove(QuickMoveClick::Left { slot } | QuickMoveClick::Right { slot }) => {
-            *slot == RESULT
-        }
-        Op::Throw(ThrowClick::Single { slot } | ThrowClick::All { slot }) => *slot == RESULT,
-        Op::Swap(swap) => swap.source_slot == RESULT,
-        _ => false,
-    }
+    let (dx, dy, dz) = (
+        axis(pos.x, point[0]),
+        axis(pos.y, point[1]),
+        axis(pos.z, point[2]),
+    );
+    dx * dx + dy * dy + dz * dz
 }
 
 pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
@@ -618,6 +647,8 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         active_effects,
         gamemode,
         crouching,
+        fall_flying,
+        swimming,
         sleeping,
         bed_orientation,
         attack_strength,
@@ -647,6 +678,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         sign_update,
         command_block_update,
         command_block_pos,
+        sign_edit_open_pos,
         edit_book,
         outgoing_chat,
         signing_state,
@@ -671,9 +703,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         s.session.fov.prev = s.session.fov.cur;
         s.session.fov.cur = fov_modifier;
         s.session.entities = entity_anims;
-        if !s.session.status.starts_with("Pos:") {
-            s.session.status = "Pos:".to_string();
-        }
+        s.session.status = None;
         let click_in_flight = !s.session.inv_actions.is_empty();
         let horse_open = s
             .session
@@ -713,7 +743,13 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
             if let Some(slot) = s.session.menu_slots.get_mut(36 + hotbar_sel as usize) {
                 remove_from(slot);
             }
-            if let Some(slot) = s.session.hotbar.get_mut(hotbar_sel as usize) {
+            if s.session
+                .hotbar
+                .get(hotbar_sel as usize)
+                .is_some_and(|st| st.count != 0)
+                && let Some(slot) =
+                    Arc::make_mut(&mut s.session.hotbar).get_mut(hotbar_sel as usize)
+            {
                 remove_from(slot);
             }
         }
@@ -736,8 +772,9 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
                     s.session.horse_published_state_id = horse.state_id;
                     s.session.menu_slots.clear();
                     s.session.menu_slots.extend_from_slice(&horse.slots);
+                    let hotbar = Arc::make_mut(&mut s.session.hotbar);
                     for (i, slot) in horse.player_slots().iter().skip(27).take(9).enumerate() {
-                        if let Some(dst) = s.session.hotbar.get_mut(i) {
+                        if let Some(dst) = hotbar.get_mut(i) {
                             dst.clone_from(slot);
                         }
                     }
@@ -773,6 +810,8 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         s.session.active_effects = active_effects;
         s.session.gamemode = gamemode;
         s.session.crouching = crouching;
+        s.session.fall_flying = fall_flying;
+        s.session.swimming = swimming;
         s.session.sleeping = sleeping;
         s.session.bed_orientation = bed_orientation;
         s.session.sleep_timer = if sleeping {
@@ -792,6 +831,9 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         } else {
             s.session.xp_seen = true;
         }
+        if s.session.container_kind == ContainerKind::Anvil {
+            s.session.xp_display_tick = GAME_TIME.load(std::sync::atomic::Ordering::Relaxed);
+        }
         s.session.xp_progress = xp_progress;
         s.session.xp_level = xp_level;
         (
@@ -805,6 +847,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
             s.session.sign_update.take(),
             s.session.command_block_update.take(),
             s.session.command_block_pos,
+            s.session.sign_edit_open_pos,
             s.session.edit_book.take(),
             std::mem::take(&mut s.session.outgoing_chat),
             (
@@ -886,6 +929,34 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         shared.lock().unwrap().session.command_block_pos = None;
     }
 
+    if let Some(sign_pos) = sign_edit_open_pos {
+        use azalea::block::BlockTrait;
+        let still_sign = bot
+            .world()
+            .ok()
+            .and_then(|world| world.read().get_block_state(sign_pos))
+            .is_some_and(|state| {
+                crate::session::SignEditKind::from_block(Box::<dyn BlockTrait>::from(state).id())
+                    .is_some()
+            });
+        let range = bot
+            .component::<azalea::entity::Attributes>()
+            .map(|a| a.block_interaction_range.calculate())
+            .unwrap_or(4.5)
+            + 4.0;
+        let eye = [
+            pos.x,
+            pos.y + crate::renderer::systems::eye_height(crouching) as f64,
+            pos.z,
+        ];
+        if !still_sign || block_distance_sqr(sign_pos, eye) >= range * range {
+            let mut s = shared.lock().unwrap();
+            if s.session.sign_edit_open_pos == Some(sign_pos) {
+                s.session.sign_edit_open_pos = None;
+            }
+        }
+    }
+
     if let Some(update) = command_block_update {
         bot.write_packet(ServerboundSetCommandBlock {
             pos: update.pos,
@@ -926,11 +997,17 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         }
     }
 
-    if let Some((id, command)) = shared.lock().unwrap().session.suggestion_request.take() {
+    let suggestion = {
+        let mut s = shared.lock().unwrap();
+        s.session.suggestion_request.take()
+    };
+    if let Some((id, command)) = suggestion {
         bot.write_packet(ServerboundCommandSuggestion { id, command });
     }
 
-    if let Err(e) = bot.set_direction(-yaw - 180.0, -pitch) {
+    let (sent_yaw, sent_pitch, flags) =
+        crate::modules::hooks::sent_look(bot, -yaw - 180.0, -pitch, flags);
+    if let Err(e) = bot.set_direction(sent_yaw, sent_pitch) {
         note_movement_write("the look direction", e);
     }
 
@@ -951,8 +1028,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
     }
     interaction::handle_interaction(bot, shared);
 
-    viewwindow::apply_render_distance_request(bot, shared);
-    viewwindow::apply_skin_prefs_request(bot, shared);
+    viewwindow::apply_client_information_requests(bot, shared);
 
     let (quit, disconnect, reload_chunks, leave_bed, respawn) = {
         let mut s = shared.lock().unwrap();
@@ -973,7 +1049,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         bot.disconnect();
     }
 
-    if reload_chunks {
+    if reload_chunks || crate::client::mesh_worker::take_died() {
         worldsync::reload_all_chunks(bot, shared);
     }
 
@@ -1172,11 +1248,15 @@ fn collect_other_players(bot: &Client) -> (Vec<OtherPlayerInfo>, HashSet<i32>) {
     (out, seen)
 }
 
-fn tick_local_anim(bot: &Client, shared: &Arc<SharedMutex>, pos: azalea::Vec3) -> HumanoidAnim {
+fn tick_local_anim(
+    bot: &Client,
+    shared: &Arc<SharedMutex>,
+    pos: azalea::Vec3,
+) -> (HumanoidAnim, TickReads) {
     use azalea::entity::Pose;
     use azalea::entity::metadata;
 
-    let (yaw, camera_pitch, sprinting, attacking, main_hand, off_hand, armor, prefs) = {
+    let (yaw, camera_pitch, sprinting, attacking, main_hand, off_hand, armor, prefs, reads) = {
         let s = shared.lock().unwrap();
         let hand = |i: usize| {
             s.session
@@ -1201,6 +1281,14 @@ fn tick_local_anim(bot: &Client, shared: &Arc<SharedMutex>, pos: azalea::Vec3) -
             hand(9),
             s.session.armor,
             s.skin_prefs,
+            TickReads {
+                #[cfg(feature = "skins")]
+                skin_parts: s.skin_prefs.skin_parts,
+                advanced_tooltips: s.session.advanced_tooltips,
+                fov_previous: s.session.fov.cur,
+                fov_effects: s.session.fov.effects,
+                first_person: s.session.fov.first_person,
+            },
         )
     };
     let pose = bot.component::<Pose>().ok().map(|p| *p).unwrap_or_default();
@@ -1241,7 +1329,16 @@ fn tick_local_anim(bot: &Client, shared: &Arc<SharedMutex>, pos: azalea::Vec3) -
         anim.swing(prefs.main_hand_left);
     }
     anim.tick(input);
-    anim.clone()
+    (anim.clone(), reads)
+}
+
+struct TickReads {
+    #[cfg(feature = "skins")]
+    skin_parts: u8,
+    advanced_tooltips: bool,
+    fov_previous: f32,
+    fov_effects: f32,
+    first_person: bool,
 }
 
 fn avatar_metadata_trusted() -> bool {

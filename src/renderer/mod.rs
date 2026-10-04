@@ -5,6 +5,7 @@ pub mod dimension;
 pub mod entity_material;
 pub mod environment;
 pub mod esp_material;
+pub mod frame_view;
 pub mod hand;
 pub mod input;
 pub mod intent;
@@ -17,7 +18,9 @@ pub mod occlusion;
 mod occupancy;
 pub mod overlays;
 #[cfg(feature = "shader_support")]
-pub mod packmaterial;
+pub mod packdraw;
+#[cfg(feature = "shader_support")]
+pub mod packvertex;
 pub mod panorama;
 pub mod player_model;
 pub mod post;
@@ -33,9 +36,8 @@ pub mod visgraph;
 pub mod world_text;
 
 pub use anim::{AnimInput, Armor, HeldItem, HumanoidAnim};
-pub use atlas::{
-    Textures, build_block_atlas, build_item_ui_atlas, placeholder_atlas, texture_is_opaque,
-};
+pub use atlas::{Textures, build_block_atlas, placeholder_atlas, texture_is_opaque};
+pub use frame_view::{FrameView, FrameViewSystems};
 pub use mesh::{
     MeshBuf, build_section_mesh, lighting_enabled, set_lighting_enabled, set_smooth_lighting,
     smooth_lighting_enabled,
@@ -45,6 +47,10 @@ pub use systems::{Shared, run};
 
 pub const ATLAS_COLS: u32 = 16;
 pub const TILE_PX: u32 = 16;
+
+pub fn atlas_rows(atlas: &bevy::image::Image) -> u32 {
+    (atlas.height() * ATLAS_COLS / atlas.width().max(1)).max(1)
+}
 
 pub(crate) fn rgba_image(
     width: u32,
@@ -72,7 +78,12 @@ pub(crate) fn rgba_image(
 #[derive(Clone, Debug)]
 pub enum BlockGeom {
     Model(std::sync::Arc<crate::blocks::BakedBlock>),
-    Fluid { amount: u8, still: u32, flow: u32 },
+    Fluid {
+        amount: u8,
+        still: u32,
+        flow: u32,
+        lava: bool,
+    },
 }
 
 pub fn fluid_surface(amount: u8) -> f32 {
@@ -87,6 +98,7 @@ pub enum TintKind {
     Foliage,
     DryFoliage,
     Redstone(u8),
+    Water,
 }
 
 #[derive(Clone)]
@@ -102,6 +114,10 @@ pub struct RenderedBlock {
     pub offset: crate::blocks::rand::ShapeOffset,
     #[cfg(feature = "builtin_shaders")]
     pub sways: bool,
+    #[cfg(feature = "shader_support")]
+    pub state: u16,
+    #[cfg(feature = "shader_support")]
+    pub translucent: bool,
 }
 
 pub struct PendingSection {

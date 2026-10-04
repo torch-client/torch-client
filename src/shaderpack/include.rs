@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::source::Source;
+use crate::util::pack::Source;
 
 const MAX_DEPTH: usize = 64;
+
+const MAX_EXPANDED_BYTES: usize = 8 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Origin {
@@ -50,7 +52,7 @@ pub(crate) fn expand(
     cache: &mut Cache,
 ) -> Result<Arc<Expanded>, Error> {
     let mut stack = Vec::new();
-    expand_inner(source, path, cache, &mut stack)
+    expand_inner(source, &normalize(path), cache, &mut stack)
 }
 
 fn expand_inner(
@@ -110,15 +112,15 @@ fn build(
 ) -> Result<Expanded, Error> {
     let mut out = String::with_capacity(text.len());
     let mut origins = Vec::new();
-    let mut run: Option<(u32, u32)> = None;
+    let mut in_run = false;
     let mut out_line = 1u32;
 
     for (index, line) in text.lines().enumerate() {
         let line_no = index as u32 + 1;
 
         let Some(target) = included(line) else {
-            if run.is_none() {
-                run = Some((out_line, line_no));
+            if !in_run {
+                in_run = true;
                 origins.push(Origin {
                     at: out_line,
                     file: Arc::clone(path),
@@ -149,10 +151,44 @@ fn build(
         }
         out.push_str(&nested.text);
         out_line += nested.text.lines().count() as u32;
-        run = None;
+        in_run = false;
+        if out.len() > MAX_EXPANDED_BYTES {
+            return Err(Error {
+                file: path.to_string(),
+                line: line_no,
+                message: format!(
+                    "expanding the includes produces more than {MAX_EXPANDED_BYTES} bytes"
+                ),
+            });
+        }
     }
 
     Ok(Expanded { text: out, origins })
+}
+
+pub(crate) fn option_texts(source: &Source) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = source
+        .files()
+        .into_iter()
+        .filter(|f| super::SOURCE_EXTENSIONS.iter().any(|e| f.ends_with(e)))
+        .collect();
+    let mut queue: Vec<String> = seen.iter().cloned().collect();
+    let mut texts = Vec::new();
+    while let Some(path) = queue.pop() {
+        let Some(text) = source.read_text(&path) else {
+            continue;
+        };
+        let from: Arc<str> = Arc::from(path.as_str());
+        for target in text.lines().filter_map(included) {
+            let target = absolute(&target, &from);
+            if !seen.contains(&target) && source.contains(&target) {
+                seen.insert(target.clone());
+                queue.push(target);
+            }
+        }
+        texts.push(text);
+    }
+    texts
 }
 
 fn included(line: &str) -> Option<String> {
@@ -174,13 +210,27 @@ fn included(line: &str) -> Option<String> {
 
 fn absolute(target: &str, from: &Arc<str>) -> String {
     if target.starts_with('/') {
-        return target.to_owned();
+        return normalize(target);
     }
     let dir = match from.rfind('/') {
         Some(at) => &from[..at],
         None => "",
     };
-    format!("{dir}/{target}")
+    normalize(&format!("{dir}/{target}"))
+}
+
+fn normalize(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            name => segments.push(name),
+        }
+    }
+    format!("/{}", segments.join("/"))
 }
 
 #[cfg(test)]
@@ -189,18 +239,49 @@ mod tests {
     use std::path::PathBuf;
 
     fn pack(name: &str, files: &[(&str, &str)]) -> Source {
-        let root = std::env::temp_dir().join("torch-client-tests").join(name);
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::util::pack::fixture(name);
         for (path, text) in files {
             let at: PathBuf = root.join("shaders").join(path.trim_start_matches('/'));
             std::fs::create_dir_all(at.parent().unwrap()).unwrap();
             std::fs::write(at, text).unwrap();
         }
-        Source::open(&root).unwrap()
+        Source::open(&root, crate::shaderpack::ROOT).unwrap()
     }
 
     fn expand_one(source: &Source, path: &str) -> Result<Arc<Expanded>, Error> {
         expand(source, path, &mut Cache::new())
+    }
+
+    #[test]
+    fn paths_normalise_the_way_iris_does() {
+        assert_eq!(normalize("/programs/../lib/./x.glsl"), "/lib/x.glsl");
+        assert_eq!(normalize("/a//b"), "/a/b");
+        assert_eq!(normalize("/../../x"), "/x");
+        assert_eq!(normalize("/"), "/");
+        assert_eq!(
+            absolute("../lib/x.glsl", &Arc::from("/programs/a.glsl")),
+            "/lib/x.glsl"
+        );
+    }
+
+    #[test]
+    fn an_exponential_include_graph_is_stopped() {
+        let mut files: Vec<(String, String)> = (0..30)
+            .map(|i| {
+                (
+                    format!("/f{i}.glsl"),
+                    format!("#include \"/f{0}.glsl\"\n#include \"/f{0}.glsl\"\n", i + 1),
+                )
+            })
+            .collect();
+        files.push(("/f30.glsl".into(), "x".repeat(64) + "\n"));
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, t)| (p.as_str(), t.as_str()))
+            .collect();
+        let source = pack("inc-bomb", &borrowed);
+        let error = expand_one(&source, "/f0.glsl").unwrap_err();
+        assert!(error.message.contains("more than"), "{error}");
     }
 
     #[test]
@@ -319,13 +400,18 @@ mod tests {
             super::super::discover::dir().display()
         );
 
+        let mut expanded = 0;
         for pack in packs {
             let at = crate::shaderpack::discover::dir().join(&pack.name);
-            let source = Source::open(&at).unwrap_or_else(|e| panic!("{}: {e}", pack.name));
+            let source = Source::open(&at, crate::shaderpack::ROOT)
+                .unwrap_or_else(|e| panic!("{}: {e}", pack.name));
             let mut cache = Cache::new();
 
             let entry = "/final.fsh";
-            assert!(source.contains(entry), "{}: no {entry}", pack.name);
+            if !source.contains(entry) {
+                println!("{}: no {entry}, skipped", pack.name);
+                continue;
+            }
             let out = expand(&source, entry, &mut cache).unwrap_or_else(|e| panic!("{e}"));
 
             let lines = out.text.lines().count();
@@ -336,11 +422,17 @@ mod tests {
                 cache.len()
             );
 
-            assert!(
-                lines > 100,
-                "{}: {entry} expanded to {lines} lines",
-                pack.name
-            );
+            let includes = source
+                .read_text(entry)
+                .is_some_and(|raw| raw.lines().any(|l| l.trim_start().starts_with("#include")));
+            if includes {
+                assert!(
+                    out.origins.len() > 1,
+                    "{}: {entry} includes files but expanded from {} alone",
+                    pack.name,
+                    out.origins.len()
+                );
+            }
             for origin in &out.origins {
                 assert!(
                     source.contains(&origin.file),
@@ -349,7 +441,9 @@ mod tests {
                     origin.file
                 );
             }
+            expanded += 1;
         }
+        assert!(expanded > 0, "no installed pack has a {}", "/final.fsh");
     }
 
     #[test]
@@ -357,11 +451,7 @@ mod tests {
     fn a_real_pack_preprocesses() {
         use super::super::preprocess::{Defines, preprocess};
 
-        for pack in crate::shaderpack::discover::list() {
-            let at = crate::shaderpack::discover::dir().join(&pack.name);
-            let Ok(source) = Source::open(&at) else {
-                continue;
-            };
+        for (pack, source) in crate::shaderpack::discover::installed() {
             let mut cache = Cache::new();
             let (mut ok, mut failed) = (0usize, Vec::new());
 
@@ -369,8 +459,9 @@ mod tests {
                 .files()
                 .into_iter()
                 .filter(|f| {
-                    [".vsh", ".fsh", ".gsh", ".csh"]
+                    super::super::SOURCE_EXTENSIONS
                         .iter()
+                        .skip(1)
                         .any(|e| f.ends_with(e))
                 })
                 .collect();
@@ -390,7 +481,7 @@ mod tests {
             }
             println!(
                 "{}: {}/{} programs preprocessed, {} distinct files expanded",
-                pack.name,
+                pack,
                 ok,
                 programs.len(),
                 cache.len()

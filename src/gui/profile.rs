@@ -30,7 +30,6 @@ const CONTENT_PAD: f32 = 2.0;
 const ICON_SIZE: f32 = 32.0;
 const TEXT_INSET: f32 = ICON_SIZE + 3.0;
 const SCROLLBAR_W: f32 = 6.0;
-const SCROLLBAR_MIN_H: f32 = 32.0;
 const BUTTON_GAP: f32 = 4.0;
 const LOWER_ROW_BUTTON_W: f32 = 74.0;
 const BAR_W: f32 = 3.0 * LOWER_ROW_BUTTON_W + 2.0 * BUTTON_GAP;
@@ -310,48 +309,17 @@ fn draw_scrollbar(
     list_h: f32,
     locked: bool,
 ) {
-    let (_, ly, _, _) = LAYOUT.content_rect(ctx.vw, ctx.vh);
     let st = &mut state.profile;
-    let max = st.max_scroll(list_h);
-
-    if !locked {
-        if ctx.input.scroll != 0.0 && ctx.mouse().is_some() {
-            st.scroll -= ctx.input.scroll * (ROW_H / 2.0);
-        }
-        if ctx.input.left_release {
-            st.scrollbar_drag = false;
-        }
-    }
-    if max <= 0.0 {
-        st.scroll = 0.0;
-        st.scrollbar_drag = false;
-        return;
-    }
-
-    let x = scrollbar_x(ctx.vw);
-    let thumb_h = ((list_h * list_h) / st.content_height()).clamp(SCROLLBAR_MIN_H, list_h - 8.0);
-
-    #[cfg(feature = "mobile_ui")]
-    if !locked {
-        let over_bar = ctx.hovering(x, ly, SCROLLBAR_W, list_h);
-        crate::gui::options::content_drag(&mut st.scroll, ctx, ly, list_h, over_bar, max);
-    }
-
-    if !locked && ctx.input.left_click && ctx.hovering(x, ly, SCROLLBAR_W, list_h) {
-        st.scrollbar_drag = true;
-    }
-    if st.scrollbar_drag
-        && ctx.input.left_down
-        && let Some(m) = ctx.mouse()
-    {
-        let travel = (list_h - thumb_h).max(1.0);
-        st.scroll = ((m.y - ly - thumb_h / 2.0) / travel * max).clamp(0.0, max);
-    }
-    st.clamp_scroll(list_h);
-
-    let thumb_y = ly + st.scroll / max * (list_h - thumb_h);
-    p.sprite("widget/scroller_background", x, ly, SCROLLBAR_W, list_h);
-    p.sprite("widget/scroller", x, thumb_y, SCROLLBAR_W, thumb_h);
+    let content_h = st.content_height();
+    crate::gui::multiplayer::list_scrollbar(
+        p,
+        ctx,
+        &mut st.scroll,
+        &mut st.scrollbar_drag,
+        content_h,
+        list_h,
+        locked,
+    );
 }
 
 fn draw_footer(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locked: bool) {

@@ -293,7 +293,6 @@ struct SharedMaterial {
 struct BeAssets {
     models: HashMap<(usize, u64), GpuModel>,
     images: HashMap<String, Option<Handle<Image>>>,
-    font: Option<Handle<Image>>,
     materials: HashMap<BeMaterialKey, SharedMaterial>,
     epoch: u64,
 }
@@ -415,7 +414,7 @@ struct LayerRig {
 struct BeRig {
     kind: BlockEntityKind,
     layers: Vec<LayerRig>,
-    keyed: Option<(u64, bool)>,
+    keyed: Option<(u64, bool, Option<u64>)>,
 }
 
 #[derive(Resource, Default)]
@@ -424,6 +423,7 @@ pub struct BeRigs {
     snapshot: Arc<HashMap<[i32; 3], BlockEntityInfo>>,
     version: u64,
     lights: crate::renderer::lightmap::LightCells,
+    preview: Option<(u64, u64, Arc<BlockEntityData>)>,
 }
 
 impl BeRigs {
@@ -433,7 +433,7 @@ impl BeRigs {
 }
 
 #[derive(Component)]
-struct BeRigNode;
+pub(crate) struct BeRigNode;
 
 pub struct BlockEntityPlugin;
 
@@ -464,6 +464,7 @@ fn sync_block_entities(
     mut nodes: Query<(&mut Transform, &mut Visibility), With<BeRigNode>>,
     mut mats: Query<&mut MeshMaterial3d<EntityMaterial>>,
     lightmap: Res<crate::renderer::systems::LightmapState>,
+    gui_state: Option<Res<crate::gui::GuiState>>,
     #[cfg(feature = "skins")] skins: Res<crate::renderer::skin::SkinTextures>,
 ) {
     crate::prof_span!("render:sync_block_entities");
@@ -490,6 +491,11 @@ fn sync_block_entities(
     let rigs = &mut *rigs;
     let live = &mut rigs.live;
     let lights = &mut rigs.lights;
+    let preview_cache = &mut rigs.preview;
+    let preview = gui_state.as_deref().and_then(|gui| gui.sign_edit.preview());
+    if preview.is_none() {
+        *preview_cache = None;
+    }
 
     let light_map = crate::client::worldsync::light_map().read();
     lights.begin(&lightmap.current);
@@ -528,11 +534,27 @@ fn sync_block_entities(
             continue;
         }
         let draw_outline = distance_sq < SIGN_OUTLINE_DISTANCE * SIGN_OUTLINE_DISTANCE;
+        let preview = preview.filter(|p| p.pos == *pos && p.applies(info.rev));
+        let data = match preview {
+            Some(p) => {
+                let fresh = matches!(
+                    preview_cache,
+                    Some((generation, rev, _)) if *generation == p.generation && *rev == info.rev
+                );
+                if !fresh {
+                    *preview_cache = Some((p.generation, info.rev, Arc::new(p.apply(&info.data))));
+                }
+                preview_cache
+                    .as_ref()
+                    .map_or_else(|| info.data.clone(), |(_, _, data)| data.clone())
+            }
+            None => info.data.clone(),
+        };
         let st = BeState {
             pos: *pos,
             kind: info.kind,
             state: info.state.clone(),
-            data: info.data.clone(),
+            data,
             open: combined_openness(info, &snapshot, partial),
             anim: skull_anim(info, partial),
             draw_outline,
@@ -547,7 +569,7 @@ fn sync_block_entities(
             layers: Vec::new(),
             keyed: None,
         });
-        let want_keyed = (info.rev, draw_outline);
+        let want_keyed = (info.rev, draw_outline, preview.map(|p| p.generation));
         let keys_may_have_changed = rig.keyed != Some(want_keyed);
         rig.keyed = Some(want_keyed);
 
@@ -571,11 +593,13 @@ fn sync_block_entities(
                 &st,
                 lit_for(spec, &st, cell, dirs),
                 (!(spec.full_bright)(&st)).then_some(levels),
-                &mut assets,
-                &mut meshes,
-                &mut images,
-                &mut materials,
-                &gui.atlas,
+                LayerSinks {
+                    assets: &mut assets,
+                    meshes: &mut meshes,
+                    images: &mut images,
+                    materials: &mut materials,
+                    gui: &*gui,
+                },
             );
             if let Some(layer) = layer {
                 rig.layers.push(layer);
@@ -730,6 +754,14 @@ fn block_entity_levels(
     (block, sky)
 }
 
+struct LayerSinks<'a> {
+    assets: &'a mut BeAssets,
+    meshes: &'a mut Assets<Mesh>,
+    images: &'a mut Assets<Image>,
+    materials: &'a mut Assets<EntityMaterial>,
+    gui: &'a crate::gui::render::GuiAssets,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_layer(
     commands: &mut Commands,
@@ -739,12 +771,15 @@ fn spawn_layer(
     st: &BeState,
     lit: Lit,
     levels: Option<(u8, u8)>,
-    assets: &mut BeAssets,
-    meshes: &mut Assets<Mesh>,
-    images: &mut Assets<Image>,
-    materials: &mut Assets<EntityMaterial>,
-    atlas: &Arc<crate::gui::atlas::GuiAtlas>,
+    sinks: LayerSinks<'_>,
 ) -> Option<LayerRig> {
+    let LayerSinks {
+        assets,
+        meshes,
+        images,
+        materials,
+        gui,
+    } = sinks;
     match &spec.geom {
         BeGeom::Model(geom) => {
             let texture = (geom.texture)(st);
@@ -801,13 +836,10 @@ fn spawn_layer(
             })
         }
         BeGeom::Built(geom) => {
-            let mesh = (geom.build)(st, atlas)?;
+            let mesh = (geom.build)(st, &gui.atlas)?;
             let image = match &geom.texture {
                 BuiltTexture::Entity(path) => assets.image(&(path)(st), images)?,
-                BuiltTexture::Font => assets
-                    .font
-                    .get_or_insert_with(|| gui_atlas_image(atlas, images))
-                    .clone(),
+                BuiltTexture::Font => gui.image.clone(),
             };
             let (root, node) = spawn_roots(commands, spec, st);
             let material = assets.material(spec, Some(image.clone()), levels, lit, materials);
@@ -867,29 +899,6 @@ fn blend_modes(spec: &BeSpec) -> (AlphaMode, f32) {
         BeGeom::Model(_) => cutoff,
     };
     (alpha_mode, cutoff)
-}
-
-fn gui_atlas_image(
-    atlas: &Arc<crate::gui::atlas::GuiAtlas>,
-    images: &mut Assets<Image>,
-) -> Handle<Image> {
-    use bevy::asset::RenderAssetUsages;
-    use bevy::image::ImageSampler;
-    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-
-    let mut image = Image::new(
-        Extent3d {
-            width: atlas.image.width(),
-            height: atlas.image.height(),
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        atlas.image.as_raw().clone(),
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.sampler = ImageSampler::nearest();
-    images.add(image)
 }
 
 fn apply_layer(

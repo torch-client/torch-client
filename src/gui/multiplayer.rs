@@ -457,45 +457,66 @@ fn draw_icon_overlay(
 }
 
 fn draw_scrollbar(p: &mut Painter, st: &mut MenuState, ctx: &ScreenCtx, list_h: f32, locked: bool) {
+    let content_h = st.content_height();
+    list_scrollbar(
+        p,
+        ctx,
+        &mut st.scroll,
+        &mut st.scrollbar_drag,
+        content_h,
+        list_h,
+        locked,
+    );
+}
+
+pub(in crate::gui) fn list_scrollbar(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    scroll: &mut f32,
+    bar_drag: &mut bool,
+    content_h: f32,
+    list_h: f32,
+    locked: bool,
+) {
     let (_, ly, _, _) = list_rect(ctx.vw, ctx.vh);
-    let max = st.max_scroll(list_h);
+    let max = (content_h - list_h).max(0.0);
 
     if !locked {
         if ctx.input.scroll != 0.0 && ctx.mouse().is_some() {
-            st.scroll -= ctx.input.scroll * (ROW_H / 2.0);
+            *scroll -= ctx.input.scroll * (ROW_H / 2.0);
         }
         if ctx.input.left_release {
-            st.scrollbar_drag = false;
+            *bar_drag = false;
         }
     }
     if max <= 0.0 {
-        st.scroll = 0.0;
-        st.scrollbar_drag = false;
+        *scroll = 0.0;
+        *bar_drag = false;
         return;
     }
 
     let x = scrollbar_x(ctx.vw);
-    let thumb_h = ((list_h * list_h) / st.content_height()).clamp(SCROLLBAR_MIN_H, list_h - 8.0);
+    let thumb_h = ((list_h * list_h) / content_h).clamp(SCROLLBAR_MIN_H, list_h - 8.0);
 
     #[cfg(feature = "mobile_ui")]
     if !locked {
         let over_bar = ctx.hovering(x, ly, SCROLLBAR_W, list_h);
-        crate::gui::options::content_drag(&mut st.scroll, ctx, ly, list_h, over_bar, max);
+        crate::gui::options::content_drag(scroll, ctx, ly, list_h, over_bar, max);
     }
 
     if !locked && ctx.input.left_click && ctx.hovering(x, ly, SCROLLBAR_W, list_h) {
-        st.scrollbar_drag = true;
+        *bar_drag = true;
     }
-    if st.scrollbar_drag
+    if *bar_drag
         && ctx.input.left_down
         && let Some(m) = ctx.mouse()
     {
         let travel = (list_h - thumb_h).max(1.0);
-        st.scroll = ((m.y - ly - thumb_h / 2.0) / travel * max).clamp(0.0, max);
+        *scroll = ((m.y - ly - thumb_h / 2.0) / travel * max).clamp(0.0, max);
     }
-    st.clamp_scroll(list_h);
+    *scroll = scroll.clamp(0.0, max);
 
-    let thumb_y = ly + st.scroll / max * (list_h - thumb_h);
+    let thumb_y = ly + *scroll / max * (list_h - thumb_h);
     p.sprite("widget/scroller_background", x, ly, SCROLLBAR_W, list_h);
     p.sprite("widget/scroller", x, thumb_y, SCROLLBAR_W, thumb_h);
 }
@@ -733,9 +754,12 @@ pub fn draw_direct(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         0xFFFFFF,
         true,
     );
-    p.text_str(ADDRESS_LABEL, x + 1.0, 100.0, 0xA0A0A0, true);
+    #[cfg(feature = "mobile_ui")]
+    let (label_y, field_y) = (53.0, 66.0);
+    #[cfg(not(feature = "mobile_ui"))]
+    let (label_y, field_y) = (100.0, 116.0);
+    p.text_str(ADDRESS_LABEL, x + 1.0, label_y, 0xA0A0A0, true);
 
-    let field_y = 116.0;
     state
         .menu
         .direct

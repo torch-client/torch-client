@@ -1,9 +1,9 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use super::props::{self, LightProps};
 use super::sources::SkySources;
 use super::storage::{Layer, LightStorage};
-use super::{ColumnPos, Direction, MAX_LEVEL, SectionPos};
+use super::{ColumnPos, Direction, FastSet, MAX_LEVEL, SectionPos};
 
 pub type Node = (i32, i32, i32);
 
@@ -139,7 +139,7 @@ fn state_props<W: LightWorld>(world: &W, x: i32, y: i32, z: i32) -> &'static Lig
 
 pub struct LightEngine {
     pub storage: LightStorage,
-    nodes_to_check: HashSet<Node>,
+    nodes_to_check: FastSet<Node>,
     increase: VecDeque<(Node, u32)>,
     decrease: VecDeque<(Node, u32)>,
 }
@@ -148,7 +148,7 @@ impl LightEngine {
     pub fn new(layer: Layer) -> Self {
         Self {
             storage: LightStorage::new(layer),
-            nodes_to_check: HashSet::new(),
+            nodes_to_check: FastSet::default(),
             increase: VecDeque::new(),
             decrease: VecDeque::new(),
         }

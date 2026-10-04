@@ -14,7 +14,6 @@ use crate::client::{
     bossbar, chat_recv, chat_sign, cooldowns, packets, tablist, tick, viewwindow, worldsync,
 };
 use crate::play::{flight, no_fall};
-use crate::session::SessionState;
 use crate::{blockentities, lighting};
 
 static USERNAME: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
@@ -250,7 +249,7 @@ pub(crate) fn start_bot(address: String) {
     if let Err(reason) = crate::platform::address::check(&address) {
         log_error!("net", "{reason}");
         if let Some(shared) = SHARED.get() {
-            shared.lock().unwrap().session.status = reason;
+            shared.lock().unwrap().session.status = Some(reason.into());
         }
         return;
     }
@@ -263,14 +262,15 @@ pub(crate) fn start_bot(address: String) {
     }
     log_info!("net", "connecting to {address}");
     let generation = BOT_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
-    crate::diag::clear_session_killed();
     if let Some(shared) = SHARED.get() {
         let mut s = shared.lock().unwrap();
-        s.session.status = format!("Connecting to {address}...");
+        s.session.status = Some(format!("Connecting to {address}...").into());
         s.session.current_address = Some(address.clone());
         s.disconnect_requested = false;
         s.quit_requested = false;
         s.reload_chunks_requested = false;
+        s.session_ended = false;
+        s.end_notice = None;
     }
     #[cfg(target_arch = "wasm32")]
     let spawn_connection = |body: Box<dyn FnOnce() + 'static>| {
@@ -290,8 +290,12 @@ pub(crate) fn start_bot(address: String) {
             false
         }
     };
+    crate::platform::notify::connected(&address);
+    crate::diag::set_watching(true);
     let spawned = spawn_connection(Box::new(move || {
-        struct BotThreadObituary;
+        struct BotThreadObituary {
+            generation: u64,
+        }
         impl Drop for BotThreadObituary {
             fn drop(&mut self) {
                 if let Ok(mut live) = LIVE_CLIENT.try_lock() {
@@ -305,26 +309,47 @@ pub(crate) fn start_bot(address: String) {
                         "net",
                         "the bot thread is unwinding from a panic: the connection is gone and \
                          no further packet will be read or answered. The panic report above is \
-                         the cause; the window will stay up and stay empty until you reconnect."
+                         the cause."
                     );
                 } else {
                     log_warn!(
                         "net",
                         "the bot thread has ended, so no further packet will be read or \
-                         answered. The window will stay up and stay empty until you reconnect."
+                         answered."
                     );
                 }
+                if BOT_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != self.generation {
+                    let _ = LEAKED_BOT_THREADS.fetch_update(
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                        |n| Some(n.saturating_sub(1)),
+                    );
+                    return;
+                }
+                let (first, notice) = SHARED.get().map_or((false, None), |shared| {
+                    let mut s = shared.lock().unwrap();
+                    let first = s.end_session("Connection lost".to_string(), None);
+                    (first, s.end_notice.take())
+                });
+                if first {
+                    reset_session_side_tables(false);
+                }
+                crate::client::worker::reset_biome_table();
+                crate::platform::notify::disconnected(notice.as_deref());
+                crate::diag::set_watching(false);
+                BOT_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }
-        let _obituary = BotThreadObituary;
         crate::platform::executor::spawn(async move {
+            let _obituary = BotThreadObituary { generation };
             #[cfg(feature = "online_mode")]
             let account = match crate::client::auth::account().await {
                 Ok(account) => account,
                 Err(reason) => {
                     log_error!("net", "{reason}");
                     if let Some(shared) = SHARED.get() {
-                        shared.lock().unwrap().session.status = reason;
+                        let spans = crate::text::parse_formatted(&reason);
+                        shared.lock().unwrap().end_session(reason, Some(spans));
                     }
                     return;
                 }
@@ -344,7 +369,9 @@ pub(crate) fn start_bot(address: String) {
                 Err(e) => {
                     log_error!("net", "could not reach {address}: {e}");
                     if let Some(shared) = SHARED.get() {
-                        shared.lock().unwrap().session.status = format!("Could not connect: {e}");
+                        let status = format!("Could not connect: {e}");
+                        let spans = crate::text::parse_formatted(&status);
+                        shared.lock().unwrap().end_session(status, Some(spans));
                     }
                     return;
                 }
@@ -365,24 +392,15 @@ pub(crate) fn start_bot(address: String) {
                 azalea::app::AppExit::Error(code) => log_error!("net", "azalea exited: {code:?}"),
             }
         });
-        if BOT_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation {
-            BOT_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
-            crate::client::worker::reset_biome_table();
-        } else {
-            let _ = LEAKED_BOT_THREADS.fetch_update(
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-                |n| Some(n.saturating_sub(1)),
-            );
-        }
     }));
     if !spawned {
+        crate::platform::notify::disconnected(None);
+        crate::diag::set_watching(false);
         BOT_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(shared) = SHARED.get() {
-            let mut s = shared.lock().unwrap();
-            s.session.status = "Could not start the connection thread".to_string();
-            s.session.current_address = None;
-            s.disconnected_pending = true;
+            let status = "Could not start the connection thread".to_string();
+            let spans = crate::text::parse_formatted(&status);
+            shared.lock().unwrap().end_session(status, Some(spans));
         }
     }
 }
@@ -418,8 +436,7 @@ async fn handle_event(
 ) -> eyre::Result<()> {
     match event {
         Event::Init => {
-            viewwindow::apply_render_distance_request(&bot, shared);
-            viewwindow::apply_skin_prefs_request(&bot, shared);
+            viewwindow::apply_client_information_requests(&bot, shared);
         }
         Event::Login => {
             crate::diag::on_connected();
@@ -430,16 +447,21 @@ async fn handle_event(
                 "net",
                 "connected; waiting for the server to stream the world"
             );
-            shared.lock().unwrap().session.status = "Connected — waiting for chunks...".to_string();
+            shared.lock().unwrap().session.status =
+                Some("Connected — waiting for chunks...".into());
         }
         Event::Spawn => {
             crate::diag::on_spawned();
             log_info!("net", "spawned; the world is up");
             let mut s = shared.lock().unwrap();
+            if s.session_ended {
+                return Ok(());
+            }
             s.in_world = true;
             if let Ok(pos) = bot.position() {
                 s.session.player_pos = [pos.x as f32, pos.y as f32, pos.z as f32];
-                s.session.status = format!("Spawned at ({:.1},{:.1},{:.1})", pos.x, pos.y, pos.z);
+                s.session.status =
+                    Some(format!("Spawned at ({:.1},{:.1},{:.1})", pos.x, pos.y, pos.z).into());
             }
         }
         Event::Tick => tick::handle_tick(&bot, shared),
@@ -471,14 +493,10 @@ async fn handle_event(
                 );
                 return Ok(());
             };
-            s.in_world = false;
-            s.disconnected_pending = true;
-            s.disconnect_reason = reason.as_ref().map(crate::client::chat_text::to_spans);
-            let health_epoch = s.session.health_epoch;
-            s.session = SessionState::default();
-            s.session.health_epoch = health_epoch;
-            s.session.clear_chunks = true;
-            s.session.status = format!("Disconnected: {}", msg);
+            s.end_session(
+                format!("Disconnected: {}", msg),
+                reason.as_ref().map(crate::client::chat_text::to_spans),
+            );
             if let Some(FormattedText::Translatable(t)) = &reason
                 && matches!(
                     t.key.as_str(),
@@ -503,13 +521,9 @@ async fn handle_event(
                 );
                 return Ok(());
             };
-            s.in_world = false;
-            s.disconnected_pending = true;
-            let health_epoch = s.session.health_epoch;
-            s.session = SessionState::default();
-            s.session.health_epoch = health_epoch;
-            s.session.clear_chunks = true;
-            s.session.status = format!("Connection failed: {}", err);
+            let status = format!("Connection failed: {}", err);
+            let spans = crate::text::parse_formatted(&status);
+            s.end_session(status, Some(spans));
             drop(s);
         }
         _ => {}
@@ -548,7 +562,30 @@ fn reset_session_side_tables(blocking: bool) {
             m.clear();
         }
     }
+    {
+        fn clear<T: Default>(map: &crate::session::SideMutex<T>) {
+            if let Ok(mut guard) = map.try_lock() {
+                *guard = T::default();
+            }
+        }
+        use crate::client::tracking::{
+            add_entity_data, crit_hits, entity_anims, meta_dirty, meta_index_18, mount_attributes,
+            on_grounds, passengers, velocities,
+        };
+        clear(entity_anims());
+        clear(mount_attributes());
+        clear(meta_index_18());
+        clear(meta_dirty());
+        clear(on_grounds());
+        clear(velocities());
+        clear(add_entity_data());
+        clear(passengers());
+        clear(crit_hits());
+    }
+    crate::client::tracking::LOCAL_ENTITY_ID.store(i32::MIN, std::sync::atomic::Ordering::Relaxed);
     crate::play::riding::reset(blocking);
+    crate::play::interaction::reset_session_state();
+    tick::reset_session_locals(blocking);
 
     tablist::reset();
     bossbar::reset();
@@ -567,12 +604,8 @@ pub(crate) fn request_disconnect() {
 
     let mut s = shared.lock().unwrap();
     s.disconnect_requested = true;
-    s.in_world = false;
-    let health_epoch = s.session.health_epoch;
-    s.session = SessionState::default();
-    s.session.health_epoch = health_epoch;
-    s.session.clear_chunks = true;
-    s.session.status = "Disconnected".to_string();
+    s.session_ended = true;
+    s.clear_session("Disconnected".to_string());
 }
 
 pub(crate) fn force_disconnect() -> bool {
@@ -582,15 +615,12 @@ pub(crate) fn force_disconnect() -> bool {
     let Ok(mut s) = shared.try_lock() else {
         return false;
     };
-    s.disconnect_requested = true;
-    s.in_world = false;
-    s.disconnected_pending = true;
-    s.disconnect_by_player = true;
-    let health_epoch = s.session.health_epoch;
-    s.session = SessionState::default();
-    s.session.health_epoch = health_epoch;
-    s.session.clear_chunks = true;
-    s.session.status = "Disconnected (bot thread stalled)".to_string();
+    let status = "Disconnected (bot thread stalled)".to_string();
+    let spans = crate::text::parse_formatted(
+        "The connection stopped responding and was closed by the client.",
+    );
+    s.end_session(status, Some(spans));
+    let notice = s.end_notice.take();
     drop(s);
 
     if !close_connection() {
@@ -605,6 +635,8 @@ pub(crate) fn force_disconnect() -> bool {
     if let Ok(mut live) = LIVE_CLIENT.try_lock() {
         *live = None;
     }
+    crate::platform::notify::disconnected(notice.as_deref());
+    crate::diag::set_watching(false);
     BOT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     BOT_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
     LEAKED_BOT_THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

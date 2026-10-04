@@ -12,7 +12,7 @@ pub fn spoofing(velocity_y: f64, fall_flying: bool, mace: bool) -> bool {
     if !s.enabled(Id::NoFall) {
         return false;
     }
-    if mace && s.flag(Id::NoFall, setting::PAUSE_ON_MACE) {
+    if mace && s.flag(setting::PAUSE_ON_MACE) {
         return false;
     }
     if super::flight::forcing() {

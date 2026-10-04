@@ -67,10 +67,11 @@ fn protocol_for(version: &serde_json::Value) -> i32 {
     };
 
     let handshakes = data.get("handshakeVersions").and_then(|v| v.as_array());
-    let speaks_v5 = handshakes.is_none_or(|list| {
+    let speaks_ours = handshakes.is_none_or(|list| {
         list.iter()
             .filter_map(|v| v.as_i64())
-            .any(|v| v == super::handshake::HANDSHAKE_VERSION as i64)
+            .filter_map(|v| u16::try_from(v).ok())
+            .any(|v| super::handshake::HANDSHAKE_VERSIONS.contains(&v))
     });
 
     let range = data.get("protocolVersions");
@@ -92,7 +93,7 @@ fn protocol_for(version: &serde_json::Value) -> i32 {
     };
 
     match joined {
-        Some(protocol) if speaks_v5 => protocol,
+        Some(protocol) if speaks_ours => protocol,
         _ => max.unwrap_or(-1) as i32,
     }
 }

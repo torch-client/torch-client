@@ -6,6 +6,7 @@ use bevy::light::cluster::ClusterConfig;
 use bevy::prelude::*;
 
 use crate::items::mesh::Transform as ItemTransform;
+use crate::items::model::DisplayContext;
 use crate::renderer::anim::{
     AnimSample, HeldItem, UseAnimation, rot_lerp, use_animation, wrap_degrees,
 };
@@ -116,15 +117,11 @@ impl Hand {
         }
     }
 
-    pub fn left_hand(self, main_arm_left: bool) -> bool {
-        self.is_left(main_arm_left)
-    }
-
-    fn display_slot(self, main_arm_left: bool) -> &'static str {
+    fn display_context(self, main_arm_left: bool) -> DisplayContext {
         if self.is_left(main_arm_left) {
-            "firstperson_lefthand"
+            DisplayContext::FirstPersonLeftHand
         } else {
-            "firstperson_righthand"
+            DisplayContext::FirstPersonRightHand
         }
     }
 
@@ -736,6 +733,12 @@ const LEFT_ARM: ArmDef = ArmDef {
     z_rot: -0.1,
 };
 
+const ARM_COLOR: Option<[f32; 4]> = if cfg!(feature = "shader_support") {
+    Some([1.0; 4])
+} else {
+    None
+};
+
 fn arm_box_mesh(tex: [f32; 2], origin: [f32; 3], grow: f32) -> Mesh {
     super::skin::box_mesh(
         super::skin::SKIN_SHEET,
@@ -744,7 +747,7 @@ fn arm_box_mesh(tex: [f32; 2], origin: [f32; 3], grow: f32) -> Mesh {
         ARM_SIZE,
         grow,
         super::skin::MODEL_TO_BLOCKS,
-        None,
+        ARM_COLOR,
     )
 }
 
@@ -769,7 +772,7 @@ fn slim_arm_box_mesh(tex: [f32; 2], origin: [f32; 3], grow: f32) -> Mesh {
         SLIM_ARM_SIZE,
         grow,
         super::skin::MODEL_TO_BLOCKS,
-        None,
+        ARM_COLOR,
     )
 }
 
@@ -822,6 +825,10 @@ fn decoration_mesh(decorations: &[crate::session::MapDecoration]) -> Mesh {
 }
 
 #[derive(Component)]
+#[cfg_attr(
+    feature = "shader_support",
+    derive(Clone, bevy::render::extract_component::ExtractComponent)
+)]
 pub struct HandCamera;
 
 #[derive(Component)]
@@ -847,24 +854,66 @@ struct HandEntities {
     map_decorations: Entity,
 }
 
+struct UploadedItem {
+    item: HeldItem,
+    using: bool,
+    main_arm_left: bool,
+    transform: Option<ItemTransform>,
+}
+
+struct HandState {
+    nodes: HandEntities,
+    ramp: EquipRamp,
+    shown: HeldItem,
+    uploaded: Option<UploadedItem>,
+    item_used_seen: u32,
+    map_bound: Option<Handle<Image>>,
+    decorations_built: Option<(i32, u32)>,
+}
+
+impl HandState {
+    fn new(nodes: HandEntities) -> HandState {
+        HandState {
+            nodes,
+            ramp: EquipRamp::default(),
+            shown: HeldItem::default(),
+            uploaded: None,
+            item_used_seen: 0,
+            map_bound: None,
+            decorations_built: None,
+        }
+    }
+}
+
 #[derive(Resource)]
 struct HandRig {
-    hands: [HandEntities; 2],
-    ramps: [EquipRamp; 2],
+    hands: [HandState; 2],
     x_bob: ViewBob,
     y_bob: ViewBob,
-    shown: [HeldItem; 2],
     shown_slot: u8,
-    uploaded: [String; 2],
     last_tick: Option<f32>,
-    item_used_seen: [u32; 2],
-    map_bound: [Option<Handle<Image>>; 2],
-    decorations_built: [Option<(i32, u32)>; 2],
     main_arm_worn: Option<bool>,
     #[cfg(feature = "skins")]
     skin_worn: Option<crate::client::skins::SkinState>,
     #[cfg(feature = "skins")]
     skin_seen: u32,
+}
+
+impl HandRig {
+    fn new(hands: [HandEntities; 2]) -> HandRig {
+        HandRig {
+            hands: hands.map(HandState::new),
+            x_bob: ViewBob::default(),
+            y_bob: ViewBob::default(),
+            shown_slot: 0,
+            last_tick: None,
+            main_arm_worn: None,
+            #[cfg(feature = "skins")]
+            skin_worn: None,
+            #[cfg(feature = "skins")]
+            skin_seen: 0,
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -892,7 +941,12 @@ impl Plugin for HandPlugin {
             Update,
             setup_hand.run_if(resource_added::<crate::renderer::systems::AssetsReady>),
         )
-        .add_systems(Update, sync_hands.run_if(in_state(AppState::InGame)))
+        .add_systems(
+            Update,
+            sync_hands
+                .after(crate::renderer::frame_view::FrameViewSystems)
+                .run_if(in_state(AppState::InGame)),
+        )
         .add_systems(
             PostUpdate,
             follow_world_camera
@@ -903,6 +957,7 @@ impl Plugin for HandPlugin {
         app.add_systems(
             Update,
             bind_hand_arms
+                .after(crate::renderer::frame_view::FrameViewSystems)
                 .before(sync_hands)
                 .run_if(in_state(AppState::InGame)),
         );
@@ -910,7 +965,7 @@ impl Plugin for HandPlugin {
 }
 
 fn bind_hand_arms(
-    shared: Res<crate::renderer::systems::Shared>,
+    view: Res<crate::renderer::frame_view::FrameView>,
     assets: Option<Res<HandAssets>>,
     rig: Option<ResMut<HandRig>>,
     #[cfg(feature = "skins")] mut skins: ResMut<super::skin::SkinTextures>,
@@ -923,15 +978,13 @@ fn bind_hand_arms(
     };
     #[cfg(feature = "skins")]
     let generation = skins.generation();
-    let guard = shared.0.lock().unwrap();
-    let main_arm_left = guard.skin_prefs.main_hand_left;
+    let main_arm_left = view.main_hand_left;
     #[cfg(feature = "skins")]
-    let skin = guard.session.local_skin.clone();
-    drop(guard);
+    let skin = &view.local_skin;
 
     let arms_settled = rig.main_arm_worn == Some(main_arm_left);
     #[cfg(feature = "skins")]
-    let skin_settled = rig.skin_worn.as_ref() == Some(&skin) && rig.skin_seen == generation;
+    let skin_settled = rig.skin_worn.as_ref() == Some(skin) && rig.skin_seen == generation;
     #[cfg(not(feature = "skins"))]
     let skin_settled = true;
     if arms_settled && skin_settled {
@@ -964,7 +1017,7 @@ fn bind_hand_arms(
                 }
             }
         }
-        rig.skin_worn = Some(skin);
+        rig.skin_worn = Some(skin.clone());
     }
 
     if arms_settled && !slim_changed {
@@ -979,7 +1032,8 @@ fn bind_hand_arms(
     };
     #[cfg(not(feature = "skins"))]
     let (arms, sleeves) = (&assets.arm, &assets.sleeve);
-    for (hand, nodes) in [Hand::Main, Hand::Off].into_iter().zip(rig.hands.iter()) {
+    for (hand, state) in [Hand::Main, Hand::Off].into_iter().zip(rig.hands.iter()) {
+        let nodes = &state.nodes;
         let side = hand.is_left(main_arm_left) as usize;
         if let Ok(mut mesh) = meshes.get_mut(nodes.arm) {
             mesh.0 = arms[side].clone();
@@ -1071,6 +1125,7 @@ fn setup_hand(
             Camera3d::default(),
             Msaa::Off,
             ClusterConfig::None,
+            crate::renderer::systems::no_indirect_drawing(),
             Camera {
                 order: HAND_CAMERA_ORDER,
                 clear_color: ClearColorConfig::None,
@@ -1082,6 +1137,7 @@ fn setup_hand(
                 far: HAND_FAR,
                 ..default()
             }),
+            bevy::core_pipeline::tonemapping::Tonemapping::None,
             Transform::default(),
             RenderLayers::layer(HAND_LAYER),
             HandCamera,
@@ -1199,24 +1255,7 @@ fn setup_hand(
         }
     });
 
-    commands.insert_resource(HandRig {
-        hands,
-        ramps: [EquipRamp::default(); 2],
-        x_bob: ViewBob::default(),
-        y_bob: ViewBob::default(),
-        shown: [HeldItem::default(), HeldItem::default()],
-        shown_slot: 0,
-        uploaded: [String::new(), String::new()],
-        last_tick: None,
-        item_used_seen: [0; 2],
-        map_bound: [None, None],
-        decorations_built: [None; 2],
-        main_arm_worn: None,
-        #[cfg(feature = "skins")]
-        skin_worn: None,
-        #[cfg(feature = "skins")]
-        skin_seen: 0,
-    });
+    commands.insert_resource(HandRig::new(hands));
     commands.insert_resource(assets);
 }
 
@@ -1294,7 +1333,7 @@ fn light_hand(
 
 #[allow(clippy::too_many_arguments)]
 fn sync_hands(
-    shared: Res<crate::renderer::systems::Shared>,
+    frame_view: Res<crate::renderer::frame_view::FrameView>,
     view: (
         Res<crate::renderer::input::FreecamState>,
         Res<crate::renderer::input::ThirdPersonState>,
@@ -1322,25 +1361,19 @@ fn sync_hands(
     let _t = crate::diag::budget::timed(crate::diag::budget::Slot::Hand);
     let Some(mut rig) = rig else { return };
 
-    let (sample, partial, slot, spectator, item_used, live_pitch, live_yaw, eye) = {
-        let s = shared.0.lock().unwrap();
-        let partial = crate::renderer::systems::partial_ticks(&s);
-        let feet = s.session.player_pos;
-        (
-            s.session.local_anim.sample(partial),
-            partial,
-            s.session.hotbar_selected,
-            s.session.gamemode == Gamemode::Spectator,
-            s.session.item_used,
-            -s.camera_pitch,
-            wrap_degrees(-s.camera_yaw - 180.0),
-            [
-                feet[0],
-                feet[1] + crate::renderer::systems::eye_height(false),
-                feet[2],
-            ],
-        )
-    };
+    let sample = &frame_view.local;
+    let partial = frame_view.partial;
+    let slot = frame_view.hotbar_selected;
+    let spectator = frame_view.gamemode == Gamemode::Spectator;
+    let item_used = frame_view.item_used;
+    let live_pitch = -frame_view.camera_pitch;
+    let live_yaw = wrap_degrees(-frame_view.camera_yaw - 180.0);
+    let feet = frame_view.player_pos;
+    let eye = [
+        feet[0],
+        feet[1] + crate::renderer::systems::eye_height(false),
+        feet[2],
+    ];
 
     if let Some(hand_assets) = hand_assets.as_deref() {
         #[cfg(feature = "builtin_shaders")]
@@ -1358,7 +1391,7 @@ fn sync_hands(
     let scoping = sample.using_item
         && use_animation(
             &held(
-                &sample,
+                sample,
                 if sample.using_offhand {
                     Hand::Off
                 } else {
@@ -1368,7 +1401,7 @@ fn sync_hands(
             .id,
         ) == UseAnimation::Spyglass;
     let view_yaw = wrap_degrees(sample.body_yaw + sample.head_yaw);
-    advance_ticked_state(&mut rig, &sample, slot, view_yaw, item_used);
+    advance_ticked_state(&mut rig, sample, slot, view_yaw, item_used);
     let view_lag_x = rig.x_bob.lag(live_pitch, partial);
     let view_lag_y = rig.y_bob.lag(live_yaw, partial);
 
@@ -1380,34 +1413,34 @@ fn sync_hands(
         || gui.hide_gui
     {
         for hand in [Hand::Main, Hand::Off] {
-            hide(&mut nodes, &rig.hands[hand.index()]);
+            hide(&mut nodes, &rig.hands[hand.index()].nodes);
         }
         return;
     }
 
-    let selection = which_hands_to_render(&sample);
-    let map_in_both_hands =
-        rig.shown[Hand::Main.index()].map_id.is_some() && rig.shown[Hand::Off.index()].is_empty();
+    let selection = which_hands_to_render(sample);
+    let map_in_both_hands = rig.hands[Hand::Main.index()].shown.map_id.is_some()
+        && rig.hands[Hand::Off.index()].shown.is_empty();
     for hand in [Hand::Off, Hand::Main] {
         let index = hand.index();
         if !match hand {
             Hand::Main => selection.main,
             Hand::Off => selection.off,
         } {
-            hide(&mut nodes, &rig.hands[index]);
+            hide(&mut nodes, &rig.hands[index].nodes);
             continue;
         }
 
         let frame = HandFrame {
             hand,
             main_arm_left: sample.main_arm_left,
-            item: rig.shown[index].clone(),
+            item: rig.hands[index].shown.clone(),
             attack: if (hand == Hand::Off) == sample.attack_left {
                 sample.attack_time
             } else {
                 0.0
             },
-            inverse_arm_height: rig.ramps[index].inverse_arm_height(partial),
+            inverse_arm_height: rig.hands[index].ramp.inverse_arm_height(partial),
             using: sample.using_item && sample.using_offhand == (hand == Hand::Off),
             ticks_using: sample.ticks_using_item,
             spin_attack: sample.spin_attack,
@@ -1417,19 +1450,19 @@ fn sync_hands(
         };
 
         if frame.item.is_empty() {
-            set_visible(&mut nodes, rig.hands[index].pose, false);
+            set_visible(&mut nodes, rig.hands[index].nodes.pose, false);
             if hand == Hand::Main {
                 let chain = player_arm(&frame);
                 let (arm_transform, _) = chain.transforms();
-                write(&mut nodes, rig.hands[index].arm, arm_transform, true);
+                write(&mut nodes, rig.hands[index].nodes.arm, arm_transform, true);
             } else {
-                set_visible(&mut nodes, rig.hands[index].arm, false);
+                set_visible(&mut nodes, rig.hands[index].nodes.arm, false);
             }
             continue;
         }
         if let Some(map_id) = frame.item.map_id {
             let (pose_node, item_node, arm_node, map_node) = {
-                let hands = &rig.hands[index];
+                let hands = &rig.hands[index].nodes;
                 (hands.pose, hands.item, hands.arm, hands.map)
             };
             set_visible(&mut nodes, item_node, false);
@@ -1437,7 +1470,12 @@ fn sync_hands(
                 let base = two_handed_map_base(&frame);
                 for arm in [Hand::Main, Hand::Off] {
                     let (transform, _) = map_hand(&base, arm, frame.main_arm_left).transforms();
-                    write(&mut nodes, rig.hands[arm.index()].arm, transform, true);
+                    write(
+                        &mut nodes,
+                        rig.hands[arm.index()].nodes.arm,
+                        transform,
+                        true,
+                    );
                 }
                 two_handed_map(&base, frame.attack)
             } else {
@@ -1449,7 +1487,7 @@ fn sync_hands(
             write(&mut nodes, pose_node, pose_transform, true);
             write(&mut nodes, map_node, map_transform, true);
             bind_map(
-                &mut rig,
+                &mut rig.hands[index],
                 index,
                 map_id,
                 &map_textures,
@@ -1461,51 +1499,64 @@ fn sync_hands(
             );
             continue;
         }
-        set_visible(&mut nodes, rig.hands[index].arm, false);
-        set_visible(&mut nodes, rig.hands[index].map, false);
-        set_visible(&mut nodes, rig.hands[index].item, true);
+        let state = &mut rig.hands[index];
+        set_visible(&mut nodes, state.nodes.arm, false);
+        set_visible(&mut nodes, state.nodes.map, false);
+        set_visible(&mut nodes, state.nodes.item, true);
 
-        let key = frame.item.model_key();
-        let gpu = item_assets.get(
-            &key,
-            hand.display_slot(frame.main_arm_left),
-            frame.using,
-            &mut meshes,
-            &mut images,
-            &mut materials,
-        );
-        let Some(gpu) = gpu else {
-            set_visible(&mut nodes, rig.hands[index].pose, false);
+        let cached = state
+            .uploaded
+            .as_ref()
+            .filter(|up| {
+                up.using == frame.using
+                    && up.main_arm_left == frame.main_arm_left
+                    && up.item.same_model(&frame.item)
+            })
+            .map(|up| up.transform);
+        let display = match cached {
+            Some(display) => display,
+            None => {
+                let key = frame.item.model_key();
+                let gpu = item_assets.get(
+                    &key,
+                    hand.display_context(frame.main_arm_left).name(),
+                    frame.using,
+                    &mut meshes,
+                    &mut images,
+                    &mut materials,
+                );
+                let display = gpu.map(|gpu| display_transform(gpu, hand, frame.main_arm_left));
+                if let Some(gpu) = gpu
+                    && let Ok((mut mesh, mut material)) = item_nodes.get_mut(state.nodes.item)
+                {
+                    mesh.0 = gpu.mesh.clone();
+                    material.0 = gpu.material.clone();
+                }
+                state.uploaded = Some(UploadedItem {
+                    item: frame.item.clone(),
+                    using: frame.using,
+                    main_arm_left: frame.main_arm_left,
+                    transform: display,
+                });
+                display
+            }
+        };
+        let Some(display) = display else {
+            set_visible(&mut nodes, state.nodes.pose, false);
             continue;
         };
 
         let mut chain = arm_with_item(&frame);
-        apply_display_transform(
-            &mut chain,
-            &display_transform(gpu, hand, frame.main_arm_left),
-            frame.is_left(),
-        );
+        apply_display_transform(&mut chain, &display, frame.is_left());
         let (pose_transform, item_transform) = chain.transforms();
-        write(&mut nodes, rig.hands[index].pose, pose_transform, true);
-        write(&mut nodes, rig.hands[index].item, item_transform, true);
-
-        let node_id = match frame.using {
-            true => format!("{key}@using"),
-            false => key,
-        };
-        if rig.uploaded[index] != node_id {
-            if let Ok((mut mesh, mut material)) = item_nodes.get_mut(rig.hands[index].item) {
-                mesh.0 = gpu.mesh.clone();
-                material.0 = gpu.material.clone();
-            }
-            rig.uploaded[index] = node_id;
-        }
+        write(&mut nodes, state.nodes.pose, pose_transform, true);
+        write(&mut nodes, state.nodes.item, item_transform, true);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn bind_map(
-    rig: &mut HandRig,
+    state: &mut HandState,
     index: usize,
     map_id: i32,
     map_textures: &crate::renderer::maps::MapTextures,
@@ -1519,7 +1570,7 @@ fn bind_map(
     >,
 ) {
     let Some(assets) = assets else { return };
-    let hands = &rig.hands[index];
+    let hands = &state.nodes;
     let (background, picture, decorations) = (
         hands.map_background,
         hands.map_picture,
@@ -1540,25 +1591,25 @@ fn bind_map(
     let Some(image) = image else {
         set_visible(nodes, picture, false);
         set_visible(nodes, decorations, false);
-        rig.map_bound[index] = None;
-        rig.decorations_built[index] = None;
+        state.map_bound = None;
+        state.decorations_built = None;
         return;
     };
     set_visible(nodes, picture, true);
-    if rig.map_bound[index].as_ref() != Some(&image) {
+    if state.map_bound.as_ref() != Some(&image) {
         if let Some(material) = materials.get_mut(&assets.map_picture[index]) {
             material.base_color_texture = Some(image.clone());
         }
-        rig.map_bound[index] = Some(image);
+        state.map_bound = Some(image);
     }
 
     let (list, revision) = map_textures.decorations(map_id).unwrap_or((&[], 0));
     set_visible(nodes, decorations, !list.is_empty());
-    if rig.decorations_built[index] != Some((map_id, revision)) {
+    if state.decorations_built != Some((map_id, revision)) {
         if let Ok((mut mesh, _)) = map_nodes.get_mut(decorations) {
             mesh.0 = meshes.add(decoration_mesh(list));
         }
-        rig.decorations_built[index] = Some((map_id, revision));
+        state.decorations_built = Some((map_id, revision));
     }
 }
 
@@ -1570,13 +1621,7 @@ fn held(s: &AnimSample, hand: Hand) -> &HeldItem {
 }
 
 fn display_transform(gpu: &ItemGpu, hand: Hand, main_arm_left: bool) -> ItemTransform {
-    if hand.left_hand(main_arm_left) {
-        if let Some(t) = gpu.display.get(hand.display_slot(main_arm_left)) {
-            return *t;
-        }
-        return gpu.transform("firstperson_righthand");
-    }
-    gpu.transform(hand.display_slot(main_arm_left))
+    gpu.for_context(hand.display_context(main_arm_left))
 }
 
 fn advance_ticked_state(
@@ -1590,12 +1635,16 @@ fn advance_ticked_state(
     let steps = match rig.last_tick {
         Some(last) => ((tick - last).max(0.0) as u32).min(20),
         None => {
-            rig.shown = [sample.main_hand.clone(), sample.off_hand.clone()];
+            for hand in [Hand::Main, Hand::Off] {
+                let state = &mut rig.hands[hand.index()];
+                state.shown = held(sample, hand).clone();
+                state.ramp = EquipRamp {
+                    height: 1.0,
+                    old: 1.0,
+                };
+                state.item_used_seen = item_used[hand.index()];
+            }
             rig.shown_slot = slot;
-            rig.ramps = [EquipRamp {
-                height: 1.0,
-                old: 1.0,
-            }; 2];
             rig.x_bob = ViewBob {
                 angle: sample.pitch,
                 old: sample.pitch,
@@ -1604,7 +1653,6 @@ fn advance_ticked_state(
                 angle: view_yaw,
                 old: view_yaw,
             };
-            rig.item_used_seen = item_used;
             0
         }
     };
@@ -1614,17 +1662,17 @@ fn advance_ticked_state(
         rig.x_bob.advance(sample.pitch);
         rig.y_bob.advance(view_yaw);
         for hand in [Hand::Main, Hand::Off] {
-            let index = hand.index();
             let next = held(sample, hand);
-            let changed =
-                rig.shown[index].id != next.id || (hand == Hand::Main && rig.shown_slot != slot);
+            let shown_slot = rig.shown_slot;
+            let state = &mut rig.hands[hand.index()];
+            let changed = state.shown.id != next.id || (hand == Hand::Main && shown_slot != slot);
             if !changed {
-                rig.shown[index] = next.clone();
+                state.shown = next.clone();
             }
             let target = if changed { 0.0 } else { 1.0 };
-            rig.ramps[index].advance(target);
-            if rig.ramps[index].hidden_enough() {
-                rig.shown[index] = next.clone();
+            state.ramp.advance(target);
+            if state.ramp.hidden_enough() {
+                state.shown = next.clone();
                 if hand == Hand::Main {
                     rig.shown_slot = slot;
                 }
@@ -1634,9 +1682,10 @@ fn advance_ticked_state(
 
     for hand in [Hand::Main, Hand::Off] {
         let index = hand.index();
-        if rig.item_used_seen[index] != item_used[index] {
-            rig.item_used_seen[index] = item_used[index];
-            rig.ramps[index].height = 0.0;
+        let state = &mut rig.hands[index];
+        if state.item_used_seen != item_used[index] {
+            state.item_used_seen = item_used[index];
+            state.ramp.height = 0.0;
         }
     }
 }
@@ -2100,48 +2149,38 @@ mod tests {
 
     #[test]
     fn hand_item_used_drops_the_equip_ramp() {
-        let mut rig = HandRig {
-            hands: std::array::from_fn(|_| HandEntities {
-                pose: Entity::PLACEHOLDER,
-                item: Entity::PLACEHOLDER,
-                arm: Entity::PLACEHOLDER,
-                sleeve: Entity::PLACEHOLDER,
-                map: Entity::PLACEHOLDER,
-                map_background: Entity::PLACEHOLDER,
-                map_picture: Entity::PLACEHOLDER,
-                map_decorations: Entity::PLACEHOLDER,
-            }),
-            ramps: [EquipRamp {
+        let mut rig = HandRig::new(std::array::from_fn(|_| HandEntities {
+            pose: Entity::PLACEHOLDER,
+            item: Entity::PLACEHOLDER,
+            arm: Entity::PLACEHOLDER,
+            sleeve: Entity::PLACEHOLDER,
+            map: Entity::PLACEHOLDER,
+            map_background: Entity::PLACEHOLDER,
+            map_picture: Entity::PLACEHOLDER,
+            map_decorations: Entity::PLACEHOLDER,
+        }));
+        for state in &mut rig.hands {
+            state.ramp = EquipRamp {
                 height: 1.0,
                 old: 1.0,
-            }; 2],
-            x_bob: ViewBob::default(),
-            y_bob: ViewBob::default(),
-            shown: [HeldItem::default(), HeldItem::default()],
-            shown_slot: 0,
-            uploaded: [String::new(), String::new()],
-            last_tick: Some(0.0),
-            item_used_seen: [0; 2],
-            map_bound: [None, None],
-            decorations_built: [None; 2],
-            main_arm_worn: None,
-            #[cfg(feature = "skins")]
-            skin_worn: None,
-            #[cfg(feature = "skins")]
-            skin_seen: 0,
-        };
+            };
+        }
+        rig.last_tick = Some(0.0);
         let sample = AnimSample {
             age_ticks: 1.0,
             ..Default::default()
         };
 
         advance_ticked_state(&mut rig, &sample, 0, 0.0, [1, 0]);
-        assert_eq!(rig.ramps[0].height, 0.0);
+        assert_eq!(rig.hands[0].ramp.height, 0.0);
         assert_eq!(
-            rig.ramps[0].old, 1.0,
+            rig.hands[0].ramp.old, 1.0,
             "the tick the use lands on keeps its old height"
         );
-        assert_eq!(rig.ramps[1].height, 1.0, "the offhand did not use anything");
+        assert_eq!(
+            rig.hands[1].ramp.height, 1.0,
+            "the offhand did not use anything"
+        );
 
         let sample = AnimSample {
             age_ticks: 2.0,
@@ -2149,7 +2188,7 @@ mod tests {
         };
         advance_ticked_state(&mut rig, &sample, 0, 0.0, [1, 0]);
         assert!(
-            rig.ramps[0].height > 0.0,
+            rig.hands[0].ramp.height > 0.0,
             "the ramp must climb back out of view"
         );
     }

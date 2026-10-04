@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -21,86 +22,76 @@ const RED: u32 = 0xFF5555;
 const DARK_PURPLE: u32 = 0xAA00AA;
 const WHITE: u32 = 0xFFFFFF;
 
-fn read_json(path: std::path::PathBuf) -> Option<serde_json::Value> {
-    let text = crate::platform::assets::read_to_string(path)?;
-    serde_json::from_str(&text).ok()
-}
-
 static LANG: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
-    let Some(v) = read_json(crate::assets_root().join("lang/en_us.json")) else {
-        return HashMap::new();
-    };
-    v.as_object()
-        .map(|o| {
-            o.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default()
-});
-
-fn data_root() -> Option<std::path::PathBuf> {
-    let assets = crate::assets_root();
-    let root = assets.parent()?.parent()?.join("data/minecraft");
-    root.is_dir().then_some(root)
-}
-
-fn tag_values(path: &str) -> Vec<String> {
-    let Some(root) = data_root() else {
-        return Vec::new();
-    };
-    let Some(v) = read_json(root.join(path)) else {
-        return Vec::new();
-    };
-    v.get("values")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.trim_start_matches("minecraft:").to_string())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-static CURSES: LazyLock<HashSet<String>> = LazyLock::new(|| {
-    tag_values("tags/enchantment/curse.json")
-        .into_iter()
-        .collect()
-});
-
-static TOOLTIP_ORDER: LazyLock<Vec<String>> =
-    LazyLock::new(|| tag_values("tags/enchantment/tooltip_order.json"));
-
-static MAX_LEVELS: LazyLock<HashMap<String, i32>> = LazyLock::new(|| {
     let mut out = HashMap::new();
-    let Some(root) = data_root() else { return out };
-    for path in crate::platform::assets::read_dir(root.join("enchantment")) {
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
+    for text in crate::platform::assets::read_stack(crate::assets_root().join("lang/en_us.json")) {
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&text) else {
             continue;
         };
-        let level = read_json(path)
-            .and_then(|v| v.get("max_level").and_then(|l| l.as_i64()))
-            .unwrap_or(1) as i32;
-        out.insert(stem, level);
+        out.extend(
+            map.into_iter()
+                .filter_map(|(k, v)| Some((k, v.as_str()?.to_owned()))),
+        );
     }
     out
 });
 
-pub(crate) fn all_enchantments() -> Vec<(String, i32)> {
+fn tag_values(name: &str) -> Vec<String> {
+    crate::util::datapack::entry("tags/enchantment", name)
+        .and_then(|v| {
+            let values = v.get("values")?.as_array()?;
+            Some(
+                values
+                    .iter()
+                    .filter_map(crate::util::datapack::bare_id)
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+static CURSES: LazyLock<HashSet<String>> =
+    LazyLock::new(|| tag_values("curse").into_iter().collect());
+
+static TOOLTIP_ORDER: LazyLock<Vec<String>> = LazyLock::new(|| tag_values("tooltip_order"));
+
+static MAX_LEVELS: LazyLock<HashMap<String, i32>> = LazyLock::new(|| {
+    crate::util::datapack::entries("enchantment")
+        .into_iter()
+        .map(|(id, v)| {
+            let level = v.get("max_level").and_then(|l| l.as_i64()).unwrap_or(1) as i32;
+            (id, level)
+        })
+        .collect()
+});
+
+pub(crate) fn all_enchantments() -> Vec<(&'static str, i32)> {
     MAX_LEVELS
         .iter()
-        .map(|(id, lvl)| (id.clone(), *lvl))
+        .map(|(id, lvl)| (id.as_str(), *lvl))
         .collect()
 }
 
+pub(crate) fn translate_once(
+    key: &'static str,
+    cell: &'static std::sync::OnceLock<String>,
+) -> &'static str {
+    cell.get_or_init(|| translate(key, &[]))
+}
+
+macro_rules! label {
+    ($key:literal) => {{
+        static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        $crate::gui::tooltip::translate_once($key, &CELL)
+    }};
+}
+pub(crate) use label;
+
 pub(crate) fn translate(key: &str, args: &[String]) -> String {
-    let template = LANG.get(key).cloned().unwrap_or_else(|| key.to_string());
+    let template: &str = LANG.get(key).map_or(key, String::as_str);
     let mut out = String::with_capacity(template.len());
-    let mut rest = template.as_str();
+    let mut rest = template;
     let mut next = args.iter();
     while let Some(i) = rest.find('%') {
         out.push_str(&rest[..i]);
@@ -423,6 +414,16 @@ pub(in crate::gui) fn position_flat(mx: f32, my: f32, vw: f32, w: f32) -> (f32, 
     (x.floor(), (my - MOUSE_OFFSET).floor())
 }
 
+struct LineCache {
+    stack: SlotStack,
+    advanced: bool,
+    lines: Vec<Vec<Span>>,
+}
+
+thread_local! {
+    static LINES: RefCell<Option<LineCache>> = const { RefCell::new(None) };
+}
+
 pub fn draw(
     p: &mut Painter,
     stack: &SlotStack,
@@ -435,7 +436,21 @@ pub fn draw(
     if stack.is_empty() {
         return;
     }
-    draw_lines(p, &build_lines(stack, advanced), mx, my, vw, vh);
+    LINES.with_borrow_mut(|cache| {
+        let hit = cache
+            .as_ref()
+            .is_some_and(|c| c.advanced == advanced && c.stack == *stack);
+        if !hit {
+            *cache = Some(LineCache {
+                stack: stack.clone(),
+                advanced,
+                lines: build_lines(stack, advanced),
+            });
+        }
+        if let Some(c) = cache.as_ref() {
+            draw_lines(p, &c.lines, mx, my, vw, vh);
+        }
+    });
 }
 
 pub(crate) fn draw_lines(p: &mut Painter, lines: &[Vec<Span>], mx: f32, my: f32, vw: f32, vh: f32) {

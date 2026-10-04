@@ -31,7 +31,7 @@ impl<'a> Reader<'a> {
     pub fn ensure_can_read(&self, size: usize) -> Result<(), UnexpectedEofError> {
         let data_addr = self.cur as usize;
         let end_addr = self.end as usize;
-        if data_addr + size > end_addr {
+        if end_addr.checked_sub(data_addr).is_none_or(|left| size > left) {
             Err(UnexpectedEofError)
         } else {
             Ok(())
@@ -113,11 +113,8 @@ impl<'a> Reader<'a> {
 
     #[inline]
     pub fn skip(&mut self, size: usize) -> Result<(), UnexpectedEofError> {
+        self.ensure_can_read(size)?;
         self.cur = unsafe { self.cur.add(size) };
-        if self.cur > self.end {
-            return Err(UnexpectedEofError);
-        }
-
         Ok(())
     }
 

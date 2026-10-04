@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::aquatic::nautilus;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -97,12 +98,12 @@ fn is_baby(st: &EntityState) -> bool {
     st.extras.is_baby
 }
 
-fn adult_texture(_st: &EntityState) -> String {
-    "entity/nautilus/nautilus".to_string()
+fn adult_texture(_st: &EntityState) -> TexturePath {
+    "entity/nautilus/nautilus".into()
 }
 
-fn baby_texture(_st: &EntityState) -> String {
-    "entity/nautilus/nautilus_baby".to_string()
+fn baby_texture(_st: &EntityState) -> TexturePath {
+    "entity/nautilus/nautilus_baby".into()
 }
 
 fn variant(st: &EntityState) -> &str {
@@ -120,11 +121,11 @@ fn is_plain_zombie(st: &EntityState) -> bool {
     !is_coral_zombie(st)
 }
 
-fn zombie_texture(st: &EntityState) -> String {
+fn zombie_texture(st: &EntityState) -> TexturePath {
     if is_coral_zombie(st) {
-        "entity/nautilus/zombie_nautilus_coral".to_string()
+        "entity/nautilus/zombie_nautilus_coral".into()
     } else {
-        "entity/nautilus/zombie_nautilus".to_string()
+        "entity/nautilus/zombie_nautilus".into()
     }
 }
 
@@ -132,17 +133,17 @@ fn shows_body_armor(st: &EntityState) -> bool {
     !st.extras.is_baby && st.extras.body_armor.is_some()
 }
 
-fn body_armor_texture(st: &EntityState) -> String {
+fn body_armor_texture(st: &EntityState) -> TexturePath {
     let asset = match &st.extras.body_armor {
         Some(id) => id.rsplit(':').next().unwrap_or("copper"),
         None => "copper",
     };
     match asset {
-        "diamond" => "entity/equipment/nautilus_body/diamond".to_string(),
-        "gold" => "entity/equipment/nautilus_body/gold".to_string(),
-        "iron" => "entity/equipment/nautilus_body/iron".to_string(),
-        "netherite" => "entity/equipment/nautilus_body/netherite".to_string(),
-        _ => "entity/equipment/nautilus_body/copper".to_string(),
+        "diamond" => "entity/equipment/nautilus_body/diamond".into(),
+        "gold" => "entity/equipment/nautilus_body/gold".into(),
+        "iron" => "entity/equipment/nautilus_body/iron".into(),
+        "netherite" => "entity/equipment/nautilus_body/netherite".into(),
+        _ => "entity/equipment/nautilus_body/copper".into(),
     }
 }
 
@@ -150,6 +151,6 @@ fn shows_saddle(st: &EntityState) -> bool {
     !st.extras.is_baby && st.extras.saddled
 }
 
-fn saddle_texture(_st: &EntityState) -> String {
-    "entity/equipment/nautilus_saddle/saddle".to_string()
+fn saddle_texture(_st: &EntityState) -> TexturePath {
+    "entity/equipment/nautilus_saddle/saddle".into()
 }

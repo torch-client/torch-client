@@ -160,7 +160,7 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
         parts[back_leg].x_rot = 0.785_398_2;
     }
 
-    if !st.extras.bee_angry && !st.extras.on_ground {
+    if !st.extras.bee_angry() && !st.extras.on_ground {
         let speed = (st.age_ticks * 0.18).cos();
         parts[bone].x_rot = 0.1 + speed * std::f32::consts::PI * 0.025;
         parts[bone].y -= (st.age_ticks * 0.18).cos() * 0.9;

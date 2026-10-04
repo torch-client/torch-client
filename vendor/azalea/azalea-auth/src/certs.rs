@@ -16,7 +16,7 @@ pub enum FetchCertificatesError {
 pub async fn fetch_certificates(
     minecraft_access_token: &str,
 ) -> Result<Certificates, FetchCertificatesError> {
-    let client = reqwest::Client::new();
+    let client = crate::http_client().unwrap_or_else(reqwest::Client::new);
 
     let res = client
         .post("https://api.minecraftservices.com/player/certificates")

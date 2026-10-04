@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::aquatic::bee;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -25,16 +26,20 @@ fn is_baby(st: &EntityState) -> bool {
     st.extras.is_baby
 }
 
-fn texture(st: &EntityState) -> String {
-    let mut name = String::from("bee");
-    if st.extras.bee_angry {
-        name.push_str("_angry");
+fn texture(st: &EntityState) -> TexturePath {
+    match (
+        st.extras.bee_angry(),
+        st.extras.has_nectar,
+        st.extras.is_baby,
+    ) {
+        (false, false, false) => "entity/bee/bee",
+        (false, false, true) => "entity/bee/bee_baby",
+        (false, true, false) => "entity/bee/bee_nectar",
+        (false, true, true) => "entity/bee/bee_nectar_baby",
+        (true, false, false) => "entity/bee/bee_angry",
+        (true, false, true) => "entity/bee/bee_angry_baby",
+        (true, true, false) => "entity/bee/bee_angry_nectar",
+        (true, true, true) => "entity/bee/bee_angry_nectar_baby",
     }
-    if st.extras.has_nectar {
-        name.push_str("_nectar");
-    }
-    if st.extras.is_baby {
-        name.push_str("_baby");
-    }
-    format!("entity/bee/{name}")
+    .into()
 }

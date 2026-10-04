@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::math::{Mat4, Quat, Vec3};
 
+use crate::entities::TexturePath;
 use crate::entities::models::objects::projectile;
 use crate::entities::registry::Registry;
 use crate::entities::render::objects::{hook_for, mirror};
@@ -95,39 +96,39 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn arrow_texture(st: &EntityState) -> String {
+fn arrow_texture(st: &EntityState) -> TexturePath {
     if st.extras.arrow_tipped {
-        "entity/projectiles/arrow_tipped".to_string()
+        "entity/projectiles/arrow_tipped".into()
     } else {
-        "entity/projectiles/arrow".to_string()
+        "entity/projectiles/arrow".into()
     }
 }
 
-fn spectral_arrow_texture(_st: &EntityState) -> String {
-    "entity/projectiles/arrow_spectral".to_string()
+fn spectral_arrow_texture(_st: &EntityState) -> TexturePath {
+    "entity/projectiles/arrow_spectral".into()
 }
 
-fn trident_texture(_st: &EntityState) -> String {
-    "entity/trident/trident".to_string()
+fn trident_texture(_st: &EntityState) -> TexturePath {
+    "entity/trident/trident".into()
 }
 
-fn llama_spit_texture(_st: &EntityState) -> String {
-    "entity/llama/llama_spit".to_string()
+fn llama_spit_texture(_st: &EntityState) -> TexturePath {
+    "entity/llama/llama_spit".into()
 }
 
-fn shulker_bullet_texture(_st: &EntityState) -> String {
-    "entity/shulker/spark".to_string()
+fn shulker_bullet_texture(_st: &EntityState) -> TexturePath {
+    "entity/shulker/spark".into()
 }
 
-fn wind_charge_texture(_st: &EntityState) -> String {
-    "entity/projectiles/wind_charge".to_string()
+fn wind_charge_texture(_st: &EntityState) -> TexturePath {
+    "entity/projectiles/wind_charge".into()
 }
 
-fn wither_skull_texture(st: &EntityState) -> String {
+fn wither_skull_texture(st: &EntityState) -> TexturePath {
     if st.extras.skull_dangerous {
-        "entity/wither/wither_invulnerable".to_string()
+        "entity/wither/wither_invulnerable".into()
     } else {
-        "entity/wither/wither".to_string()
+        "entity/wither/wither".into()
     }
 }
 

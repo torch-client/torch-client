@@ -1,7 +1,8 @@
 #![allow(clippy::excessive_precision)]
 
-use crate::entities::keyframe::{AnimationDefinition, Channel, Interpolation, Keyframe, Target};
-use crate::entities::models::aquatic::animation::{degree_vec, pos_vec};
+use crate::entities::keyframe::{
+    AnimationDefinition, Channel, Interpolation, Keyframe, Target, degree_vec, pos_vec,
+};
 
 static BAT_RESTING_0_HEAD_ROTATION: &[Keyframe] = &[Keyframe::new(
     0.0,

@@ -1,5 +1,3 @@
-use std::sync::LazyLock;
-
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::Mesh;
@@ -7,9 +5,6 @@ use bevy::prelude::Mesh;
 use crate::blocks::BakedQuad;
 use crate::blocks::state::Rot;
 use crate::entities::BlockRef;
-
-static MODELS: LazyLock<crate::items::model::Assets> =
-    LazyLock::new(|| crate::items::model::Assets::new(&crate::assets_root()));
 
 pub fn mesh(block: BlockRef) -> Option<Mesh> {
     let mut out = QuadBuf::default();
@@ -25,8 +20,12 @@ pub fn mesh(block: BlockRef) -> Option<Mesh> {
         }
         BlockRef::Model(model) => {
             let atlas_rows = crate::ATLAS_ROWS.get().copied()?;
-            let baked =
-                crate::blocks::bake::bake_model(&MODELS, model.path(), Rot::default(), atlas_rows);
+            let baked = crate::blocks::bake::bake_model(
+                crate::items::model::shared(),
+                model.path(),
+                Rot::default(),
+                atlas_rows,
+            );
             for quad in &baked.quads {
                 out.push(quad);
             }
@@ -104,7 +103,7 @@ mod tests {
             "block/item_frame_map",
             "block/glow_item_frame",
         ] {
-            let resolved = MODELS.model(path);
+            let resolved = crate::items::model::shared().model(path);
             assert!(
                 !resolved.elements.is_empty(),
                 "{path} resolved to no elements"

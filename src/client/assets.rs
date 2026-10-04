@@ -42,9 +42,22 @@ pub(crate) fn root() -> PathBuf {
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "windows")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(target_os = "windows"),
+    not(target_os = "android")
+))]
 fn default_root() -> PathBuf {
     std::env::temp_dir().join("torch-client/assets")
+}
+
+#[cfg(target_os = "android")]
+fn default_root() -> PathBuf {
+    bevy::android::ANDROID_APP
+        .get()
+        .and_then(|app| app.internal_data_path())
+        .unwrap_or_else(std::env::temp_dir)
+        .join("assets")
 }
 
 #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
@@ -548,7 +561,10 @@ impl Download {
         self.set(Stage::Downloading);
 
         let mut reported = 0u64;
-        let body = crate::platform::http::get_bytes(url, size, &mut |done, total| {
+        let mut progress = |done: u64, total: u64| {
+            if done < reported {
+                reported = 0;
+            }
             self.done.store(done, Ordering::Relaxed);
             if total > 0 {
                 self.total.store(total, Ordering::Relaxed);
@@ -558,8 +574,17 @@ impl Download {
                 log_info!("assets", "jar: {}", progress_line(done, total.max(size)));
             }
             !self.cancelled()
-        })
-        .await
+        };
+        let body = match crate::platform::http::get_bytes(url, size, &mut progress).await {
+            Ok(body) => Ok(body),
+            Err(e) => match fallback_url(url) {
+                Some(proxied) => {
+                    log_warn!("assets", "jar: {e}; retrying through the proxy");
+                    crate::platform::http::get_bytes(&proxied, size, &mut progress).await
+                }
+                None => Err(e),
+            },
+        }
         .map_err(|e| Failure::new("The download was interrupted", e))?;
 
         let bytes = match body {
@@ -912,10 +937,28 @@ impl Failure {
 }
 
 async fn get_json(url: &str) -> Result<serde_json::Value, Failure> {
-    let text = crate::platform::http::get_string(url)
-        .await
-        .map_err(|e| Failure::new("Could not reach Mojang", e))?;
+    let text = match crate::platform::http::get_string(url).await {
+        Ok(text) => Ok(text),
+        Err(e) => match fallback_url(url) {
+            Some(proxied) => {
+                log_warn!("assets", "{url}: {e}; retrying through the proxy");
+                crate::platform::http::get_string(&proxied).await
+            }
+            None => Err(e),
+        },
+    }
+    .map_err(|e| Failure::new("Could not reach Mojang", e))?;
     serde_json::from_str(&text).map_err(|e| Failure::new("Mojang sent something unreadable", e))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fallback_url(url: &str) -> Option<String> {
+    Some(format!("{OBJECT_PROXY}{url}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fallback_url(_: &str) -> Option<String> {
+    None
 }
 
 fn pick_version(manifest: &serde_json::Value, version: &str) -> Result<String, Failure> {

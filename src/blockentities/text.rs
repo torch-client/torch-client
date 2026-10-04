@@ -8,9 +8,41 @@ use crate::text::{Span, Style};
 
 use super::feed::{INHERIT_COLOR, SignFace};
 
-pub const MAX_TEXT_LINE_WIDTH: f32 = 90.0;
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SignKind {
+    Standing,
+    Hanging,
+}
 
-pub const TEXT_LINE_HEIGHT: f32 = 10.0;
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SignMetrics {
+    pub max_width: f32,
+    pub line_height: f32,
+}
+
+impl SignKind {
+    pub fn of(kind: azalea_registry::builtin::BlockEntityKind) -> Option<SignKind> {
+        use azalea_registry::builtin::BlockEntityKind;
+        match kind {
+            BlockEntityKind::Sign => Some(SignKind::Standing),
+            BlockEntityKind::HangingSign => Some(SignKind::Hanging),
+            _ => None,
+        }
+    }
+
+    pub fn metrics(self) -> SignMetrics {
+        match self {
+            SignKind::Standing => SignMetrics {
+                max_width: 90.0,
+                line_height: 10.0,
+            },
+            SignKind::Hanging => SignMetrics {
+                max_width: 60.0,
+                line_height: 9.0,
+            },
+        }
+    }
+}
 
 pub const LINES: usize = 4;
 
@@ -58,17 +90,22 @@ pub fn text_style(face: &SignFace, draw_outline: bool) -> TextStyle {
     }
 }
 
-pub fn sign_text_mesh(atlas: &GuiAtlas, face: &SignFace, style: TextStyle) -> Option<Mesh> {
+pub fn sign_text_mesh(
+    atlas: &GuiAtlas,
+    face: &SignFace,
+    style: TextStyle,
+    metrics: SignMetrics,
+) -> Option<Mesh> {
     let mut builder = TextMesh::new(atlas);
-    let midpoint = LINES as f32 * TEXT_LINE_HEIGHT / 2.0;
+    let midpoint = LINES as f32 * metrics.line_height / 2.0;
     for (i, line) in face.lines.iter().enumerate() {
-        let spans = first_split_line(atlas, line, style.color);
+        let spans = first_split_line(atlas, line, style.color, metrics.max_width);
         if spans.is_empty() {
             continue;
         }
         let width = atlas.font.width(&spans).ceil() as i32;
         let x = -(width / 2) as f32;
-        let y = i as f32 * TEXT_LINE_HEIGHT - midpoint;
+        let y = i as f32 * metrics.line_height - midpoint;
         if let Some(outline) = style.outline {
             builder.outline_line(&spans, x, y, outline);
         }
@@ -77,11 +114,11 @@ pub fn sign_text_mesh(atlas: &GuiAtlas, face: &SignFace, style: TextStyle) -> Op
     builder.finish()
 }
 
-fn first_split_line(atlas: &GuiAtlas, spans: &[Span], color: u32) -> Vec<Span> {
+fn first_split_line(atlas: &GuiAtlas, spans: &[Span], color: u32, max_width: f32) -> Vec<Span> {
     if spans.is_empty() {
         return Vec::new();
     }
-    let wrapped = atlas.font.wrap(spans, MAX_TEXT_LINE_WIDTH);
+    let wrapped = atlas.font.wrap(spans, max_width);
     let mut line = wrapped.into_iter().next().unwrap_or_default();
     for span in &mut line {
         if span.style.color == INHERIT_COLOR {

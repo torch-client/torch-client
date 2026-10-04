@@ -64,6 +64,21 @@ mod tests {
     }
 
     #[test]
+    fn every_translated_version_has_a_hop_and_tables() {
+        for &protocol in TRANSLATED {
+            assert!(
+                crate::protocol::packets::PacketTable::for_protocol(protocol).is_some(),
+                "{protocol} is joinable with no packet table"
+            );
+            assert!(
+                crate::protocol::hop::Translator::for_protocol(protocol).is_some(),
+                "{protocol} is joinable with no hop"
+            );
+        }
+        assert!(crate::protocol::hop::Translator::for_protocol(NATIVE.protocol).is_none());
+    }
+
+    #[test]
     fn lookups() {
         assert_eq!(ProtocolVersion::from_protocol(775).unwrap().name, "26.1.2");
         assert_eq!(ProtocolVersion::from_protocol(773).unwrap().name, "1.21.10");

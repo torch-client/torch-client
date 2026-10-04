@@ -4,6 +4,11 @@ use crate::entities::geom::{BakedModel, CubeList, LayerDef, MeshDef, PartPose, P
 use crate::entities::state::EntityState;
 use crate::util::mth::DEG_TO_RAD;
 
+const ROD_NAMES: [&str; 12] = [
+    "part0", "part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9",
+    "part10", "part11",
+];
+
 pub fn layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
@@ -50,7 +55,7 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
 
     let mut angle = age * 3.1415927 * -0.1;
     for i in 0..4 {
-        let id = model.id(&format!("part{i}"));
+        let id = model.id(ROD_NAMES[i]);
         parts[id].y = -2.0 + (((i * 2) as f32 + age) * 0.25).cos();
         parts[id].x = angle.cos() * 9.0;
         parts[id].z = angle.sin() * 9.0;
@@ -58,7 +63,7 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
     }
     angle = 0.7853982 + age * 3.1415927 * 0.03;
     for i in 4..8 {
-        let id = model.id(&format!("part{i}"));
+        let id = model.id(ROD_NAMES[i]);
         parts[id].y = 2.0 + (((i * 2) as f32 + age) * 0.25).cos();
         parts[id].x = angle.cos() * 7.0;
         parts[id].z = angle.sin() * 7.0;
@@ -66,7 +71,7 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
     }
     angle = 0.47123894 + age * 3.1415927 * -0.05;
     for i in 8..12 {
-        let id = model.id(&format!("part{i}"));
+        let id = model.id(ROD_NAMES[i]);
         parts[id].y = 11.0 + ((i as f32 * 1.5 + age) * 0.5).cos();
         parts[id].x = angle.cos() * 5.0;
         parts[id].z = angle.sin() * 5.0;

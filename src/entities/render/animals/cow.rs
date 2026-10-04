@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::{cow, quadruped};
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -66,18 +67,18 @@ fn model(st: &EntityState) -> Option<&'static str> {
     }
 }
 
-fn adult_texture(st: &EntityState) -> String {
+fn adult_texture(st: &EntityState) -> TexturePath {
     let name = variant(st);
     match crate::util::variants::cow(name) {
-        Some(entry) => entry.texture(false).to_string(),
-        None => format!("entity/cow/cow_{name}"),
+        Some(entry) => entry.texture(false).into(),
+        None => format!("entity/cow/cow_{name}").into(),
     }
 }
 
-fn baby_texture(st: &EntityState) -> String {
+fn baby_texture(st: &EntityState) -> TexturePath {
     let name = variant(st);
     match crate::util::variants::cow(name) {
-        Some(entry) => entry.texture(true).to_string(),
-        None => format!("entity/cow/cow_{name}_baby"),
+        Some(entry) => entry.texture(true).into(),
+        None => format!("entity/cow/cow_{name}_baby").into(),
     }
 }

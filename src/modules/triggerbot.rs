@@ -23,10 +23,10 @@ pub fn should_attack(target: Option<EntityKind>, strength: f32, weapon: bool) ->
         return false;
     }
 
-    if s.flag(Id::TriggerBot, setting::WAIT_FOR_COOLDOWN) && strength < 1.0 {
+    if s.flag(setting::WAIT_FOR_COOLDOWN) && strength < 1.0 {
         return false;
     }
-    if s.flag(Id::TriggerBot, setting::REQUIRE_WEAPON) && !weapon {
+    if s.flag(setting::REQUIRE_WEAPON) && !weapon {
         return false;
     }
     let Some(kind) = target else {
@@ -36,7 +36,7 @@ pub fn should_attack(target: Option<EntityKind>, strength: f32, weapon: bool) ->
         return false;
     }
 
-    let (lo, hi) = s.range(Id::TriggerBot, setting::DELAY);
+    let (lo, hi) = s.range(setting::DELAY);
     COOLDOWN.store(roll_delay(lo, hi), Relaxed);
     true
 }

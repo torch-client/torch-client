@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::{Quat, Vec3};
 
+use crate::entities::TexturePath;
 use crate::entities::models::humanoid::{armor_stand, mannequin};
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -95,12 +96,12 @@ fn is_small(st: &EntityState) -> bool {
     st.extras.small
 }
 
-fn armor_stand_texture(_st: &EntityState) -> String {
-    "entity/armorstand/armorstand".to_string()
+fn armor_stand_texture(_st: &EntityState) -> TexturePath {
+    "entity/armorstand/armorstand".into()
 }
 
-fn mannequin_texture(_st: &EntityState) -> String {
-    "entity/player/wide/steve".to_string()
+fn mannequin_texture(_st: &EntityState) -> TexturePath {
+    "entity/player/wide/steve".into()
 }
 
 fn armor_stand_root(st: &EntityState) -> RootPose {

@@ -149,6 +149,18 @@ const ALL: &[Var] = &[
         enabled: true,
     },
     Var {
+        name: "MC_TERRAIN_DIRECT",
+        what: "force the direct terrain tier (one draw per run of sections) on a device that has the indirect one",
+        default: "off",
+        enabled: true,
+    },
+    Var {
+        name: "MC_SHADERPACK_PASSES",
+        what: "run only this many of a shader pack's full-screen passes (deferred, composite, final, in order) and show colortex0 as it stands, to find which pass misbehaves",
+        default: "every pass",
+        enabled: cfg!(feature = "shader_support"),
+    },
+    Var {
         name: "MC_SHAFTS",
         what: "volumetric light shafts in the post-processing chain",
         default: "off",

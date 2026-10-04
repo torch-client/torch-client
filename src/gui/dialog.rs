@@ -45,15 +45,24 @@ const CONFIRM_BUTTON_WIDTH: f32 = 150.0;
 
 #[derive(Default)]
 pub struct DialogState {
-    dialog: Option<Arc<Dialog>>,
+    phase: Phase,
     parent: Screen,
     inputs: Vec<InputState>,
     scroll: f32,
     scroll_drag: Option<f32>,
     layout: Option<Layout>,
     overlay: Overlay,
-    waiting_since: Option<f32>,
-    waiting_active: bool,
+}
+
+#[derive(Default)]
+enum Phase {
+    #[default]
+    Closed,
+    Showing(Arc<Dialog>),
+    Waiting {
+        since: Option<f32>,
+        active: bool,
+    },
 }
 
 enum InputState {
@@ -88,18 +97,21 @@ impl DialogState {
 
     fn open(&mut self, dialog: Arc<Dialog>) {
         self.inputs = dialog.inputs.iter().map(initial_state).collect();
-        self.dialog = Some(dialog);
+        self.phase = Phase::Showing(dialog);
         self.scroll = 0.0;
         self.scroll_drag = None;
         self.overlay = Overlay::None;
-        self.waiting_since = None;
-        self.waiting_active = false;
+    }
+
+    fn showing(&self) -> Option<Arc<Dialog>> {
+        match &self.phase {
+            Phase::Showing(dialog) => Some(dialog.clone()),
+            Phase::Closed | Phase::Waiting { .. } => None,
+        }
     }
 
     pub fn clear(&mut self) -> Screen {
-        self.dialog = None;
-        self.waiting_since = None;
-        self.waiting_active = false;
+        self.phase = Phase::Closed;
         self.overlay = Overlay::None;
         self.parent
     }
@@ -109,11 +121,11 @@ impl DialogState {
     }
 
     pub fn is_open(&self) -> bool {
-        self.dialog.is_some() || self.waiting_since.is_some()
+        !matches!(self.phase, Phase::Closed)
     }
 
     pub fn pauses(&self) -> bool {
-        self.dialog.as_ref().is_some_and(|dialog| dialog.pause)
+        matches!(&self.phase, Phase::Showing(dialog) if dialog.pause)
     }
 
     pub fn on_escape(&mut self, shared: &Arc<SharedMutex>) -> Outcome {
@@ -123,9 +135,9 @@ impl DialogState {
                 Outcome::default()
             }
             Overlay::None => {
-                let Some(dialog) = self.dialog.clone() else {
+                let Some(dialog) = self.showing() else {
                     let mut out = Outcome::default();
-                    if self.waiting_active {
+                    if matches!(self.phase, Phase::Waiting { active: true, .. }) {
                         out.nav = Some(self.clear());
                     }
                     return out;
@@ -161,9 +173,10 @@ impl DialogState {
             AfterAction::None => {}
             AfterAction::Close => out.nav = Some(self.parent),
             AfterAction::WaitForResponse => {
-                self.dialog = None;
-                self.waiting_since = Some(f32::NEG_INFINITY);
-                self.waiting_active = false;
+                self.phase = Phase::Waiting {
+                    since: None,
+                    active: false,
+                };
             }
         }
         let Some(click) = click else { return out };
@@ -349,7 +362,7 @@ pub fn draw(
         &masked_ctx
     };
 
-    let mut out = match state.dialog.clone() {
+    let mut out = match state.showing() {
         Some(dialog) => draw_dialog(p, state, dialog_ctx, shared, &dialog),
         None => draw_waiting(p, state, dialog_ctx),
     };
@@ -921,10 +934,15 @@ fn draw_input(
 
 fn draw_waiting(p: &mut Painter, state: &mut DialogState, ctx: &ScreenCtx) -> Outcome {
     let mut out = Outcome::default();
-    let since = match state.waiting_since {
-        Some(since) if since.is_finite() => since,
+    let since = match state.phase {
+        Phase::Waiting {
+            since: Some(since), ..
+        } => since,
         _ => {
-            state.waiting_since = Some(ctx.input.time);
+            state.phase = Phase::Waiting {
+                since: Some(ctx.input.time),
+                active: false,
+            };
             ctx.input.time
         }
     };
@@ -939,7 +957,10 @@ fn draw_waiting(p: &mut Painter, state: &mut DialogState, ctx: &ScreenCtx) -> Ou
     );
 
     let active = elapsed >= WAIT_BUTTON_ACTIVE_SECS;
-    state.waiting_active = active;
+    state.phase = Phase::Waiting {
+        since: Some(since),
+        active,
+    };
     if elapsed < WAIT_BUTTON_VISIBLE_SECS {
         return out;
     }

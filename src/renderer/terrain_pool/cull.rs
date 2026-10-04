@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::atomic::Ordering;
 
 use bevy::app::App;
 use bevy::asset::embedded_asset;
 use bevy::camera::primitives::Frustum;
 use bevy::ecs::query::{Has, QueryItem};
-use bevy::ecs::system::lifetimeless::SRes;
 use bevy::prelude::*;
 use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
@@ -23,23 +23,117 @@ use bevy::render::view::ExtractedView;
 use bevy::render::{Render, RenderApp, RenderSystems};
 use bytemuck::{Pod, Zeroable};
 
-use super::pools::TerrainPools;
+use super::pools::{SlotTable, TerrainPools};
 use super::{MAX_VIEWS, SLOTS_INITIAL, STREAMS, TerrainTier, TerrainView};
 
 #[cfg(feature = "builtin_shaders")]
 use bevy::pbr::{LightEntity, ViewLightEntities};
 
+pub const MAX_CULL_PLANES: usize = 13;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CullView {
-    pub planes: [[f32; 4]; 6],
+    pub planes: [[f32; 4]; MAX_CULL_PLANES],
+    pub within_min: [f32; 4],
+    pub within_max: [f32; 4],
+    pub always_min: [f32; 4],
+    pub always_max: [f32; 4],
     pub slot_cap: u32,
     pub view_index: u32,
     pub pool_count: u32,
     pub compact: u32,
+    pub flags: u32,
+    pub plane_count: u32,
+    pub pad: [u32; 2],
 }
 
-const CULL_VIEW_STRIDE: u64 = 256;
+pub const VIEW_WATER: u32 = 1;
+pub const VIEW_UNOCCLUDED: u32 = 2;
+pub const VIEW_WITHIN: u32 = 4;
+pub const VIEW_ALWAYS: u32 = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CullShape {
+    pub planes: [[f32; 4]; MAX_CULL_PLANES],
+    pub plane_count: usize,
+    pub within: Option<[[f32; 3]; 2]>,
+    pub always: Option<[[f32; 3]; 2]>,
+}
+
+impl CullShape {
+    fn frustum(planes: [[f32; 4]; 6]) -> CullShape {
+        let mut all = [[0.0; 4]; MAX_CULL_PLANES];
+        all[..6].copy_from_slice(&planes);
+        CullShape {
+            planes: all,
+            plane_count: 6,
+            within: None,
+            always: None,
+        }
+    }
+
+    pub fn keeps(&self, lo: [f32; 3], hi: [f32; 3]) -> bool {
+        if let Some([min, max]) = self.within
+            && (0..3).any(|a| hi[a] < min[a] || lo[a] > max[a])
+        {
+            return false;
+        }
+        if let Some([min, max]) = self.always
+            && (0..3).all(|a| hi[a] >= min[a] && lo[a] <= max[a])
+        {
+            return true;
+        }
+        self.planes[..self.plane_count].iter().all(|p| {
+            let v = [0, 1, 2].map(|a| if p[a] > 0.0 { hi[a] } else { lo[a] });
+            !(p[0] * v[0] + p[1] * v[1] + p[2] * v[2] + p[3] < 0.0)
+        })
+    }
+
+    fn view(
+        &self,
+        slot_cap: u32,
+        view_index: u32,
+        pool_count: u32,
+        compact: u32,
+        flags: u32,
+    ) -> CullView {
+        let corner = |b: Option<[[f32; 3]; 2]>, i: usize| {
+            b.map_or([0.0; 4], |b| [b[i][0], b[i][1], b[i][2], 0.0])
+        };
+        CullView {
+            planes: self.planes,
+            within_min: corner(self.within, 0),
+            within_max: corner(self.within, 1),
+            always_min: corner(self.always, 0),
+            always_max: corner(self.always, 1),
+            slot_cap,
+            view_index,
+            pool_count,
+            compact,
+            flags: flags
+                | if self.within.is_some() {
+                    VIEW_WITHIN
+                } else {
+                    0
+                }
+                | if self.always.is_some() {
+                    VIEW_ALWAYS
+                } else {
+                    0
+                },
+            plane_count: self.plane_count as u32,
+            pad: [0; 2],
+        }
+    }
+}
+
+const CAMERA_FLAGS: u32 = VIEW_WATER;
+#[cfg(feature = "shader_support")]
+const PACK_SHADOW_FLAGS: u32 = VIEW_WATER | VIEW_UNOCCLUDED;
+
+const CULL_VIEW_STRIDE: u64 = 512;
+const _: () = assert!(std::mem::size_of::<CullView>() as u64 <= CULL_VIEW_STRIDE);
 
 const INDIRECT_ARGS_SIZE: u64 = 20;
 
@@ -55,6 +149,9 @@ pub struct CullBuffers {
     pub generation: u64,
     zero_counts: Vec<u8>,
     view_scratch: [u8; CULL_VIEW_STRIDE as usize],
+    water_counts: Vec<u32>,
+    water_order: Vec<(u32, f32, u32)>,
+    water_args: Vec<[u32; 5]>,
 }
 
 impl CullBuffers {
@@ -91,6 +188,9 @@ impl CullBuffers {
             generation: 0,
             zero_counts: vec![0u8; (regions as usize) * 4],
             view_scratch: [0u8; CULL_VIEW_STRIDE as usize],
+            water_counts: Vec::new(),
+            water_order: Vec::new(),
+            water_args: Vec::new(),
         }
     }
 
@@ -114,6 +214,9 @@ impl CullBuffers {
             generation: 0,
             zero_counts: Vec::new(),
             view_scratch: [0u8; CULL_VIEW_STRIDE as usize],
+            water_counts: Vec::new(),
+            water_order: Vec::new(),
+            water_args: Vec::new(),
         }
     }
 
@@ -121,6 +224,53 @@ impl CullBuffers {
         self.view_count >= view_count.max(1)
             && self.pool_count >= pool_count.max(1)
             && self.slot_cap >= slot_cap
+    }
+
+    fn write_water(&mut self, queue: &RenderQueue, pools: &TerrainPools, view: &AssignedView) {
+        self.water_order.clear();
+        for &slot in &pools.water_slots {
+            if view.flags & VIEW_UNOCCLUDED == 0 && !pools.is_visible(slot) {
+                continue;
+            }
+            let meta = &pools.meta_cpu[slot as usize];
+            let (lo, hi) = meta.world_box();
+            if !view.shape.keeps(lo, hi) {
+                continue;
+            }
+            let centre = (Vec3::from(lo) + Vec3::from(hi)) * 0.5;
+            self.water_order
+                .push((meta.pool, centre.distance_squared(view.eye), slot));
+        }
+        self.water_order
+            .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
+        for run in self.water_order.chunk_by(|a, b| a.0 == b.0) {
+            let pool = run[0].0;
+            self.water_args.clear();
+            self.water_args.extend(run.iter().map(|&(_, _, slot)| {
+                let meta = &pools.meta_cpu[slot as usize];
+                [
+                    meta.index_count,
+                    1,
+                    meta.first_index,
+                    meta.base_vertex,
+                    slot,
+                ]
+            }));
+            let region = (view.slot * self.pool_count + pool) * STREAMS + super::STREAM_WATER;
+            queue.write_buffer(
+                &self.commands,
+                region as u64 * self.slot_cap as u64 * INDIRECT_ARGS_SIZE,
+                bytemuck::cast_slice(&self.water_args),
+            );
+            self.water_counts[(view.slot * self.pool_count + pool) as usize] = run.len() as u32;
+        }
+    }
+
+    pub fn water_count(&self, view_index: u32, pool: u32) -> u32 {
+        self.water_counts
+            .get((view_index * self.pool_count + pool) as usize)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -131,7 +281,175 @@ pub struct TerrainViews {
 }
 
 #[derive(Resource, Default)]
-pub struct DirectLists(pub HashMap<(bevy::render::view::RetainedViewEntity, u32), Vec<u32>>);
+pub struct DirectLists(
+    pub HashMap<bevy::render::view::RetainedViewEntity, [Vec<u32>; STREAMS as usize]>,
+);
+
+#[derive(Clone, Copy)]
+pub struct AssignedView {
+    slot: u32,
+    key: bevy::render::view::RetainedViewEntity,
+    shape: CullShape,
+    flags: u32,
+    eye: Vec3,
+}
+
+#[cfg(feature = "shader_support")]
+#[derive(Resource, Default)]
+pub struct PackCullView(pub Option<CullShape>);
+
+#[cfg(feature = "shader_support")]
+pub fn pack_shadow_view(
+    camera: bevy::render::view::RetainedViewEntity,
+) -> bevy::render::view::RetainedViewEntity {
+    bevy::render::view::RetainedViewEntity::new(
+        camera.main_entity,
+        Some(camera.main_entity),
+        u32::MAX,
+    )
+}
+
+#[cfg(feature = "shader_support")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShadowCullMode {
+    Distance,
+    Advanced,
+    SafeZone,
+}
+
+#[cfg(feature = "shader_support")]
+pub struct ShadowCullInput {
+    pub mode: ShadowCullMode,
+    pub camera_clip: Mat4,
+    pub toward_light: Vec3,
+    pub camera: bevy::math::DVec3,
+    pub shadow_distance: f32,
+    pub voxel_distance: f32,
+    pub render_mul: f32,
+    pub render_distance: f32,
+}
+
+#[cfg(feature = "shader_support")]
+pub fn shadow_cull_shape(input: &ShadowCullInput) -> CullShape {
+    let around = |distance: f64| -> [[f32; 3]; 2] {
+        let c = input.camera;
+        [
+            [
+                (c.x - distance) as f32,
+                (c.y - distance) as f32,
+                (c.z - distance) as f32,
+            ],
+            [
+                (c.x + distance) as f32,
+                (c.y + distance) as f32,
+                (c.z + distance) as f32,
+            ],
+        ]
+    };
+    let mut shape = CullShape {
+        planes: [[0.0; 4]; MAX_CULL_PLANES],
+        plane_count: 0,
+        within: None,
+        always: None,
+    };
+    let render_distance = f64::from(input.render_distance);
+    if input.mode == ShadowCullMode::Distance {
+        let distance = f64::from(input.shadow_distance * input.render_mul);
+        if distance > 0.0 && distance <= render_distance {
+            shape.within = Some(around(distance));
+        }
+        return shape;
+    }
+    let safe = input.mode == ShadowCullMode::SafeZone;
+    let mul = if safe && input.render_mul < 0.0 {
+        1.0
+    } else {
+        input.render_mul
+    };
+    let distance = if mul < 0.0 {
+        render_distance
+    } else {
+        f64::from(
+            if safe {
+                input.voxel_distance
+            } else {
+                input.shadow_distance
+            } * mul,
+        )
+    };
+    let boxed = (safe || distance < render_distance).then(|| around(distance));
+    for plane in advanced_planes(input.camera_clip, input.toward_light) {
+        if shape.plane_count == MAX_CULL_PLANES {
+            break;
+        }
+        let normal = plane.truncate().as_dvec3();
+        let w = f64::from(plane.w) - normal.dot(input.camera);
+        shape.planes[shape.plane_count] = [plane.x, plane.y, plane.z, w as f32];
+        shape.plane_count += 1;
+    }
+    if safe {
+        shape.within = Some(around(f64::from(input.shadow_distance * mul)));
+        shape.always = boxed;
+    } else {
+        shape.within = boxed;
+    }
+    shape
+}
+
+#[cfg(feature = "shader_support")]
+fn advanced_planes(camera_clip: Mat4, toward_light: Vec3) -> impl Iterator<Item = Vec4> {
+    let t = camera_clip.transpose();
+    let base: [Vec4; 6] = [
+        Vec4::new(-1.0, 0.0, 0.0, 1.0),
+        Vec4::new(1.0, 0.0, 0.0, 1.0),
+        Vec4::new(0.0, -1.0, 0.0, 1.0),
+        Vec4::new(0.0, 1.0, 0.0, 1.0),
+        Vec4::new(0.0, 0.0, -1.0, 1.0),
+        Vec4::new(0.0, 0.0, 1.0, 1.0),
+    ]
+    .map(|v| (t * v).normalize_or_zero());
+    let light = toward_light.normalize_or_zero();
+    let mut out = [Vec4::ZERO; MAX_CULL_PLANES];
+    let mut count = 0;
+    let mut add = |plane: Vec4| {
+        if count < MAX_CULL_PLANES {
+            out[count] = plane;
+            count += 1;
+        }
+    };
+    let back: [bool; 6] = base.map(|p| p.truncate().dot(light) > 0.0);
+    for plane in base.iter().filter(|p| p.truncate().dot(light) >= 0.0) {
+        add(*plane);
+    }
+    let neighbours = |i: usize| -> [usize; 4] {
+        match i / 2 {
+            0 => [2, 3, 4, 5],
+            1 => [0, 1, 4, 5],
+            _ => [0, 1, 2, 3],
+        }
+    };
+    for (i, plane) in base.iter().enumerate() {
+        if !back[i] {
+            continue;
+        }
+        for n in neighbours(i) {
+            if !back[n] {
+                add(edge_plane(*plane, base[n], light));
+            }
+        }
+    }
+    out.into_iter().take(count)
+}
+
+#[cfg(feature = "shader_support")]
+fn edge_plane(back: Vec4, front: Vec4, light: Vec3) -> Vec4 {
+    let (b, f) = (back.truncate(), front.truncate());
+    let intersection = b.cross(f);
+    let normal = intersection.cross(light);
+    let point = (intersection.cross(b) * -front.w + f.cross(intersection) * -back.w)
+        / intersection.length_squared();
+    normal.extend(-normal.dot(point))
+}
 
 #[derive(Resource)]
 pub struct CullPipeline {
@@ -162,6 +480,8 @@ pub fn build(app: &mut App) {
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
+    #[cfg(feature = "shader_support")]
+    render_app.init_resource::<PackCullView>();
     render_app
         .init_resource::<TerrainViews>()
         .init_resource::<DirectLists>()
@@ -257,12 +577,16 @@ pub fn prepare_cull(
     cameras: Query<(Entity, &ExtractedView, Has<TerrainView>)>,
     #[cfg(feature = "builtin_shaders")] view_lights: Query<&ViewLightEntities>,
     #[cfg(feature = "builtin_shaders")] lights: Query<(&ExtractedView, &LightEntity)>,
+    #[cfg(feature = "shader_support")] pack_view: Option<Res<PackCullView>>,
+    #[cfg(feature = "builtin_shaders")] takeover: Option<Res<super::draw::PackTakeover>>,
+    mut assigned: Local<Vec<AssignedView>>,
 ) {
+    #[cfg(feature = "builtin_shaders")]
+    let cascades = !takeover.is_some_and(|t| t.0);
     views.index.clear();
     views.count = 0;
 
-    let mut assigned: Vec<(u32, bevy::render::view::RetainedViewEntity, [[f32; 4]; 6])> =
-        Vec::new();
+    assigned.clear();
 
     for (entity, view, is_terrain) in cameras.iter() {
         #[cfg(not(feature = "builtin_shaders"))]
@@ -273,10 +597,34 @@ pub fn prepare_cull(
         let slot = views.count;
         views.count += 1;
         views.index.insert(view.retained_view_entity, slot);
-        assigned.push((slot, view.retained_view_entity, frustum_planes(view)));
+        let eye = view.world_from_view.translation();
+        assigned.push(AssignedView {
+            slot,
+            key: view.retained_view_entity,
+            shape: CullShape::frustum(frustum_planes(view)),
+            flags: CAMERA_FLAGS,
+            eye,
+        });
+
+        #[cfg(feature = "shader_support")]
+        if let Some(shape) = pack_view.as_ref().and_then(|v| v.0)
+            && views.count < MAX_VIEWS
+        {
+            let slot = views.count;
+            views.count += 1;
+            let key = pack_shadow_view(view.retained_view_entity);
+            views.index.insert(key, slot);
+            assigned.push(AssignedView {
+                slot,
+                key,
+                shape,
+                flags: PACK_SHADOW_FLAGS,
+                eye,
+            });
+        }
 
         #[cfg(feature = "builtin_shaders")]
-        if let Ok(view_lights) = view_lights.get(entity) {
+        if cascades && let Ok(view_lights) = view_lights.get(entity) {
             for &light_entity in &view_lights.lights {
                 if views.count >= MAX_VIEWS {
                     break;
@@ -290,11 +638,13 @@ pub fn prepare_cull(
                 let slot = views.count;
                 views.count += 1;
                 views.index.insert(light_view.retained_view_entity, slot);
-                assigned.push((
+                assigned.push(AssignedView {
                     slot,
-                    light_view.retained_view_entity,
-                    frustum_planes(light_view),
-                ));
+                    key: light_view.retained_view_entity,
+                    shape: CullShape::frustum(frustum_planes(light_view)),
+                    flags: 0,
+                    eye,
+                });
             }
         }
     }
@@ -306,86 +656,89 @@ pub fn prepare_cull(
             *cull = CullBuffers::new(&device, views.count, pool_count, pools.slot_cap);
             cull.generation = generation;
         }
-        for &(slot, _, planes) in &assigned {
-            let cull_view = CullView {
-                planes,
-                slot_cap: cull.slot_cap,
-                view_index: slot,
-                pool_count: cull.pool_count,
-                compact: tier.count as u32,
-            };
+        for view in assigned.iter() {
+            let cull_view = view.shape.view(
+                cull.slot_cap,
+                view.slot,
+                cull.pool_count,
+                tier.count as u32,
+                view.flags,
+            );
             let bytes = bytemuck::bytes_of(&cull_view);
             cull.view_scratch[..bytes.len()].copy_from_slice(bytes);
             queue.write_buffer(
                 &cull.views,
-                (slot as u64) * CULL_VIEW_STRIDE,
+                (view.slot as u64) * CULL_VIEW_STRIDE,
                 &cull.view_scratch,
             );
         }
         let live_regions = (cull.regions as usize) * 4;
         queue.write_buffer(&cull.counts, 0, &cull.zero_counts[..live_regions]);
+
+        let cull = &mut *cull;
+        cull.water_counts.clear();
+        cull.water_counts
+            .resize((cull.view_count * cull.pool_count) as usize, 0);
+        for view in assigned.iter().filter(|view| view.flags & VIEW_WATER != 0) {
+            cull.write_water(&queue, &pools, view);
+        }
         return;
     }
 
-    for lists_vec in lists.0.values_mut() {
-        lists_vec.clear();
+    let stats = &pools.stats.0;
+    stats.draws.store(
+        stats.draws_pending.swap(0, Ordering::Relaxed),
+        Ordering::Relaxed,
+    );
+    let mut camera_drawn = 0usize;
+    for per_view in lists.0.values_mut() {
+        for list in per_view.iter_mut() {
+            list.clear();
+        }
     }
-    for &(slot, retained, planes) in &assigned {
-        let is_shadow = slot != 0;
-        for (index, meta) in pools.meta_cpu.iter().enumerate() {
+    let end = (pools.draw_end as usize).min(pools.meta_cpu.len());
+    for view in assigned.iter() {
+        let (shape, flags) = (&view.shape, view.flags);
+        let per_view = lists.0.entry(view.key).or_default();
+        for (index, meta) in pools.meta_cpu[..end].iter().enumerate() {
             if !pools.is_live(index as u32) {
                 continue;
             }
-            let vis_word = pools.vis_cpu.get(index / 32).copied().unwrap_or(u32::MAX);
-            if (vis_word >> (index % 32)) & 1 == 0 {
+            if flags & VIEW_UNOCCLUDED == 0 && !pools.is_visible(index as u32) {
                 continue;
             }
-            let lo = [
-                (meta.origin[0] as f32) + meta.min[0],
-                (meta.origin[1] as f32) + meta.min[1],
-                (meta.origin[2] as f32) + meta.min[2],
-            ];
-            let hi = [
-                (meta.origin[0] as f32) + meta.max[0],
-                (meta.origin[1] as f32) + meta.max[1],
-                (meta.origin[2] as f32) + meta.max[2],
-            ];
-            if !aabb_in_frustum(&planes, lo, hi) {
+            let (lo, hi) = meta.world_box();
+            if !shape.keeps(lo, hi) {
                 continue;
+            }
+            if flags == CAMERA_FLAGS {
+                camera_drawn += 1;
             }
             let water = meta.flags & super::META_WATER != 0;
             if water {
-                if !is_shadow {
-                    lists
-                        .0
-                        .entry((retained, super::STREAM_WATER))
-                        .or_default()
-                        .push(index as u32);
+                if flags & VIEW_WATER != 0 {
+                    per_view[super::STREAM_WATER as usize].push(index as u32);
                 }
                 continue;
             }
             if meta.solid_count > 0 {
-                lists
-                    .0
-                    .entry((retained, super::STREAM_SOLID))
-                    .or_default()
-                    .push(index as u32);
+                per_view[super::STREAM_SOLID as usize].push(index as u32);
             }
             if meta.index_count > meta.solid_count {
-                lists
-                    .0
-                    .entry((retained, super::STREAM_CUTOUT))
-                    .or_default()
-                    .push(index as u32);
+                per_view[super::STREAM_CUTOUT as usize].push(index as u32);
             }
         }
     }
 
-    for list in lists.0.values_mut() {
-        list.sort_unstable_by_key(|&slot| {
-            let meta = &pools.meta_cpu[slot as usize];
-            (meta.pool, meta.first_index)
-        });
+    stats.drawn.store(camera_drawn, Ordering::Relaxed);
+
+    for per_view in lists.0.values_mut() {
+        for (stream, list) in (0u32..).zip(per_view.iter_mut()) {
+            list.sort_unstable_by_key(|&slot| {
+                let meta = &pools.meta_cpu[slot as usize];
+                (meta.pool, meta.stream_range(stream).0)
+            });
+        }
     }
 }
 
@@ -401,20 +754,6 @@ fn frustum_planes(view: &ExtractedView) -> [[f32; 4]; 6] {
     planes
 }
 
-fn aabb_in_frustum(planes: &[[f32; 4]; 6], lo: [f32; 3], hi: [f32; 3]) -> bool {
-    for p in planes {
-        let v = [
-            if p[0] > 0.0 { hi[0] } else { lo[0] },
-            if p[1] > 0.0 { hi[1] } else { lo[1] },
-            if p[2] > 0.0 { hi[2] } else { lo[2] },
-        ];
-        if p[0] * v[0] + p[1] * v[1] + p[2] * v[2] + p[3] < 0.0 {
-            return false;
-        }
-    }
-    true
-}
-
 pub fn prepare_cull_bind_group(
     device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
@@ -424,6 +763,9 @@ pub fn prepare_cull_bind_group(
     mut bind_group: ResMut<CullBindGroup>,
 ) {
     let Some(pipeline) = pipeline else { return };
+    let SlotTable::Indirect { meta, vis } = &pools.table else {
+        return;
+    };
     let key = (pools.tables_generation, cull.generation);
     if bind_group.key == Some(key) && bind_group.group.is_some() {
         return;
@@ -433,8 +775,8 @@ pub fn prepare_cull_bind_group(
         "terrain_cull",
         &layout,
         &BindGroupEntries::sequential((
-            pools.meta.as_entire_binding(),
-            pools.vis.as_entire_binding(),
+            meta.as_entire_binding(),
+            vis.as_entire_binding(),
             cull.commands.as_entire_binding(),
             cull.counts.as_entire_binding(),
             BufferBinding {
@@ -480,7 +822,11 @@ impl ViewNode for TerrainCullNode {
         };
         let cull = world.resource::<CullBuffers>();
 
-        let workgroups = cull.slot_cap.div_ceil(64);
+        let draw_end = world.resource::<TerrainPools>().draw_end.min(cull.slot_cap);
+        if draw_end == 0 {
+            return Ok(());
+        }
+        let workgroups = draw_end.div_ceil(64);
         let mut pass =
             render_context
                 .command_encoder()
@@ -494,5 +840,102 @@ impl ViewNode for TerrainCullNode {
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "shader_support"))]
+mod tests {
+    use super::*;
+    use bevy::math::Vec3;
+
+    #[test]
+    fn the_cull_shader_validates_and_its_view_matches() {
+        let module = naga::front::wgsl::parse_str(include_str!("cull.wgsl")).expect("parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("validates");
+        let handle = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("CullView"))
+            .expect("declared")
+            .0;
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(module.to_ctx()).expect("lays out");
+        assert_eq!(
+            layouter[handle].size as usize,
+            std::mem::size_of::<CullView>()
+        );
+    }
+
+    fn section(lo: Vec3) -> ([f32; 3], [f32; 3]) {
+        (lo.to_array(), (lo + Vec3::splat(16.0)).to_array())
+    }
+
+    fn input(mode: ShadowCullMode, camera: Vec3, toward_light: Vec3) -> ShadowCullInput {
+        ShadowCullInput {
+            mode,
+            camera_clip: Mat4::perspective_rh_gl(70f32.to_radians(), 16.0 / 9.0, 0.05, 512.0),
+            toward_light,
+            camera: camera.as_dvec3(),
+            shadow_distance: 192.0,
+            voxel_distance: 0.0,
+            render_mul: 1.0,
+            render_distance: 256.0,
+        }
+    }
+
+    #[test]
+    fn distance_culling_is_a_box_around_the_camera() {
+        let camera = Vec3::new(1000.0, 64.0, -5000.0);
+        let shape = shadow_cull_shape(&input(ShadowCullMode::Distance, camera, Vec3::Y));
+        let (lo, hi) = section(camera + Vec3::new(100.0, 0.0, 100.0));
+        assert!(shape.keeps(lo, hi));
+        let (lo, hi) = section(camera + Vec3::new(300.0, 0.0, 0.0));
+        assert!(!shape.keeps(lo, hi), "past shadowDistance");
+    }
+
+    #[test]
+    fn advanced_culling_keeps_casters_into_the_view() {
+        let camera = Vec3::new(1000.0, 64.0, -5000.0);
+        let shape = shadow_cull_shape(&input(ShadowCullMode::Advanced, camera, Vec3::Y));
+        let keeps = |offset: Vec3| {
+            let (lo, hi) = section(camera + offset);
+            shape.keeps(lo, hi)
+        };
+        assert!(keeps(Vec3::new(-8.0, -8.0, -60.0)), "in view");
+        assert!(
+            keeps(Vec3::new(-8.0, 80.0, -60.0)),
+            "above the view, casting down into it"
+        );
+        assert!(!keeps(Vec3::new(-8.0, -8.0, 120.0)), "behind the camera");
+    }
+
+    #[test]
+    fn the_safe_zone_keeps_its_box() {
+        let camera = Vec3::new(8.0, 64.0, 8.0);
+        let mut safe = input(ShadowCullMode::SafeZone, camera, Vec3::Y);
+        safe.voxel_distance = 64.0;
+        let shape = shadow_cull_shape(&safe);
+        let (lo, hi) = section(camera + Vec3::new(-8.0, -8.0, 30.0));
+        assert!(
+            shape.keeps(lo, hi),
+            "behind the camera but in the voxel box"
+        );
+        let (lo, hi) = section(camera + Vec3::new(-8.0, -8.0, 120.0));
+        assert!(!shape.keeps(lo, hi), "behind the camera past the voxel box");
+        let (lo, hi) = section(camera + Vec3::new(300.0, 0.0, -60.0));
+        assert!(!shape.keeps(lo, hi), "past shadowDistance");
+    }
+
+    #[test]
+    fn pack_shadow_view_is_its_own_key() {
+        let camera =
+            bevy::render::view::RetainedViewEntity::new(Entity::PLACEHOLDER.into(), None, 0);
+        assert_ne!(pack_shadow_view(camera), camera);
+        assert_eq!(pack_shadow_view(camera), pack_shadow_view(camera));
     }
 }

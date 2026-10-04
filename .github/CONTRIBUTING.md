@@ -44,7 +44,8 @@ tools/build_web.sh --features webgpu
 | `eagler` | off | Joins Eaglercraft servers over `wss://`. |
 | `webgpu` | off | Browser build only. Uses WebGPU instead of WebGL2, with no fallback. |
 | `mobile_ui` | off | On-screen touch controls. The Android build turns this on itself. |
-| `click_gui` | off | A Right Shift menu. Layout only; its settings do nothing yet. |
+| `click_gui` | off | A Right Shift menu with a switch and settings for every module. |
+| `hud_editor` | off | A screen for dragging, scaling and hiding HUD elements, saved to `hud.json`. |
 | `profiling` | off | Span profiler. Press F9 in game to save a flamegraph. |
 | `deadlock-detection` | off | Names the threads involved when the client freezes on a lock. |
 | `alloc_diag` | off | Heap usage rows on the F3 screen. |

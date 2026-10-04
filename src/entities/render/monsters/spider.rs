@@ -1,5 +1,6 @@
 use azalea_registry::builtin::EntityKind;
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::spider;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -44,16 +45,16 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/spider/spider".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/spider/spider".into()
 }
 
-fn cave_spider_texture(_st: &EntityState) -> String {
-    "entity/spider/cave_spider".to_string()
+fn cave_spider_texture(_st: &EntityState) -> TexturePath {
+    "entity/spider/cave_spider".into()
 }
 
-fn eyes_texture(_st: &EntityState) -> String {
-    "entity/spider/spider_eyes".to_string()
+fn eyes_texture(_st: &EntityState) -> TexturePath {
+    "entity/spider/spider_eyes".into()
 }
 
 fn root(st: &EntityState) -> RootPose {

@@ -14,92 +14,133 @@ use super::wire::{Reader, varint_len, write_varint, write_varlong};
 const ACTION_INTERACT: i32 = 0;
 const ACTION_ATTACK: i32 = 1;
 
+pub(crate) struct Ids {
+    to_native: &'static Remap,
+    from_native: &'static Remap,
+}
+
+type Rewrite = fn(&Ids, &[u8]) -> Option<Box<[u8]>>;
+
+struct HopSpec {
+    wire: fn() -> &'static PacketTable,
+    to_native: fn() -> &'static Remap,
+    from_native: fn() -> &'static Remap,
+    inbound: &'static [(&'static str, Rewrite)],
+    outbound: &'static [(&'static str, &'static str, Rewrite)],
+}
+
+const V774: HopSpec = HopSpec {
+    wire: PacketTable::v1_21_11,
+    to_native: Remap::to_native,
+    from_native: Remap::from_native,
+    inbound: &[
+        ("set_time", set_time),
+        ("level_chunk_with_light", level_chunk),
+        ("block_update", block_update),
+        ("section_blocks_update", section_blocks_update),
+        ("set_entity_data", entity_data),
+        ("container_set_content", container_set_content),
+        ("container_set_slot", container_set_slot),
+        ("set_cursor_item", set_cursor_item),
+        ("set_player_inventory", set_player_inventory),
+        ("set_equipment", set_equipment),
+        ("add_entity", add_entity),
+        ("block_event", block_event),
+        ("award_stats", award_stats),
+        ("level_event", level_event),
+        ("level_particles", level_particles),
+        ("explode", explode),
+        ("sound", sound),
+        ("sound_entity", sound),
+        ("update_recipes", update_recipes),
+    ],
+    outbound: &[
+        ("attack", "interact", attack),
+        ("interact", "interact", interact_use),
+        ("container_click", "container_click", container_click),
+        (
+            "set_creative_mode_slot",
+            "set_creative_mode_slot",
+            creative_slot,
+        ),
+    ],
+};
+
 pub(crate) struct Hop {
+    ids: Ids,
+    wire: &'static PacketTable,
+    native: &'static PacketTable,
     inbound_game: Box<[u32]>,
     outbound_game: Box<[Option<u32>]>,
-    set_time: u32,
-    level_chunk_with_light: u32,
-    block_update: u32,
-    section_blocks_update: u32,
-    set_entity_data: u32,
-    container_set_content: u32,
-    container_set_slot: u32,
-    set_cursor_item: u32,
-    set_player_inventory: u32,
-    set_equipment: u32,
-    add_entity: u32,
-    block_event: u32,
-    award_stats: u32,
-    level_event: u32,
-    level_particles: u32,
-    explode: u32,
-    sound: u32,
-    sound_entity: u32,
-    update_recipes: u32,
-    attack: u32,
-    interact: u32,
-    container_click: u32,
-    set_creative_mode_slot: u32,
+    inbound_rewrite: Box<[Option<Rewrite>]>,
+    outbound_rewrite: Box<[Option<(Option<u32>, Rewrite)>]>,
     trace: bool,
 }
 
 impl Hop {
     pub(crate) fn v774() -> &'static Hop {
         static HOP: OnceLock<Hop> = OnceLock::new();
-        HOP.get_or_init(|| {
-            let old = PacketTable::v1_21_11();
-            let new = PacketTable::native();
-            let id = |dir, name: &str| {
-                new.id(Phase::Game, dir, name)
-                    .unwrap_or_else(|| panic!("775 has no game packet {name}"))
-            };
+        HOP.get_or_init(|| Hop::build(&V774))
+    }
 
-            let inbound_game = (0..old.count(Phase::Game, Direction::Clientbound))
-                .map(|wire| {
-                    let name = old
-                        .name_of(Phase::Game, Direction::Clientbound, wire as u32)
-                        .expect("in range");
-                    id(Direction::Clientbound, name)
-                })
-                .collect();
-            let outbound_game = (0..new.count(Phase::Game, Direction::Serverbound))
-                .map(|native| {
-                    let name = new
-                        .name_of(Phase::Game, Direction::Serverbound, native as u32)
-                        .expect("in range");
-                    old.id(Phase::Game, Direction::Serverbound, name)
-                })
-                .collect();
+    fn build(spec: &HopSpec) -> Hop {
+        let old = (spec.wire)();
+        let new = PacketTable::native();
+        let id = |dir, name: &str| {
+            new.id(Phase::Game, dir, name)
+                .unwrap_or_else(|| panic!("775 has no game packet {name}"))
+        };
 
-            Hop {
-                inbound_game,
-                outbound_game,
-                set_time: id(Direction::Clientbound, "set_time"),
-                level_chunk_with_light: id(Direction::Clientbound, "level_chunk_with_light"),
-                block_update: id(Direction::Clientbound, "block_update"),
-                section_blocks_update: id(Direction::Clientbound, "section_blocks_update"),
-                set_entity_data: id(Direction::Clientbound, "set_entity_data"),
-                container_set_content: id(Direction::Clientbound, "container_set_content"),
-                container_set_slot: id(Direction::Clientbound, "container_set_slot"),
-                set_cursor_item: id(Direction::Clientbound, "set_cursor_item"),
-                set_player_inventory: id(Direction::Clientbound, "set_player_inventory"),
-                set_equipment: id(Direction::Clientbound, "set_equipment"),
-                add_entity: id(Direction::Clientbound, "add_entity"),
-                block_event: id(Direction::Clientbound, "block_event"),
-                award_stats: id(Direction::Clientbound, "award_stats"),
-                level_event: id(Direction::Clientbound, "level_event"),
-                level_particles: id(Direction::Clientbound, "level_particles"),
-                explode: id(Direction::Clientbound, "explode"),
-                sound: id(Direction::Clientbound, "sound"),
-                sound_entity: id(Direction::Clientbound, "sound_entity"),
-                update_recipes: id(Direction::Clientbound, "update_recipes"),
-                attack: id(Direction::Serverbound, "attack"),
-                interact: id(Direction::Serverbound, "interact"),
-                container_click: id(Direction::Serverbound, "container_click"),
-                set_creative_mode_slot: id(Direction::Serverbound, "set_creative_mode_slot"),
-                trace: crate::diag::debug_on("proto"),
-            }
-        })
+        let inbound_game = (0..old.count(Phase::Game, Direction::Clientbound))
+            .map(|wire| {
+                let name = old
+                    .name_of(Phase::Game, Direction::Clientbound, wire as u32)
+                    .expect("in range");
+                id(Direction::Clientbound, name)
+            })
+            .collect();
+        let outbound_game = (0..new.count(Phase::Game, Direction::Serverbound))
+            .map(|native| {
+                let name = new
+                    .name_of(Phase::Game, Direction::Serverbound, native as u32)
+                    .expect("in range");
+                old.id(Phase::Game, Direction::Serverbound, name)
+            })
+            .collect();
+
+        let mut inbound_rewrite: Box<[Option<Rewrite>]> =
+            vec![None; new.count(Phase::Game, Direction::Clientbound)].into_boxed_slice();
+        for &(name, rewrite) in spec.inbound {
+            let native = id(Direction::Clientbound, name) as usize;
+            assert!(
+                inbound_rewrite[native].replace(rewrite).is_none(),
+                "{name} is rewritten inbound twice"
+            );
+        }
+        let mut outbound_rewrite: Box<[Option<(Option<u32>, Rewrite)>]> =
+            vec![None; new.count(Phase::Game, Direction::Serverbound)].into_boxed_slice();
+        for &(name, wire_name, rewrite) in spec.outbound {
+            let native = id(Direction::Serverbound, name) as usize;
+            let wire = old.id(Phase::Game, Direction::Serverbound, wire_name);
+            assert!(
+                outbound_rewrite[native].replace((wire, rewrite)).is_none(),
+                "{name} is rewritten outbound twice"
+            );
+        }
+
+        Hop {
+            ids: Ids {
+                to_native: (spec.to_native)(),
+                from_native: (spec.from_native)(),
+            },
+            wire: old,
+            native: new,
+            inbound_game,
+            outbound_game,
+            inbound_rewrite,
+            outbound_rewrite,
+            trace: crate::diag::debug_on("proto"),
+        }
     }
 
     pub(crate) fn inbound(&self, phase: ConnectionProtocol, raw: Box<[u8]>) -> Box<[u8]> {
@@ -118,48 +159,15 @@ impl Hop {
         };
         let body = r.rest();
 
-        let rewritten = if native_id == self.set_time {
-            set_time(body)
-        } else if native_id == self.level_chunk_with_light {
-            level_chunk(body)
-        } else if native_id == self.block_update {
-            block_update(body)
-        } else if native_id == self.section_blocks_update {
-            section_blocks_update(body)
-        } else if native_id == self.set_entity_data {
-            entity_data(body)
-        } else if native_id == self.container_set_content {
-            stacks(body, 2, true, 1)
-        } else if native_id == self.container_set_slot {
-            container_set_slot(body)
-        } else if native_id == self.set_cursor_item {
-            stacks(body, 0, false, 0)
-        } else if native_id == self.set_player_inventory {
-            stacks(body, 1, false, 0)
-        } else if native_id == self.set_equipment {
-            set_equipment(body)
-        } else if native_id == self.add_entity {
-            add_entity(body)
-        } else if native_id == self.block_event {
-            block_event(body)
-        } else if native_id == self.award_stats {
-            award_stats(body)
-        } else if native_id == self.level_event {
-            level_event(body)
-        } else if native_id == self.level_particles {
-            level_particles(body)
-        } else if native_id == self.explode {
-            explode(body)
-        } else if native_id == self.sound || native_id == self.sound_entity {
-            sound(body)
-        } else if native_id == self.update_recipes {
-            update_recipes(body)
-        } else {
-            None
-        };
+        let rewritten = self
+            .inbound_rewrite
+            .get(native_id as usize)
+            .copied()
+            .flatten()
+            .and_then(|rewrite| rewrite(&self.ids, body));
 
         if self.trace {
-            trace(
+            self.trace_frame(
                 "in",
                 Direction::Clientbound,
                 wire_id,
@@ -187,41 +195,10 @@ impl Hop {
         };
         let body = r.rest();
 
-        if native_id == self.attack || native_id == self.interact {
-            let wire_id = self
-                .outbound_game
-                .get(self.interact as usize)
-                .copied()
-                .flatten();
-            let body = interact(body, native_id == self.attack);
+        if let Some(&Some((wire_id, rewrite))) = self.outbound_rewrite.get(native_id as usize) {
+            let body = rewrite(&self.ids, body);
             if self.trace {
-                trace(
-                    "out",
-                    Direction::Serverbound,
-                    native_id,
-                    wire_id.filter(|_| body.is_some()),
-                    body.is_some(),
-                );
-            }
-            return match (body, wire_id) {
-                (Some(body), Some(wire_id)) => frame(wire_id, &body),
-                _ => Box::new([]),
-            };
-        }
-
-        if native_id == self.container_click || native_id == self.set_creative_mode_slot {
-            let body = if native_id == self.container_click {
-                container_click(body)
-            } else {
-                creative_slot(body)
-            };
-            let wire_id = self
-                .outbound_game
-                .get(native_id as usize)
-                .copied()
-                .flatten();
-            if self.trace {
-                trace(
+                self.trace_frame(
                     "out",
                     Direction::Serverbound,
                     native_id,
@@ -241,13 +218,33 @@ impl Hop {
             .copied()
             .flatten();
         if self.trace {
-            trace("out", Direction::Serverbound, native_id, wire_id, false);
+            self.trace_frame("out", Direction::Serverbound, native_id, wire_id, false);
         }
         match wire_id {
             Some(wire_id) if wire_id != native_id => frame(wire_id, body),
             Some(_) => raw,
             None => Box::new([]),
         }
+    }
+
+    fn trace_frame(&self, way: &str, dir: Direction, from: u32, to: Option<u32>, body: bool) {
+        let (from_table, to_table) = match dir {
+            Direction::Clientbound => (self.wire, self.native),
+            Direction::Serverbound => (self.native, self.wire),
+        };
+        let name = |table: &PacketTable, id: Option<u32>| match id {
+            Some(id) => table
+                .name_of(Phase::Game, dir, id)
+                .map_or_else(|| format!("?{id}"), |name| format!("{name}({id})")),
+            None => "suppressed".to_owned(),
+        };
+        crate::log_debug!(
+            "proto",
+            "{way} {} -> {}{}",
+            name(from_table, Some(from)),
+            name(to_table, to),
+            if body { " +body" } else { "" }
+        );
     }
 }
 
@@ -272,26 +269,6 @@ fn passed_through(way: &str, phase: ConnectionProtocol, raw: &[u8]) {
     crate::log_debug!("proto", "{way} {phase:?} {name}({id}) passed through");
 }
 
-fn trace(way: &str, dir: Direction, from: u32, to: Option<u32>, body: bool) {
-    let (from_table, to_table) = match dir {
-        Direction::Clientbound => (PacketTable::v1_21_11(), PacketTable::native()),
-        Direction::Serverbound => (PacketTable::native(), PacketTable::v1_21_11()),
-    };
-    let name = |table: &PacketTable, id: Option<u32>| match id {
-        Some(id) => table
-            .name_of(Phase::Game, dir, id)
-            .map_or_else(|| format!("?{id}"), |name| format!("{name}({id})")),
-        None => "suppressed".to_owned(),
-    };
-    crate::log_debug!(
-        "proto",
-        "{way} {} -> {}{}",
-        name(from_table, Some(from)),
-        name(to_table, to),
-        if body { " +body" } else { "" }
-    );
-}
-
 pub(crate) struct Translator {
     hop: &'static Hop,
 }
@@ -299,6 +276,13 @@ pub(crate) struct Translator {
 impl Translator {
     pub(crate) fn v774() -> Self {
         Self { hop: Hop::v774() }
+    }
+
+    pub(crate) fn for_protocol(protocol: i32) -> Option<Self> {
+        match protocol {
+            774 => Some(Self::v774()),
+            _ => None,
+        }
     }
 }
 
@@ -319,7 +303,7 @@ fn frame(id: u32, body: &[u8]) -> Box<[u8]> {
     out.into_boxed_slice()
 }
 
-fn set_time(body: &[u8]) -> Option<Box<[u8]>> {
+fn set_time(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let game_time = r.take(8)?;
     let day_time = r.u64()? as i64;
@@ -360,12 +344,20 @@ fn interact(body: &[u8], attacking: bool) -> Option<Box<[u8]>> {
     Some(out.into_boxed_slice())
 }
 
-fn state(id: i32) -> Option<i32> {
-    Remap::to_native().map(IdSpace::BlockState, id)
+fn attack(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    interact(body, true)
 }
 
-fn block(id: i32) -> Option<i32> {
-    Remap::to_native().map(IdSpace::Block, id)
+fn interact_use(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    interact(body, false)
+}
+
+fn state(ids: &Ids, id: i32) -> Option<i32> {
+    ids.to_native.map(IdSpace::BlockState, id)
+}
+
+fn block(ids: &Ids, id: i32) -> Option<i32> {
+    ids.to_native.map(IdSpace::Block, id)
 }
 
 fn skip_lp_vec3(r: &mut Reader) -> Option<()> {
@@ -401,8 +393,8 @@ fn copy_payload(
     Some(())
 }
 
-fn particle(r: &mut Reader, out: &mut Vec<u8>, probe: &mut Vec<u8>) -> Option<()> {
-    let native = Remap::to_native().map(IdSpace::ParticleType, r.varint()?)?;
+fn particle(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>, probe: &mut Vec<u8>) -> Option<()> {
+    let native = ids.to_native.map(IdSpace::ParticleType, r.varint()?)?;
     write_varint(out, native);
 
     match ParticleKind::from_u32(u32::try_from(native).ok()?)? {
@@ -411,10 +403,10 @@ fn particle(r: &mut Reader, out: &mut Vec<u8>, probe: &mut Vec<u8>) -> Option<()
         | ParticleKind::FallingDust
         | ParticleKind::DustPillar
         | ParticleKind::BlockCrumble => {
-            let id = state(r.varint()?)?;
+            let id = state(ids, r.varint()?)?;
             write_varint(out, id);
         }
-        ParticleKind::Item => item_stack(r, out)?,
+        ParticleKind::Item => item_stack(ids, r, out)?,
         _ => copy_payload(r, out, probe, native, |cursor| {
             azalea::entity::particle::Particle::azalea_read(cursor).is_ok()
         })?,
@@ -422,7 +414,7 @@ fn particle(r: &mut Reader, out: &mut Vec<u8>, probe: &mut Vec<u8>) -> Option<()
     Some(())
 }
 
-fn sound_holder(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+fn sound_holder(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     let raw = r.varint()?;
     if raw == 0 {
         write_varint(out, 0);
@@ -436,7 +428,7 @@ fn sound_holder(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
         }
         return Some(());
     }
-    let moved = Remap::to_native().map(IdSpace::SoundEvent, raw - 1)?;
+    let moved = ids.to_native.map(IdSpace::SoundEvent, raw - 1)?;
     write_varint(out, moved + 1);
     Some(())
 }
@@ -447,13 +439,13 @@ const SERIALIZER_OPTIONAL_BLOCK_STATE: i32 = 15;
 const SERIALIZER_PARTICLE: i32 = 16;
 const SERIALIZER_PARTICLES: i32 = 17;
 
-fn item_stack(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+fn item_stack(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     let count = r.varint()?;
     write_varint(out, count);
     if count <= 0 {
         return Some(());
     }
-    let item = Remap::to_native().map(IdSpace::Item, r.varint()?)?;
+    let item = ids.to_native.map(IdSpace::Item, r.varint()?)?;
     write_varint(out, item);
 
     let with_payload = r.count()?;
@@ -462,25 +454,28 @@ fn item_stack(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     write_varint(out, without as i32);
 
     for _ in 0..with_payload {
-        let kind = component(r, out)?;
+        let kind = component(ids, r, out)?;
         let mut cursor = std::io::Cursor::new(r.rest());
-        azalea_inventory::components::DataComponentUnion::azalea_read_as(kind, &mut cursor).ok()?;
+        let mut value =
+            azalea_inventory::components::DataComponentUnion::azalea_read_as(kind, &mut cursor)
+                .ok()?;
+        unsafe { value.drop_as(kind) };
         let length = usize::try_from(cursor.position()).ok()?;
         out.extend_from_slice(r.take(length)?);
     }
     for _ in 0..without {
-        component(r, out)?;
+        component(ids, r, out)?;
     }
     Some(())
 }
 
-fn component(r: &mut Reader, out: &mut Vec<u8>) -> Option<DataComponentKind> {
-    let id = Remap::to_native().map(IdSpace::DataComponentType, r.varint()?)?;
+fn component(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<DataComponentKind> {
+    let id = ids.to_native.map(IdSpace::DataComponentType, r.varint()?)?;
     write_varint(out, id);
     DataComponentKind::from_u32(u32::try_from(id).ok()?)
 }
 
-fn entity_data(body: &[u8]) -> Option<Box<[u8]>> {
+fn entity_data(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 8);
     write_varint(&mut out, r.varint()?);
@@ -492,28 +487,30 @@ fn entity_data(body: &[u8]) -> Option<Box<[u8]>> {
         if index == 0xFF {
             return Some(out.into_boxed_slice());
         }
-        let serializer = Remap::to_native().map(IdSpace::EntityDataSerializer, r.varint()?)?;
+        let serializer = ids
+            .to_native
+            .map(IdSpace::EntityDataSerializer, r.varint()?)?;
         write_varint(&mut out, serializer);
 
         match serializer {
             SERIALIZER_ITEM_STACK => {
-                item_stack(&mut r, &mut out)?;
+                item_stack(ids, &mut r, &mut out)?;
                 continue;
             }
             SERIALIZER_BLOCK_STATE | SERIALIZER_OPTIONAL_BLOCK_STATE => {
-                let id = state(r.varint()?)?;
+                let id = state(ids, r.varint()?)?;
                 write_varint(&mut out, id);
                 continue;
             }
             SERIALIZER_PARTICLE => {
-                particle(&mut r, &mut out, &mut probe)?;
+                particle(ids, &mut r, &mut out, &mut probe)?;
                 continue;
             }
             SERIALIZER_PARTICLES => {
                 let count = r.count()?;
                 write_varint(&mut out, count as i32);
                 for _ in 0..count {
-                    particle(&mut r, &mut out, &mut probe)?;
+                    particle(ids, &mut r, &mut out, &mut probe)?;
                 }
                 continue;
             }
@@ -526,7 +523,13 @@ fn entity_data(body: &[u8]) -> Option<Box<[u8]>> {
     }
 }
 
-fn stacks(body: &[u8], header: usize, counted: bool, trailing: usize) -> Option<Box<[u8]>> {
+fn stacks(
+    ids: &Ids,
+    body: &[u8],
+    header: usize,
+    counted: bool,
+    trailing: usize,
+) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 16);
     for _ in 0..header {
@@ -540,12 +543,24 @@ fn stacks(body: &[u8], header: usize, counted: bool, trailing: usize) -> Option<
         1
     };
     for _ in 0..count {
-        item_stack(&mut r, &mut out)?;
+        item_stack(ids, &mut r, &mut out)?;
     }
     for _ in 0..trailing {
-        item_stack(&mut r, &mut out)?;
+        item_stack(ids, &mut r, &mut out)?;
     }
     Some(out.into_boxed_slice())
+}
+
+fn container_set_content(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    stacks(ids, body, 2, true, 1)
+}
+
+fn set_cursor_item(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    stacks(ids, body, 0, false, 0)
+}
+
+fn set_player_inventory(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    stacks(ids, body, 1, false, 0)
 }
 
 const SLOT_DISPLAY_TO_NATIVE: [i32; 8] = [0, 1, 4, 5, 6, 8, 9, 10];
@@ -557,7 +572,7 @@ const SLOT_DISPLAY_SMITHING_TRIM: i32 = 5;
 const SLOT_DISPLAY_WITH_REMAINDER: i32 = 6;
 const SLOT_DISPLAY_COMPOSITE: i32 = 7;
 
-fn update_recipes(body: &[u8]) -> Option<Box<[u8]>> {
+fn update_recipes(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 64);
 
@@ -568,15 +583,15 @@ fn update_recipes(body: &[u8]) -> Option<Box<[u8]>> {
         let items = r.count()?;
         write_varint(&mut out, items as i32);
         for _ in 0..items {
-            item(&mut r, &mut out)?;
+            item(ids, &mut r, &mut out)?;
         }
     }
 
     let entries = r.count()?;
     write_varint(&mut out, entries as i32);
     for _ in 0..entries {
-        ingredient(&mut r, &mut out)?;
-        slot_display(&mut r, &mut out)?;
+        ingredient(ids, &mut r, &mut out)?;
+        slot_display(ids, &mut r, &mut out)?;
     }
 
     (r.remaining() == 0).then(|| out.into_boxed_slice())
@@ -589,33 +604,33 @@ fn identifier(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     Some(())
 }
 
-fn item(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
-    let id = Remap::to_native().map(IdSpace::Item, r.varint()?)?;
+fn item(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    let id = ids.to_native.map(IdSpace::Item, r.varint()?)?;
     write_varint(out, id);
     Some(())
 }
 
-fn ingredient(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+fn ingredient(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     let size = r.count()?;
     write_varint(out, size as i32);
     if size == 0 {
         return identifier(r, out);
     }
     for _ in 1..size {
-        item(r, out)?;
+        item(ids, r, out)?;
     }
     Some(())
 }
 
-fn slot_display(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+fn slot_display(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     let kind = r.varint()?;
     let native = *SLOT_DISPLAY_TO_NATIVE.get(usize::try_from(kind).ok()?)?;
     write_varint(out, native);
     match kind {
-        SLOT_DISPLAY_ITEM => item(r, out)?,
+        SLOT_DISPLAY_ITEM => item(ids, r, out)?,
         SLOT_DISPLAY_ITEM_STACK => {
             let mut stack = Vec::new();
-            item_stack(r, &mut stack)?;
+            item_stack(ids, r, &mut stack)?;
             let mut s = Reader::new(&stack);
             let count = s.varint()?;
             if count <= 0 {
@@ -627,8 +642,8 @@ fn slot_display(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
         }
         SLOT_DISPLAY_TAG => identifier(r, out)?,
         SLOT_DISPLAY_SMITHING_TRIM => {
-            slot_display(r, out)?;
-            slot_display(r, out)?;
+            slot_display(ids, r, out)?;
+            slot_display(ids, r, out)?;
             let pattern = r.varint()?;
             if pattern == 0 {
                 return None;
@@ -636,14 +651,14 @@ fn slot_display(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
             write_varint(out, pattern);
         }
         SLOT_DISPLAY_WITH_REMAINDER => {
-            slot_display(r, out)?;
-            slot_display(r, out)?;
+            slot_display(ids, r, out)?;
+            slot_display(ids, r, out)?;
         }
         SLOT_DISPLAY_COMPOSITE => {
             let count = r.count()?;
             write_varint(out, count as i32);
             for _ in 0..count {
-                slot_display(r, out)?;
+                slot_display(ids, r, out)?;
             }
         }
         _ => {}
@@ -651,31 +666,31 @@ fn slot_display(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     Some(())
 }
 
-fn container_set_slot(body: &[u8]) -> Option<Box<[u8]>> {
+fn container_set_slot(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 4);
     write_varint(&mut out, r.varint()?);
     write_varint(&mut out, r.varint()?);
     out.extend_from_slice(r.take(2)?);
-    item_stack(&mut r, &mut out)?;
+    item_stack(ids, &mut r, &mut out)?;
     Some(out.into_boxed_slice())
 }
 
-fn set_equipment(body: &[u8]) -> Option<Box<[u8]>> {
+fn set_equipment(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 8);
     write_varint(&mut out, r.varint()?);
     loop {
         let slot = r.u8()?;
         out.push(slot);
-        item_stack(&mut r, &mut out)?;
+        item_stack(ids, &mut r, &mut out)?;
         if slot & 0x80 == 0 {
             return Some(out.into_boxed_slice());
         }
     }
 }
 
-fn hashed_stack(r: &mut Reader, out: &mut Vec<u8>) -> Option<bool> {
+fn hashed_stack(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<bool> {
     let present = r.u8()?;
     out.push(present);
     if present == 0 {
@@ -683,29 +698,29 @@ fn hashed_stack(r: &mut Reader, out: &mut Vec<u8>) -> Option<bool> {
     }
 
     let mut ok = true;
-    back(IdSpace::Item, r.varint()?, out, &mut ok);
+    back(ids, IdSpace::Item, r.varint()?, out, &mut ok);
     write_varint(out, r.varint()?);
     let added = r.count()?;
     let removed = r.count()?;
     write_varint(out, added as i32);
     write_varint(out, removed as i32);
     for _ in 0..added {
-        back(IdSpace::DataComponentType, r.varint()?, out, &mut ok);
+        back(ids, IdSpace::DataComponentType, r.varint()?, out, &mut ok);
         out.extend_from_slice(r.take(4)?);
     }
     for _ in 0..removed {
-        back(IdSpace::DataComponentType, r.varint()?, out, &mut ok);
+        back(ids, IdSpace::DataComponentType, r.varint()?, out, &mut ok);
     }
     Some(ok)
 }
 
-fn back(space: IdSpace, raw: i32, out: &mut Vec<u8>, ok: &mut bool) {
-    let id = Remap::from_native().map(space, raw);
+fn back(ids: &Ids, space: IdSpace, raw: i32, out: &mut Vec<u8>, ok: &mut bool) {
+    let id = ids.from_native.map(space, raw);
     *ok &= id.is_some();
     write_varint(out, id.unwrap_or_default());
 }
 
-fn container_click(body: &[u8]) -> Option<Box<[u8]>> {
+fn container_click(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len());
     write_varint(&mut out, r.varint()?);
@@ -718,7 +733,7 @@ fn container_click(body: &[u8]) -> Option<Box<[u8]>> {
     let mut ok = true;
     for _ in 0..count {
         slots.extend_from_slice(r.take(2)?);
-        ok &= hashed_stack(&mut r, &mut slots)?;
+        ok &= hashed_stack(ids, &mut r, &mut slots)?;
     }
     if ok {
         write_varint(&mut out, count as i32);
@@ -728,14 +743,14 @@ fn container_click(body: &[u8]) -> Option<Box<[u8]>> {
     }
 
     let carried = out.len();
-    if !hashed_stack(&mut r, &mut out)? {
+    if !hashed_stack(ids, &mut r, &mut out)? {
         out.truncate(carried);
         out.push(0);
     }
     Some(out.into_boxed_slice())
 }
 
-fn creative_slot(body: &[u8]) -> Option<Box<[u8]>> {
+fn creative_slot(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 4);
     out.extend_from_slice(r.take(2)?);
@@ -746,7 +761,7 @@ fn creative_slot(body: &[u8]) -> Option<Box<[u8]>> {
         return Some(out.into_boxed_slice());
     }
 
-    let Some(item) = Remap::from_native().map(IdSpace::Item, r.varint()?) else {
+    let Some(item) = ids.from_native.map(IdSpace::Item, r.varint()?) else {
         crate::log_warn!(
             "net",
             "clearing a creative slot: this server has no id for what was put in it"
@@ -762,29 +777,33 @@ fn creative_slot(body: &[u8]) -> Option<Box<[u8]>> {
     write_varint(&mut out, with_payload as i32);
     write_varint(&mut out, without as i32);
     for _ in 0..with_payload {
-        let kind = Remap::from_native().map(IdSpace::DataComponentType, r.varint()?)?;
+        let kind = ids
+            .from_native
+            .map(IdSpace::DataComponentType, r.varint()?)?;
         write_varint(&mut out, kind);
         let length = r.count()?;
         write_varint(&mut out, length as i32);
         out.extend_from_slice(r.take(length)?);
     }
     for _ in 0..without {
-        let kind = Remap::from_native().map(IdSpace::DataComponentType, r.varint()?)?;
+        let kind = ids
+            .from_native
+            .map(IdSpace::DataComponentType, r.varint()?)?;
         write_varint(&mut out, kind);
     }
     Some(out.into_boxed_slice())
 }
 
-fn level_particles(body: &[u8]) -> Option<Box<[u8]>> {
+fn level_particles(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     const HEADER: usize = 1 + 1 + 3 * 8 + 4 * 4 + 4;
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 4);
     out.extend_from_slice(r.take(HEADER)?);
-    particle(&mut r, &mut out, &mut Vec::new())?;
+    particle(ids, &mut r, &mut out, &mut Vec::new())?;
     Some(out.into_boxed_slice())
 }
 
-fn explode(body: &[u8]) -> Option<Box<[u8]>> {
+fn explode(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 8);
     out.extend_from_slice(r.take(3 * 8 + 4 + 4)?);
@@ -795,32 +814,32 @@ fn explode(body: &[u8]) -> Option<Box<[u8]>> {
     }
 
     let mut probe = Vec::new();
-    particle(&mut r, &mut out, &mut probe)?;
-    sound_holder(&mut r, &mut out)?;
+    particle(ids, &mut r, &mut out, &mut probe)?;
+    sound_holder(ids, &mut r, &mut out)?;
 
     let count = r.count()?;
     write_varint(&mut out, count as i32);
     for _ in 0..count {
-        particle(&mut r, &mut out, &mut probe)?;
+        particle(ids, &mut r, &mut out, &mut probe)?;
         out.extend_from_slice(r.take(4 + 4)?);
         write_varint(&mut out, r.varint()?);
     }
     Some(out.into_boxed_slice())
 }
 
-fn sound(body: &[u8]) -> Option<Box<[u8]>> {
+fn sound(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 2);
-    sound_holder(&mut r, &mut out)?;
+    sound_holder(ids, &mut r, &mut out)?;
     out.extend_from_slice(r.rest());
     Some(out.into_boxed_slice())
 }
 
-fn block_event(body: &[u8]) -> Option<Box<[u8]>> {
+fn block_event(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 1);
     out.extend_from_slice(r.take(8 + 1 + 1)?);
-    let id = block(r.varint()?)?;
+    let id = block(ids, r.varint()?)?;
     write_varint(&mut out, id);
     Some(out.into_boxed_slice())
 }
@@ -828,7 +847,7 @@ fn block_event(body: &[u8]) -> Option<Box<[u8]>> {
 const STAT_MINED: i32 = 0;
 const STAT_DROPPED: i32 = 5;
 
-fn award_stats(body: &[u8]) -> Option<Box<[u8]>> {
+fn award_stats(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let count = r.count()?;
     let mut out = Vec::with_capacity(body.len() + count);
@@ -838,9 +857,9 @@ fn award_stats(body: &[u8]) -> Option<Box<[u8]>> {
         write_varint(&mut out, kind);
         let value = r.varint()?;
         let value = match kind {
-            STAT_MINED => block(value)?,
+            STAT_MINED => block(ids, value)?,
             k if (STAT_MINED + 1..=STAT_DROPPED).contains(&k) => {
-                Remap::to_native().map(IdSpace::Item, value)?
+                ids.to_native.map(IdSpace::Item, value)?
             }
             _ => value,
         };
@@ -850,7 +869,7 @@ fn award_stats(body: &[u8]) -> Option<Box<[u8]>> {
     Some(out.into_boxed_slice())
 }
 
-fn add_entity(body: &[u8]) -> Option<Box<[u8]>> {
+fn add_entity(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     r.varint()?;
     r.take(16)?;
@@ -862,7 +881,7 @@ fn add_entity(body: &[u8]) -> Option<Box<[u8]>> {
     r.take(3)?;
 
     let head = r.slice_from(0);
-    let data = state(r.varint()?)?;
+    let data = state(ids, r.varint()?)?;
     let mut out = Vec::with_capacity(head.len() + varint_len(data));
     out.extend_from_slice(head);
     write_varint(&mut out, data);
@@ -872,7 +891,7 @@ fn add_entity(body: &[u8]) -> Option<Box<[u8]>> {
 const LEVEL_EVENT_DESTROY_BLOCK: u32 = 2001;
 const LEVEL_EVENT_BRUSH_COMPLETE: u32 = 3008;
 
-fn level_event(body: &[u8]) -> Option<Box<[u8]>> {
+fn level_event(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let event = r.take(4)?;
     let kind = u32::from_be_bytes(event.try_into().ok()?);
@@ -880,7 +899,7 @@ fn level_event(body: &[u8]) -> Option<Box<[u8]>> {
         return None;
     }
     let pos = r.take(8)?;
-    let data = state(i32::from_be_bytes(r.take(4)?.try_into().ok()?))?;
+    let data = state(ids, i32::from_be_bytes(r.take(4)?.try_into().ok()?))?;
 
     let mut out = Vec::with_capacity(body.len());
     out.extend_from_slice(event);
@@ -890,17 +909,17 @@ fn level_event(body: &[u8]) -> Option<Box<[u8]>> {
     Some(out.into_boxed_slice())
 }
 
-fn block_update(body: &[u8]) -> Option<Box<[u8]>> {
+fn block_update(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let pos = r.take(8)?;
-    let id = state(r.varint()?)?;
+    let id = state(ids, r.varint()?)?;
     let mut out = Vec::with_capacity(8 + varint_len(id));
     out.extend_from_slice(pos);
     write_varint(&mut out, id);
     Some(out.into_boxed_slice())
 }
 
-fn section_blocks_update(body: &[u8]) -> Option<Box<[u8]>> {
+fn section_blocks_update(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let section = r.take(8)?;
     let count = r.count()?;
@@ -910,7 +929,7 @@ fn section_blocks_update(body: &[u8]) -> Option<Box<[u8]>> {
     write_varint(&mut out, count as i32);
     for _ in 0..count {
         let packed = r.varlong()? as u64;
-        let id = state(i32::try_from(packed >> 12).ok()?)?;
+        let id = state(ids, i32::try_from(packed >> 12).ok()?)?;
         write_varlong(
             &mut out,
             ((i64::from(id) as u64) << 12 | (packed & 0xFFF)) as i64,
@@ -924,8 +943,8 @@ const SECTION_BIOMES: usize = 64;
 const STATES_INDIRECT_MAX: u8 = 8;
 const BIOMES_INDIRECT_MAX: u8 = 3;
 
-fn level_chunk(body: &[u8]) -> Option<Box<[u8]>> {
-    match rewrite_level_chunk(body) {
+fn level_chunk(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    match rewrite_level_chunk(ids, body) {
         Ok(out) => Some(out),
         Err(why) => {
             crate::log_error!(
@@ -938,7 +957,7 @@ fn level_chunk(body: &[u8]) -> Option<Box<[u8]>> {
     }
 }
 
-fn rewrite_level_chunk(body: &[u8]) -> Result<Box<[u8]>, String> {
+fn rewrite_level_chunk(ids: &Ids, body: &[u8]) -> Result<Box<[u8]>, String> {
     let mut r = Reader::new(body);
     let pos = r
         .u64()
@@ -958,7 +977,7 @@ fn rewrite_level_chunk(body: &[u8]) -> Result<Box<[u8]>, String> {
     let blob = r.take(length).ok_or_else(|| short("the section blob"))?;
     let tail = r.rest();
 
-    let sections = sections(blob).map_err(|why| {
+    let sections = sections(ids, blob).map_err(|why| {
         format!("chunk {x},{z} was not translated: {why} (the blob is {length} bytes)")
     })?;
     let mut out = Vec::with_capacity(head.len() + 5 + sections.len() + tail.len());
@@ -1007,7 +1026,7 @@ impl fmt::Display for Failure {
     }
 }
 
-fn sections(blob: &[u8]) -> Result<Vec<u8>, Failure> {
+fn sections(ids: &Ids, blob: &[u8]) -> Result<Vec<u8>, Failure> {
     let mut r = Reader::new(blob);
     let mut out = Vec::with_capacity(blob.len() + 64);
     let mut section = 0;
@@ -1023,7 +1042,14 @@ fn sections(blob: &[u8]) -> Result<Vec<u8>, Failure> {
         };
         out.extend_from_slice(count);
         out.extend_from_slice(&[0, 0]);
-        if let Err(bail) = container(&mut r, &mut out, SECTION_STATES, STATES_INDIRECT_MAX, true) {
+        if let Err(bail) = container(
+            ids,
+            &mut r,
+            &mut out,
+            SECTION_STATES,
+            STATES_INDIRECT_MAX,
+            true,
+        ) {
             return Err(Failure {
                 bail,
                 section,
@@ -1031,7 +1057,14 @@ fn sections(blob: &[u8]) -> Result<Vec<u8>, Failure> {
                 at: r.pos(),
             });
         }
-        if let Err(bail) = container(&mut r, &mut out, SECTION_BIOMES, BIOMES_INDIRECT_MAX, false) {
+        if let Err(bail) = container(
+            ids,
+            &mut r,
+            &mut out,
+            SECTION_BIOMES,
+            BIOMES_INDIRECT_MAX,
+            false,
+        ) {
             return Err(Failure {
                 bail,
                 section,
@@ -1045,6 +1078,7 @@ fn sections(blob: &[u8]) -> Result<Vec<u8>, Failure> {
 }
 
 fn container(
+    ids: &Ids,
     r: &mut Reader,
     out: &mut Vec<u8>,
     size: usize,
@@ -1057,7 +1091,7 @@ fn container(
     let id = |r: &mut Reader, out: &mut Vec<u8>| -> Result<(), Bail> {
         let raw = r.varint().ok_or(Bail::Short)?;
         let moved = if remap {
-            state(raw).ok_or(Bail::NoTarget(raw))?
+            state(ids, raw).ok_or(Bail::NoTarget(raw))?
         } else {
             raw
         };
@@ -1095,7 +1129,7 @@ fn container(
                 }
                 let raw = i32::try_from((word >> (slot * usize::from(bits))) & mask)
                     .map_err(|_| Bail::Short)?;
-                let moved = state(raw).ok_or(Bail::NoTarget(raw))?;
+                let moved = state(ids, raw).ok_or(Bail::NoTarget(raw))?;
                 let moved = u64::try_from(moved).map_err(|_| Bail::TooWide { id: raw, bits })?;
                 if moved > mask {
                     return Err(Bail::TooWide { id: raw, bits });
@@ -1117,6 +1151,16 @@ mod tests {
 
     fn hop() -> &'static Hop {
         Hop::v774()
+    }
+
+    fn ids() -> &'static Ids {
+        &hop().ids
+    }
+
+    fn native_serverbound(name: &str) -> u32 {
+        PacketTable::native()
+            .id(Phase::Game, Direction::Serverbound, name)
+            .unwrap_or_else(|| panic!("775 has {name}"))
     }
 
     #[test]
@@ -1167,7 +1211,7 @@ mod tests {
     fn attack_is_rewritten_rather_than_suppressed() {
         let h = hop();
         let mut frame = Vec::new();
-        write_varint(&mut frame, h.attack as i32);
+        write_varint(&mut frame, native_serverbound("attack") as i32);
         write_varint(&mut frame, 99);
         let out = h.outbound(ConnectionProtocol::Game, frame.into_boxed_slice());
         assert!(!out.is_empty(), "attacking must reach the server");
@@ -1235,7 +1279,7 @@ mod tests {
         body.extend_from_slice(&1234u64.to_be_bytes());
         body.extend_from_slice(&600u64.to_be_bytes());
         body.push(1);
-        let out = set_time(&body).expect("17 bytes is a whole packet");
+        let out = set_time(ids(), &body).expect("17 bytes is a whole packet");
 
         let mut r = Reader::new(&out);
         assert_eq!(r.u64(), Some(1234));
@@ -1253,7 +1297,7 @@ mod tests {
         body.extend_from_slice(&0u64.to_be_bytes());
         body.extend_from_slice(&18000u64.to_be_bytes());
         body.push(0);
-        let out = set_time(&body).unwrap();
+        let out = set_time(ids(), &body).unwrap();
         let mut r = Reader::new(&out);
         r.u64();
         r.count();
@@ -1265,7 +1309,7 @@ mod tests {
 
     #[test]
     fn a_short_set_time_does_not_rewrite() {
-        assert!(set_time(&[0u8; 16]).is_none());
+        assert!(set_time(ids(), &[0u8; 16]).is_none());
     }
 
     #[test]
@@ -1309,7 +1353,7 @@ mod tests {
     const LAST_RUN: i32 = 20000;
 
     fn moved(id: i32) -> i32 {
-        state(id).unwrap_or_else(|| panic!("774 state {id} does not map"))
+        state(ids(), id).unwrap_or_else(|| panic!("774 state {id} does not map"))
     }
 
     fn container_bytes(bits: u8, palette: &[i32], packed: &[u64]) -> Vec<u8> {
@@ -1343,8 +1387,11 @@ mod tests {
 
     #[test]
     fn a_section_gains_a_fluid_count_and_keeps_its_block_count() {
-        let out = sections(&section_bytes(&container_bytes(0, &[FIRST_RUN], &[])))
-            .expect("a whole section");
+        let out = sections(
+            ids(),
+            &section_bytes(&container_bytes(0, &[FIRST_RUN], &[])),
+        )
+        .expect("a whole section");
         let mut r = Reader::new(&out);
         assert_eq!(r.take(2), Some(&[0x01, 0x00][..]), "block count survived");
         assert_eq!(r.take(2), Some(&[0x00, 0x00][..]), "fluid count was added");
@@ -1357,7 +1404,7 @@ mod tests {
         let palette = [BELOW_FIRST_RUN, FIRST_RUN, SECOND_RUN, LAST_RUN];
         let packed = [0x0123_4567_89AB_CDEFu64; 4096 / (64 / 4)];
         let states = container_bytes(4, &palette, &packed);
-        let out = sections(&section_bytes(&states)).expect("a whole section");
+        let out = sections(ids(), &section_bytes(&states)).expect("a whole section");
 
         let mut r = Reader::new(&out);
         r.take(4);
@@ -1397,7 +1444,7 @@ mod tests {
         };
 
         let states = container_bytes(BITS as u8, &[], &pack(&ids));
-        let out = sections(&section_bytes(&states)).expect("a whole section");
+        let out = sections(self::ids(), &section_bytes(&states)).expect("a whole section");
 
         let expected: Vec<i32> = ids.iter().map(|id| moved(*id)).collect();
         let mut r = Reader::new(&out);
@@ -1412,7 +1459,7 @@ mod tests {
     fn every_section_in_the_blob_is_rewritten() {
         let one = section_bytes(&container_bytes(0, &[FIRST_RUN], &[]));
         let blob: Vec<u8> = one.iter().chain(&one).chain(&one).copied().collect();
-        let out = sections(&blob).expect("three whole sections");
+        let out = sections(ids(), &blob).expect("three whole sections");
         assert_eq!(out.len(), blob.len() + 3 * 2, "one fluid count each");
         let mut r = Reader::new(&out);
         for _ in 0..3 {
@@ -1443,7 +1490,7 @@ mod tests {
         body.extend_from_slice(&blob);
         body.extend_from_slice(&tail);
 
-        let out = level_chunk(&body).expect("a whole chunk");
+        let out = level_chunk(ids(), &body).expect("a whole chunk");
         assert_eq!(&out[..head_len], &body[..head_len], "head is untouched");
         let mut r = Reader::new(&out[head_len..]);
         assert_eq!(
@@ -1457,15 +1504,15 @@ mod tests {
 
     #[test]
     fn a_truncated_chunk_does_not_rewrite() {
-        assert!(level_chunk(&[]).is_none());
+        assert!(level_chunk(ids(), &[]).is_none());
         assert!(matches!(
-            sections(&[0x01]),
+            sections(ids(), &[0x01]),
             Err(Failure {
                 bail: Bail::Short,
                 ..
             })
         ));
-        let short = sections(&section_bytes(&container_bytes(4, &[1], &[0; 2])));
+        let short = sections(ids(), &section_bytes(&container_bytes(4, &[1], &[0; 2])));
         assert!(matches!(
             short,
             Err(Failure {
@@ -1480,10 +1527,13 @@ mod tests {
     #[test]
     fn an_unmappable_state_says_which_id_stopped_it() {
         let past_the_end = (0..)
-            .find(|id| state(*id).is_none())
+            .find(|id| state(ids(), *id).is_none())
             .expect("the table ends somewhere");
 
-        let single = sections(&section_bytes(&container_bytes(0, &[past_the_end], &[])));
+        let single = sections(
+            ids(),
+            &section_bytes(&container_bytes(0, &[past_the_end], &[])),
+        );
         assert!(matches!(
             single,
             Err(Failure {
@@ -1493,11 +1543,10 @@ mod tests {
             }) if id == past_the_end
         ));
 
-        let indirect = sections(&section_bytes(&container_bytes(
-            4,
-            &[past_the_end],
-            &[0; 256],
-        )));
+        let indirect = sections(
+            ids(),
+            &section_bytes(&container_bytes(4, &[past_the_end], &[0; 256])),
+        );
         assert!(matches!(
             indirect,
             Err(Failure { bail: Bail::NoTarget(id), .. }) if id == past_the_end
@@ -1505,7 +1554,7 @@ mod tests {
 
         let mut packed = [0u64; 1024];
         packed[0] = u64::try_from(past_the_end).expect("a positive id");
-        let direct = sections(&section_bytes(&container_bytes(15, &[], &packed)));
+        let direct = sections(ids(), &section_bytes(&container_bytes(15, &[], &packed)));
         assert!(matches!(
             direct,
             Err(Failure { bail: Bail::NoTarget(id), .. }) if id == past_the_end
@@ -1521,7 +1570,7 @@ mod tests {
             blob.extend_from_slice(&one);
         }
 
-        let out = sections(&blob).expect("a whole column");
+        let out = sections(ids(), &blob).expect("a whole column");
         let chunk = azalea_world::Chunk::read_with_dimension_height(
             &mut std::io::Cursor::new(&out[..]),
             384,
@@ -1544,7 +1593,7 @@ mod tests {
         blob.extend_from_slice(&good);
         blob.extend_from_slice(&bad);
         assert!(matches!(
-            sections(&blob),
+            sections(ids(), &blob),
             Err(Failure {
                 bail: Bail::NoTarget(_),
                 section: 2,
@@ -1558,7 +1607,7 @@ mod tests {
         let mut body = vec![0u8; 8];
         body[7] = 0x2A;
         write_varint(&mut body, LAST_RUN);
-        let out = block_update(&body).unwrap();
+        let out = block_update(ids(), &body).unwrap();
         let mut r = Reader::new(&out);
         assert_eq!(r.take(8), Some(&body[..8]), "the position is untouched");
         assert_eq!(r.varint(), Some(moved(LAST_RUN)));
@@ -1578,7 +1627,7 @@ mod tests {
             write_varlong(&mut body, ((*&id as u64) << 12 | pos) as i64);
         }
 
-        let out = section_blocks_update(&body).unwrap();
+        let out = section_blocks_update(ids(), &body).unwrap();
         let mut r = Reader::new(&out);
         assert_eq!(r.take(8), Some(&[0u8; 8][..]));
         assert_eq!(r.count(), Some(changes.len()));
@@ -1594,7 +1643,7 @@ mod tests {
     fn an_impossible_state_does_not_rewrite() {
         let mut body = vec![0u8; 8];
         write_varint(&mut body, 29_671);
-        assert!(block_update(&body).is_none());
+        assert!(block_update(ids(), &body).is_none());
     }
 
     const ITEM_AT_THE_SEAM: i32 = 230;
@@ -1626,7 +1675,7 @@ mod tests {
     fn an_empty_stack_is_a_count_and_nothing_else() {
         let mut body = Vec::new();
         write_varint(&mut body, 0);
-        assert_eq!(translated(item_stack, &body), body);
+        assert_eq!(translated(|r, out| item_stack(ids(), r, out), &body), body);
     }
 
     #[test]
@@ -1639,7 +1688,7 @@ mod tests {
         write_varint(&mut body, COMPONENT_AT_THE_SEAM - 1);
         write_varint(&mut body, COMPONENT_AT_THE_SEAM);
 
-        let out = translated(item_stack, &body);
+        let out = translated(|r, out| item_stack(ids(), r, out), &body);
         let mut r = Reader::new(&out);
         assert_eq!(r.varint(), Some(3), "the count is not an id");
         assert_eq!(r.varint(), Some(ITEM_AT_THE_SEAM + 1));
@@ -1670,7 +1719,7 @@ mod tests {
         write_varint(&mut body, wire);
         write_varint(&mut body, 1234);
 
-        let out = translated(item_stack, &body);
+        let out = translated(|r, out| item_stack(ids(), r, out), &body);
         let mut r = Reader::new(&out);
         r.varint();
         r.varint();
@@ -1693,7 +1742,7 @@ mod tests {
         write_varint(&mut body, 3);
         body.push(0xFF);
 
-        let out = entity_data(&body).expect("a whole packet");
+        let out = entity_data(ids(), &body).expect("a whole packet");
         let mut r = Reader::new(&out);
         assert_eq!(r.varint(), Some(77));
         assert_eq!(r.u8(), Some(0));
@@ -1718,7 +1767,7 @@ mod tests {
         write_varint(&mut body, 0);
         body.push(0xFF);
 
-        let out = entity_data(&body).unwrap();
+        let out = entity_data(ids(), &body).unwrap();
         let mut r = Reader::new(&out);
         r.varint();
         r.u8();
@@ -1744,7 +1793,7 @@ mod tests {
         write_varint(&mut body, 0);
         write_varint(&mut body, 0);
 
-        let out = update_recipes(&body).expect("rewrites");
+        let out = update_recipes(ids(), &body).expect("rewrites");
         let mut expected = Vec::new();
         write_varint(&mut expected, 0);
         write_varint(&mut expected, 1);
@@ -1780,11 +1829,11 @@ mod tests {
 
     #[test]
     fn a_truncated_stack_or_metadata_does_not_rewrite() {
-        assert!(entity_data(&[]).is_none());
-        assert!(entity_data(&[0x01, 0x00]).is_none());
+        assert!(entity_data(ids(), &[]).is_none());
+        assert!(entity_data(ids(), &[0x01, 0x00]).is_none());
         let mut body = Vec::new();
         write_varint(&mut body, 1);
-        assert!(item_stack(&mut Reader::new(&body), &mut Vec::new()).is_none());
+        assert!(item_stack(ids(), &mut Reader::new(&body), &mut Vec::new()).is_none());
     }
 
     #[test]
@@ -1801,7 +1850,7 @@ mod tests {
     fn an_unrewritable_attack_is_dropped_rather_than_sent() {
         let h = hop();
         let mut frame = Vec::new();
-        write_varint(&mut frame, h.attack as i32);
+        write_varint(&mut frame, native_serverbound("attack") as i32);
         assert!(
             h.outbound(ConnectionProtocol::Game, frame.into_boxed_slice())
                 .is_empty()
@@ -1858,7 +1907,7 @@ mod tests {
 
         let mut r = Reader::new(&body);
         let mut out = Vec::new();
-        particle(&mut r, &mut out, &mut Vec::new()).expect("a whole particle");
+        particle(ids(), &mut r, &mut out, &mut Vec::new()).expect("a whole particle");
         assert_eq!(r.remaining(), 0);
 
         let mut r = Reader::new(&out);
@@ -1879,7 +1928,7 @@ mod tests {
 
         let mut r = Reader::new(&body);
         let mut out = Vec::new();
-        particle(&mut r, &mut out, &mut Vec::new()).unwrap();
+        particle(ids(), &mut r, &mut out, &mut Vec::new()).unwrap();
         assert_eq!(r.remaining(), 0, "the delay was consumed");
 
         let mut r = Reader::new(&out);
@@ -1895,7 +1944,7 @@ mod tests {
 
         let mut r = Reader::new(&body);
         let mut out = Vec::new();
-        particle(&mut r, &mut out, &mut Vec::new()).unwrap();
+        particle(ids(), &mut r, &mut out, &mut Vec::new()).unwrap();
         assert_eq!(out, [3], "only the id");
         assert_eq!(r.rest(), [0xAA, 0xBB], "and nothing after it was taken");
     }
@@ -1910,7 +1959,7 @@ mod tests {
         write_varint(&mut body, 109);
         write_varint(&mut body, FIRST_RUN);
 
-        let out = level_particles(&body).expect("a whole packet");
+        let out = level_particles(ids(), &body).expect("a whole packet");
         assert_eq!(&out[..header], &body[..header]);
         let mut r = Reader::new(&out[header..]);
         assert_eq!(r.varint(), Some(111));
@@ -1930,7 +1979,7 @@ mod tests {
         write_varint(&mut body, SOUND_774 + 1);
         body.extend_from_slice(&[0xAA; 4]);
 
-        let out = sound(&body).expect("a whole packet");
+        let out = sound(ids(), &body).expect("a whole packet");
         let mut r = Reader::new(&out);
         assert_eq!(
             r.varint(),
@@ -1950,7 +1999,7 @@ mod tests {
         body.extend_from_slice(&1f32.to_be_bytes());
         body.push(0x77);
 
-        let out = sound(&body).expect("a whole packet");
+        let out = sound(ids(), &body).expect("a whole packet");
         assert_eq!(&*out, &body[..], "an inline sound is copied verbatim");
     }
 
@@ -1969,7 +2018,7 @@ mod tests {
         body.extend_from_slice(&[0u8; 8]);
         write_varint(&mut body, 4);
 
-        let out = explode(&body).expect("a whole packet");
+        let out = explode(ids(), &body).expect("a whole packet");
         let mut r = Reader::new(&out);
         assert_eq!(r.take(3 * 8 + 4 + 4), Some(&body[..32]));
         assert_eq!(r.u8(), Some(0));
@@ -2032,7 +2081,7 @@ mod tests {
         write_varint(&mut body, FIRST_RUN);
         body.push(0xFF);
 
-        let out = entity_data(&body).expect("a whole packet");
+        let out = entity_data(ids(), &body).expect("a whole packet");
         let mut r = Reader::new(&out);
         r.varint();
         r.u8();
@@ -2055,7 +2104,7 @@ mod tests {
         body.push(2);
         write_varint(&mut body, 500);
 
-        let out = block_event(&body).unwrap();
+        let out = block_event(ids(), &body).unwrap();
         let mut r = Reader::new(&out);
         assert_eq!(r.take(10), Some(&body[..10]));
         assert_eq!(r.varint(), Some(502), "past both inserted blocks");
@@ -2076,7 +2125,7 @@ mod tests {
         write_varint(&mut body, 40);
         write_varint(&mut body, 9);
 
-        let out = award_stats(&body).unwrap();
+        let out = award_stats(ids(), &body).unwrap();
         let mut r = Reader::new(&out);
         assert_eq!(r.count(), Some(3));
         assert_eq!(
@@ -2109,7 +2158,7 @@ mod tests {
     #[test]
     fn a_falling_block_moves_its_state_and_nothing_else_does() {
         let falling = EntityKind::FallingBlock.to_u32() as i32;
-        let out = add_entity(&add_entity_bytes(falling, LAST_RUN)).expect("a falling block");
+        let out = add_entity(ids(), &add_entity_bytes(falling, LAST_RUN)).expect("a falling block");
         let mut r = Reader::new(&out);
         r.varint();
         r.take(16);
@@ -2119,7 +2168,7 @@ mod tests {
 
         let arrow = EntityKind::Arrow.to_u32() as i32;
         assert!(
-            add_entity(&add_entity_bytes(arrow, LAST_RUN)).is_none(),
+            add_entity(ids(), &add_entity_bytes(arrow, LAST_RUN)).is_none(),
             "only a falling block reads that field as a state"
         );
     }
@@ -2133,7 +2182,7 @@ mod tests {
             body.extend_from_slice(&FIRST_RUN.to_be_bytes());
             body.push(1);
 
-            let out = level_event(&body).unwrap_or_else(|| panic!("event {kind}"));
+            let out = level_event(ids(), &body).unwrap_or_else(|| panic!("event {kind}"));
             let mut r = Reader::new(&out);
             assert_eq!(r.take(4 + 8), Some(&body[..12]));
             assert_eq!(
@@ -2147,7 +2196,7 @@ mod tests {
         body.extend_from_slice(&[0u8; 8]);
         body.extend_from_slice(&30i32.to_be_bytes());
         body.push(0);
-        assert!(level_event(&body).is_none());
+        assert!(level_event(ids(), &body).is_none());
     }
 
     #[test]
@@ -2163,7 +2212,7 @@ mod tests {
 
         let mut r = Reader::new(&body);
         let mut out = Vec::new();
-        assert_eq!(hashed_stack(&mut r, &mut out), Some(true));
+        assert_eq!(hashed_stack(ids(), &mut r, &mut out), Some(true));
         assert_eq!(r.remaining(), 0);
 
         let mut r = Reader::new(&out);
@@ -2200,7 +2249,7 @@ mod tests {
         write_varint(&mut body, 0);
         body.push(0);
 
-        let out = container_click(&body).expect("the click still goes out");
+        let out = container_click(ids(), &body).expect("the click still goes out");
         let mut r = Reader::new(&out);
         assert_eq!((r.varint(), r.varint()), (Some(1), Some(2)));
         r.take(3);
@@ -2221,7 +2270,7 @@ mod tests {
         write_varint(&mut body, 3);
         body.extend_from_slice(&[1, 2, 3]);
 
-        let out = creative_slot(&body).expect("a whole stack");
+        let out = creative_slot(ids(), &body).expect("a whole stack");
         let mut r = Reader::new(&out);
         assert_eq!(r.take(2), Some(&9u16.to_be_bytes()[..]));
         assert_eq!(r.varint(), Some(1));
@@ -2241,7 +2290,7 @@ mod tests {
         write_varint(&mut body, 0);
         write_varint(&mut body, 0);
 
-        let out = creative_slot(&body).expect("the slot is still set");
+        let out = creative_slot(ids(), &body).expect("the slot is still set");
         let mut r = Reader::new(&out);
         assert_eq!(r.take(2), Some(&9u16.to_be_bytes()[..]));
         assert_eq!(r.varint(), Some(0), "an empty stack is a zero count");

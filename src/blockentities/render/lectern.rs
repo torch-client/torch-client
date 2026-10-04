@@ -1,5 +1,6 @@
 use std::f32::consts::PI;
 
+use azalea_core::direction::Direction;
 use azalea_registry::builtin::BlockEntityKind;
 use bevy::prelude::*;
 
@@ -47,17 +48,17 @@ fn setup(model: &BakedModel, parts: &mut [PartState], _st: &BeState) {
     }
 }
 
-fn clockwise(facing: &str) -> &'static str {
+fn clockwise(facing: Option<Direction>) -> Direction {
     match facing {
-        "north" => "east",
-        "east" => "south",
-        "west" => "north",
-        _ => "west",
+        Some(Direction::North) => Direction::East,
+        Some(Direction::East) => Direction::South,
+        Some(Direction::West) => Direction::North,
+        _ => Direction::West,
     }
 }
 
 fn transform(st: &BeState) -> Transform {
-    let y_rot = facing_y_rot(clockwise(st.state.prop("facing")));
+    let y_rot = facing_y_rot(Some(clockwise(st.state.facing)));
     let rotation =
         Quat::from_rotation_y(-y_rot.to_radians()) * Quat::from_rotation_z(67.5_f32.to_radians());
     Transform {

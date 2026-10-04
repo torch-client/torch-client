@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
 use bevy::asset::RenderAssetUsages;
@@ -12,6 +12,7 @@ use crate::entities::geom;
 use crate::entities::models::humanoid::armor as armor_mesh;
 use crate::entities::render::humanoid::armor as armor_tex;
 use crate::items::mesh::Transform as ItemTransform;
+use crate::items::model::DisplayContext;
 
 use crate::util::mth::ease::{in_out_expo, in_out_sine, in_quad, out_quart};
 use crate::util::mth::{DEG_TO_RAD, RAD_TO_DEG, lerp, progress, rot_lerp_rad};
@@ -543,13 +544,16 @@ fn held_item_transform(t: &ItemTransform, left_hand: bool) -> Transform {
     }
 }
 
-fn display_transform(gpu: &super::item_assets::ItemGpu, left_hand: bool) -> ItemTransform {
+fn held_context(left_hand: bool) -> DisplayContext {
     if left_hand {
-        if let Some(t) = gpu.display.get("thirdperson_lefthand") {
-            return *t;
-        }
+        DisplayContext::ThirdPersonLeftHand
+    } else {
+        DisplayContext::ThirdPersonRightHand
     }
-    gpu.transform("thirdperson_righthand")
+}
+
+fn display_transform(gpu: &super::item_assets::ItemGpu, left_hand: bool) -> ItemTransform {
+    gpu.for_context(held_context(left_hand))
 }
 
 #[derive(Clone, Copy)]
@@ -767,6 +771,8 @@ fn bake_wings(meshes: &mut Assets<Mesh>) -> [Handle<Mesh>; 2] {
 
 const LEGGINGS_SLOT: usize = 2;
 
+const CHEST_SLOT: usize = 1;
+
 const ARMOR_SLOT_NAMES: [&str; 4] = ["helmet", "chestplate", "leggings", "boots"];
 
 struct ArmorMesh {
@@ -853,7 +859,44 @@ struct RigArmor;
 
 #[derive(Component)]
 struct HeldItemNode {
-    id: String,
+    shown: HeldItem,
+    blocking: bool,
+}
+
+#[cfg(feature = "skins")]
+const PART_BODY: usize = 1;
+const PART_RIGHT_ARM: usize = 2;
+const PART_LEFT_ARM: usize = 3;
+#[cfg(feature = "skins")]
+const PART_RIGHT_SLEEVE: usize = 8;
+#[cfg(feature = "skins")]
+const PART_LEFT_SLEEVE: usize = 9;
+#[cfg(feature = "skins")]
+const FIRST_OVERLAY: usize = 6;
+
+struct ArmorSlotRig {
+    boxes: Vec<Entity>,
+    material: Handle<EntityMaterial>,
+    worn: Option<&'static str>,
+}
+
+struct HeldRig {
+    node: Entity,
+    material: Handle<EntityMaterial>,
+}
+
+#[cfg(feature = "skins")]
+struct CapeRig {
+    node: Entity,
+    material: Handle<EntityMaterial>,
+    ready: bool,
+    offset: Vec3,
+}
+
+struct WingsRig {
+    nodes: [Entity; 2],
+    material: Handle<EntityMaterial>,
+    worn: Option<(Option<&'static str>, u32)>,
 }
 
 struct Rig {
@@ -863,36 +906,41 @@ struct Rig {
     parts: [Entity; 6],
     #[cfg(feature = "skins")]
     overlays: [Entity; 6],
-    held: [Entity; 2],
+    held: [HeldRig; 2],
     base: Handle<EntityMaterial>,
     overlay: Handle<EntityMaterial>,
-    held_materials: [Handle<EntityMaterial>; 2],
-    armor: [Vec<Entity>; 4],
-    armor_materials: [Handle<EntityMaterial>; 4],
-    armor_worn: Armor,
+    armor: [ArmorSlotRig; 4],
     lit: Lit,
-
     #[cfg(feature = "skins")]
-    cape: Entity,
-    wings: [Entity; 2],
-    wings_material: Handle<EntityMaterial>,
-    wings_worn: Option<(Option<&'static str>, u32)>,
-    #[cfg(feature = "skins")]
-    cape_material: Handle<EntityMaterial>,
+    cape: CapeRig,
+    wings: WingsRig,
     #[cfg(feature = "skins")]
     worn: crate::client::skins::SkinState,
-    #[cfg(feature = "skins")]
-    cape_ready: bool,
-    #[cfg(feature = "skins")]
-    cape_offset: Vec3,
     #[cfg(feature = "skins")]
     seen_textures: u32,
 }
 
 #[derive(Resource, Default)]
-struct PlayerRigs {
+pub(crate) struct PlayerRigs {
     entries: Vec<Rig>,
     local: Option<Rig>,
+    scratch: SlotScratch,
+}
+
+#[derive(Default)]
+struct SlotScratch {
+    slot_of: HashMap<i32, usize>,
+    taken: Vec<bool>,
+    assign: Vec<Option<usize>>,
+    unmatched: Vec<usize>,
+    free: Vec<usize>,
+}
+
+impl PlayerRigs {
+    #[cfg(feature = "shader_support")]
+    pub(crate) fn local_root(&self) -> Option<Entity> {
+        self.local.as_ref().map(|rig| rig.root)
+    }
 }
 
 const POOL_SLACK: usize = 4;
@@ -909,7 +957,9 @@ impl Plugin for PlayerModelPlugin {
             )
             .add_systems(
                 Update,
-                sync_player_models.run_if(in_state(crate::renderer::AppState::InGame)),
+                sync_player_models
+                    .after(crate::renderer::frame_view::FrameViewSystems)
+                    .run_if(in_state(crate::renderer::AppState::InGame)),
             );
 
         #[cfg(feature = "skins")]
@@ -1058,15 +1108,19 @@ fn spawn_rig(
         entities.push(entity);
     }
 
-    let held = [2usize, 3].map(|arm| {
+    let held = [(PART_RIGHT_ARM, 0usize), (PART_LEFT_ARM, 1)].map(|(arm, hand)| {
+        let material = held_materials[hand].clone();
         let entity = commands
             .spawn((
                 Mesh3d(assets.no_item.clone()),
-                MeshMaterial3d(held_materials[if arm == 2 { 0 } else { 1 }].clone()),
+                MeshMaterial3d(material.clone()),
                 Transform::default(),
                 Visibility::Hidden,
-                HeldItemNode { id: String::new() },
-                Name::new(if arm == 2 {
+                HeldItemNode {
+                    shown: HeldItem::default(),
+                    blocking: false,
+                },
+                Name::new(if arm == PART_RIGHT_ARM {
                     "right_hand_item"
                 } else {
                     "left_hand_item"
@@ -1074,7 +1128,10 @@ fn spawn_rig(
             ))
             .id();
         commands.entity(entities[arm]).add_child(entity);
-        entity
+        HeldRig {
+            node: entity,
+            material,
+        }
     });
 
     #[cfg(feature = "skins")]
@@ -1098,8 +1155,13 @@ fn spawn_rig(
                 Name::new(CAPE.name),
             ))
             .id();
-        commands.entity(entities[1]).add_child(entity);
-        entity
+        commands.entity(entities[PART_BODY]).add_child(entity);
+        CapeRig {
+            node: entity,
+            material: cape_material,
+            ready: false,
+            offset: Vec3::ZERO,
+        }
     };
 
     let wings_material = materials.add(EntityMaterial::new(
@@ -1135,8 +1197,8 @@ fn spawn_rig(
             0,
         ))
     });
-    let armor = std::array::from_fn(|slot| {
-        assets.armor[slot]
+    let armor = std::array::from_fn(|slot| ArmorSlotRig {
+        boxes: assets.armor[slot]
             .iter()
             .map(|piece| {
                 let entity = commands
@@ -1152,7 +1214,9 @@ fn spawn_rig(
                 commands.entity(entities[piece.part]).add_child(entity);
                 entity
             })
-            .collect()
+            .collect(),
+        material: armor_materials[slot].clone(),
+        worn: None,
     });
 
     Rig {
@@ -1179,18 +1243,15 @@ fn spawn_rig(
         held,
         base,
         overlay,
-        held_materials,
         armor,
-        armor_materials,
-        armor_worn: Armor::default(),
         lit,
         #[cfg(feature = "skins")]
         cape,
-        #[cfg(feature = "skins")]
-        cape_material,
-        wings,
-        wings_material,
-        wings_worn: None,
+        wings: WingsRig {
+            nodes: wings,
+            material: wings_material,
+            worn: None,
+        },
         #[cfg(feature = "skins")]
         worn: crate::client::skins::SkinState {
             parts: u8::MAX,
@@ -1199,10 +1260,6 @@ fn spawn_rig(
         },
         #[cfg(feature = "skins")]
         seen_textures: 0,
-        #[cfg(feature = "skins")]
-        cape_ready: false,
-        #[cfg(feature = "skins")]
-        cape_offset: Vec3::ZERO,
     }
 }
 
@@ -1290,6 +1347,7 @@ struct WornSkin {
 
 fn sync_player_models(
     shared: Res<crate::renderer::systems::Shared>,
+    view: Res<crate::renderer::frame_view::FrameView>,
     freecam: Res<crate::renderer::input::FreecamState>,
     third_person: Res<crate::renderer::input::ThirdPersonState>,
     assets: Option<Res<PlayerModelAssets>>,
@@ -1322,18 +1380,10 @@ fn sync_player_models(
     };
     let dirs = diffuse_lights(crate::renderer::dimension::current());
 
-    let (players, local_pose, local_pos, local_skin) = {
+    let partial = view.partial;
+    let players: Vec<(i32, [f32; 3], AnimSample, WornSkin)> = {
         let s = shared.0.lock().unwrap();
-        let partial = crate::renderer::systems::partial_ticks(&s);
-        let prev = s.session.player_pos_prev;
-        let cur = s.session.player_pos;
-        let feet = [
-            prev[0] + (cur[0] - prev[0]) * partial,
-            prev[1] + (cur[1] - prev[1]) * partial,
-            prev[2] + (cur[2] - prev[2]) * partial,
-        ];
-        let players: Vec<(i32, [f32; 3], AnimSample, WornSkin)> = s
-            .session
+        s.session
             .other_players
             .iter()
             .map(|p| {
@@ -1347,59 +1397,67 @@ fn sync_player_models(
                     },
                 )
             })
-            .collect();
-        let mut local = s.session.local_anim.sample(partial);
-        let live_head = crate::renderer::anim::wrap_degrees(-s.camera_yaw - 180.0);
-        local.head_yaw = crate::renderer::anim::wrap_degrees(live_head - local.body_yaw);
-        local.pitch = -s.camera_pitch;
-
-        (
-            players,
-            local,
-            feet,
-            WornSkin {
-                #[cfg(feature = "skins")]
-                state: s.session.local_skin.clone(),
-            },
-        )
+            .collect()
+    };
+    let mut local_pose = view.local.clone();
+    let live_head = crate::renderer::anim::wrap_degrees(-view.camera_yaw - 180.0);
+    local_pose.head_yaw = crate::renderer::anim::wrap_degrees(live_head - local_pose.body_yaw);
+    local_pose.pitch = -view.camera_pitch;
+    let local_pos = view.player_lerp;
+    let local_skin = WornSkin {
+        #[cfg(feature = "skins")]
+        state: view.local_skin.clone(),
     };
 
-    let mut slot_of: HashMap<i32, usize> = HashMap::new();
+    let mut scratch = std::mem::take(&mut rigs.scratch);
+    let SlotScratch {
+        slot_of,
+        taken,
+        assign,
+        unmatched,
+        free,
+    } = &mut scratch;
+    slot_of.clear();
     for (i, rig) in rigs.entries.iter().enumerate() {
         if let Some(id) = rig.id {
             slot_of.insert(id, i);
         }
     }
-    let mut taken = vec![false; rigs.entries.len()];
-    let mut assign: Vec<usize> = Vec::with_capacity(players.len());
-    let mut unmatched: Vec<usize> = Vec::new();
+    taken.clear();
+    taken.resize(rigs.entries.len(), false);
+    assign.clear();
+    unmatched.clear();
     for (k, (id, _, _, _)) in players.iter().enumerate() {
         match slot_of.get(id) {
             Some(&i) if !taken[i] => {
                 taken[i] = true;
-                assign.push(i);
+                assign.push(Some(i));
             }
             _ => {
                 unmatched.push(k);
-                assign.push(usize::MAX);
+                assign.push(None);
             }
         }
     }
 
-    let mut free: Vec<usize> = (0..taken.len()).filter(|i| !taken[*i]).collect();
-    for k in unmatched {
+    free.clear();
+    free.extend((0..taken.len()).filter(|i| !taken[*i]));
+    for &k in unmatched.iter() {
         let slot = match free.pop() {
             Some(i) => i,
             None => {
                 rigs.entries
                     .push(spawn_rig(&mut commands, &assets, items.entity_materials));
+                taken.push(false);
                 rigs.entries.len() - 1
             }
         };
-        assign[k] = slot;
+        taken[slot] = true;
+        assign[k] = Some(slot);
     }
 
-    for ((id, feet, sample, worn), &slot) in players.iter().zip(assign.iter()) {
+    for ((id, feet, sample, worn), slot) in players.iter().zip(assign.iter()) {
+        let Some(slot) = *slot else { continue };
         rigs.entries[slot].id = Some(*id);
         let lit = player_lit(&lightmap.current, *feet, sample, dirs);
         apply_rig(
@@ -1407,16 +1465,15 @@ fn sync_player_models(
             *feet,
             sample,
             worn,
-            true,
+            RigVisibility::Shown,
             lit,
             &mut queries,
             &mut items,
         );
     }
 
-    let live: HashSet<usize> = assign.iter().copied().collect();
     for i in 0..rigs.entries.len() {
-        if live.contains(&i) {
+        if taken[i] {
             continue;
         }
         rigs.entries[i].id = None;
@@ -1424,15 +1481,27 @@ fn sync_player_models(
             *vis = Visibility::Hidden;
         }
     }
+    rigs.scratch = scratch;
 
+    #[cfg(feature = "shader_support")]
+    let pose_hidden = crate::renderer::packvertex::player_shadow();
+    #[cfg(not(feature = "shader_support"))]
+    let pose_hidden = false;
     if let Some(local) = &mut rigs.local {
         let lit = player_lit(&lightmap.current, local_pos, &local_pose, dirs);
+        let shown = if freecam.active || third_person.active {
+            RigVisibility::Shown
+        } else if pose_hidden {
+            RigVisibility::HiddenPosed
+        } else {
+            RigVisibility::Hidden
+        };
         apply_rig(
             local,
             local_pos,
             &local_pose,
             &local_skin,
-            freecam.active || third_person.active,
+            shown,
             lit,
             &mut queries,
             &mut items,
@@ -1480,21 +1549,14 @@ fn update_held_item(
     let Ok((mut transform, mut vis, mut mesh, mut node)) = query.get_mut(entity) else {
         return;
     };
-    let key = item.model_key();
-    let node_id = match blocking {
-        true => format!("{key}@using"),
-        false => key.clone(),
-    };
-    if node.id == node_id {
+    if node.blocking == blocking && node.shown.same_model(item) {
         return;
     }
-    node.id.clear();
-    node.id.push_str(&node_id);
+    node.shown = item.clone();
+    node.blocking = blocking;
+    let key = item.model_key();
 
-    let slot = match left_hand {
-        true => "thirdperson_lefthand",
-        false => "thirdperson_righthand",
-    };
+    let slot = held_context(left_hand).name();
     let gpu = items
         .assets
         .get(
@@ -1528,15 +1590,15 @@ fn update_wings(
     items: &mut ItemCtx,
     layers: &mut LayerQuery<'_, '_>,
 ) {
-    let chest = armor[1];
+    let chest = armor[CHEST_SLOT];
     #[cfg(feature = "skins")]
     let generation = items.skins.generation();
     #[cfg(not(feature = "skins"))]
     let generation = 0;
-    if rig.wings_worn == Some((chest, generation)) {
+    if rig.wings.worn == Some((chest, generation)) {
         return;
     }
-    rig.wings_worn = Some((chest, generation));
+    rig.wings.worn = Some((chest, generation));
 
     let worn = crate::entities::render::humanoid::armor::has_layer(
         chest,
@@ -1568,7 +1630,7 @@ fn update_wings(
     });
     let texture = texture.flatten();
 
-    if let Some(material) = items.entity_materials.get_mut(&rig.wings_material) {
+    if let Some(material) = items.entity_materials.get_mut(&rig.wings.material) {
         material.texture = texture.clone();
     }
     let shown = if texture.is_some() {
@@ -1576,7 +1638,7 @@ fn update_wings(
     } else {
         Visibility::Hidden
     };
-    for entity in rig.wings {
+    for entity in rig.wings.nodes {
         if let Ok((mut vis, _)) = layers.get_mut(entity) {
             *vis = shown;
         }
@@ -1587,13 +1649,13 @@ fn update_wings(
         use crate::entities::render::humanoid::armor;
 
         let over_chestplate = armor::has_layer(chest, armor::LAYER_HUMANOID);
-        rig.cape_offset = if over_chestplate {
+        rig.cape.offset = if over_chestplate {
             Vec3::new(0.0, -0.053_125 * 16.0, 0.068_75 * 16.0)
         } else {
             Vec3::ZERO
         };
-        if let Ok((mut vis, _)) = layers.get_mut(rig.cape) {
-            *vis = if rig.cape_ready && !worn {
+        if let Ok((mut vis, _)) = layers.get_mut(rig.cape.node) {
+            *vis = if rig.cape.ready && !worn {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
@@ -1644,11 +1706,11 @@ fn update_skin(
         .cape
         .as_ref()
         .and_then(|url| items.skins.get(url).cloned());
-    if let Some(material) = items.entity_materials.get_mut(&rig.cape_material) {
+    if let Some(material) = items.entity_materials.get_mut(&rig.cape.material) {
         material.texture = cape.clone();
     }
-    rig.cape_ready = cape.is_some() && skin.parts & (1 << CAPE_BIT) != 0;
-    rig.wings_worn = None;
+    rig.cape.ready = cape.is_some() && skin.parts & (1 << CAPE_BIT) != 0;
+    rig.wings.worn = None;
 
     for (entity, bit) in rig.overlays.iter().zip(OVERLAY_BITS) {
         if let Ok((mut vis, _)) = layers.get_mut(*entity) {
@@ -1669,10 +1731,16 @@ fn update_skin(
         &items.model.meshes
     };
     for (entity, index) in [
-        (rig.parts[2], 2),
-        (rig.parts[3], 3),
-        (rig.overlays[2], 8),
-        (rig.overlays[3], 9),
+        (rig.parts[PART_RIGHT_ARM], PART_RIGHT_ARM),
+        (rig.parts[PART_LEFT_ARM], PART_LEFT_ARM),
+        (
+            rig.overlays[PART_RIGHT_SLEEVE - FIRST_OVERLAY],
+            PART_RIGHT_SLEEVE,
+        ),
+        (
+            rig.overlays[PART_LEFT_SLEEVE - FIRST_OVERLAY],
+            PART_LEFT_SLEEVE,
+        ),
     ] {
         if let Ok((_, mut mesh)) = layers.get_mut(entity) {
             mesh.0 = set[index].clone();
@@ -1701,13 +1769,20 @@ fn player_lit(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RigVisibility {
+    Shown,
+    Hidden,
+    HiddenPosed,
+}
+
 #[cfg_attr(not(feature = "skins"), allow(unused_variables))]
 fn apply_rig(
     rig: &mut Rig,
     feet: [f32; 3],
     sample: &AnimSample,
     worn: &WornSkin,
-    visible: bool,
+    shown: RigVisibility,
     lit: Lit,
     queries: &mut RigQueries,
     items: &mut ItemCtx,
@@ -1716,13 +1791,13 @@ fn apply_rig(
     if let Ok((mut transform, mut vis)) = queries.0.get_mut(rig.root) {
         transform.translation = Vec3::from(feet) + root.world_offset;
         transform.rotation = root.rotation;
-        *vis = if visible {
+        *vis = if shown == RigVisibility::Shown {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
     }
-    if !visible {
+    if shown == RigVisibility::Hidden {
         return;
     }
     if let Ok(mut transform) = queries.1.get_mut(rig.flip) {
@@ -1736,7 +1811,7 @@ fn apply_rig(
         }
     }
 
-    for (entity, part) in rig.wings.iter().zip(pose.wings.iter()) {
+    for (entity, part) in rig.wings.nodes.iter().zip(pose.wings.iter()) {
         if let Ok(mut transform) = queries.2.get_mut(*entity) {
             *transform = part.transform();
         }
@@ -1746,9 +1821,9 @@ fn apply_rig(
     {
         update_skin(rig, &worn.state, items, &mut queries.5);
         if worn.state.refs.cape.is_some() {
-            if let Ok(mut transform) = queries.2.get_mut(rig.cape) {
+            if let Ok(mut transform) = queries.2.get_mut(rig.cape.node) {
                 transform.rotation = pose.cape;
-                transform.translation = Vec3::from(CAPE.pivot) + rig.cape_offset;
+                transform.translation = Vec3::from(CAPE.pivot) + rig.cape.offset;
             }
         }
     }
@@ -1758,22 +1833,22 @@ fn apply_rig(
     } else {
         (&sample.main_hand, &sample.off_hand)
     };
-    let held_materials = rig.held_materials.clone();
+    let [right_held, left_held] = &rig.held;
     update_held_item(
-        rig.held[0],
+        right_held.node,
         right_item,
         false,
         sample.right_arm_pose == ArmPose::Block,
-        &held_materials[0],
+        &right_held.material,
         items,
         &mut queries.3,
     );
     update_held_item(
-        rig.held[1],
+        left_held.node,
         left_item,
         true,
         sample.left_arm_pose == ArmPose::Block,
-        &held_materials[1],
+        &left_held.material,
         items,
         &mut queries.3,
     );
@@ -1782,10 +1857,10 @@ fn apply_rig(
     update_wings(rig, &sample.armor, items, &mut queries.5);
 
     if lit != rig.lit {
-        for handle in [&rig.base, &rig.overlay, &rig.wings_material]
+        for handle in [&rig.base, &rig.overlay, &rig.wings.material]
             .into_iter()
-            .chain(rig.held_materials.iter())
-            .chain(rig.armor_materials.iter())
+            .chain(rig.held.iter().map(|held| &held.material))
+            .chain(rig.armor.iter().map(|slot| &slot.material))
         {
             if let Some(material) = items.entity_materials.get_mut(handle) {
                 material.params.set(lit);
@@ -1804,20 +1879,20 @@ fn update_armor(
         (With<RigArmor>, Without<RigRoot>, Without<HeldItemNode>),
     >,
 ) {
-    for slot in 0..rig.armor.len() {
-        if rig.armor_worn[slot] == armor[slot] {
+    for (index, slot) in rig.armor.iter_mut().enumerate() {
+        if slot.worn == armor[index] {
             continue;
         }
-        rig.armor_worn[slot] = armor[slot];
+        slot.worn = armor[index];
 
-        let texture = match &armor[slot] {
+        let texture = match &armor[index] {
             Some(item) => {
-                let path = armor_texture(slot, item);
+                let path = armor_texture(index, item);
                 items.armor_textures.get(&path, items.images)
             }
             None => None,
         };
-        if let Some(material) = items.entity_materials.get_mut(&rig.armor_materials[slot]) {
+        if let Some(material) = items.entity_materials.get_mut(&slot.material) {
             material.texture = texture.clone();
         }
         let shown = if texture.is_some() {
@@ -1825,7 +1900,7 @@ fn update_armor(
         } else {
             Visibility::Hidden
         };
-        for entity in &rig.armor[slot] {
+        for entity in &slot.boxes {
             if let Ok(mut vis) = visibility.get_mut(*entity) {
                 *vis = shown;
             }
@@ -1937,7 +2012,6 @@ mod tests {
         assert!(p.right_leg.x_rot.abs() > p.left_arm.x_rot.abs());
     }
 
-    #[test]
     #[cfg(feature = "skins")]
     #[test]
     fn cape_hangs_six_degrees_off_the_back_at_rest() {

@@ -22,7 +22,7 @@ pub(crate) fn valid_username(name: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Dir,
-    Reset(Scope),
+    Reset { scope: Scope, assume_yes: bool },
     Env,
     Ping(String),
 }
@@ -47,10 +47,9 @@ impl Scope {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct Parsed {
-    pub args: Args,
-    pub action: Option<Action>,
-    pub assume_yes: bool,
+pub(crate) enum Command {
+    Play(Args),
+    Run(Action),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -173,21 +172,18 @@ EXAMPLES
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn parse() -> Args {
-    let parsed = match parse_from(std::env::args().skip(1)) {
-        Ok(parsed) => parsed,
+    match parse_from(std::env::args().skip(1)) {
+        Ok(Command::Play(args)) => args,
+        Ok(Command::Run(action)) => std::process::exit(run_action(action)),
         Err(message) => {
             eprintln!("{message}\n\nTry `torch-client --help`.");
             std::process::exit(2);
         }
-    };
-    if let Some(action) = parsed.action {
-        std::process::exit(run_action(action, parsed.assume_yes));
     }
-    parsed.args
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_from(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
+fn parse_from(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut username = None;
     let mut address = None;
     let mut access_token = None;
@@ -227,9 +223,9 @@ fn parse_from(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             "-a" | "--address" | "--ip" | "--server" => address = Some(value("--address")?),
             "-t" | "--access-token" => access_token = Some(value("--access-token")?),
             "--dir" | "--print-dir" => set_action(&mut action, Action::Dir)?,
-            "--reset" | "--reset-all" => set_action(&mut action, Action::Reset(Scope::All))?,
-            "--reset-config" => set_action(&mut action, Action::Reset(Scope::Config))?,
-            "--reset-assets" => set_action(&mut action, Action::Reset(Scope::Assets))?,
+            "--reset" | "--reset-all" => set_action(&mut action, reset(Scope::All))?,
+            "--reset-config" => set_action(&mut action, reset(Scope::Config))?,
+            "--reset-assets" => set_action(&mut action, reset(Scope::Assets))?,
             "--env" | "--print-env" => set_action(&mut action, Action::Env)?,
             "--ping" => set_action(&mut action, Action::Ping(value("--ping")?))?,
             "-y" | "--yes" => assume_yes = true,
@@ -252,11 +248,16 @@ fn parse_from(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
         n => return Err(format!("Expected at most two arguments, got {n}.")),
     }
 
-    if let Some(action) = &action {
+    if let Some(action) = &mut action {
         if username.is_some() || address.is_some() || access_token.is_some() {
             return Err(format!("`{}` takes no other arguments.", name_of(action)));
         }
-        if assume_yes && !matches!(action, Action::Reset(_)) {
+        if let Action::Reset {
+            assume_yes: yes, ..
+        } = action
+        {
+            *yes = assume_yes;
+        } else if assume_yes {
             return Err(format!(
                 "`--yes` answers a reset's question; `{}` does not ask one.",
                 name_of(action)
@@ -298,29 +299,36 @@ fn parse_from(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
         crate::platform::address::check(address)?;
     }
 
-    Ok(Parsed {
-        args: Args {
-            username,
-            address,
-            access_token,
-        },
-        action,
-        assume_yes,
-    })
+    if let Some(action) = action {
+        return Ok(Command::Run(action));
+    }
+    Ok(Command::Play(Args {
+        username,
+        address,
+        access_token,
+    }))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn reset(scope: Scope) -> Action {
+    Action::Reset {
+        scope,
+        assume_yes: false,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn name_of(action: &Action) -> &'static str {
     match action {
         Action::Dir => "--dir",
-        Action::Reset(scope) => scope.flag(),
+        Action::Reset { scope, .. } => scope.flag(),
         Action::Env => "--env",
         Action::Ping(_) => "--ping",
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn run_action(action: Action, assume_yes: bool) -> i32 {
+fn run_action(action: Action) -> i32 {
     match action {
         Action::Dir => {
             print_dirs();
@@ -330,7 +338,7 @@ fn run_action(action: Action, assume_yes: bool) -> i32 {
             print_env();
             0
         }
-        Action::Reset(scope) => reset(scope, assume_yes),
+        Action::Reset { scope, assume_yes } => delete(scope, assume_yes),
         Action::Ping(address) => ping(&address),
     }
 }
@@ -430,7 +438,7 @@ fn human_size(bytes: u64) -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn reset(scope: Scope, assume_yes: bool) -> i32 {
+fn delete(scope: Scope, assume_yes: bool) -> i32 {
     let config = crate::platform::storage::dir();
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     let mut files: Vec<std::path::PathBuf> = Vec::new();
@@ -753,14 +761,27 @@ fn confirm(assume_yes: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Scope, parse_from};
+    use super::{Action, Command, Scope, parse_from};
 
     fn parse(args: &[&str]) -> Result<(Option<String>, Option<String>), String> {
-        parse_from(args.iter().map(|a| a.to_string())).map(|p| (p.args.username, p.args.address))
+        parse_from(args.iter().map(|a| a.to_string())).map(|c| match c {
+            Command::Play(args) => (args.username, args.address),
+            Command::Run(_) => (None, None),
+        })
     }
 
     fn action(args: &[&str]) -> Result<Option<Action>, String> {
-        parse_from(args.iter().map(|a| a.to_string())).map(|p| p.action)
+        parse_from(args.iter().map(|a| a.to_string())).map(|c| match c {
+            Command::Play(_) => None,
+            Command::Run(action) => Some(action),
+        })
+    }
+
+    fn reset(scope: Scope) -> Option<Action> {
+        Some(Action::Reset {
+            scope,
+            assume_yes: false,
+        })
     }
 
     #[test]
@@ -822,15 +843,16 @@ mod tests {
         );
         assert_eq!(action(&["--dir"]), Ok(Some(Action::Dir)));
         assert_eq!(action(&["--env"]), Ok(Some(Action::Env)));
-        assert_eq!(action(&["--reset"]), Ok(Some(Action::Reset(Scope::All))));
+        assert_eq!(action(&["--reset"]), Ok(reset(Scope::All)));
         assert_eq!(
-            action(&["--reset-config"]),
-            Ok(Some(Action::Reset(Scope::Config)))
+            action(&["--reset", "--yes"]),
+            Ok(Some(Action::Reset {
+                scope: Scope::All,
+                assume_yes: true
+            }))
         );
-        assert_eq!(
-            action(&["--reset-assets"]),
-            Ok(Some(Action::Reset(Scope::Assets)))
-        );
+        assert_eq!(action(&["--reset-config"]), Ok(reset(Scope::Config)));
+        assert_eq!(action(&["--reset-assets"]), Ok(reset(Scope::Assets)));
         assert_eq!(action(&["play.example"]), Ok(None));
     }
 

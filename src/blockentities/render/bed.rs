@@ -40,8 +40,7 @@ fn texture(st: &BeState) -> String {
 }
 
 fn transform(st: &BeState) -> Transform {
-    let facing =
-        Quat::from_rotation_z((180.0 + facing_y_rot(st.state.prop("facing"))).to_radians());
+    let facing = Quat::from_rotation_z((180.0 + facing_y_rot(st.state.facing)).to_radians());
     let lie_flat = Quat::from_rotation_x(90.0_f32.to_radians());
     let pivot = Vec3::new(0.5, 0.5, 0.5);
     let base = Vec3::new(0.0, 0.5625, 0.0);

@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::{Quat, Vec3};
 
+use crate::entities::TexturePath;
 use crate::entities::models::humanoid::zombie;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -59,11 +60,11 @@ fn register_zombie(registry: &mut Registry) {
     );
 }
 
-fn zombie_texture(st: &EntityState) -> String {
+fn zombie_texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/zombie/zombie_baby".to_string()
+        "entity/zombie/zombie_baby".into()
     } else {
-        "entity/zombie/zombie".to_string()
+        "entity/zombie/zombie".into()
     }
 }
 
@@ -98,11 +99,11 @@ fn register_husk(registry: &mut Registry) {
     );
 }
 
-fn husk_texture(st: &EntityState) -> String {
+fn husk_texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/zombie/husk_baby".to_string()
+        "entity/zombie/husk_baby".into()
     } else {
-        "entity/zombie/husk".to_string()
+        "entity/zombie/husk".into()
     }
 }
 
@@ -166,19 +167,19 @@ fn register_drowned(registry: &mut Registry) {
     );
 }
 
-fn drowned_texture(st: &EntityState) -> String {
+fn drowned_texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/zombie/drowned_baby".to_string()
+        "entity/zombie/drowned_baby".into()
     } else {
-        "entity/zombie/drowned".to_string()
+        "entity/zombie/drowned".into()
     }
 }
 
-fn drowned_outer_texture(st: &EntityState) -> String {
+fn drowned_outer_texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/zombie/drowned_outer_layer_baby".to_string()
+        "entity/zombie/drowned_outer_layer_baby".into()
     } else {
-        "entity/zombie/drowned_outer_layer".to_string()
+        "entity/zombie/drowned_outer_layer".into()
     }
 }
 
@@ -220,6 +221,6 @@ fn register_giant(registry: &mut Registry) {
     );
 }
 
-fn giant_texture(_st: &EntityState) -> String {
-    "entity/zombie/zombie".to_string()
+fn giant_texture(_st: &EntityState) -> TexturePath {
+    "entity/zombie/zombie".into()
 }

@@ -1,5 +1,9 @@
+use std::collections::VecDeque;
+
+use crate::diag::Stat;
 use crate::direction::Direction;
 use crate::gui::ScreenCtx;
+use crate::gui::hud_layout::{ElementId, Hud, Rect};
 use crate::gui::painter::Painter;
 use crate::session::{ChunkProfiling, Gamemode};
 use crate::text::LINE_HEIGHT;
@@ -79,28 +83,32 @@ pub enum TagGamemode {
 const HEALTH_BAR_H: f32 = 1.5;
 const HEALTH_BAR_GAP: f32 = 1.5;
 
-#[derive(Clone, Default)]
+pub const FRAME_HISTORY_LEN: usize = 160;
+
+#[derive(Default)]
 pub struct HudInfo {
     pub pos: [f32; 3],
     pub gamemode: Gamemode,
     pub yaw: f32,
-    pub pitch: f32,
     pub flying: bool,
     pub freecam: bool,
-    pub status: String,
+    pub status: Option<std::sync::Arc<str>>,
     pub fps: f32,
-    pub frame_ms: f32,
-    pub budget: crate::diag::Budget,
-    pub debug: bool,
     pub in_world: bool,
     pub runtime: crate::diag::Runtime,
+    pub frame_history: VecDeque<f32>,
+    pub nametags: Vec<NameTag>,
+    pub active_effects: Vec<crate::play::mob_effects::MobEffectInstance>,
+    pub debug: Option<DebugInfo>,
+}
+
+#[derive(Default)]
+pub struct DebugInfo {
+    pub page: DebugPage,
+    pub frame_ms: f32,
     pub memory: MemoryUse,
     pub profiling: ChunkProfiling,
     pub pipeline: crate::diag::Counts,
-    pub page: DebugPage,
-    pub frame_history: Vec<f32>,
-    pub nametags: Vec<NameTag>,
-    pub active_effects: Vec<crate::play::mob_effects::MobEffectInstance>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -201,137 +209,219 @@ fn gamemode_name(g: Gamemode) -> &'static str {
     }
 }
 
-#[cfg_attr(not(feature = "mobile_ui"), allow(unused_variables))]
-pub fn draw(p: &mut Painter, ctx: &ScreenCtx, info: &HudInfo, chat_open: bool, show_fps: bool) {
-    let x = 2.0_f32;
-    let mut y = 2.0_f32;
-
-    #[cfg(feature = "mobile_ui")]
-    draw_position_mobile(p, ctx, info, chat_open, show_fps);
-    #[cfg(not(feature = "mobile_ui"))]
-    {
-        let pos = format!(
-            "XYZ: {:.2} / {:.2} / {:.2}",
-            info.pos[0], info.pos[1], info.pos[2]
-        );
-        let end = p.text_str(&pos, x.floor(), y.floor(), TEXT_COLOR, true);
-        let tag = format!("  [{}]", gamemode_name(info.gamemode));
-        p.text_str(&tag, end.floor(), y.floor(), GOLD, true);
-        y += LINE_HEIGHT;
-
-        let facing = facing_from_bevy_yaw(info.yaw);
-        let line = format!(
-            "Direction: {} ({})",
-            facing_name(facing),
-            facing_towards(facing)
-        );
-        p.text_str(&line, x.floor(), y.floor(), TEXT_COLOR, true);
-        y += LINE_HEIGHT;
-    }
-
-    if info.flying {
-        p.text_str("Flying", x.floor(), y.floor(), FLYING_COLOR, true);
-        y += LINE_HEIGHT;
-    }
-
-    if !info.status.is_empty() && !info.status.starts_with("Pos:") {
-        p.text_str(&info.status, x.floor(), y.floor(), STATUS_COLOR, true);
-        y += LINE_HEIGHT;
-    }
-
-    #[cfg(not(feature = "mobile_ui"))]
-    if show_fps {
-        draw_fps_line_left(p, x.floor(), info.fps, y.floor());
-    }
-
-    let right_y = 2.0_f32;
-    if info.freecam {
-        let label = "[ FREECAM ]";
-        let w = p.atlas.font.width_str(label);
-        p.text_str(label, (ctx.vw - 2.0 - w).floor(), right_y, GREEN, true);
-    }
+struct Line {
+    text: String,
+    color: u32,
+    text_w: f32,
+    width: f32,
+    fixed: bool,
+    tag: Option<(String, f32, f32)>,
 }
 
-#[cfg(feature = "mobile_ui")]
-fn draw_fps_line(p: &mut Painter, ctx: &ScreenCtx, fps: f32, y: f32) {
-    let line = format!("FPS: {:.0}", fps.max(0.0));
-    let x = (ctx.vw - 2.0 - p.atlas.font.width_str("FPS: 9999")).floor();
-    p.text_str(&line, x, y.floor(), TEXT_COLOR, true);
-}
+const WIDEST_XYZ: &str = "XYZ: -30000000.00 / -2048.00 / -30000000.00";
 
-#[cfg(not(feature = "mobile_ui"))]
-fn draw_fps_line_left(p: &mut Painter, x: f32, fps: f32, y: f32) {
-    let line = format!("FPS: {:.0}", fps.max(0.0));
-    p.text_str(&line, x, y, TEXT_COLOR, true);
-}
+const GAMEMODES: [Gamemode; 4] = [
+    Gamemode::Survival,
+    Gamemode::Creative,
+    Gamemode::Adventure,
+    Gamemode::Spectator,
+];
 
-#[cfg(feature = "mobile_ui")]
-fn draw_position_mobile(
+const HORIZONTAL: [Direction; 4] = [
+    Direction::North,
+    Direction::South,
+    Direction::West,
+    Direction::East,
+];
+
+pub fn draw(
     p: &mut Painter,
     ctx: &ScreenCtx,
     info: &HudInfo,
+    sidebar: &crate::client::tablist::Sidebar,
     chat_open: bool,
     show_fps: bool,
+    hud: &mut Hud,
 ) {
-    let perf_lines = if show_fps { 2.0 } else { 1.0 };
-    let (y_xyz, y_perf_top, y_dir) = if chat_open {
-        let y_xyz = 2.0;
-        let y_perf_top = y_xyz + LINE_HEIGHT;
-        let y_dir = y_perf_top + perf_lines * LINE_HEIGHT;
-        (y_xyz, y_perf_top, y_dir)
-    } else {
-        let layout = crate::mobile::pad::Layout::new(
-            ctx.vw,
-            ctx.vh,
-            0.0,
-            crate::mobile::pad::Movement::Buttons,
-        );
-        let y_xyz = layout.use_button.y - 2.0 - LINE_HEIGHT;
-        let y_dir = y_xyz - LINE_HEIGHT;
-        let y_perf_top = y_dir - perf_lines * LINE_HEIGHT;
-        (y_xyz, y_perf_top, y_dir)
+    use crate::gui::hud_layout::{Anchor, COUNT, Home, Place};
+    use bevy::math::Vec2;
+
+    let (vw, vh) = (ctx.vw, ctx.vh);
+    let editing = hud.editing();
+    let atlas = p.atlas;
+    let width = |s: &str| atlas.font.width_str(s);
+    let line = |text: String, color: u32, widest: f32| {
+        let text_w = width(&text);
+        Line {
+            text,
+            color,
+            text_w,
+            width: text_w.max(widest),
+            fixed: false,
+            tag: None,
+        }
     };
+    let widest_of = |names: &mut dyn Iterator<Item = f32>| names.fold(0.0, f32::max);
+    let widest_gamemode = widest_of(&mut GAMEMODES.iter().map(|g| width(gamemode_name(*g))));
 
-    draw_perf_mobile(p, ctx, info, y_perf_top, show_fps);
+    let mut lines: [Option<Line>; COUNT] = Default::default();
+    let mut put = |id: ElementId, l: Line| lines[id.index()] = Some(l);
 
-    let pos = format!(
-        "XYZ: {:.2} / {:.2} / {:.2}",
-        info.pos[0], info.pos[1], info.pos[2]
-    );
-    let tag = format!("  [{}]", gamemode_name(info.gamemode));
-    let total_w = p.atlas.font.width_str(&pos) + p.atlas.font.width_str(&tag);
-    let start_x = (ctx.vw - 2.0 - total_w).floor();
-    let end = p.text_str(&pos, start_x, y_xyz.floor(), TEXT_COLOR, true);
-    p.text_str(&tag, end.floor(), y_xyz.floor(), GOLD, true);
-
-    let facing = facing_from_bevy_yaw(info.yaw);
-    let line = format!(
-        "Direction: {} ({})",
-        facing_name(facing),
-        facing_towards(facing)
-    );
-    let w = p.atlas.font.width_str(&line);
-    p.text_str(
-        &line,
-        (ctx.vw - 2.0 - w).floor(),
-        y_dir.floor(),
-        TEXT_COLOR,
-        true,
-    );
-}
-
-#[cfg(feature = "mobile_ui")]
-fn draw_perf_mobile(p: &mut Painter, ctx: &ScreenCtx, info: &HudInfo, y_top: f32, show_fps: bool) {
-    let mut y = y_top;
-    if show_fps {
-        draw_fps_line(p, ctx, info.fps, y);
-        y += LINE_HEIGHT;
+    let gamemode = gamemode_name(info.gamemode);
+    let inline_tag =
+        hud.place(ElementId::Gamemode) == Place::Fixed && hud.shown(ElementId::Gamemode);
+    if hud.shown(ElementId::Coords) {
+        let mut l = line(
+            format!(
+                "XYZ: {:.2} / {:.2} / {:.2}",
+                info.pos[0], info.pos[1], info.pos[2]
+            ),
+            TEXT_COLOR,
+            width(WIDEST_XYZ),
+        );
+        if inline_tag {
+            let tag = format!("  [{gamemode}]");
+            let w = width("  [") + widest_gamemode + width("]");
+            let drawn = width(&tag);
+            l.tag = Some((tag, w, drawn));
+        }
+        put(ElementId::Coords, l);
+    }
+    if !inline_tag && hud.shown(ElementId::Gamemode) {
+        let w = width("[") + widest_gamemode + width("]");
+        put(ElementId::Gamemode, line(format!("[{gamemode}]"), GOLD, w));
+    }
+    if hud.shown(ElementId::Direction) {
+        let text = |d: Direction| format!("Direction: {} ({})", facing_name(d), facing_towards(d));
+        let w = width("Direction: ")
+            + widest_of(&mut HORIZONTAL.into_iter().map(|d| {
+                width(facing_name(d)) + width(" (") + width(facing_towards(d)) + width(")")
+            }));
+        put(
+            ElementId::Direction,
+            line(text(facing_from_bevy_yaw(info.yaw)), TEXT_COLOR, w),
+        );
+    }
+    if (info.flying || editing) && hud.shown(ElementId::Flying) {
+        put(
+            ElementId::Flying,
+            line("Flying".to_owned(), FLYING_COLOR, 0.0),
+        );
+    }
+    let status_live = info.status.as_deref().filter(|text| !text.is_empty());
+    if (status_live.is_some() || editing) && hud.shown(ElementId::Status) {
+        let text = status_live.unwrap_or("Connecting...").to_owned();
+        put(ElementId::Status, line(text, STATUS_COLOR, 0.0));
+    }
+    if (show_fps || editing) && hud.shown(ElementId::Fps) {
+        let mut l = line(
+            format!("FPS: {:.0}", info.fps.max(0.0)),
+            TEXT_COLOR,
+            width("FPS: 9999"),
+        );
+        l.fixed = true;
+        put(ElementId::Fps, l);
+    }
+    if crate::diag::MEMORY_METRICS && hud.shown(ElementId::Ram) {
+        let mut l = line(
+            format!("RAM: {}", bytes(info.runtime.rss_bytes)),
+            TEXT_COLOR,
+            width("RAM: 9999.99 GiB"),
+        );
+        l.fixed = true;
+        put(ElementId::Ram, l);
+    }
+    if (info.freecam || editing) && hud.shown(ElementId::Freecam) {
+        put(
+            ElementId::Freecam,
+            line("[ FREECAM ]".to_owned(), GREEN, 0.0),
+        );
     }
 
-    if crate::diag::MEMORY_METRICS {
-        let ram_line = format!("RAM: {}", bytes(info.runtime.rss_bytes));
-        let ram_x = (ctx.vw - 2.0 - p.atlas.font.width_str("RAM: 9999.99 GiB")).floor();
-        p.text_str(&ram_line, ram_x, y.floor(), TEXT_COLOR, true);
+    let mut sizes = [None; COUNT];
+    for id in ElementId::ALL {
+        if let Some(l) = &lines[id.index()] {
+            let w = l.width + l.tag.as_ref().map_or(0.0, |(_, w, _)| *w);
+            sizes[id.index()] = Some(Rect::new(0.0, 0.0, w, LINE_HEIGHT));
+        }
+    }
+    let effects = !info.active_effects.is_empty() || editing;
+    if effects && hud.shown(ElementId::Effects) {
+        sizes[ElementId::Effects.index()] = Some(hud.natural_of(ElementId::Effects, vw, vh));
+    }
+
+    let home_at = |home: Home| -> Option<(Anchor, Vec2)> {
+        #[cfg(feature = "mobile_ui")]
+        if home == Home::Corner {
+            if chat_open {
+                return Some((Anchor::TopRight, Vec2::new(2.0, 2.0)));
+            }
+            let pad =
+                crate::mobile::pad::Layout::new(vw, vh, 0.0, crate::mobile::pad::Movement::Buttons);
+            return Some((
+                Anchor::BottomRight,
+                Vec2::new(2.0, vh - (pad.use_button.y - 2.0)),
+            ));
+        }
+        let _ = (home, chat_open);
+        None
+    };
+    #[cfg(feature = "mobile_ui")]
+    let fixed_at = {
+        let fixed_h = |id: ElementId| match hud.place(id) {
+            Place::Fixed => sizes[id.index()].map_or(0.0, |r| r.h),
+            _ => 0.0,
+        };
+        let ram_y = sidebar_top(ctx, sidebar) - 1.0 - fixed_h(ElementId::Ram);
+        let fps_y = ram_y - fixed_h(ElementId::Fps);
+        move |id: ElementId| -> Option<(Anchor, Vec2)> {
+            let y = match id {
+                ElementId::Fps => fps_y,
+                ElementId::Ram => ram_y,
+                _ => return None,
+            };
+            Some((Anchor::TopRight, Vec2::new(2.0, y)))
+        }
+    };
+    #[cfg(not(feature = "mobile_ui"))]
+    let fixed_at = {
+        let _ = sidebar;
+        |_: ElementId| -> Option<(Anchor, Vec2)> { None }
+    };
+    let slots = hud.arrange(vw, vh, &sizes, home_at, fixed_at);
+    for id in ElementId::ALL {
+        let (Some(slot), Some(natural)) = (slots[id.index()], sizes[id.index()]) else {
+            continue;
+        };
+        if id == ElementId::Effects {
+            hud.draw_at(p, id, natural, slot, true, |p| {
+                draw_effects(p, ctx, &info.active_effects);
+            });
+            continue;
+        }
+        let Some(l) = lines[id.index()].take() else {
+            continue;
+        };
+        let drawn = l.text_w + l.tag.as_ref().map_or(0.0, |(_, _, d)| *d);
+        let x = match slot.align {
+            _ if l.fixed => 0.0,
+            2 => (natural.w - drawn).floor(),
+            1 => ((natural.w - drawn) / 2.0).floor(),
+            _ => 0.0,
+        };
+        hud.draw_at(p, id, natural, slot, false, |p| {
+            let end = p.text_str(&l.text, x, 0.0, l.color, true);
+            if let Some((tag, ..)) = &l.tag {
+                p.text_str(tag, end, 0.0, GOLD, true);
+            }
+        });
+        if let Some((_, _, w)) = l.tag {
+            let s = slot.scale;
+            hud.attach(
+                ElementId::Gamemode,
+                Rect::new(slot.x + (x + l.text_w) * s, slot.y, w * s, LINE_HEIGHT * s),
+            );
+        }
     }
 }
 
@@ -357,7 +447,7 @@ fn row_c(label: &'static str, value: String, color: u32) -> Row {
     }
 }
 
-fn na_row(label: &'static str, in_world: bool, real: String) -> Item {
+fn na_row(label: &'static str, in_world: bool, real: String) -> Item<'static> {
     if in_world {
         row(label, real).into()
     } else {
@@ -365,7 +455,7 @@ fn na_row(label: &'static str, in_world: bool, real: String) -> Item {
     }
 }
 
-fn na_row_c(label: &'static str, in_world: bool, real: String, color: u32) -> Item {
+fn na_row_c(label: &'static str, in_world: bool, real: String, color: u32) -> Item<'static> {
     if in_world {
         row_c(label, real, color).into()
     } else {
@@ -373,16 +463,16 @@ fn na_row_c(label: &'static str, in_world: bool, real: String, color: u32) -> It
     }
 }
 
-enum Item {
+enum Item<'a> {
     Row(Row),
-    Graph(Vec<f32>),
+    Graph(&'a VecDeque<f32>),
     Divider,
 }
 
 const DIVIDER_HEIGHT: f32 = 4.0;
 
-impl From<Row> for Item {
-    fn from(r: Row) -> Item {
+impl From<Row> for Item<'_> {
+    fn from(r: Row) -> Self {
         Item::Row(r)
     }
 }
@@ -480,7 +570,7 @@ fn draw_section(p: &mut Painter, title: &str, items: &[Item], right_x: f32, top_
     top_y + box_h + SECTION_GAP
 }
 
-fn draw_frame_graph(p: &mut Painter, samples: &[f32], x: f32, y: f32, w: f32, h: f32) {
+fn draw_frame_graph(p: &mut Painter, samples: &VecDeque<f32>, x: f32, y: f32, w: f32, h: f32) {
     p.fill(x, y, w, h, 0x6000_0000);
     if samples.is_empty() {
         return;
@@ -500,25 +590,29 @@ fn draw_frame_graph(p: &mut Painter, samples: &[f32], x: f32, y: f32, w: f32, h:
     }
 }
 
-fn frame_history_stats(history: &[f32]) -> (f32, f32, f32) {
-    if history.is_empty() {
+fn frame_history_stats(history: &VecDeque<f32>) -> (f32, f32, f32) {
+    let mut buf = [0.0f32; FRAME_HISTORY_LEN];
+    let n = history.len().min(FRAME_HISTORY_LEN);
+    if n == 0 {
         return (0.0, 0.0, 0.0);
     }
-    let avg = history.iter().sum::<f32>() / history.len() as f32;
-    let mut sorted = history.to_vec();
-    sorted.sort_by(f32::total_cmp);
-    let p95 = sorted[((sorted.len() - 1) as f32 * 0.95).round() as usize];
-    let max = *sorted.last().unwrap();
-    (avg, p95, max)
+    for (slot, ms) in buf.iter_mut().zip(history) {
+        *slot = *ms;
+    }
+    let sorted = &mut buf[..n];
+    sorted.sort_unstable_by(f32::total_cmp);
+    let avg = sorted.iter().sum::<f32>() / n as f32;
+    let p95 = sorted[((n - 1) as f32 * 0.95).round() as usize];
+    (avg, p95, sorted[n - 1])
 }
 
-pub fn draw_debug(p: &mut Painter, ctx: &ScreenCtx, info: &HudInfo) {
+pub fn draw_debug(p: &mut Painter, ctx: &ScreenCtx, info: &HudInfo, d: &DebugInfo) {
     let right_x = ctx.vw - 2.0;
     let mut y = 2.0_f32;
-    for (title, items) in sections_for(info) {
+    for (title, items) in sections_for(info, d) {
         y = draw_section(p, title, &items, right_x, y);
     }
-    if info.page != DebugPage::Help {
+    if d.page != DebugPage::Help {
         draw_footnote(p, "F3+0 for shortcuts", right_x, y);
     }
 }
@@ -534,19 +628,19 @@ fn draw_footnote(p: &mut Painter, text: &str, right_x: f32, top_y: f32) {
     );
 }
 
-fn sections_for(info: &HudInfo) -> Vec<(&'static str, Vec<Item>)> {
-    match info.page {
-        DebugPage::Overview => overview_sections(info),
-        DebugPage::Performance => vec![("PERFORMANCE", performance_items(info))],
-        DebugPage::World => vec![("WORLD", world_items(info))],
+fn sections_for<'a>(info: &'a HudInfo, d: &DebugInfo) -> Vec<(&'static str, Vec<Item<'a>>)> {
+    match d.page {
+        DebugPage::Overview => overview_sections(info, d),
+        DebugPage::Performance => vec![("PERFORMANCE", performance_items(info, d))],
+        DebugPage::World => vec![("WORLD", world_items(info, d))],
         DebugPage::Network => vec![("NETWORK", network_items(info))],
-        DebugPage::Workers => vec![("CHUNK WORKERS", workers_items(info))],
-        DebugPage::Memory => vec![("MEMORY", memory_items(info))],
+        DebugPage::Workers => vec![("CHUNK WORKERS", workers_items(info, d))],
+        DebugPage::Memory => vec![("MEMORY", memory_items(info, d))],
         DebugPage::Help => vec![("F3 SHORTCUTS", help_items())],
     }
 }
 
-fn help_items() -> Vec<Item> {
+fn help_items() -> Vec<Item<'static>> {
     vec![
         row("F3+1", "Overview".to_string()).into(),
         row("F3+2", "Performance".to_string()).into(),
@@ -562,20 +656,20 @@ fn help_items() -> Vec<Item> {
     ]
 }
 
-fn performance_items(info: &HudInfo) -> Vec<Item> {
+fn performance_items<'a>(info: &'a HudInfo, d: &DebugInfo) -> Vec<Item<'a>> {
     let rt = &info.runtime;
     let (avg, p95, max) = frame_history_stats(&info.frame_history);
     vec![
         row_c(
             "FPS",
             format!("{:.0}", info.fps),
-            frame_ms_color(info.frame_ms),
+            frame_ms_color(d.frame_ms),
         )
         .into(),
         row_c(
             "Frame",
-            format!("{:.2} ms", info.frame_ms),
-            frame_ms_color(info.frame_ms),
+            format!("{:.2} ms", d.frame_ms),
+            frame_ms_color(d.frame_ms),
         )
         .into(),
         row(
@@ -589,27 +683,38 @@ fn performance_items(info: &HudInfo) -> Vec<Item> {
             },
         )
         .into(),
-        Item::Graph(info.frame_history.clone()),
+        Item::Graph(&info.frame_history),
         row("Avg", format!("{avg:.2} ms")).into(),
         row("P95", format!("{p95:.2} ms")).into(),
         row_c("Max", format!("{max:.2} ms"), frame_ms_color(max)).into(),
     ]
 }
 
-fn world_items(info: &HudInfo) -> Vec<Item> {
-    let pipe = &info.pipeline;
-    let mem = &info.memory;
+fn world_items(info: &HudInfo, d: &DebugInfo) -> Vec<Item<'static>> {
+    let pipe = &d.pipeline;
+    let mem = &d.memory;
     let in_world = info.in_world;
-    let dropped_total = pipe.chunks_dropped + pipe.light_jobs_dropped + pipe.mesh_panics;
+    let dropped_total =
+        pipe[Stat::ChunksDropped] + pipe[Stat::LightJobsDropped] + pipe[Stat::MeshPanics];
     vec![
-        na_row("Chunks in", in_world, format!("{}", pipe.chunks_received)),
-        na_row("Columns lit", in_world, format!("{}", pipe.columns_lit)),
+        na_row(
+            "Chunks in",
+            in_world,
+            format!("{}", pipe[Stat::ChunksReceived]),
+        ),
+        na_row(
+            "Columns lit",
+            in_world,
+            format!("{}", pipe[Stat::ColumnsLit]),
+        ),
         na_row_c(
             "Dropped",
             in_world,
             format!(
                 "{} chunk / {} light / {} panic",
-                pipe.chunks_dropped, pipe.light_jobs_dropped, pipe.mesh_panics
+                pipe[Stat::ChunksDropped],
+                pipe[Stat::LightJobsDropped],
+                pipe[Stat::MeshPanics]
             ),
             count_color(dropped_total, 1, 50),
         ),
@@ -622,9 +727,17 @@ fn world_items(info: &HudInfo) -> Vec<Item> {
             "Terrain mesh",
             in_world,
             format!(
-                "{} in {} column meshes",
+                "{} in {} slots{}",
                 bytes(mem.terrain_bytes),
-                mem.sections
+                mem.sections,
+                crate::renderer::terrain_pool::stats()
+                    .map(|s| &s.0)
+                    .filter(|s| s.indirect.load(std::sync::atomic::Ordering::Relaxed) == 0)
+                    .map_or(String::new(), |s| format!(
+                        ", {} drawn in {} draws",
+                        s.drawn.load(std::sync::atomic::Ordering::Relaxed),
+                        s.draws.load(std::sync::atomic::Ordering::Relaxed)
+                    ))
             ),
         ),
         na_row(
@@ -639,7 +752,7 @@ fn world_items(info: &HudInfo) -> Vec<Item> {
     ]
 }
 
-fn network_items(info: &HudInfo) -> Vec<Item> {
+fn network_items(info: &HudInfo) -> Vec<Item<'static>> {
     let rt = &info.runtime;
     vec![
         row(
@@ -655,8 +768,8 @@ fn network_items(info: &HudInfo) -> Vec<Item> {
     ]
 }
 
-fn workers_items(info: &HudInfo) -> Vec<Item> {
-    let prof = &info.profiling;
+fn workers_items(info: &HudInfo, d: &DebugInfo) -> Vec<Item<'static>> {
+    let prof = &d.profiling;
     let in_world = info.in_world;
     vec![
         row("Workers", format!("{}", prof.worker_count)).into(),
@@ -664,7 +777,7 @@ fn workers_items(info: &HudInfo) -> Vec<Item> {
         na_row(
             "Superseded",
             in_world,
-            format!("{}", info.pipeline.mesh_jobs_superseded),
+            format!("{}", d.pipeline[Stat::MeshJobsSuperseded]),
         ),
         na_row_c(
             "Mesh avg",
@@ -698,9 +811,9 @@ fn workers_items(info: &HudInfo) -> Vec<Item> {
     ]
 }
 
-fn memory_items(info: &HudInfo) -> Vec<Item> {
+fn memory_items(info: &HudInfo, d: &DebugInfo) -> Vec<Item<'static>> {
     let rt = &info.runtime;
-    let mem = &info.memory;
+    let mem = &d.memory;
     let in_world = info.in_world;
     let accounted = mem.terrain_bytes
         + mem.world_bytes
@@ -710,7 +823,7 @@ fn memory_items(info: &HudInfo) -> Vec<Item> {
         + mem.texture_bytes;
     let other = rt.rss_bytes.saturating_sub(accounted);
 
-    let mut items: Vec<Item> = Vec::new();
+    let mut items: Vec<Item<'static>> = Vec::new();
     if crate::diag::MEMORY_METRICS {
         items.push(row("RSS", bytes(rt.rss_bytes)).into());
     }
@@ -827,24 +940,25 @@ fn churn_row(rt: &crate::diag::Runtime, sites: &[usize]) -> String {
     }
 }
 
-fn overview_sections(info: &HudInfo) -> Vec<(&'static str, Vec<Item>)> {
+fn overview_sections(info: &HudInfo, d: &DebugInfo) -> Vec<(&'static str, Vec<Item<'static>>)> {
     let rt = &info.runtime;
-    let prof = &info.profiling;
-    let pipe = &info.pipeline;
-    let mem = &info.memory;
+    let prof = &d.profiling;
+    let pipe = &d.pipeline;
+    let mem = &d.memory;
     let in_world = info.in_world;
-    let dropped_total = pipe.chunks_dropped + pipe.light_jobs_dropped + pipe.mesh_panics;
-    let mut perf: Vec<Item> = vec![
+    let dropped_total =
+        pipe[Stat::ChunksDropped] + pipe[Stat::LightJobsDropped] + pipe[Stat::MeshPanics];
+    let mut perf: Vec<Item<'static>> = vec![
         row_c(
             "FPS",
             format!("{:.0}", info.fps),
-            frame_ms_color(info.frame_ms),
+            frame_ms_color(d.frame_ms),
         )
         .into(),
         row_c(
             "Frame",
-            format!("{:.2} ms", info.frame_ms),
-            frame_ms_color(info.frame_ms),
+            format!("{:.2} ms", d.frame_ms),
+            frame_ms_color(d.frame_ms),
         )
         .into(),
         row(
@@ -1244,30 +1358,38 @@ fn title_alpha(remaining: f32, fade_in: f32, stay: f32, fade_out: f32) -> f32 {
     alpha.floor().clamp(0.0, 255.0) / 255.0
 }
 
-pub fn draw_overlays(p: &mut Painter, ctx: &ScreenCtx, ov: &HudOverlays, gamemode: Gamemode) {
+pub fn draw_overlays(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    ov: &HudOverlays,
+    gamemode: Gamemode,
+    elements: &mut Hud,
+) {
     let now = ctx.input.time * TICKS_PER_SECOND;
     let (vw, vh) = (gui_width(ctx), gui_height(ctx));
 
-    if gamemode != Gamemode::Spectator {
-        let alpha = held_name_alpha(ov.held_ends - now);
-        if alpha > 0.0 {
-            let width = p.atlas.font.width(&ov.held).ceil();
-            let x = ((vw - width) / 2.0).floor();
-            let y = if gamemode == Gamemode::Creative {
-                vh - 45.0
-            } else {
-                vh - 59.0
-            };
-            p.text_faded(&ov.held, x, y, true, alpha);
+    elements.follow(p, ctx.vw, ctx.vh, ElementId::Hotbar, |p| {
+        if gamemode != Gamemode::Spectator {
+            let alpha = held_name_alpha(ov.held_ends - now);
+            if alpha > 0.0 {
+                let width = p.atlas.font.width(&ov.held).ceil();
+                let x = ((vw - width) / 2.0).floor();
+                let y = if gamemode == Gamemode::Creative {
+                    vh - 45.0
+                } else {
+                    vh - 59.0
+                };
+                p.text_faded(&ov.held, x, y, true, alpha);
+            }
         }
-    }
 
-    let alpha = action_bar_alpha(ov.action_bar_ends - now);
-    if alpha > 0.0 {
-        let width = p.atlas.font.width(&ov.action_bar).ceil();
-        let x = (vw / 2.0).floor() - (width / 2.0).floor();
-        p.text_faded(&ov.action_bar, x, vh - 72.0, true, alpha);
-    }
+        let alpha = action_bar_alpha(ov.action_bar_ends - now);
+        if alpha > 0.0 {
+            let width = p.atlas.font.width(&ov.action_bar).ceil();
+            let x = (vw / 2.0).floor() - (width / 2.0).floor();
+            p.text_faded(&ov.action_bar, x, vh - 72.0, true, alpha);
+        }
+    });
 
     if !ov.title.is_empty() {
         let alpha = title_alpha(ov.title_ends - now, ov.fade_in, ov.stay, ov.fade_out);
@@ -1378,6 +1500,21 @@ pub fn draw_boss_bars(p: &mut Painter, ctx: &ScreenCtx, bars: &[crate::client::b
 const SIDEBAR_BG: u32 = 0x4C00_0000;
 const SIDEBAR_HEADER_BG: u32 = 0x6600_0000;
 
+#[cfg(feature = "mobile_ui")]
+pub fn sidebar_top(ctx: &ScreenCtx, sidebar: &crate::client::tablist::Sidebar) -> f32 {
+    let count = if sidebar.active {
+        sidebar
+            .rows
+            .len()
+            .min(crate::client::tablist::MAX_SIDEBAR_ROWS)
+    } else {
+        0
+    };
+    let height = count as f32 * LINE_HEIGHT;
+    let bottom = (gui_height(ctx) / 2.0).floor() + (height / 3.0).floor();
+    bottom - height - LINE_HEIGHT - 1.0
+}
+
 pub fn draw_sidebar(p: &mut Painter, ctx: &ScreenCtx, sidebar: &crate::client::tablist::Sidebar) {
     if !sidebar.active {
         return;
@@ -1472,7 +1609,7 @@ mod tests {
             subtitle_text: session.subtitle_text.take(),
             title_times: session.title_times.take(),
             titles_clear: session.titles_clear.take(),
-            hotbar: vec![SlotStack::default(); 10],
+            hotbar: vec![SlotStack::default(); 10].into(),
             ..Default::default()
         }
     }

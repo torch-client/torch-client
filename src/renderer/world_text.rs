@@ -11,7 +11,8 @@ use crate::gui::painter::{Painter, PainterBuffers};
 use crate::gui::render::GuiAssets;
 use crate::renderer::AppState;
 use crate::renderer::entity_material::{EntityMaterial, EntityParams, LightMode, Lit};
-use crate::renderer::systems::{Shared, WorldCamera, partial_ticks};
+use crate::renderer::frame_view::{FrameView, FrameViewSystems};
+use crate::renderer::systems::WorldCamera;
 use crate::text::{Font, LINE_HEIGHT, Span};
 
 pub struct WorldTextPlugin;
@@ -20,7 +21,9 @@ impl Plugin for WorldTextPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            sync_text_displays.run_if(in_state(AppState::InGame)),
+            sync_text_displays
+                .after(FrameViewSystems)
+                .run_if(in_state(AppState::InGame)),
         );
     }
 }
@@ -93,9 +96,10 @@ impl Layouts {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sync_text_displays(
     mut commands: Commands,
-    shared: Res<Shared>,
+    view: Res<FrameView>,
     time: Res<Time>,
     gui: Option<Res<GuiAssets>>,
     assets: Option<Res<WorldTextAssets>>,
@@ -103,6 +107,7 @@ fn sync_text_displays(
     mut materials: ResMut<Assets<EntityMaterial>>,
     camera: Query<&Transform, With<WorldCamera>>,
     mut layouts: Local<Layouts>,
+    mut drawn: Local<bool>,
 ) {
     crate::prof_span!("render:text_displays");
     let Some(gui) = gui else { return };
@@ -119,12 +124,73 @@ fn sync_text_displays(
     let eye = camera.position;
     let frame = (time.elapsed_secs() * 20.0) as u32;
 
+    let partial = view.partial;
+    let mut painted: Option<([Painter<'_>; 2], [Vec<[f32; 3]>; 2])> = None;
+    layouts.generation = layouts.generation.wrapping_add(1);
+    for anim in view.entities.iter() {
+        let Some(display) = anim.shared().display.as_deref() else {
+            continue;
+        };
+        if display.text.is_empty() {
+            continue;
+        }
+        let pos = Vec3::from(anim.position(partial));
+        if pos.distance(eye) > display.view_range * VIEW_RANGE_BLOCKS {
+            continue;
+        }
+        if painted.is_none() {
+            let Some(taken) = take_buffers(&mut meshes, &assets, &gui.atlas, frame) else {
+                return;
+            };
+            painted = Some(taken);
+        }
+        let (entity_yaw, entity_pitch) = anim.look(partial);
+        let matrix = pose(display, pos, entity_yaw, entity_pitch, &camera);
+        let pass = if display.flags & Display::FLAG_SEE_THROUGH != 0 {
+            Pass::SeeThrough
+        } else {
+            Pass::Normal
+        };
+        let layout = layouts.get(anim.id, &gui.atlas.font, display);
+        if let Some((painters, _)) = &mut painted {
+            paint(&mut painters[pass as usize], display, layout, matrix);
+        }
+    }
+    layouts.sweep();
+
+    match painted {
+        Some((painters, normals)) => {
+            put_back(&mut meshes, &assets, painters, normals);
+            *drawn = true;
+        }
+        None if *drawn => {
+            if let Some((painters, normals)) = take_buffers(&mut meshes, &assets, &gui.atlas, frame)
+            {
+                put_back(&mut meshes, &assets, painters, normals);
+            }
+            *drawn = false;
+        }
+        None => {}
+    }
+}
+
+fn take_buffers<'a>(
+    meshes: &mut Assets<Mesh>,
+    assets: &WorldTextAssets,
+    atlas: &'a crate::gui::atlas::GuiAtlas,
+    frame: u32,
+) -> Option<([Painter<'a>; 2], [Vec<[f32; 3]>; 2])> {
+    if assets
+        .meshes
+        .iter()
+        .any(|handle| meshes.get(handle).is_none())
+    {
+        return None;
+    }
     let mut bufs = [PainterBuffers::default(), PainterBuffers::default()];
     let mut normals: [Vec<[f32; 3]>; 2] = [Vec::new(), Vec::new()];
     for (i, handle) in assets.meshes.iter().enumerate() {
-        let Some(mesh) = meshes.get_mut(handle) else {
-            return;
-        };
+        let mesh = meshes.get_mut(handle)?;
         bufs[i] = PainterBuffers {
             positions: f32x3(mesh.remove_attribute(Mesh::ATTRIBUTE_POSITION)),
             uvs: f32x2(mesh.remove_attribute(Mesh::ATTRIBUTE_UV_0)),
@@ -138,45 +204,13 @@ fn sync_text_displays(
     }
     let [normal_bufs, see_through_bufs] = bufs;
     let mut painters = [
-        Painter::with_buffers(&gui.atlas, frame, normal_bufs),
-        Painter::with_buffers(&gui.atlas, frame, see_through_bufs),
+        Painter::with_buffers(atlas, frame, normal_bufs),
+        Painter::with_buffers(atlas, frame, see_through_bufs),
     ];
     for painter in &mut painters {
         painter.unihex_enabled = false;
     }
-
-    {
-        let Ok(state) = shared.0.try_lock() else {
-            put_back(&mut meshes, &assets, painters, normals);
-            return;
-        };
-        let partial = partial_ticks(&state);
-        layouts.generation = layouts.generation.wrapping_add(1);
-        for anim in state.session.entities.iter() {
-            let Some(display) = anim.shared().display.as_deref() else {
-                continue;
-            };
-            if display.text.is_empty() {
-                continue;
-            }
-            let pos = Vec3::from(anim.position(partial));
-            if pos.distance(eye) > display.view_range * VIEW_RANGE_BLOCKS {
-                continue;
-            }
-            let (entity_yaw, entity_pitch) = anim.look(partial);
-            let matrix = pose(display, pos, entity_yaw, entity_pitch, &camera);
-            let pass = if display.flags & Display::FLAG_SEE_THROUGH != 0 {
-                Pass::SeeThrough
-            } else {
-                Pass::Normal
-            };
-            let layout = layouts.get(anim.id, &gui.atlas.font, display);
-            paint(&mut painters[pass as usize], display, layout, matrix);
-        }
-        layouts.sweep();
-    }
-
-    put_back(&mut meshes, &assets, painters, normals);
+    Some((painters, normals))
 }
 
 fn paint(painter: &mut Painter, display: &Display, layout: &Layout, pose: Mat4) {

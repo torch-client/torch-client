@@ -7,10 +7,20 @@ pub mod blocks;
 pub mod scan;
 pub mod table;
 
-use super::registry::Id;
+use super::list::BitList;
+use super::registry::handle::{Enum, Slider};
+use super::registry::{Id, options, ore_esp, storage_esp, xray};
 use super::{Edge, Phase, store};
 pub use scan::Found;
 pub use table::Slot;
+
+options! {
+    pub enum Shape {
+        Lines = "Lines",
+        Sides = "Sides",
+        Both = "Both",
+    }
+}
 
 #[derive(Default)]
 pub struct EspFrame {
@@ -30,10 +40,38 @@ static SINCE: AtomicU32 = AtomicU32::new(u32::MAX);
 static LAST_LEN: AtomicUsize = AtomicUsize::new(0);
 static DIRTY: AtomicBool = AtomicBool::new(false);
 
-static EDGES: [Edge; 3] = [
-    Edge::new(Id::Xray),
-    Edge::new(Id::OreEsp),
-    Edge::new(Id::StorageEsp),
+struct Esp {
+    edge: Edge,
+    list: &'static BitList,
+    range: Slider,
+    shape: Enum<Shape>,
+    fill: Slider,
+}
+
+const COUNT: usize = 3;
+
+static ESPS: [Esp; COUNT] = [
+    Esp {
+        edge: Edge::new(Id::OreEsp),
+        list: &blocks::ORES,
+        range: ore_esp::RANGE,
+        shape: ore_esp::SHAPE,
+        fill: ore_esp::FILL,
+    },
+    Esp {
+        edge: Edge::new(Id::StorageEsp),
+        list: &blocks::STORAGE,
+        range: storage_esp::RANGE,
+        shape: storage_esp::SHAPE,
+        fill: storage_esp::FILL,
+    },
+    Esp {
+        edge: Edge::new(Id::Xray),
+        list: &blocks::XRAY,
+        range: xray::RANGE,
+        shape: xray::SHAPE,
+        fill: xray::FILL,
+    },
 ];
 
 #[inline]
@@ -44,7 +82,7 @@ pub fn mark_dirty() {
 #[inline]
 pub fn any_enabled() -> bool {
     let s = store();
-    s.enabled(Id::Xray) || s.enabled(Id::OreEsp) || s.enabled(Id::StorageEsp)
+    ESPS.iter().any(|e| s.enabled(e.edge.id()))
 }
 
 fn pos_key(c: ChunkPos, section_y: i32) -> u64 {
@@ -53,7 +91,7 @@ fn pos_key(c: ChunkPos, section_y: i32) -> u64 {
 
 pub fn tick(bot: &azalea::Client, shared: &Arc<crate::session::SharedMutex>) {
     let s = store();
-    let phases = [EDGES[0].poll(s), EDGES[1].poll(s), EDGES[2].poll(s)];
+    let phases = ESPS.each_ref().map(|e| e.edge.poll(s));
     let running = phases
         .iter()
         .any(|p| matches!(p, Phase::Started | Phase::Running));

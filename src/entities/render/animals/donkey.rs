@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::equine;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -68,24 +69,20 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(st: &EntityState) -> String {
-    let base = if st.kind == EntityKind::Mule {
-        "mule"
-    } else {
-        "donkey"
-    };
-    if st.extras.is_baby {
-        format!("entity/horse/{base}_baby")
-    } else {
-        format!("entity/horse/{base}")
+fn texture(st: &EntityState) -> TexturePath {
+    match (st.kind == EntityKind::Mule, st.extras.is_baby) {
+        (true, true) => "entity/horse/mule_baby",
+        (true, false) => "entity/horse/mule",
+        (false, true) => "entity/horse/donkey_baby",
+        (false, false) => "entity/horse/donkey",
     }
+    .into()
 }
 
-fn saddle_texture(st: &EntityState) -> String {
-    let base = if st.kind == EntityKind::Mule {
-        "mule_saddle"
+fn saddle_texture(st: &EntityState) -> TexturePath {
+    if st.kind == EntityKind::Mule {
+        "entity/equipment/mule_saddle/saddle".into()
     } else {
-        "donkey_saddle"
-    };
-    format!("entity/equipment/{base}/saddle")
+        "entity/equipment/donkey_saddle/saddle".into()
+    }
 }

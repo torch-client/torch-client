@@ -30,6 +30,65 @@ pub(crate) const SKIN_HEAD_V: u32 = 8;
 pub(crate) const SKIN_HAT_U: u32 = 40;
 pub(crate) const SKIN_HEAD_SIZE: u32 = 8;
 
+#[derive(Clone, Copy, Debug)]
+struct ReservedGrid {
+    origin: (u32, u32),
+    cell_w: u32,
+    cell_h: u32,
+    columns: usize,
+    slots: usize,
+}
+
+impl ReservedGrid {
+    const fn new(cell_w: u32, cell_h: u32, columns: usize, slots: usize) -> ReservedGrid {
+        ReservedGrid {
+            origin: (0, 0),
+            cell_w,
+            cell_h,
+            columns,
+            slots,
+        }
+    }
+
+    fn at(self, origin: (u32, u32)) -> ReservedGrid {
+        ReservedGrid { origin, ..self }
+    }
+
+    fn blank(&self) -> RgbaImage {
+        let rows = self.slots.div_ceil(self.columns) as u32;
+        RgbaImage::new(self.columns as u32 * self.cell_w, rows * self.cell_h)
+    }
+
+    fn cell(&self, slot: usize) -> Option<(u32, u32)> {
+        if slot >= self.slots {
+            return None;
+        }
+        Some((
+            self.origin.0 + (slot % self.columns) as u32 * self.cell_w,
+            self.origin.1 + (slot / self.columns) as u32 * self.cell_h,
+        ))
+    }
+}
+
+const SERVER_ICON_GRID: ReservedGrid = ReservedGrid::new(
+    SERVER_ICON_PX,
+    SERVER_ICON_PX,
+    SERVER_ICON_COLUMNS,
+    SERVER_ICON_SLOTS,
+);
+const BANNER_ICON_GRID: ReservedGrid = ReservedGrid::new(
+    BANNER_ICON_PX,
+    BANNER_ICON_PX,
+    BANNER_ICON_COLUMNS,
+    BANNER_ICON_SLOTS,
+);
+const PLAYER_FACE_GRID: ReservedGrid = ReservedGrid::new(
+    PLAYER_FACE_W,
+    PLAYER_FACE_H,
+    PLAYER_FACE_COLUMNS,
+    PLAYER_FACE_SLOTS,
+);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Region {
     pub x: u32,
@@ -59,15 +118,22 @@ pub struct Sprite {
     pub scaling: Scaling,
 }
 
+pub struct AtlasPixels {
+    pub rgba: RgbaImage,
+    pub unihex: Vec<u8>,
+}
+
 pub struct GuiAtlas {
-    pub image: RgbaImage,
+    width: u32,
+    height: u32,
+    pixels: std::sync::Mutex<Option<AtlasPixels>>,
     sprites: HashMap<String, Sprite>,
     sheets: HashMap<String, Region>,
     items: HashMap<String, Vec<(u32, Region)>>,
     font_origin: (u32, u32),
-    server_icons_origin: (u32, u32),
-    banner_icons_origin: (u32, u32),
-    player_faces_origin: (u32, u32),
+    server_icons: ReservedGrid,
+    banner_icons: ReservedGrid,
+    player_faces: ReservedGrid,
     pub white: Region,
     pub font: Font,
 }
@@ -110,24 +176,20 @@ impl GuiAtlas {
     }
 
     pub fn banner_icon(&self, slot: usize) -> Option<Region> {
-        if slot >= BANNER_ICON_SLOTS {
-            return None;
-        }
+        let (x, y) = self.banner_icons.cell(slot)?;
         Some(Region {
-            x: self.banner_icons_origin.0 + (slot % BANNER_ICON_COLUMNS) as u32 * BANNER_ICON_PX,
-            y: self.banner_icons_origin.1 + (slot / BANNER_ICON_COLUMNS) as u32 * BANNER_ICON_PX,
+            x,
+            y,
             w: BANNER_ICON_PX,
             h: BANNER_ICON_PX,
         })
     }
 
     pub fn server_icon(&self, slot: usize) -> Option<Region> {
-        if slot >= SERVER_ICON_SLOTS {
-            return None;
-        }
+        let (x, y) = self.server_icons.cell(slot)?;
         Some(Region {
-            x: self.server_icons_origin.0 + (slot % SERVER_ICON_COLUMNS) as u32 * SERVER_ICON_PX,
-            y: self.server_icons_origin.1 + (slot / SERVER_ICON_COLUMNS) as u32 * SERVER_ICON_PX,
+            x,
+            y,
             w: SERVER_ICON_PX,
             h: SERVER_ICON_PX,
         })
@@ -135,11 +197,7 @@ impl GuiAtlas {
 
     #[cfg(feature = "skins")]
     pub fn player_face(&self, slot: usize) -> Option<(Region, Region)> {
-        if slot >= PLAYER_FACE_SLOTS {
-            return None;
-        }
-        let x = self.player_faces_origin.0 + (slot % PLAYER_FACE_COLUMNS) as u32 * PLAYER_FACE_W;
-        let y = self.player_faces_origin.1 + (slot / PLAYER_FACE_COLUMNS) as u32 * PLAYER_FACE_H;
+        let (x, y) = self.player_faces.cell(slot)?;
         let cell = |x| Region {
             x,
             y,
@@ -159,25 +217,31 @@ impl GuiAtlas {
     }
 
     pub fn boot() -> GuiAtlas {
-        let font = Font::builtin();
-        let (w, h) = (font.image.width(), font.image.height());
+        let (font, font_pixels) = Font::builtin();
+        let page = &font_pixels.pages;
+        let (w, h) = (page.width(), page.height());
         let mut image = RgbaImage::new(w.max(1), h + 1);
         for y in 0..h {
             for x in 0..w {
-                image.put_pixel(x, y, *font.image.get_pixel(x, y));
+                image.put_pixel(x, y, *page.get_pixel(x, y));
             }
         }
         image.put_pixel(0, h, image::Rgba([255, 255, 255, 255]));
 
         GuiAtlas {
-            image,
+            width: image.width(),
+            height: image.height(),
+            pixels: std::sync::Mutex::new(Some(AtlasPixels {
+                rgba: image,
+                unihex: font_pixels.unihex,
+            })),
             sprites: HashMap::new(),
             sheets: HashMap::new(),
             items: HashMap::new(),
             font_origin: (0, 0),
-            server_icons_origin: (0, 0),
-            banner_icons_origin: (0, 0),
-            player_faces_origin: (0, 0),
+            server_icons: SERVER_ICON_GRID,
+            banner_icons: BANNER_ICON_GRID,
+            player_faces: PLAYER_FACE_GRID,
             white: Region {
                 x: 0,
                 y: h,
@@ -189,10 +253,24 @@ impl GuiAtlas {
     }
 
     pub fn uv(&self, px: f32, py: f32) -> [f32; 2] {
-        [
-            px / self.image.width() as f32,
-            py / self.image.height() as f32,
-        ]
+        [px / self.width as f32, py / self.height as f32]
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    pub fn take_pixels(&self) -> Option<AtlasPixels> {
+        self.pixels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    pub fn pixels(&self) -> std::sync::MutexGuard<'_, Option<AtlasPixels>> {
+        self.pixels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn unihex_uv(&self, px: f32, py: f32) -> [f32; 2] {
@@ -280,6 +358,11 @@ const SHEETS: &[Sheet] = &[
     },
     Sheet {
         key: "container/smithing",
+        w: 176,
+        h: 166,
+    },
+    Sheet {
+        key: "container/anvil",
         w: 176,
         h: 166,
     },
@@ -397,6 +480,16 @@ const EXTRAS: &[Extra] = &[
         key: "pack_icon",
         path: "gui/pack.png",
         alt_path: Some("../../../pack.png"),
+        size: (32, 32),
+        crop_h: None,
+        nearest: false,
+        scaling: Scaling::Stretch,
+    },
+    #[cfg(resource_packs)]
+    Extra {
+        key: "unknown_pack",
+        path: "misc/unknown_pack.png",
+        alt_path: None,
         size: (32, 32),
         crop_h: None,
         nearest: false,
@@ -549,10 +642,9 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
     let mut sprite_files = Vec::new();
     collect_pngs(&sprites_dir, &sprites_dir, &mut sprite_files);
     for (key, path) in sprite_files {
-        let Ok(img) = crate::platform::assets::open_image(&path) else {
+        let Ok(img) = crate::platform::assets::open_gui_image(&path) else {
             continue;
         };
-        let img = img.to_rgba8();
         let scaling = read_scaling(&path, img.width(), img.height());
         entries.push(Entry {
             kind: Kind::Sprite,
@@ -568,13 +660,13 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
     let mut effect_files = Vec::new();
     collect_pngs(&mob_effect_dir, &mob_effect_dir, &mut effect_files);
     for (name, path) in effect_files {
-        let Ok(img) = crate::platform::assets::open_image(&path) else {
+        let Ok(img) = crate::platform::assets::open_gui_image(&path) else {
             continue;
         };
         entries.push(Entry {
             kind: Kind::Sprite,
             key: format!("mob_effect/{name}"),
-            image: img.to_rgba8(),
+            image: img,
             scaling: Scaling::Stretch,
         });
     }
@@ -618,13 +710,52 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
         }
     }
 
-    for sheet in SHEETS {
-        let path = gui_dir.join(format!("{}.png", sheet.key));
-        let Ok(img) = crate::platform::assets::open_image(&path) else {
-            eprintln!("[GuiAtlas] missing sheet {}", path.display());
+    for wood in crate::blockentities::render::sign::WOODS {
+        let hanging = textures.join(format!("gui/hanging_signs/{wood}.png"));
+        match crate::platform::assets::open_gui_image(&hanging) {
+            Ok(img) => entries.push(Entry {
+                kind: Kind::Sprite,
+                key: crate::gui::sign_edit::hanging_sprite(wood),
+                image: img,
+                scaling: Scaling::Stretch,
+            }),
+            Err(_) => eprintln!("[GuiAtlas] missing {}", hanging.display()),
+        }
+        let plain = textures.join(format!("entity/signs/{wood}.png"));
+        let Ok(img) = crate::platform::assets::open_image(&plain) else {
+            eprintln!("[GuiAtlas] missing {}", plain.display());
             continue;
         };
         let mut img = img.to_rgba8();
+        let k = (img.width() / crate::gui::sign_edit::SIGN_TEXTURE_WIDTH).max(1);
+        for (key, [u, v, w, h]) in [
+            (
+                crate::gui::sign_edit::board_sprite(wood),
+                crate::gui::sign_edit::BOARD_UV,
+            ),
+            (
+                crate::gui::sign_edit::stick_sprite(wood),
+                crate::gui::sign_edit::STICK_UV,
+            ),
+        ] {
+            if img.width() < (u + w) * k || img.height() < (v + h) * k {
+                continue;
+            }
+            entries.push(Entry {
+                kind: Kind::Sprite,
+                key,
+                image: image::imageops::crop(&mut img, u * k, v * k, w * k, h * k).to_image(),
+                scaling: Scaling::Stretch,
+            });
+        }
+    }
+
+    for sheet in SHEETS {
+        let path = gui_dir.join(format!("{}.png", sheet.key));
+        let Ok(mut img) = crate::platform::assets::open_gui_image(&path) else {
+            eprintln!("[GuiAtlas] missing sheet {}", path.display());
+            continue;
+        };
         let (w, h) = (sheet.w.min(img.width()), sheet.h.min(img.height()));
         let image = if (w, h) == (img.width(), img.height()) {
             img
@@ -645,46 +776,35 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
         entries.push(sga);
     }
 
-    let font = Font::load(assets);
+    let (font, font_pixels) = Font::load(assets);
+    let unihex = font_pixels.unihex;
     entries.push(Entry {
         kind: Kind::Font,
         key: String::new(),
-        image: font.image.clone(),
+        image: font_pixels.pages,
         scaling: Scaling::Stretch,
     });
 
-    let rows = SERVER_ICON_SLOTS.div_ceil(SERVER_ICON_COLUMNS) as u32;
     entries.push(Entry {
         kind: Kind::ServerIcons,
         key: String::new(),
-        image: RgbaImage::new(
-            SERVER_ICON_COLUMNS as u32 * SERVER_ICON_PX,
-            rows * SERVER_ICON_PX,
-        ),
+        image: SERVER_ICON_GRID.blank(),
         scaling: Scaling::Stretch,
     });
 
-    let rows = BANNER_ICON_SLOTS.div_ceil(BANNER_ICON_COLUMNS) as u32;
     entries.push(Entry {
         kind: Kind::BannerIcons,
         key: String::new(),
-        image: RgbaImage::new(
-            BANNER_ICON_COLUMNS as u32 * BANNER_ICON_PX,
-            rows * BANNER_ICON_PX,
-        ),
+        image: BANNER_ICON_GRID.blank(),
         scaling: Scaling::Stretch,
     });
 
     #[cfg(feature = "skins")]
     {
-        let rows = PLAYER_FACE_SLOTS.div_ceil(PLAYER_FACE_COLUMNS) as u32;
         entries.push(Entry {
             kind: Kind::PlayerFaces,
             key: String::new(),
-            image: RgbaImage::new(
-                PLAYER_FACE_COLUMNS as u32 * PLAYER_FACE_W,
-                rows * PLAYER_FACE_H,
-            ),
+            image: PLAYER_FACE_GRID.blank(),
             scaling: Scaling::Stretch,
         });
     }
@@ -731,9 +851,9 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
     let mut sheets = HashMap::new();
     let mut font_origin = (0, 0);
     let mut items_origin = (0, 0);
-    let mut server_icons_origin = (0, 0);
-    let mut banner_icons_origin = (0, 0);
-    let mut player_faces_origin = (0, 0);
+    let mut server_icons = SERVER_ICON_GRID;
+    let mut banner_icons = BANNER_ICON_GRID;
+    let mut player_faces = PLAYER_FACE_GRID;
     let mut white = Region {
         x: 0,
         y: 0,
@@ -741,14 +861,14 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
         h: 1,
     };
 
-    for (i, entry) in entries.iter().enumerate() {
+    for (i, entry) in entries.into_iter().enumerate() {
         let r = placements[i];
         blit(&mut image, &entry.image, r.x, r.y);
         match entry.kind {
             Kind::White => white = r,
             Kind::Sprite => {
                 sprites.insert(
-                    entry.key.clone(),
+                    entry.key,
                     Sprite {
                         region: r,
                         scaling: entry.scaling,
@@ -756,13 +876,13 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
                 );
             }
             Kind::Sheet => {
-                sheets.insert(entry.key.clone(), r);
+                sheets.insert(entry.key, r);
             }
             Kind::Font => font_origin = (r.x, r.y),
             Kind::Items => items_origin = (r.x, r.y),
-            Kind::ServerIcons => server_icons_origin = (r.x, r.y),
-            Kind::BannerIcons => banner_icons_origin = (r.x, r.y),
-            Kind::PlayerFaces => player_faces_origin = (r.x, r.y),
+            Kind::ServerIcons => server_icons = SERVER_ICON_GRID.at((r.x, r.y)),
+            Kind::BannerIcons => banner_icons = BANNER_ICON_GRID.at((r.x, r.y)),
+            Kind::PlayerFaces => player_faces = PLAYER_FACE_GRID.at((r.x, r.y)),
         }
     }
 
@@ -798,14 +918,19 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
     );
 
     GuiAtlas {
-        image,
+        width: image.width(),
+        height: image.height(),
+        pixels: std::sync::Mutex::new(Some(AtlasPixels {
+            rgba: image,
+            unihex,
+        })),
         sprites,
         sheets,
         items,
         font_origin,
-        server_icons_origin,
-        banner_icons_origin,
-        player_faces_origin,
+        server_icons,
+        banner_icons,
+        player_faces,
         white,
         font,
     }

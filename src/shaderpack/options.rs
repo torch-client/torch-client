@@ -30,15 +30,21 @@ pub(crate) enum Kind {
 pub(crate) struct Opt {
     pub(crate) name: String,
     pub(crate) kind: Kind,
-    pub(crate) is_const: bool,
 }
 
 impl Opt {
+    pub(crate) fn accepts(&self, value: &str) -> bool {
+        match &self.kind {
+            Kind::Boolean { .. } => matches!(value, "true" | "false"),
+            Kind::Value { values, .. } => values.iter().any(|v| v == value),
+        }
+    }
+
     pub(crate) fn default_value(&self) -> &str {
         match &self.kind {
             Kind::Boolean { default: true } => "true",
             Kind::Boolean { default: false } => "false",
-            Kind::Value { values, default } => &values[*default],
+            Kind::Value { values, default } => values.get(*default).map_or("", String::as_str),
         }
     }
 }
@@ -58,6 +64,7 @@ impl Options {
         self.all.iter()
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.all.len()
     }
@@ -113,7 +120,9 @@ impl Values {
             let Some((name, value)) = line.split_once('=') else {
                 continue;
             };
-            if let Some(option) = options.get(name.trim()) {
+            if let Some(option) = options.get(name.trim())
+                && option.accepts(value.trim())
+            {
                 values.set(option, value.trim());
             }
         }
@@ -136,7 +145,23 @@ struct Decl<'a> {
     value: Option<&'a str>,
     values: Vec<&'a str>,
     enabled: bool,
-    is_const: bool,
+}
+
+fn same_default(a: &Kind, b: &Kind) -> bool {
+    match (a, b) {
+        (Kind::Boolean { default: a }, Kind::Boolean { default: b }) => a == b,
+        (
+            Kind::Value {
+                values: a,
+                default: at_a,
+            },
+            Kind::Value {
+                values: b,
+                default: at_b,
+            },
+        ) => a[*at_a] == b[*at_b],
+        _ => false,
+    }
 }
 
 pub(crate) fn discover<'a>(texts: impl Iterator<Item = &'a str> + Clone) -> Options {
@@ -169,15 +194,15 @@ pub(crate) fn discover<'a>(texts: impl Iterator<Item = &'a str> + Clone) -> Opti
                     let mut values: Vec<String> =
                         decl.values.iter().map(|v| (*v).to_owned()).collect();
                     let default = values.iter().position(|v| v == value).unwrap_or_else(|| {
-                        values.insert(0, value.to_owned());
-                        0
+                        values.push(value.to_owned());
+                        values.len() - 1
                     });
                     Kind::Value { values, default }
                 }
             };
 
             match options.index.get(decl.name) {
-                Some(at) if options.all[*at].kind != kind => {
+                Some(at) if !same_default(&options.all[*at].kind, &kind) => {
                     ambiguous.insert(decl.name.to_owned());
                 }
                 Some(_) => {}
@@ -188,7 +213,6 @@ pub(crate) fn discover<'a>(texts: impl Iterator<Item = &'a str> + Clone) -> Opti
                     options.all.push(Opt {
                         name: decl.name.to_owned(),
                         kind,
-                        is_const: decl.is_const,
                     });
                 }
             }
@@ -212,7 +236,11 @@ pub(crate) fn apply(text: &str, options: &Options, values: &Values) -> String {
     for line in text.lines() {
         match declaration(line).and_then(|decl| {
             let option = options.get(decl.name)?;
-            Some((decl, option, values.get(option)))
+            let declares = match option.kind {
+                Kind::Boolean { .. } => decl.value.is_none(),
+                Kind::Value { .. } => !decl.values.is_empty(),
+            };
+            declares.then(|| (decl, option, values.get(option)))
         }) {
             Some((decl, option, value)) if value != shipped(&decl, option) => {
                 out.push_str(&rewrite(line, &decl, value));
@@ -252,11 +280,22 @@ fn rewrite(line: &str, decl: &Decl<'_>, value: &str) -> String {
 }
 
 fn value_span(line: &str, decl: &Decl<'_>, old: &str) -> (usize, usize) {
-    let from = line.find(decl.name).map_or(0, |at| at + decl.name.len());
+    let from = word_end(line, decl.name).unwrap_or(0);
     match line[from..].find(old) {
         Some(at) => (from + at, from + at + old.len()),
         None => (line.len(), line.len()),
     }
+}
+
+fn word_end(line: &str, word: &str) -> Option<usize> {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    line.match_indices(word)
+        .map(|(at, _)| (at, at + word.len()))
+        .find_map(|(start, end)| {
+            let before = line[..start].chars().next_back().is_none_or(|c| !ident(c));
+            let after = line[end..].chars().next().is_none_or(|c| !ident(c));
+            (before && after).then_some(end)
+        })
 }
 
 fn comment(line: &str) -> String {
@@ -307,29 +346,21 @@ fn declaration(line: &str) -> Option<Decl<'_>> {
             value,
             values,
             enabled,
-            is_const: false,
         });
     }
 
     if !enabled {
         return None;
     }
-    let rest = body.strip_prefix("const")?;
-    if !rest.starts_with(char::is_whitespace) {
-        return None;
-    }
-    let (_type, rest) = rest.trim_start().split_once(char::is_whitespace)?;
-    let (name, value) = rest.trim_start().split_once('=')?;
-    let name = name.trim();
+    let (_type, name, value) = super::literal::const_declaration(body)?;
     if !CONST_OPTIONS.contains(&name) {
         return None;
     }
     Some(Decl {
         name,
-        value: Some(value.trim().trim_end_matches(';').trim()),
+        value: Some(value),
         values,
         enabled: true,
-        is_const: true,
     })
 }
 
@@ -390,7 +421,7 @@ mod tests {
                 default: 1,
             }
         );
-        assert!(options.get("shadowMapResolution").unwrap().is_const);
+        assert!(options.get("shadowMapResolution").is_some());
     }
 
     #[test]
@@ -442,6 +473,15 @@ mod tests {
     }
 
     #[test]
+    fn a_short_name_inside_the_keyword_is_not_where_the_value_is() {
+        let text = "#define n e //[e f]\n";
+        let options = found(text);
+        let mut values = Values::default();
+        values.set(options.get("n").unwrap(), "f");
+        assert_eq!(apply(text, &options, &values), "#define n f //[e f]\n");
+    }
+
+    #[test]
     fn applying_edits_only_what_it_must() {
         let text = "#ifdef A\n#endif\n\
                     #define A\n\
@@ -464,6 +504,10 @@ mod tests {
             "{out}"
         );
 
+        let redefined = format!("{text}#define V 99\n");
+        let out = apply(&redefined, &options, &values);
+        assert!(out.contains("#define V 99\n"), "{out}");
+
         values.set(options.get("V").unwrap(), "13.00");
         let again = apply(text, &options, &values);
         assert!(
@@ -484,33 +528,18 @@ mod tests {
     #[test]
     #[ignore = "needs a shader pack installed"]
     fn a_real_pack_declares_options_its_menu_can_name() {
-        use super::super::{discover as packs, properties, source::Source};
+        use super::super::{discover as packs, properties};
 
-        for pack in packs::list() {
-            let at = packs::dir().join(&pack.name);
-            let Ok(source) = Source::open(&at) else {
-                continue;
-            };
-
-            let files: Vec<String> = source
-                .files()
-                .into_iter()
-                .filter(|f| {
-                    [".glsl", ".vsh", ".fsh", ".gsh", ".csh"]
-                        .iter()
-                        .any(|e| f.ends_with(e))
-                })
-                .collect();
-            let texts: Vec<String> = files.iter().filter_map(|f| source.read_text(f)).collect();
+        for (pack, source) in packs::installed() {
+            let texts: Vec<String> = crate::shaderpack::include::option_texts(&source);
             let options = discover(texts.iter().map(String::as_str));
 
             let (booleans, values) = options
                 .iter()
                 .partition::<Vec<_>, _>(|o| matches!(o.kind, Kind::Boolean { .. }));
-            let consts = options.iter().filter(|o| o.is_const).count();
             println!(
-                "{}: {} options ({} boolean, {} valued, {consts} const) from {} files",
-                pack.name,
+                "{}: {} options ({} boolean, {} valued) from {} files",
+                pack,
                 options.len(),
                 booleans.len(),
                 values.len(),
@@ -540,7 +569,7 @@ mod tests {
             assert!(
                 missing.is_empty(),
                 "{}: {} names on screens are not declared options",
-                pack.name,
+                pack,
                 missing.len()
             );
         }
@@ -553,10 +582,31 @@ mod tests {
                 "#define V 1 //[1 2]",
                 "#define V 1 //[1 2 3]",
                 "#define W 1 //[1 2]",
+                "#define W 2 //[1 2]",
             ]
             .into_iter(),
         );
-        assert!(options.get("V").is_none());
-        assert!(options.get("W").is_some());
+        let v = options.get("V").expect("same default, one option");
+        assert!(matches!(&v.kind, Kind::Value { values, .. } if values == &["1", "2"]));
+        assert!(options.get("W").is_none(), "defaults 1 and 2 disagree");
+    }
+
+    #[test]
+    fn a_saved_value_outside_the_list_is_ignored() {
+        let options = discover(["#ifdef B\n#endif\n#define B\n#define V 1 //[1 2]"].into_iter());
+        let values = Values::load("V=3; evil\nB=maybe\n", &options);
+        assert!(values.is_empty());
+        let values = Values::load("V=2\nB=false\n", &options);
+        assert_eq!(values.get(options.get("V").unwrap()), "2");
+        assert_eq!(values.get(options.get("B").unwrap()), "false");
+    }
+
+    #[test]
+    fn a_missing_default_is_appended() {
+        let options = discover(["#define V 3 //[1 2]"].into_iter());
+        let v = options.get("V").unwrap();
+        assert!(
+            matches!(&v.kind, Kind::Value { values, default: 2 } if values == &["1", "2", "3"])
+        );
     }
 }

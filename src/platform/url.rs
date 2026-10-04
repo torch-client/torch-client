@@ -20,8 +20,17 @@ pub(crate) fn open(url: &str) {
     native(url);
 }
 
+#[cfg(resource_packs)]
+pub(crate) fn open_folder(path: &std::path::Path) {
+    if let Err(e) = std::fs::create_dir_all(path) {
+        crate::log_warn!("url", "could not create {}: {e}", path.display());
+        return;
+    }
+    native(path.as_os_str());
+}
+
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-fn native(url: &str) {
+fn native(url: impl AsRef<std::ffi::OsStr>) {
     let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
         ("open", &[])
     } else if cfg!(target_os = "windows") {

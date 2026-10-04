@@ -1,5 +1,6 @@
 use std::f32::consts::PI;
 
+use azalea_core::direction::Direction;
 use azalea_registry::builtin::BlockEntityKind;
 use bevy::prelude::*;
 
@@ -82,29 +83,29 @@ fn segment_degrees(segment: u32) -> f32 {
     segment as f32 * (360.0 / 16.0)
 }
 
-fn facing_step(facing: &str) -> (f32, f32) {
+fn facing_step(facing: Option<Direction>) -> (f32, f32) {
     match facing {
-        "north" => (0.0, -1.0),
-        "west" => (-1.0, 0.0),
-        "east" => (1.0, 0.0),
+        Some(Direction::North) => (0.0, -1.0),
+        Some(Direction::West) => (-1.0, 0.0),
+        Some(Direction::East) => (1.0, 0.0),
         _ => (0.0, 1.0),
     }
 }
 
-fn opposite(facing: &str) -> &'static str {
+fn opposite(facing: Option<Direction>) -> Direction {
     match facing {
-        "north" => "south",
-        "west" => "east",
-        "east" => "west",
-        _ => "north",
+        Some(Direction::North) => Direction::South,
+        Some(Direction::West) => Direction::East,
+        Some(Direction::East) => Direction::West,
+        _ => Direction::North,
     }
 }
 
 fn wall_transform(st: &BeState) -> Transform {
-    let facing = st.state.prop("facing");
+    let facing = st.state.facing;
     let (step_x, step_z) = facing_step(facing);
     let rotation =
-        Quat::from_rotation_y(-super::chest::facing_y_rot(opposite(facing)).to_radians());
+        Quat::from_rotation_y(-super::chest::facing_y_rot(Some(opposite(facing))).to_radians());
     Transform {
         translation: Vec3::new(0.5 - step_x * 0.25, 0.25, 0.5 - step_z * 0.25),
         rotation,
@@ -113,7 +114,7 @@ fn wall_transform(st: &BeState) -> Transform {
 }
 
 fn ground_transform(st: &BeState) -> Transform {
-    let segment: u32 = st.state.prop("rotation").parse().unwrap_or(0);
+    let segment: u32 = st.state.rotation;
     Transform {
         translation: Vec3::new(0.5, 0.0, 0.5),
         rotation: Quat::from_rotation_y(-segment_degrees(segment).to_radians()),

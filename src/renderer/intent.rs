@@ -51,3 +51,18 @@ pub(crate) fn publish(mut intent: ResMut<Intent>, shared: Res<Shared>) {
     drop(s);
     *intent = Intent::default();
 }
+
+pub(crate) fn release_on_suspend(
+    mut lifecycle: bevy::ecs::message::MessageReader<bevy::window::AppLifecycle>,
+    shared: Res<Shared>,
+) {
+    if lifecycle
+        .read()
+        .any(|e| *e == bevy::window::AppLifecycle::Suspended)
+    {
+        let mut s = shared.0.lock().unwrap();
+        s.move_flags = 0;
+        s.session.attack_held = false;
+        s.session.use_held = false;
+    }
+}

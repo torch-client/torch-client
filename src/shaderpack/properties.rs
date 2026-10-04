@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use super::options::{Kind, Options, Values};
 use super::preprocess::{Defines, preprocess};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,25 +65,38 @@ impl Properties {
 }
 
 pub(crate) fn parse(text: &str, defines: &mut Defines) -> Properties {
-    let cooked = preprocess(text, defines).unwrap_or_else(|_| text.to_owned());
-    let raw: Vec<&str> = text.lines().collect();
-
     let mut out = Properties::default();
 
-    for (index, line) in cooked.lines().enumerate() {
-        let Some((key, value)) = entry(line) else {
+    let cooked = match preprocess(text, defines) {
+        Ok(cooked) => cooked,
+        Err(e) => {
+            out.unknown.push(format!(
+                "preprocessing stopped at line {}: {}",
+                e.line, e.message
+            ));
+            text.to_owned()
+        }
+    };
+
+    for (line, _, _) in super::preprocess::logical_lines(&cooked) {
+        let Some((key, value)) = entry(&line) else {
             continue;
         };
-        let raw_value = || {
-            raw.get(index)
-                .and_then(|line| entry(line))
-                .map_or(value, |(_, v)| v)
-        };
+        if !from_raw(key) {
+            out.other.insert(key.to_owned(), value.to_owned());
+        }
+    }
 
+    for (line, _, _) in super::preprocess::logical_lines(text) {
+        let Some((key, value)) = entry(&line) else {
+            continue;
+        };
+        if !from_raw(key) {
+            continue;
+        }
         match split_key(key) {
             ("screen", None) => {
-                out.screens
-                    .insert(ROOT_SCREEN.to_owned(), elements(raw_value()));
+                out.screens.insert(ROOT_SCREEN.to_owned(), elements(value));
             }
             ("screen", Some("columns")) => {
                 store_columns(&mut out, ROOT_SCREEN, value, key);
@@ -90,16 +104,18 @@ pub(crate) fn parse(text: &str, defines: &mut Defines) -> Properties {
             ("screen", Some(rest)) => match rest.strip_suffix(".columns") {
                 Some(id) => store_columns(&mut out, id, value, key),
                 None => {
-                    out.screens.insert(rest.to_owned(), elements(raw_value()));
+                    out.screens.insert(rest.to_owned(), elements(value));
                 }
             },
             ("sliders", None) => {
-                out.sliders
-                    .extend(raw_value().split_whitespace().map(str::to_owned));
+                out.sliders = value.split_whitespace().map(str::to_owned).collect();
             }
             ("profile", Some(name)) => {
-                let tokens = raw_value().split_whitespace().map(str::to_owned).collect();
-                out.profiles.push((name.to_owned(), Profile { tokens }));
+                let tokens = value.split_whitespace().map(str::to_owned).collect();
+                match out.profiles.iter_mut().find(|(n, _)| n == name) {
+                    Some((_, profile)) => profile.tokens = tokens,
+                    None => out.profiles.push((name.to_owned(), Profile { tokens })),
+                }
             }
             _ => {
                 out.other.insert(key.to_owned(), value.to_owned());
@@ -108,6 +124,27 @@ pub(crate) fn parse(text: &str, defines: &mut Defines) -> Properties {
     }
 
     out
+}
+
+pub(crate) fn parse_with_options(text: &str, options: &Options, values: &Values) -> Properties {
+    let mut defines = super::features::properties_defines();
+    for opt in options.iter() {
+        match (&opt.kind, values.get(opt)) {
+            (Kind::Boolean { .. }, "true") => defines.define(opt.name.clone(), ""),
+            (Kind::Boolean { .. }, _) => {}
+            (Kind::Value { .. }, value) => defines.define(opt.name.clone(), value),
+        }
+    }
+    parse(text, &mut defines)
+}
+
+fn from_raw(key: &str) -> bool {
+    key == "screen"
+        || key.starts_with("screen.")
+        || key == "sliders"
+        || key.starts_with("profile.")
+        || key == "iris.features.required"
+        || key == "iris.features.optional"
 }
 
 fn store_columns(out: &mut Properties, screen: &str, value: &str, key: &str) {
@@ -197,6 +234,24 @@ mod tests {
     }
 
     #[test]
+    fn layout_keys_are_read_from_the_raw_text() {
+        let text = "#ifdef OFF\nscreen=A B\niris.features.optional=CUSTOM_IMAGES\nshadowEntities=false\n#endif\n\
+                    screen.X=A \\\n  B C\n";
+        let props = parsed(text);
+        assert_eq!(props.screens[ROOT_SCREEN].len(), 2);
+        assert_eq!(
+            props.features("iris.features.optional").collect::<Vec<_>>(),
+            ["CUSTOM_IMAGES"]
+        );
+        assert!(!props.other.contains_key("shadowEntities"));
+        assert_eq!(
+            props.screens["X"].len(),
+            3,
+            "the continuation keeps B and C"
+        );
+    }
+
+    #[test]
     fn a_continued_value_is_one_value() {
         let props = parsed("uniform.float.x=a + \\\n    b\n");
         assert_eq!(props.other["uniform.float.x"], "a +     b");
@@ -217,13 +272,9 @@ mod tests {
     #[test]
     #[ignore = "needs a shader pack installed"]
     fn a_real_pack_parses() {
-        use super::super::{discover, features, source::Source};
+        use super::super::{discover, features};
 
-        for pack in discover::list() {
-            let at = discover::dir().join(&pack.name);
-            let Ok(source) = Source::open(&at) else {
-                continue;
-            };
+        for (pack, source) in discover::installed() {
             let Some(text) = source.read_text("/shaders.properties") else {
                 continue;
             };
@@ -235,7 +286,7 @@ mod tests {
             println!(
                 "{}: {} screens holding {placed} elements, {} sliders, {} profiles, \
                  {} other keys, {} unreadable",
-                pack.name,
+                pack,
                 props.screens.len(),
                 props.sliders.len(),
                 props.profiles.len(),
@@ -249,7 +300,7 @@ mod tests {
             assert!(
                 props.screens.contains_key(ROOT_SCREEN),
                 "{}: no root screen",
-                pack.name
+                pack
             );
             for (screen, elements) in &props.screens {
                 for element in elements {
@@ -257,7 +308,7 @@ mod tests {
                         assert!(
                             props.screens.contains_key(id),
                             "{}: screen {screen:?} links to missing {id:?}",
-                            pack.name
+                            pack
                         );
                     }
                 }

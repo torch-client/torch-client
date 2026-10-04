@@ -1,18 +1,20 @@
-use super::registry::{Id, nametags as setting};
+use super::registry::{Id, nametags as setting, options};
 use super::store;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Sizing {
-    Perspective,
-    Constant,
+options! {
+    pub enum Sizing {
+        Perspective = "Perspective",
+        Constant = "Constant",
+    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Health {
-    Off,
-    Number,
-    Bar,
-    Both,
+options! {
+    pub enum Health {
+        Off = "Off",
+        Number = "Number",
+        Bar = "Bar",
+        Both = "Both",
+    }
 }
 
 impl Health {
@@ -40,19 +42,11 @@ pub fn config() -> Option<Config> {
         return None;
     }
     Some(Config {
-        scale: s.num(Id::Nametags, setting::SCALE),
-        sizing: match s.choice(Id::Nametags, setting::SIZING) {
-            1 => Sizing::Constant,
-            _ => Sizing::Perspective,
-        },
-        health: match s.choice(Id::Nametags, setting::HEALTH) {
-            0 => Health::Off,
-            2 => Health::Bar,
-            3 => Health::Both,
-            _ => Health::Number,
-        },
-        gamemode: s.flag(Id::Nametags, setting::GAMEMODE),
-        distance: s.flag(Id::Nametags, setting::DISTANCE),
+        scale: s.num(setting::SCALE),
+        sizing: s.choice(setting::SIZING),
+        health: s.choice(setting::HEALTH),
+        gamemode: s.flag(setting::GAMEMODE),
+        distance: s.flag(setting::DISTANCE),
     })
 }
 

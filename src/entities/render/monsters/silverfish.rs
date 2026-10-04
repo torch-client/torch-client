@@ -1,5 +1,6 @@
 use azalea_registry::builtin::EntityKind;
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::silverfish;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -28,12 +29,12 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn silverfish_texture(_st: &EntityState) -> String {
-    "entity/silverfish/silverfish".to_string()
+fn silverfish_texture(_st: &EntityState) -> TexturePath {
+    "entity/silverfish/silverfish".into()
 }
 
-fn endermite_texture(_st: &EntityState) -> String {
-    "entity/endermite/endermite".to_string()
+fn endermite_texture(_st: &EntityState) -> TexturePath {
+    "entity/endermite/endermite".into()
 }
 
 fn root(st: &EntityState) -> RootPose {

@@ -2,6 +2,7 @@ use azalea_registry::builtin::EntityKind;
 use bevy::math::{Quat, Vec3};
 use bevy::prelude::{Mesh, Transform};
 
+use crate::entities::TexturePath;
 use crate::entities::registry::Registry;
 use crate::entities::state::{Direction, EntityState};
 use crate::entities::{BlockRef, FrameModel, LightMode, RenderSpec, RootPose};
@@ -93,14 +94,14 @@ fn map_mesh(_st: &EntityState) -> Mesh {
     out.finish()
 }
 
-fn map_texture(st: &EntityState) -> Option<String> {
+fn map_texture(st: &EntityState) -> Option<TexturePath> {
     st.extras
         .item
         .map_id
-        .map(|id| format!("{MAP_TEXTURE_PREFIX}{id}"))
+        .map(|id| format!("{MAP_TEXTURE_PREFIX}{id}").into())
 }
 
-fn map_key(st: &EntityState) -> String {
+fn map_key(st: &EntityState) -> TexturePath {
     map_texture(st).unwrap_or_default()
 }
 

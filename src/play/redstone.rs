@@ -3,6 +3,8 @@ use azalea::physics::collision::BlockWithShape;
 use azalea_core::{direction::Direction, position::BlockPos};
 use azalea_registry::builtin::BlockKind;
 
+use crate::blocks::facing;
+
 const DIRECTIONS: [Direction; 6] = [
     Direction::Down,
     Direction::Up,
@@ -76,7 +78,7 @@ fn block_signal(state: BlockState, direction: Direction) -> u8 {
     if kind == BlockKind::RedstoneWallTorch {
         let lit = block.get_property("lit") == Some("true");
         let facing = block.get_property("facing");
-        return if lit && facing != Some(direction_name(direction)) {
+        return if lit && facing != Some(facing::name(direction)) {
             15
         } else {
             0
@@ -84,7 +86,7 @@ fn block_signal(state: BlockState, direction: Direction) -> u8 {
     }
 
     if kind == BlockKind::Repeater || kind == BlockKind::Comparator || kind == BlockKind::Observer {
-        if !powered || block.get_property("facing") != Some(direction_name(direction)) {
+        if !powered || block.get_property("facing") != Some(facing::name(direction)) {
             return 0;
         }
         return if kind == BlockKind::Comparator { 1 } else { 15 };
@@ -104,7 +106,7 @@ fn block_signal(state: BlockState, direction: Direction) -> u8 {
         if direction == Direction::Up {
             return power;
         }
-        let side = block.get_property(direction_name(direction.opposite()));
+        let side = block.get_property(facing::name(direction.opposite()));
         return if matches!(side, Some("side") | Some("up")) {
             power
         } else {
@@ -157,7 +159,7 @@ fn block_direct_signal(state: BlockState, direction: Direction) -> u8 {
             Some("ceiling") => Direction::Down,
             Some("floor") => Direction::Up,
             _ => match block.get_property("facing") {
-                Some(name) => match direction_from_name(name) {
+                Some(name) => match facing::from_name(name) {
                     Some(d) => d,
                     None => return 0,
                 },
@@ -191,29 +193,6 @@ fn block_direct_signal(state: BlockState, direction: Direction) -> u8 {
     }
 
     0
-}
-
-fn direction_name(direction: Direction) -> &'static str {
-    match direction {
-        Direction::Down => "down",
-        Direction::Up => "up",
-        Direction::North => "north",
-        Direction::South => "south",
-        Direction::West => "west",
-        Direction::East => "east",
-    }
-}
-
-fn direction_from_name(name: &str) -> Option<Direction> {
-    Some(match name {
-        "down" => Direction::Down,
-        "up" => Direction::Up,
-        "north" => Direction::North,
-        "south" => Direction::South,
-        "west" => Direction::West,
-        "east" => Direction::East,
-        _ => return None,
-    })
 }
 
 #[cfg(test)]

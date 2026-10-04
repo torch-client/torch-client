@@ -19,7 +19,11 @@ pub fn rasterize_scaled(
     let s = scale.max(1) as f32;
     let (width, height) = (width * scale.max(1), height * scale.max(1));
     let mut img = RgbaImage::from_pixel(width, height, Rgba(background));
-    let atlas = &p.atlas.image;
+    let guard = p.atlas.pixels();
+    let Some(pixels) = &*guard else {
+        return img;
+    };
+    let atlas = &pixels.rgba;
     let (aw, ah) = (atlas.width() as f32, atlas.height() as f32);
 
     for tri in p.indices.chunks_exact(3) {
@@ -197,7 +201,7 @@ mod tests {
         Arc::new(SharedMutex::new(SharedState {
             in_world: true,
             session: SessionState {
-                hotbar: menu[36..46].to_vec(),
+                hotbar: Arc::from(&menu[36..46]),
                 menu_slots: menu,
                 hotbar_selected: 2,
                 health: 15.0,

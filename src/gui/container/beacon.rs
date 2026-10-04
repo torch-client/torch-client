@@ -1,6 +1,6 @@
 use super::{
-    GuiState, InvAction, Layout, Painter, ScreenCtx, SlotStack, Snapshot, button, dim_background,
-    slots, window_origin,
+    BeaconPick, GuiState, InvAction, Layout, Painter, ScreenCtx, SlotStack, Snapshot, button,
+    dim_background, slots, window_origin,
 };
 use crate::gui::tooltip;
 use crate::play::mob_effects;
@@ -10,8 +10,6 @@ use azalea_registry::builtin::MobEffect;
 use std::str::FromStr;
 
 const LABEL_RGB: u32 = (-2039584i32 as u32) & 0x00FF_FFFF;
-
-const NO_EFFECT: i16 = -1;
 
 const TIER_EFFECTS: [&[(&str, &str)]; 3] = [
     &[("speed", "mob_effect/speed"), ("haste", "mob_effect/haste")],
@@ -51,9 +49,9 @@ pub fn draw(
     let mouse = ctx.mouse();
     let ui = &mut state.container;
 
-    if ui.beacon.0 == NO_EFFECT && ui.beacon.1 == NO_EFFECT {
-        ui.beacon.0 = decode_effect(snap.container_data[1]);
-        ui.beacon.1 = decode_effect(snap.container_data[2]);
+    if ui.beacon == BeaconPick::default() {
+        ui.beacon.primary = decode_effect(snap.container_data[1]);
+        ui.beacon.secondary = decode_effect(snap.container_data[2]);
     }
 
     for (tier, effects) in TIER_EFFECTS.iter().enumerate() {
@@ -63,9 +61,9 @@ pub fn draw(
             let y = top + 22.0 + tier as f32 * 25.0;
             let id = effect_id(name);
             let active = (tier as i32) < levels;
-            let selected = ui.beacon.0 == id;
+            let selected = ui.beacon.primary == id;
             if power_button(p, ctx, mouse, x, y, active, selected, sprite, name, false) {
-                ui.beacon.0 = id;
+                ui.beacon.primary = id;
             }
         }
     }
@@ -76,7 +74,7 @@ pub fn draw(
         let x = left + 167.0 - total_w / 2.0;
         let id = effect_id(TIER3_EFFECT.0);
         let active = levels >= 4;
-        let selected = ui.beacon.1 == id;
+        let selected = ui.beacon.secondary == id;
         if power_button(
             p,
             ctx,
@@ -89,21 +87,21 @@ pub fn draw(
             TIER3_EFFECT.0,
             false,
         ) {
-            ui.beacon.1 = id;
+            ui.beacon.secondary = id;
         }
     }
-    if ui.beacon.0 != NO_EFFECT
-        && let Some((name, sprite)) = effect_by_id(ui.beacon.0)
+    if let Some(primary) = ui.beacon.primary
+        && let Some((name, sprite)) = effect_by_id(primary)
     {
         let x = left + 167.0 + 24.0 - total_w / 2.0;
         let active = levels >= 4;
-        let selected = ui.beacon.1 == ui.beacon.0;
+        let selected = ui.beacon.secondary == Some(primary);
         if power_button(p, ctx, mouse, x, y, active, selected, sprite, name, true) {
-            ui.beacon.1 = ui.beacon.0;
+            ui.beacon.secondary = Some(primary);
         }
     }
 
-    let confirm_active = filled(snap, 0) && ui.beacon.0 != NO_EFFECT;
+    let confirm_active = filled(snap, 0) && ui.beacon.primary.is_some();
     if action_button(
         p,
         ctx,
@@ -113,8 +111,8 @@ pub fn draw(
         "container/beacon/confirm",
     ) {
         out.push(InvAction::SetBeacon {
-            primary: to_effect_option(ui.beacon.0),
-            secondary: to_effect_option(ui.beacon.1),
+            primary: to_effect_option(ui.beacon.primary),
+            secondary: to_effect_option(ui.beacon.secondary),
         });
         out.push(InvAction::Close);
     }
@@ -201,8 +199,8 @@ fn button_sprite(active: bool, selected: bool, hovered: bool) -> &'static str {
     }
 }
 
-fn effect_id(name: &str) -> i16 {
-    MobEffect::from_str(name).map_or(NO_EFFECT, |e| e.to_u32() as i16)
+fn effect_id(name: &str) -> Option<i16> {
+    MobEffect::from_str(name).ok().map(|e| e.to_u32() as i16)
 }
 
 fn effect_by_id(id: i16) -> Option<(&'static str, &'static str)> {
@@ -210,16 +208,16 @@ fn effect_by_id(id: i16) -> Option<(&'static str, &'static str)> {
         .iter()
         .flat_map(|tier| tier.iter())
         .chain(std::iter::once(&TIER3_EFFECT))
-        .find(|&&(name, _)| effect_id(name) == id)
+        .find(|&&(name, _)| effect_id(name) == Some(id))
         .copied()
 }
 
-fn decode_effect(raw: i16) -> i16 {
-    if raw > 0 { raw - 1 } else { NO_EFFECT }
+fn decode_effect(raw: i16) -> Option<i16> {
+    (raw > 0).then(|| raw - 1)
 }
 
-fn to_effect_option(id: i16) -> Option<u32> {
-    (id > NO_EFFECT).then(|| id as u32)
+fn to_effect_option(id: Option<i16>) -> Option<u32> {
+    id.filter(|&id| id >= 0).map(|id| id as u32)
 }
 
 fn filled(snap: &Snapshot, i: usize) -> bool {
@@ -266,25 +264,26 @@ mod tests {
     fn effect_ids_round_trip() {
         for tier in TIER_EFFECTS {
             for &(name, _) in tier {
-                let id = effect_id(name);
-                assert!(id >= 0, "{name} did not resolve");
+                let id = effect_id(name).unwrap_or_else(|| panic!("{name} did not resolve"));
+                assert!(id >= 0, "{name} resolved to a negative id");
                 assert_eq!(effect_by_id(id).map(|(n, _)| n), Some(name));
             }
         }
-        assert_eq!(effect_by_id(NO_EFFECT), None);
+        assert_eq!(effect_by_id(-1), None);
     }
 
     #[test]
     fn decode_effect_undoes_the_plus_one_encoding() {
-        assert_eq!(decode_effect(0), NO_EFFECT);
-        assert_eq!(decode_effect(1), 0);
-        assert_eq!(decode_effect(5), 4);
+        assert_eq!(decode_effect(0), None);
+        assert_eq!(decode_effect(1), Some(0));
+        assert_eq!(decode_effect(5), Some(4));
     }
 
     #[test]
     fn no_effect_is_none_on_the_wire() {
-        assert_eq!(to_effect_option(NO_EFFECT), None);
+        assert_eq!(to_effect_option(None), None);
         let speed = effect_id("speed");
-        assert_eq!(to_effect_option(speed), Some(speed as u32));
+        assert_eq!(to_effect_option(speed), speed.map(|id| id as u32));
+        assert!(speed.is_some());
     }
 }

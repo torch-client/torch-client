@@ -4,11 +4,11 @@ use std::sync::OnceLock;
 use azalea_registry::builtin::EntityKind;
 use serde_json::Value;
 
-use crate::entities::RenderSpec;
 use crate::entities::geom::{BakedModel, LayerDef, PartState};
 use crate::entities::models::humanoid::armor;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
+use crate::entities::{RenderSpec, TexturePath};
 
 pub type ArmorLayers = [fn() -> LayerDef; 4];
 
@@ -70,7 +70,7 @@ pub fn register_set(
     setup: fn(&BakedModel, &mut [PartState], &EntityState),
     visible: [fn(&EntityState) -> bool; 4],
 ) {
-    const TEXTURES: [fn(&EntityState) -> String; 4] = [
+    const TEXTURES: [fn(&EntityState) -> TexturePath; 4] = [
         helmet_texture,
         chestplate_texture,
         leggings_texture,
@@ -287,20 +287,20 @@ fn over_onto(under: &mut image::RgbaImage, over: &image::RgbaImage) {
     }
 }
 
-fn helmet_texture(st: &EntityState) -> String {
-    humanoid_texture(st.extras.helmet.as_deref())
+fn helmet_texture(st: &EntityState) -> TexturePath {
+    humanoid_texture(st.extras.helmet.as_deref()).into()
 }
 
-fn chestplate_texture(st: &EntityState) -> String {
-    humanoid_texture(st.extras.chestplate.as_deref())
+fn chestplate_texture(st: &EntityState) -> TexturePath {
+    humanoid_texture(st.extras.chestplate.as_deref()).into()
 }
 
-fn leggings_texture(st: &EntityState) -> String {
-    leggings_layer_texture(st.extras.leggings.as_deref())
+fn leggings_texture(st: &EntityState) -> TexturePath {
+    leggings_layer_texture(st.extras.leggings.as_deref()).into()
 }
 
-fn boots_texture(st: &EntityState) -> String {
-    humanoid_texture(st.extras.boots.as_deref())
+fn boots_texture(st: &EntityState) -> TexturePath {
+    humanoid_texture(st.extras.boots.as_deref()).into()
 }
 
 pub const FILLED: [fn(&EntityState) -> bool; 4] =

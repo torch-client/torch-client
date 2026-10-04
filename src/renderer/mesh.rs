@@ -77,6 +77,37 @@ pub struct MeshBuf {
     pub cutout_idx: Vec<u32>,
     pub min: [i16; 3],
     pub max: [i16; 3],
+    #[cfg(feature = "shader_support")]
+    pub pack: Vec<super::packvertex::PackQuad>,
+    #[cfg(feature = "shader_support")]
+    pub pack_block: Option<super::packvertex::PackBlock>,
+}
+
+#[cfg(feature = "shader_support")]
+fn fluid_face(corners: &[[f32; 3]; 4]) -> usize {
+    const DOWN: usize = 0;
+    const UP: usize = 1;
+    const NORTH: usize = 2;
+    const SOUTH: usize = 3;
+    const WEST: usize = 4;
+    const EAST: usize = 5;
+    let e1 = [0, 1, 2].map(|a| corners[1][a] - corners[0][a]);
+    let e3 = [0, 1, 2].map(|a| corners[3][a] - corners[0][a]);
+    let n = [
+        e3[1] * e1[2] - e3[2] * e1[1],
+        e3[2] * e1[0] - e3[0] * e1[2],
+        e3[0] * e1[1] - e3[1] * e1[0],
+    ];
+    let (ax, ay, az) = (n[0].abs(), n[1].abs(), n[2].abs());
+    if ay >= ax && ay >= az {
+        if n[1] >= 0.0 { UP } else { DOWN }
+    } else if ax >= az {
+        if n[0] >= 0.0 { EAST } else { WEST }
+    } else if n[2] >= 0.0 {
+        SOUTH
+    } else {
+        NORTH
+    }
 }
 
 #[inline]
@@ -165,12 +196,10 @@ impl MeshBuf {
 
     fn shrink_to_fit(&mut self) {
         self.verts.shrink_to_fit();
+        #[cfg(feature = "shader_support")]
+        self.pack.shrink_to_fit();
         self.idx.shrink_to_fit();
         self.cutout_idx.shrink_to_fit();
-    }
-
-    pub fn byte_size(&self) -> usize {
-        self.verts.len() * 20 + self.index_count() * 4
     }
 
     fn push_vertex(&mut self, pos: [f32; 3], uv: [u16; 2], light: [u8; 4], color: [u8; 4]) {
@@ -199,8 +228,33 @@ impl MeshBuf {
         let base = self.verts.len() as u32;
         let light = pack_light(light, material, 1.0);
         let col = pack_color([tint[0], tint[1], tint[2], 1.0]);
+        #[cfg(feature = "shader_support")]
+        let col = match &self.pack_block {
+            Some(block) => pack_color(block.fluid_color(block.tint, fluid_face(corners))),
+            None => col,
+        };
         for i in 0..4 {
             self.push_vertex(corners[i], pack_uv(face_uvs[i]), light, col);
+        }
+        #[cfg(feature = "shader_support")]
+        if let Some(block) = &self.pack_block {
+            let e1 = [
+                corners[1][0] - corners[0][0],
+                corners[1][1] - corners[0][1],
+                corners[1][2] - corners[0][2],
+            ];
+            let e3 = [
+                corners[3][0] - corners[0][0],
+                corners[3][1] - corners[0][1],
+                corners[3][2] - corners[0][2],
+            ];
+            let normal = [
+                e3[1] * e1[2] - e3[2] * e1[1],
+                e3[2] * e1[0] - e3[0] * e1[2],
+                e3[0] * e1[1] - e3[1] * e1[0],
+            ];
+            self.pack
+                .push(super::packvertex::quad(block, corners, face_uvs, normal));
         }
         self.idx
             .extend_from_slice(&[base + 2, base + 1, base, base + 3, base + 2, base]);
@@ -223,6 +277,14 @@ impl MeshBuf {
             let p = quad.pos[i];
             let ao = shade_to_linear_q(lit.shade[i]);
             let color = pack_color([ao * tint[0], ao * tint[1], ao * tint[2], shade]);
+            #[cfg(feature = "shader_support")]
+            let color = match &self.pack_block {
+                Some(block) => {
+                    let quad_tint = if quad.tint >= 0 { block.tint } else { [1.0; 3] };
+                    pack_color(block.color(quad_tint, lit.face_shade, lit.shade[i]))
+                }
+                None => color,
+            };
             let light = pack_light(lit.light[i], material, p[1]);
             self.push_vertex(
                 [p[0] + wx, p[1] + wy, p[2] + wz],
@@ -230,6 +292,16 @@ impl MeshBuf {
                 light,
                 color,
             );
+        }
+        #[cfg(feature = "shader_support")]
+        if let Some(block) = &self.pack_block {
+            let corners = quad.pos.map(|p| [p[0] + wx, p[1] + wy, p[2] + wz]);
+            self.pack.push(super::packvertex::quad(
+                block,
+                &corners,
+                &quad.uv,
+                quad.normal,
+            ));
         }
         let idx = if quad.opaque {
             &mut self.idx
@@ -342,31 +414,68 @@ pub fn build_section_mesh(
         (still, flow)
     };
 
+    #[cfg(feature = "shader_support")]
+    let pack_ids = super::packvertex::current();
+    #[cfg(feature = "shader_support")]
+    let water_pack_id = pack_ids.as_ref().map(|ids| {
+        ids.of(
+            azalea::block::BlockState::from(azalea_registry::builtin::BlockKind::Water).id() as u16,
+        )
+    });
+
     for (bx, by, bz, rb) in blocks {
         let (wx, wy, wz) = (
             (*bx - x_base) as f32,
             (*by - y_base) as f32,
             (*bz - z_base) as f32,
         );
+        #[cfg(feature = "shader_support")]
+        if let Some(ids) = &pack_ids {
+            let block = super::packvertex::PackBlock {
+                id: ids.of(rb.state),
+                emission: rb.emission,
+                cell: [wx, wy, wz],
+                tint: [1.0; 3],
+                shades: *cardinal,
+                lighting: ids.lighting(),
+            };
+            buf.pack_block = Some(block);
+            water.pack_block = Some(block);
+        }
 
         match &rb.geom {
             BlockGeom::Model(baked) => {
-                emit_baked(
-                    wx, wy, wz, rb, baked, occ, *bx, *by, *bz, cardinal, &mut buf,
-                );
+                #[cfg(feature = "shader_support")]
+                let target = if pack_ids.is_some() && rb.translucent {
+                    &mut water
+                } else {
+                    &mut buf
+                };
+                #[cfg(not(feature = "shader_support"))]
+                let target = &mut buf;
+                emit_baked(wx, wy, wz, rb, baked, occ, *bx, *by, *bz, cardinal, target);
             }
             BlockGeom::Fluid {
                 amount,
                 still,
                 flow,
+                lava,
             } => {
-                let is_water = *still == water_still;
+                let is_water = !*lava;
                 let tint = if is_water {
                     crate::util::biome_color::water_ratio(occ.biome(*bx, *by, *bz))
                 } else {
                     crate::util::biome_color::NEUTRAL
                 };
                 let dest = if is_water { &mut water } else { &mut buf };
+                #[cfg(feature = "shader_support")]
+                if let Some(block) = dest.pack_block.as_mut() {
+                    block.tint = if is_water {
+                        crate::util::biome_color::pack_water(occ.biome(*bx, *by, *bz))
+                    } else {
+                        [1.0; 3]
+                    };
+                }
                 let material = if is_water {
                     MATERIAL_WATER
                 } else {
@@ -380,6 +489,12 @@ pub fn build_section_mesh(
         }
 
         if rb.waterlogged {
+            #[cfg(feature = "shader_support")]
+            if let (Some(block), Some(id)) = (water.pack_block.as_mut(), water_pack_id) {
+                block.id = id;
+                block.emission = 0;
+                block.tint = crate::util::biome_color::pack_water(occ.biome(*bx, *by, *bz));
+            }
             let tint = crate::util::biome_color::water_ratio(occ.biome(*bx, *by, *bz));
             emit_fluid(
                 wx,
@@ -404,7 +519,6 @@ pub fn build_section_mesh(
     (buf, water)
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn emit_baked(
     wx: f32,
@@ -437,7 +551,20 @@ fn emit_baked(
             crate::util::biome_color::dry_foliage_ratio(occ.biome(bx, by, bz))
         }
         super::TintKind::Redstone(power) => crate::util::biome_color::redstone_ratio(power),
+        super::TintKind::Water => crate::util::biome_color::water_ratio(occ.biome(bx, by, bz)),
     };
+    #[cfg(feature = "shader_support")]
+    if let Some(block) = buf.pack_block.as_mut() {
+        use crate::util::biome_color as bc;
+        block.tint = match rb.tint_kind {
+            super::TintKind::None => [1.0; 3],
+            super::TintKind::Grass => bc::pack_grass(occ.biome(bx, by, bz)),
+            super::TintKind::Foliage => bc::pack_foliage(occ.biome(bx, by, bz)),
+            super::TintKind::DryFoliage => bc::pack_dry_foliage(occ.biome(bx, by, bz)),
+            super::TintKind::Redstone(power) => bc::redstone_ratio(power),
+            super::TintKind::Water => bc::pack_water(occ.biome(bx, by, bz)),
+        };
+    }
 
     #[cfg(feature = "builtin_shaders")]
     let sways = rb.sways;
@@ -562,9 +689,13 @@ fn flowing_top_uvs(flow_x: f32, flow_z: f32, tile: u32, ar: u32) -> [[f32; 2]; 4
     ]
 }
 
-fn corner_height_input(occ: &Occupancy, x: i32, y: i32, z: i32) -> f32 {
-    if occ.is_fluid(x, y, z) {
-        occ.fluid_top(x, y, z)
+fn corner_height_input(occ: &Occupancy, x: i32, y: i32, z: i32, lava: bool) -> f32 {
+    if occ.same_fluid(x, y, z, lava) {
+        if occ.same_fluid(x, y + 1, z, lava) {
+            1.0
+        } else {
+            occ.fluid_own_height(x, y, z)
+        }
     } else if occ.is_solid(x, y, z) {
         -1.0
     } else {
@@ -656,6 +787,7 @@ fn emit_fluid_side(
         [u_a, get_v((1.0 - hh0) * 0.5)],
     ];
     buf.push_quad(&corners, &face_uvs, light, tint, material);
+    push_back_face(buf, &corners, &face_uvs, light, tint, material);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -676,39 +808,40 @@ fn emit_fluid(
     buf: &mut MeshBuf,
 ) {
     const EPS: f32 = 0.001;
+    let lava = material == MATERIAL_LAVA;
 
-    let above_fluid = occ.is_fluid(bx, by + 1, bz);
+    let above_fluid = occ.same_fluid(bx, by + 1, bz, lava);
     let (top_nw, top_ne, top_se, top_sw) = if above_fluid {
         (1.0, 1.0, 1.0, 1.0)
     } else {
         let self_height = super::fluid_surface(amount);
-        let north = corner_height_input(occ, bx, by, bz - 1);
-        let south = corner_height_input(occ, bx, by, bz + 1);
-        let east = corner_height_input(occ, bx + 1, by, bz);
-        let west = corner_height_input(occ, bx - 1, by, bz);
+        let north = corner_height_input(occ, bx, by, bz - 1, lava);
+        let south = corner_height_input(occ, bx, by, bz + 1, lava);
+        let east = corner_height_input(occ, bx + 1, by, bz, lava);
+        let west = corner_height_input(occ, bx - 1, by, bz, lava);
         let ne = corner_height(
             self_height,
             north,
             east,
-            corner_height_input(occ, bx + 1, by, bz - 1),
+            corner_height_input(occ, bx + 1, by, bz - 1, lava),
         );
         let nw = corner_height(
             self_height,
             north,
             west,
-            corner_height_input(occ, bx - 1, by, bz - 1),
+            corner_height_input(occ, bx - 1, by, bz - 1, lava),
         );
         let se = corner_height(
             self_height,
             south,
             east,
-            corner_height_input(occ, bx + 1, by, bz + 1),
+            corner_height_input(occ, bx + 1, by, bz + 1, lava),
         );
         let sw = corner_height(
             self_height,
             south,
             west,
-            corner_height_input(occ, bx - 1, by, bz + 1),
+            corner_height_input(occ, bx - 1, by, bz + 1, lava),
         );
         (nw - EPS, ne - EPS, se - EPS, sw - EPS)
     };
@@ -729,16 +862,15 @@ fn emit_fluid(
         (0, 0, 1),
         (0, 0, -1),
     ];
+    let render_down = !occ.same_fluid(bx, by - 1, bz, lava) && !occ.is_solid(bx, by - 1, bz);
+    let bottom = if render_down { EPS } else { 0.0 };
     for fi in 0..6usize {
         let (dx, dy, dz) = NBR[fi];
         let (nx, ny, nz) = (bx + dx, by + dy, bz + dz);
-        if occ.is_solid(nx, ny, nz) {
-            continue;
-        }
-
         match fi {
             0 => {
-                if above_fluid {
+                let lowest = top_nw.min(top_ne).min(top_se).min(top_sw) + EPS;
+                if above_fluid || (occ.is_solid(nx, ny, nz) && lowest >= 1.0) {
                     continue;
                 }
                 let (flow_x, flow_z) = fluid_flow(occ, bx, by, bz, super::fluid_surface(amount));
@@ -755,9 +887,12 @@ fn emit_fluid(
                     flowing_top_uvs(flow_x, flow_z, flow, ar)
                 };
                 buf.push_quad(&corners, &face_uvs, light, tint, material);
+                if backward_up_face(occ, bx, by + 1, bz, lava) {
+                    push_back_face(buf, &corners, &face_uvs, light, tint, material);
+                }
             }
             1 => {
-                if occ.is_fluid(nx, ny, nz) {
+                if !render_down {
                     continue;
                 }
                 emit_face(
@@ -766,22 +901,46 @@ fn emit_fluid(
                 );
             }
             _ => {
-                let nbr_top = occ.fluid_top(nx, ny, nz);
+                if occ.same_fluid(nx, ny, nz, lava) || occ.is_solid(nx, ny, nz) {
+                    continue;
+                }
                 let (hh0, hh1) = match fi {
                     2 => (top_ne, top_se),
                     3 => (top_sw, top_nw),
                     4 => (top_se, top_sw),
                     _ => (top_nw, top_ne),
                 };
-                if nbr_top >= hh0.max(hh1) {
-                    continue;
-                }
                 emit_fluid_side(
-                    wx, wy, wz, material, fi, nbr_top, hh0, hh1, tiles[fi], ar, light, tint, buf,
+                    wx, wy, wz, material, fi, bottom, hh0, hh1, tiles[fi], ar, light, tint, buf,
                 );
             }
         }
     }
+}
+
+fn backward_up_face(occ: &Occupancy, x: i32, y: i32, z: i32, lava: bool) -> bool {
+    (-1..=1).any(|ox| {
+        (-1..=1)
+            .any(|oz| !occ.same_fluid(x + ox, y, z + oz, lava) && !occ.is_solid(x + ox, y, z + oz))
+    })
+}
+
+fn push_back_face(
+    buf: &mut MeshBuf,
+    corners: &[[f32; 3]; 4],
+    face_uvs: &[[f32; 2]; 4],
+    light: [f32; 2],
+    tint: [f32; 3],
+    material: u8,
+) {
+    let order = [0, 3, 2, 1];
+    buf.push_quad(
+        &order.map(|i| corners[i]),
+        &order.map(|i| face_uvs[i]),
+        light,
+        tint,
+        material,
+    );
 }
 
 #[cfg(test)]

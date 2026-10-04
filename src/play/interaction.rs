@@ -60,6 +60,31 @@ pub(crate) fn take_local_break(pos: BlockPos) -> bool {
     true
 }
 
+pub(crate) fn reset_session_state() {
+    BREAK_DELAY.store(0, Ordering::Relaxed);
+    PLACE_DELAY.store(0, Ordering::Relaxed);
+    SERVER_USING_ITEM.store(false, Ordering::Relaxed);
+    WAS_MINING.store(false, Ordering::Relaxed);
+    let use_item = match USE_ITEM.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    };
+    if let Some(mut use_item) = use_item {
+        use_item.started = false;
+        use_item.item = None;
+        use_item.remaining = 0;
+    }
+    let local_break = match LOCAL_BREAK.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    };
+    if let Some(mut local_break) = local_break {
+        *local_break = None;
+    }
+}
+
 pub fn handle_interaction(bot: &Client, shared: &Arc<SharedMutex>) {
     let hit = block_hit(bot);
 
@@ -135,7 +160,11 @@ pub fn handle_interaction(bot: &Client, shared: &Arc<SharedMutex>) {
 
     crate::modules::auto_sell::tick(bot, shared);
 
+    crate::modules::auto_totem::tick(bot, shared);
+
     let attack_held = crate::modules::auto_mine::tick(bot, shared, hit.as_ref()) || attack_held;
+
+    crate::modules::auto_mace::tick(bot, shared);
 
     let attack_entity = attack_entity
         || (crate::modules::triggerbot::enabled() && {
@@ -819,6 +848,13 @@ enum BucketAction {
     Fill(bool),
 }
 
+struct PlannedWrite {
+    pos: BlockPos,
+    new: BlockState,
+    old: BlockState,
+    bucket: Option<BucketAction>,
+}
+
 struct Predicted {
     hit: BlockHitResult,
     x_rot: f32,
@@ -839,15 +875,18 @@ fn predict_use(bot: &Client, kind: UseKind, secondary_use: bool) -> Option<Predi
     }
 
     let hit = block_hit(bot)?;
-    let (Ok(world), Ok(inventory), Ok(look), Ok(player_pos)) = (
+    let (Ok(world), Ok(inventory), Ok(look), Ok(player_pos), Ok(physics)) = (
         bot.world(),
         bot.component::<azalea::entity::inventory::Inventory>(),
         bot.component::<azalea::entity::LookDirection>(),
         bot.position(),
+        bot.component::<azalea::entity::Physics>(),
     ) else {
         return None;
     };
     let (x_rot, y_rot) = (look.x_rot(), look.y_rot());
+    let player_box = physics.bounding_box;
+    drop(physics);
 
     let predicted = {
         let world = world.read();
@@ -866,19 +905,19 @@ fn predict_use(bot: &Client, kind: UseKind, secondary_use: bool) -> Option<Predi
                 height,
                 |pos| world.get_block_state(pos),
             )
+            .filter(|&(pos, state)| {
+                crate::play::placement::is_unobstructed(state, pos, &[player_box])
+            })
             .map(|(pos, state)| (pos, state, None)),
             UseKind::Bucket => match held {
-                ItemStack::Present(item) if item.kind == ItemKind::WaterBucket => {
+                ItemStack::Present(item)
+                    if matches!(item.kind, ItemKind::WaterBucket | ItemKind::LavaBucket) =>
+                {
+                    let is_lava = item.kind == ItemKind::LavaBucket;
                     crate::play::placement::predict_bucket(held, &hit, min_y, height, |pos| {
                         world.get_block_state(pos)
                     })
-                    .map(|(pos, state)| (pos, state, Some(BucketAction::Empty(false))))
-                }
-                ItemStack::Present(item) if item.kind == ItemKind::LavaBucket => {
-                    crate::play::placement::predict_bucket(held, &hit, min_y, height, |pos| {
-                        world.get_block_state(pos)
-                    })
-                    .map(|(pos, state)| (pos, state, Some(BucketAction::Empty(true))))
+                    .map(|(pos, state)| (pos, state, Some(BucketAction::Empty(is_lava))))
                 }
                 _ => crate::play::placement::predict_bucket_fill(held, &hit, |pos| {
                     world.get_block_state(pos)
@@ -887,15 +926,23 @@ fn predict_use(bot: &Client, kind: UseKind, secondary_use: bool) -> Option<Predi
             },
         };
 
-        placed.and_then(|(pos, state, bucket_action)| {
-            world
-                .get_block_state(pos)
-                .map(|old| (pos, state, old, bucket_action))
+        placed.and_then(|(pos, new, bucket)| {
+            world.get_block_state(pos).map(|old| PlannedWrite {
+                pos,
+                new,
+                old,
+                bucket,
+            })
         })
     };
     drop(inventory);
     drop(look);
-    let (pos, state, old_state, bucket_action) = predicted?;
+    let PlannedWrite {
+        pos,
+        new: state,
+        old: old_state,
+        bucket: bucket_action,
+    } = predicted?;
 
     let seq = {
         let mut ecs = bot.ecs.write();

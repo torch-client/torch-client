@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::Vec3;
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::creeper;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -25,12 +26,12 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/creeper/creeper".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/creeper/creeper".into()
 }
 
-fn charge_texture(_st: &EntityState) -> String {
-    "entity/creeper/creeper_armor".to_string()
+fn charge_texture(_st: &EntityState) -> TexturePath {
+    "entity/creeper/creeper_armor".into()
 }
 
 fn is_powered(st: &EntityState) -> bool {

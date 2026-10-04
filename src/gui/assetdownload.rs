@@ -1,10 +1,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bevy::asset::RenderAssetUsages;
-use bevy::image::ImageSampler;
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::client::assets::{Stage, download};
 use crate::gui::painter::Painter;
@@ -187,7 +184,6 @@ pub(crate) fn adopt_downloaded_assets(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
-    mut gui_materials: ResMut<Assets<crate::gui::gui_material::GuiMaterial>>,
     block: Option<Res<crate::renderer::systems::BlockAtlasHandle>>,
     chunk: Option<Res<crate::renderer::systems::ChunkMaterial>>,
     water: Option<Res<crate::renderer::systems::WaterMaterial>>,
@@ -204,7 +200,7 @@ pub(crate) fn adopt_downloaded_assets(
         return;
     };
 
-    let rows = (prepared.block_atlas.height() / crate::renderer::TILE_PX).max(1);
+    let rows = crate::renderer::atlas_rows(&prepared.block_atlas);
     crate::TEXTURE_MAP.set(prepared.block_tiles.clone()).ok();
     crate::ATLAS_ROWS.set(rows).ok();
     commands.insert_resource(crate::renderer::systems::BlockTileMap(prepared.block_tiles));
@@ -218,40 +214,13 @@ pub(crate) fn adopt_downloaded_assets(
         standard.get_mut(&overlay.material);
     }
 
-    let mut image = Image::new(
-        Extent3d {
-            width: prepared.gui_atlas.image.width(),
-            height: prepared.gui_atlas.image.height(),
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        prepared.gui_atlas.image.as_raw().clone(),
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    image.sampler = ImageSampler::nearest();
+    let (image, unihex) = crate::gui::render::atlas_textures(&prepared.gui_atlas);
     if let Err(e) = images.insert(&gui.image, image) {
         log_warn!("assets", "the gui atlas could not be replaced: {e}");
     }
-    let (uw, uh) = prepared.gui_atlas.font.unihex_dims;
-    if uw > 0 && uh > 0 {
-        let mut unihex = Image::new(
-            Extent3d {
-                width: uw,
-                height: uh,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            prepared.gui_atlas.font.unihex_image.clone(),
-            TextureFormat::R8Unorm,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        unihex.sampler = ImageSampler::nearest();
-        if let Err(e) = images.insert(&gui.unihex_image, unihex) {
-            log_warn!("assets", "the unifont texture could not be replaced: {e}");
-        }
+    if let Err(e) = images.insert(&gui.unihex_image, unihex) {
+        log_warn!("assets", "the unifont texture could not be replaced: {e}");
     }
-    gui_materials.get_mut(&gui.material);
     gui.atlas = std::sync::Arc::new(prepared.gui_atlas);
 
     commands.insert_resource(crate::renderer::systems::AssetsReady);

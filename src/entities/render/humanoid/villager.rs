@@ -1,10 +1,10 @@
 use azalea_registry::builtin::EntityKind;
 
-use crate::entities::RenderSpec;
 use crate::entities::geom::{BakedModel, LayerDef, PartState};
 use crate::entities::models::humanoid::{villager, zombie};
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
+use crate::entities::{RenderSpec, TexturePath};
 
 use super::armor;
 use super::zombie::{is_adult, is_baby};
@@ -152,27 +152,27 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn villager_texture(st: &EntityState) -> String {
+fn villager_texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/villager/villager_baby".to_string()
+        "entity/villager/villager_baby".into()
     } else {
-        "entity/villager/villager".to_string()
+        "entity/villager/villager".into()
     }
 }
 
-fn wandering_trader_texture(_st: &EntityState) -> String {
-    "entity/wandering_trader/wandering_trader".to_string()
+fn wandering_trader_texture(_st: &EntityState) -> TexturePath {
+    "entity/wandering_trader/wandering_trader".into()
 }
 
-fn witch_texture(_st: &EntityState) -> String {
-    "entity/witch/witch".to_string()
+fn witch_texture(_st: &EntityState) -> TexturePath {
+    "entity/witch/witch".into()
 }
 
-fn zombie_villager_texture(st: &EntityState) -> String {
+fn zombie_villager_texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/zombie_villager/zombie_villager_baby".to_string()
+        "entity/zombie_villager/zombie_villager_baby".into()
     } else {
-        "entity/zombie_villager/zombie_villager".to_string()
+        "entity/zombie_villager/zombie_villager".into()
     }
 }
 
@@ -239,7 +239,7 @@ struct ProfessionLayers {
     baby: fn() -> LayerDef,
     baby_no_hat: fn() -> LayerDef,
     setup: fn(&BakedModel, &mut [PartState], &EntityState),
-    textures: [fn(&EntityState) -> String; 4],
+    textures: [fn(&EntityState) -> TexturePath; 4],
     visible: [fn(&EntityState) -> bool; 6],
     names: [&'static str; 6],
 }
@@ -248,7 +248,7 @@ fn register_profession_layers(registry: &mut Registry, kind: EntityKind, l: Prof
     let specs: [(
         &'static str,
         fn() -> LayerDef,
-        fn(&EntityState) -> String,
+        fn(&EntityState) -> TexturePath,
         i32,
     ); 6] = [
         (l.names[0], l.adult, l.textures[0], 1),
@@ -268,39 +268,40 @@ fn register_profession_layers(registry: &mut Registry, kind: EntityKind, l: Prof
     }
 }
 
-fn villager_type_texture(st: &EntityState) -> String {
-    format!("entity/villager/type/{}", villager_type(st))
+fn villager_type_texture(st: &EntityState) -> TexturePath {
+    format!("entity/villager/type/{}", villager_type(st)).into()
 }
 
-fn villager_baby_type_texture(st: &EntityState) -> String {
-    format!("entity/villager/baby/{}", villager_type(st))
+fn villager_baby_type_texture(st: &EntityState) -> TexturePath {
+    format!("entity/villager/baby/{}", villager_type(st)).into()
 }
 
-fn villager_profession_texture(st: &EntityState) -> String {
-    format!("entity/villager/profession/{}", profession_or_farmer(st))
+fn villager_profession_texture(st: &EntityState) -> TexturePath {
+    format!("entity/villager/profession/{}", profession_or_farmer(st)).into()
 }
 
-fn villager_level_texture(st: &EntityState) -> String {
-    format!("entity/villager/profession_level/{}", level(st))
+fn villager_level_texture(st: &EntityState) -> TexturePath {
+    format!("entity/villager/profession_level/{}", level(st)).into()
 }
 
-fn zombie_villager_type_texture(st: &EntityState) -> String {
-    format!("entity/zombie_villager/type/{}", villager_type(st))
+fn zombie_villager_type_texture(st: &EntityState) -> TexturePath {
+    format!("entity/zombie_villager/type/{}", villager_type(st)).into()
 }
 
-fn zombie_villager_baby_type_texture(st: &EntityState) -> String {
-    format!("entity/zombie_villager/baby/{}", villager_type(st))
+fn zombie_villager_baby_type_texture(st: &EntityState) -> TexturePath {
+    format!("entity/zombie_villager/baby/{}", villager_type(st)).into()
 }
 
-fn zombie_villager_profession_texture(st: &EntityState) -> String {
+fn zombie_villager_profession_texture(st: &EntityState) -> TexturePath {
     format!(
         "entity/zombie_villager/profession/{}",
         profession_or_farmer(st)
     )
+    .into()
 }
 
-fn zombie_villager_level_texture(st: &EntityState) -> String {
-    format!("entity/zombie_villager/profession_level/{}", level(st))
+fn zombie_villager_level_texture(st: &EntityState) -> TexturePath {
+    format!("entity/zombie_villager/profession_level/{}", level(st)).into()
 }
 
 fn profession_or_farmer(st: &EntityState) -> &str {

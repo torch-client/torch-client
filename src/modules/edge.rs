@@ -26,14 +26,17 @@ impl Edge {
         }
     }
 
+    pub const fn id(&self) -> Id {
+        self.id
+    }
+
     pub fn poll(&self, s: &Store) -> Phase {
-        let i = self.id as usize;
-        let now = s.toggle_count(i);
+        let now = s.toggle_count(self.id);
         if now == 0 {
             return Phase::Off;
         }
         let seen = self.seen.swap(now, Relaxed);
-        match (s.enabled_at(i), seen == now) {
+        match (s.enabled(self.id), seen == now) {
             (true, true) => Phase::Running,
             (true, false) => Phase::Started,
             (false, false) if seen != Self::UNSEEN => Phase::Stopped,
@@ -65,22 +68,22 @@ mod tests {
     fn an_edge_reports_each_transition_once() {
         let s = Store::from_registry();
         let e = Edge::new(Id::TriggerBot);
-        let i = Id::TriggerBot as usize;
+        let i = Id::TriggerBot;
 
         assert_eq!(e.poll(&s), Phase::Off, "nobody has touched it");
-        s.set_enabled_at(i, true);
+        s.set_enabled(i, true);
         assert_eq!(e.poll(&s), Phase::Started);
         assert_eq!(e.poll(&s), Phase::Running, "a start happens once");
-        s.set_enabled_at(i, false);
+        s.set_enabled(i, false);
         assert_eq!(e.poll(&s), Phase::Stopped);
         assert_eq!(e.poll(&s), Phase::Off, "a stop happens once");
 
-        s.set_enabled_at(i, true);
-        s.set_enabled_at(i, false);
+        s.set_enabled(i, true);
+        s.set_enabled(i, false);
         assert_eq!(e.poll(&s), Phase::Stopped, "on and off inside one tick");
-        s.set_enabled_at(i, true);
-        s.set_enabled_at(i, false);
-        s.set_enabled_at(i, true);
+        s.set_enabled(i, true);
+        s.set_enabled(i, false);
+        s.set_enabled(i, true);
         assert_eq!(e.poll(&s), Phase::Started, "and off and on again");
     }
 
@@ -88,9 +91,9 @@ mod tests {
     fn a_start_and_stop_before_the_first_poll_is_not_a_stop() {
         let s = Store::from_registry();
         let e = Edge::new(Id::TriggerBot);
-        let i = Id::TriggerBot as usize;
-        s.set_enabled_at(i, true);
-        s.set_enabled_at(i, false);
+        let i = Id::TriggerBot;
+        s.set_enabled(i, true);
+        s.set_enabled(i, false);
         assert_eq!(e.poll(&s), Phase::Off, "nothing was set up to put back");
     }
 
@@ -99,7 +102,7 @@ mod tests {
         let s = Store::from_registry();
         let e = Edge::new(Id::Flight);
         s.set_profile(Mode::Rage);
-        s.set_enabled_at(Id::Flight as usize, true);
+        s.set_enabled(Id::Flight, true);
         assert_eq!(e.poll(&s), Phase::Started);
         s.set_profile(Mode::Normal);
         assert_eq!(e.poll(&s), Phase::Stopped, "Normal does not permit Flight");

@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::aquatic::dolphin;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -36,10 +37,10 @@ fn is_baby(st: &EntityState) -> bool {
     st.extras.is_baby
 }
 
-fn adult_texture(_st: &EntityState) -> String {
-    "entity/dolphin/dolphin".to_string()
+fn adult_texture(_st: &EntityState) -> TexturePath {
+    "entity/dolphin/dolphin".into()
 }
 
-fn baby_texture(_st: &EntityState) -> String {
-    "entity/dolphin/dolphin_baby".to_string()
+fn baby_texture(_st: &EntityState) -> TexturePath {
+    "entity/dolphin/dolphin_baby".into()
 }

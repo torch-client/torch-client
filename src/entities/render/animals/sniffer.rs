@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::sniffer;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -23,10 +24,10 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/sniffer/snifflet".to_string()
+        "entity/sniffer/snifflet".into()
     } else {
-        "entity/sniffer/sniffer".to_string()
+        "entity/sniffer/sniffer".into()
     }
 }

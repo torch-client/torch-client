@@ -1,12 +1,14 @@
-use super::{aim_assist, auto_mine, sneak};
+use azalea::Client;
+
+use super::{aim_assist, auto_mace, auto_mine, sneak};
 use crate::session::SharedState;
 
 pub fn shapes_look() -> bool {
-    aim_assist::enabled() || auto_mine::enabled()
+    aim_assist::enabled() || auto_mine::enabled() || auto_mace::drives_camera()
 }
 
 pub fn drives_look() -> bool {
-    auto_mine::enabled()
+    auto_mine::enabled() || auto_mace::drives_camera()
 }
 
 pub fn look_delta(s: &SharedState, yaw: f32, pitch: f32, dt: f32, hand: (f32, f32)) -> (f32, f32) {
@@ -15,8 +17,13 @@ pub fn look_delta(s: &SharedState, yaw: f32, pitch: f32, dt: f32, hand: (f32, f3
     } else {
         hand
     };
-    if auto_mine::enabled() {
+    let d = if auto_mine::enabled() {
         auto_mine::look_step(s, yaw, pitch, dt, d)
+    } else {
+        d
+    };
+    if auto_mace::drives_camera() {
+        auto_mace::look_step(s, yaw, pitch, dt, d)
     } else {
         d
     }
@@ -35,4 +42,12 @@ pub fn move_flags(s: &SharedState, keys: u8) -> u8 {
         flags |= crate::session::MOVE_FORWARD;
     }
     flags
+}
+
+pub fn sent_look(bot: &Client, yaw: f32, pitch: f32, flags: u8) -> (f32, f32, u8) {
+    if auto_mace::enabled() {
+        auto_mace::steer(bot, yaw, pitch, flags)
+    } else {
+        (yaw, pitch, flags)
+    }
 }

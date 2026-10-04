@@ -36,8 +36,8 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
         Phase::Started => TARGET.store(NO_TARGET, Relaxed),
         Phase::Running => {}
     }
-    let range = s.num(Id::AimAssist, setting::RANGE);
-    let fov = s.num(Id::AimAssist, setting::FOV);
+    let range = s.num(setting::RANGE);
+    let fov = s.num(setting::FOV);
 
     let picked = {
         let mut state = shared.lock().unwrap();
@@ -53,14 +53,14 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
     };
     let (eye, (id, point)) = picked;
 
-    if !s.flag(Id::AimAssist, setting::IGNORE_WALLS) && !visible(bot, eye, point) {
+    if !s.flag(setting::IGNORE_WALLS) && !visible(bot, eye, point) {
         shared.lock().unwrap().session.aim_target = None;
         return;
     }
 
     let now = crate::client::tracking::game_time();
     if TARGET.swap(id, Relaxed) != id {
-        let (lo, hi) = s.range(Id::AimAssist, setting::REACTION);
+        let (lo, hi) = s.range(setting::REACTION);
         ARM_AT.store(now + (roll(lo, hi) / MS_PER_TICK).round() as i64, Relaxed);
     }
     let armed = now >= ARM_AT.load(Relaxed);
@@ -106,7 +106,7 @@ fn pick(s: &SharedState, eye: [f32; 3], range: f32, fov: f32) -> Option<(i32, [f
     best.map(|(_, id, point)| (id, point))
 }
 
-fn visible(bot: &Client, eye: [f32; 3], point: [f32; 3]) -> bool {
+pub(super) fn visible(bot: &Client, eye: [f32; 3], point: [f32; 3]) -> bool {
     let Ok(world) = bot.world() else {
         return false;
     };
@@ -133,10 +133,10 @@ pub fn nudge(s: &SharedState, yaw: f32, pitch: f32, dx: f32, dy: f32) -> (f32, f
         return (dx, dy);
     };
     let pull = Pull {
-        gain: store.num(Id::AimAssist, setting::STRENGTH) / 100.0,
-        friction: store.num(Id::AimAssist, setting::FRICTION) / 100.0,
-        deadzone: store.num(Id::AimAssist, setting::DEADZONE),
-        window: store.num(Id::AimAssist, setting::FOV) * 0.5,
+        gain: store.num(setting::STRENGTH) / 100.0,
+        friction: store.num(setting::FRICTION) / 100.0,
+        deadzone: store.num(setting::DEADZONE),
+        window: store.num(setting::FOV) * 0.5,
     };
     if pull.gain <= 0.0 && pull.friction <= 0.0 {
         return (dx, dy);

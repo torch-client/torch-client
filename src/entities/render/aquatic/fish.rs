@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::*;
 
+use crate::entities::TexturePath;
 use crate::entities::models::aquatic::fish;
 use crate::entities::registry::Registry;
 use crate::entities::render::aquatic::root::fish_root;
@@ -131,16 +132,16 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn cod_texture(_st: &EntityState) -> String {
-    "entity/fish/cod".to_string()
+fn cod_texture(_st: &EntityState) -> TexturePath {
+    "entity/fish/cod".into()
 }
 
-fn salmon_texture(_st: &EntityState) -> String {
-    "entity/fish/salmon".to_string()
+fn salmon_texture(_st: &EntityState) -> TexturePath {
+    "entity/fish/salmon".into()
 }
 
-fn pufferfish_texture(_st: &EntityState) -> String {
-    "entity/fish/pufferfish".to_string()
+fn pufferfish_texture(_st: &EntityState) -> TexturePath {
+    "entity/fish/pufferfish".into()
 }
 
 fn cod_root(st: &EntityState) -> RootPose {
@@ -196,19 +197,19 @@ fn is_large_tropical(st: &EntityState) -> bool {
     tropical_pattern(st).0 == 1
 }
 
-fn tropical_body_texture(st: &EntityState) -> String {
+fn tropical_body_texture(st: &EntityState) -> TexturePath {
     if is_small_tropical(st) {
-        "entity/fish/tropical_a".to_string()
+        "entity/fish/tropical_a".into()
     } else {
-        "entity/fish/tropical_b".to_string()
+        "entity/fish/tropical_b".into()
     }
 }
 
-fn tropical_pattern_texture(st: &EntityState) -> String {
+fn tropical_pattern_texture(st: &EntityState) -> TexturePath {
     let (base, index) = tropical_pattern(st);
     let letter = if base == 0 { 'a' } else { 'b' };
     let n = index + 1;
-    format!("entity/fish/tropical_{letter}_pattern_{n}")
+    format!("entity/fish/tropical_{letter}_pattern_{n}").into()
 }
 
 const DYE_TEXTURE_DIFFUSE: [u32; 16] = [

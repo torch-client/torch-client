@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use bevy::platform::collections::HashMap;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};

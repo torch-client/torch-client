@@ -1,10 +1,10 @@
 use azalea_registry::EntityKind;
 
-use crate::entities::RenderSpec;
 use crate::entities::geom::{BakedModel, PartState};
 use crate::entities::models::humanoid::elytra as model;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
+use crate::entities::{RenderSpec, TexturePath};
 
 use super::armor::{self, LAYER_WINGS};
 
@@ -20,8 +20,8 @@ pub fn register(registry: &mut Registry, kinds: &[EntityKind]) {
     );
 }
 
-fn texture(st: &EntityState) -> String {
-    armor::slot_texture(st.extras.chestplate, LAYER_WINGS)
+fn texture(st: &EntityState) -> TexturePath {
+    armor::slot_texture(st.extras.chestplate, LAYER_WINGS).into()
 }
 
 fn wearing(st: &EntityState) -> bool {

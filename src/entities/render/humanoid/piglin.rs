@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::humanoid::piglin;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -78,20 +79,20 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn piglin_texture(st: &EntityState) -> String {
+fn piglin_texture(st: &EntityState) -> TexturePath {
     if st.kind == EntityKind::PiglinBrute {
-        "entity/piglin/piglin_brute".to_string()
+        "entity/piglin/piglin_brute".into()
     } else if st.extras.is_baby {
-        "entity/piglin/piglin_baby".to_string()
+        "entity/piglin/piglin_baby".into()
     } else {
-        "entity/piglin/piglin".to_string()
+        "entity/piglin/piglin".into()
     }
 }
 
-fn zombified_piglin_texture(st: &EntityState) -> String {
+fn zombified_piglin_texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/piglin/zombified_piglin_baby".to_string()
+        "entity/piglin/zombified_piglin_baby".into()
     } else {
-        "entity/piglin/zombified_piglin".to_string()
+        "entity/piglin/zombified_piglin".into()
     }
 }

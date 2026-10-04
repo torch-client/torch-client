@@ -29,6 +29,17 @@ BUILD_TOOLS=$(ls -d "$SDK"/build-tools/*/ 2>/dev/null | sort -V | tail -1 || tru
 PLATFORM=$(ls -d "$SDK"/platforms/android-*/ 2>/dev/null | sort -V | tail -1 || true)
 [ -n "$PLATFORM" ] || { echo "no platform under $SDK/platforms" >&2; exit 1; }
 
+PLATFORM_API=$(basename "$PLATFORM" | sed 's/^android-//; s/\..*//')
+if [[ "$PLATFORM_API" =~ ^[0-9]+$ ]] && [ "$PLATFORM_API" -lt 34 ]; then
+  echo "platform $PLATFORM is API $PLATFORM_API; the manifest needs 34 or newer" >&2
+  exit 1
+fi
+
+command -v javac >/dev/null || {
+  echo "no javac on PATH; install a JDK (17 or newer) for the connection service" >&2
+  exit 1
+}
+
 echo "==> ndk         $NDK"
 echo "==> build-tools $BUILD_TOOLS"
 echo "==> platform    $PLATFORM"
@@ -63,8 +74,12 @@ if "$TOOLS/llvm-readelf" -d "$SO" | grep -q "libc++_shared.so"; then
      "$STAGE/lib/$ABI/"
 fi
 
-echo "==> assets"
-python3 tools/pack_assets.py --out "$STAGE/assets/assets.bin"
+if [ "${MC_BUNDLE_ASSETS:-0}" = 1 ]; then
+  echo "==> assets (bundled)"
+  python3 tools/pack_assets.py --out "$STAGE/assets/assets.bin"
+else
+  echo "==> assets: not bundled; the client downloads them on first launch"
+fi
 
 if [ -n "${MC_ADDRESS:-}" ]; then
   echo "==> launch target $MC_ADDRESS"
@@ -75,6 +90,21 @@ if [ -n "${MC_ENV:-}" ]; then
   echo "==> env $MC_ENV"
   tr ' ' '\n' <<< "$MC_ENV" | grep -v '^$' > "$STAGE/assets/env.txt"
 fi
+
+# The connection service, the APK's one Java class. `--release 11` compiles
+# against the JDK's own view of `java.*`, and android.jar supplies `android.*`;
+# d8 then desugars the lambdas for the minimum API and writes classes.dex.
+echo "==> javac + d8"
+mkdir -p "$STAGE/classes"
+javac -nowarn --release 11 \
+  -classpath "$PLATFORM/android.jar" \
+  -d "$STAGE/classes" \
+  android/java/com/torchclient/game/*.java
+"$BUILD_TOOLS/d8" --release \
+  --min-api "$MIN_SDK" \
+  --lib "$PLATFORM/android.jar" \
+  --output "$STAGE" \
+  $(find "$STAGE/classes" -name '*.class')
 
 echo "==> aapt2 link"
 "$BUILD_TOOLS/aapt2" link \
@@ -94,7 +124,7 @@ echo "==> aapt2 link"
 # an APK that is larger than it has to be, which `strip`/LTO in the `android`
 # profile is the lever on.
 echo "==> zip"
-( cd "$STAGE" && zip -q -0 -X -r base.apk "lib/$ABI" assets )
+( cd "$STAGE" && zip -q -0 -X -r base.apk classes.dex "lib/$ABI" assets )
 
 echo "==> zipalign"
 # -P 16: 16 KB page alignment for the libraries, matching max-page-size above.

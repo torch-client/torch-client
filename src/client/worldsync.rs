@@ -113,7 +113,9 @@ pub(crate) fn start_light_thread() {
                 let received = received_chunks().lock().unwrap();
                 let mut meshed = meshed_chunks().lock().unwrap();
                 for (world, col) in to_mesh {
-                    if !received.contains(&(col.x, col.z)) {
+                    if !received.contains(&(col.x, col.z))
+                        || !surrounded(|c| received.contains(&c), col.x, col.z)
+                    {
                         continue;
                     }
                     if meshed.insert((col.x, col.z)) {
@@ -138,7 +140,10 @@ pub(crate) fn start_light_thread() {
             }
             crate::diag::add(crate::diag::Stat::MeshJobs, jobs.len() as u64);
             for (world, cx, cz, scope) in jobs {
-                q.push(world, cx, cz, scope);
+                match scope {
+                    JobScope::Section(sy) => q.push_relight(world, cx, cz, sy),
+                    JobScope::Column => q.push(world, cx, cz, scope),
+                }
             }
         })
     });
@@ -184,33 +189,44 @@ pub(crate) fn bump_chunk_generation() {
     CHUNK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+const NEIGHBOURS: [(i32, i32); 8] = [
+    (-1, 0),
+    (1, 0),
+    (0, -1),
+    (0, 1),
+    (-1, -1),
+    (1, -1),
+    (-1, 1),
+    (1, 1),
+];
+
+fn surrounded(received: impl Fn((i32, i32)) -> bool, x: i32, z: i32) -> bool {
+    NEIGHBOURS.iter().all(|(dx, dz)| received((x + dx, z + dz)))
+}
+
+fn ready_after_arrival(
+    received: impl Fn((i32, i32)) -> bool,
+    meshed: impl Fn((i32, i32)) -> bool,
+    cx: i32,
+    cz: i32,
+) -> Vec<lighting::ColumnPos> {
+    std::iter::once((0, 0))
+        .chain(NEIGHBOURS)
+        .map(|(dx, dz)| (cx + dx, cz + dz))
+        .filter(|&t| !meshed(t) && received(t) && surrounded(&received, t.0, t.1))
+        .map(|(x, z)| lighting::ColumnPos { x, z })
+        .collect()
+}
+
 pub(crate) fn note_chunk_received(bot: &Client, cx: i32, cz: i32) {
     crate::diag::on_chunk_received();
     bump_chunk_generation();
     log_debug!("chunks", "received column {cx},{cz}");
     let Ok(world) = bot.world() else { return };
-    let mut ready: Vec<lighting::ColumnPos> = Vec::new();
     let mut received = received_chunks().lock().unwrap();
     received.insert((cx, cz));
     let mut meshed = meshed_chunks().lock().unwrap();
-    for (tx, tz) in [
-        (cx, cz),
-        (cx - 1, cz),
-        (cx + 1, cz),
-        (cx, cz - 1),
-        (cx, cz + 1),
-    ] {
-        if meshed.contains(&(tx, tz)) || !received.contains(&(tx, tz)) {
-            continue;
-        }
-        let surrounded = [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
-            .iter()
-            .all(|(dx, dz)| received.contains(&(tx + dx, tz + dz)));
-        if !surrounded {
-            continue;
-        }
-        ready.push(lighting::ColumnPos { x: tx, z: tz });
-    }
+    let ready = ready_after_arrival(|c| received.contains(&c), |c| meshed.contains(&c), cx, cz);
     let to_worker = crate::client::mesh_worker::active();
     if to_worker {
         for col in &ready {
@@ -344,6 +360,82 @@ pub(crate) fn set_dimension(common: &azalea_protocol::packets::common::CommonPla
     use crate::renderer::dimension::Dimension;
 
     crate::renderer::dimension::set_current(Dimension::from_path(common.dimension.path()));
+    crate::renderer::dimension::set_sea_level(common.sea_level);
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn ready(
+        received: &HashSet<(i32, i32)>,
+        meshed: &HashSet<(i32, i32)>,
+        at: (i32, i32),
+    ) -> Vec<(i32, i32)> {
+        let mut v: Vec<_> = ready_after_arrival(
+            |c| received.contains(&c),
+            |c| meshed.contains(&c),
+            at.0,
+            at.1,
+        )
+        .into_iter()
+        .map(|c| (c.x, c.z))
+        .collect();
+        v.sort();
+        v
+    }
+
+    fn block_without(missing: &[(i32, i32)]) -> HashSet<(i32, i32)> {
+        let mut s = HashSet::new();
+        for x in -1..=1 {
+            for z in -1..=1 {
+                if !missing.contains(&(x, z)) {
+                    s.insert((x, z));
+                }
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn a_missing_corner_holds_the_column_back() {
+        let received = block_without(&[(1, 1)]);
+        let meshed = HashSet::new();
+        assert!(ready(&received, &meshed, (0, 0)).is_empty());
+    }
+
+    #[test]
+    fn the_last_corner_completes_its_diagonal() {
+        let received = block_without(&[]);
+        let meshed = HashSet::new();
+        assert_eq!(ready(&received, &meshed, (1, 1)), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn meshed_and_absent_columns_are_skipped() {
+        let received = block_without(&[]);
+        let meshed: HashSet<_> = [(0, 0)].into_iter().collect();
+        assert!(ready(&received, &meshed, (1, 1)).is_empty());
+
+        let received = block_without(&[(0, 0)]);
+        assert!(ready(&received, &HashSet::new(), (1, 1)).is_empty());
+    }
+
+    #[test]
+    fn a_square_meshes_its_interior() {
+        let mut received = HashSet::new();
+        let mut meshed = HashSet::new();
+        for x in -2..=2 {
+            for z in -2..=2 {
+                received.insert((x, z));
+                for c in ready(&received, &meshed, (x, z)) {
+                    meshed.insert(c);
+                }
+            }
+        }
+        assert_eq!(meshed, block_without(&[]));
+    }
 }
 
 #[cfg(test)]

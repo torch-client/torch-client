@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::polar_bear;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -28,10 +29,10 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/bear/polarbear_baby".to_string()
+        "entity/bear/polarbear_baby".into()
     } else {
-        "entity/bear/polarbear".to_string()
+        "entity/bear/polarbear".into()
     }
 }

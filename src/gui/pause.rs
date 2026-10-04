@@ -35,6 +35,11 @@ fn grid_origin(vw: f32, vh: f32) -> (f32, f32) {
     )
 }
 
+#[cfg(feature = "mobile_ui")]
+pub fn side_strip_right(vw: f32, vh: f32) -> f32 {
+    grid_origin(vw, vh).0
+}
+
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let (gx, gy) = grid_origin(ctx.vw, ctx.vh);
     let x = gx + BUTTON_PADDING;

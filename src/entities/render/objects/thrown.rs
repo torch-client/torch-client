@@ -2,6 +2,7 @@ use azalea_registry::builtin::EntityKind;
 use bevy::math::{Quat, Vec3};
 use bevy::prelude::Transform;
 
+use crate::entities::TexturePath;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
 use crate::entities::{CameraView, RenderSpec, RootPose, no_inner};
@@ -50,8 +51,20 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn dropped_item(st: &EntityState) -> String {
-    st.extras.item.model_key()
+fn item_key(item: &crate::renderer::anim::HeldItem) -> TexturePath {
+    let has_layers = item
+        .layers
+        .as_ref()
+        .is_some_and(|layers| !layers.is_empty());
+    if has_layers || item.tint.is_some() {
+        item.model_key().into()
+    } else {
+        item.id.into()
+    }
+}
+
+fn dropped_item(st: &EntityState) -> TexturePath {
+    item_key(&st.extras.item)
 }
 
 fn dropped_count(st: &EntityState) -> u32 {
@@ -90,9 +103,9 @@ fn thrown_scale(kind: EntityKind) -> f32 {
     }
 }
 
-fn thrown_item(st: &EntityState) -> String {
+fn thrown_item(st: &EntityState) -> TexturePath {
     if !st.extras.item.is_empty() {
-        return st.extras.item.model_key();
+        return item_key(&st.extras.item);
     }
     match st.kind {
         EntityKind::Egg => "egg",
@@ -106,7 +119,7 @@ fn thrown_item(st: &EntityState) -> String {
         EntityKind::FireworkRocket => "firework_rocket",
         _ => "",
     }
-    .to_string()
+    .into()
 }
 
 fn thrown_root(st: &EntityState, camera: &CameraView) -> RootPose {
@@ -121,8 +134,8 @@ fn thrown_root(st: &EntityState, camera: &CameraView) -> RootPose {
     }
 }
 
-fn display_item(st: &EntityState) -> String {
-    st.extras.item.model_key()
+fn display_item(st: &EntityState) -> TexturePath {
+    item_key(&st.extras.item)
 }
 
 fn item_display_root(st: &EntityState, camera: &CameraView) -> RootPose {
@@ -138,8 +151,8 @@ fn item_display_root(st: &EntityState, camera: &CameraView) -> RootPose {
     }
 }
 
-fn spawner_item(st: &EntityState) -> String {
-    st.extras.item.model_key()
+fn spawner_item(st: &EntityState) -> TexturePath {
+    item_key(&st.extras.item)
 }
 
 fn spawner_root(st: &EntityState) -> RootPose {
@@ -157,8 +170,8 @@ fn spawner_root(st: &EntityState) -> RootPose {
     }
 }
 
-fn frame_item(st: &EntityState) -> String {
-    st.extras.item.model_key()
+fn frame_item(st: &EntityState) -> TexturePath {
+    item_key(&st.extras.item)
 }
 
 fn frame_item_visible(st: &EntityState) -> bool {

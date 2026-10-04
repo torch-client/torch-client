@@ -1,5 +1,6 @@
 use azalea_registry::builtin::EntityKind;
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::enderman;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -22,10 +23,10 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/enderman/enderman".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/enderman/enderman".into()
 }
 
-fn eyes_texture(_st: &EntityState) -> String {
-    "entity/enderman/enderman_eyes".to_string()
+fn eyes_texture(_st: &EntityState) -> TexturePath {
+    "entity/enderman/enderman_eyes".into()
 }

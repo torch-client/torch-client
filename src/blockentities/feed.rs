@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use azalea::block::{BlockState, BlockTrait};
+use azalea_core::direction::Direction;
 use azalea_core::position::BlockPos;
 use azalea_protocol::packets::game::c_block_entity_data::ClientboundBlockEntityData;
 use azalea_protocol::packets::game::c_block_event::ClientboundBlockEvent;
@@ -16,9 +17,41 @@ pub struct BlockStateInfo {
     pub state_id: u16,
     pub block: String,
     pub props: HashMap<String, String>,
+    pub facing: Option<Direction>,
+    pub rotation: u32,
+    pub chest_half: ChestHalf,
+    pub powered: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChestHalf {
+    Single,
+    Left,
+    Right,
 }
 
 impl BlockStateInfo {
+    pub fn new(state_id: u16, block: String, props: HashMap<String, String>) -> Self {
+        let prop = |name: &str| props.get(name).map(String::as_str).unwrap_or("");
+        let facing = crate::blocks::facing::from_name(prop("facing"));
+        let rotation = prop("rotation").parse().unwrap_or(0);
+        let chest_half = match prop("type") {
+            "left" => ChestHalf::Left,
+            "right" => ChestHalf::Right,
+            _ => ChestHalf::Single,
+        };
+        let powered = prop("powered") == "true";
+        BlockStateInfo {
+            state_id,
+            block,
+            props,
+            facing,
+            rotation,
+            chest_half,
+            powered,
+        }
+    }
+
     pub fn prop(&self, name: &str) -> &str {
         self.props.get(name).map(String::as_str).unwrap_or("")
     }
@@ -251,7 +284,7 @@ impl Store {
     }
 }
 
-fn kind_for_block(id: &str) -> Option<BlockEntityKind> {
+pub(crate) fn kind_for_block(id: &str) -> Option<BlockEntityKind> {
     if matches!(
         id,
         "skeleton_skull"
@@ -454,7 +487,7 @@ pub fn publish(world: &azalea_world::World) -> Option<Arc<HashMap<[i32; 3], Bloc
         entry.lid.tick();
         let resolved_state = resolve(states, state);
         if entry.kind == BlockEntityKind::Skull {
-            entry.animating = resolved_state.prop("powered") == "true";
+            entry.animating = resolved_state.powered;
             if entry.animating {
                 entry.animation_tick = entry.animation_tick.wrapping_add(1);
             }
@@ -476,7 +509,7 @@ pub fn publish(world: &azalea_world::World) -> Option<Arc<HashMap<[i32; 3], Bloc
 
     let halves: Vec<[i32; 3]> = snapshot
         .iter()
-        .filter(|(_, info)| matches!(info.state.prop("type"), "left" | "right"))
+        .filter(|(_, info)| info.state.chest_half != ChestHalf::Single)
         .map(|(pos, _)| *pos)
         .collect();
     for pos in halves {
@@ -517,15 +550,15 @@ fn resolve(
         .entry(state.id())
         .or_insert_with(|| {
             let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
-            Arc::new(BlockStateInfo {
-                state_id: state.id(),
-                block: block.id().to_string(),
-                props: block
+            Arc::new(BlockStateInfo::new(
+                state.id(),
+                block.id().to_string(),
+                block
                     .property_map()
                     .into_iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
-            })
+            ))
         })
         .clone()
 }
@@ -535,56 +568,32 @@ fn chest_partner(
     info: &BlockEntityInfo,
     all: &HashMap<[i32; 3], BlockEntityInfo>,
 ) -> Option<[i32; 3]> {
-    let chest_type = info.state.prop("type");
-    if chest_type != "left" && chest_type != "right" {
+    let left = match info.state.chest_half {
+        ChestHalf::Left => true,
+        ChestHalf::Right => false,
+        ChestHalf::Single => return None,
+    };
+    let facing = info.state.facing?;
+    let toward = if left {
+        crate::blocks::facing::clockwise(facing)
+    } else {
+        crate::blocks::facing::counter_clockwise(facing)
+    };
+    if matches!(toward, Direction::Up | Direction::Down) {
         return None;
     }
-    let facing = info.state.prop("facing");
-    let toward = if chest_type == "left" {
-        clockwise(facing)
-    } else {
-        counter_clockwise(facing)
-    };
-    let offset = horizontal_offset(toward)?;
-    let neighbour = [pos[0] + offset[0], pos[1], pos[2] + offset[1]];
+    let step = toward.normal();
+    let neighbour = [pos[0] + step.x, pos[1], pos[2] + step.z];
     let other = all.get(&neighbour)?;
-    let opposite = if chest_type == "left" {
-        "right"
+    let opposite = if left {
+        ChestHalf::Right
     } else {
-        "left"
+        ChestHalf::Left
     };
     (other.state.block == info.state.block
-        && other.state.prop("type") == opposite
-        && other.state.prop("facing") == facing)
-        .then_some(neighbour)
-}
-
-fn clockwise(facing: &str) -> &'static str {
-    match facing {
-        "north" => "east",
-        "east" => "south",
-        "south" => "west",
-        _ => "north",
-    }
-}
-
-fn counter_clockwise(facing: &str) -> &'static str {
-    match facing {
-        "north" => "west",
-        "west" => "south",
-        "south" => "east",
-        _ => "north",
-    }
-}
-
-fn horizontal_offset(facing: &str) -> Option<[i32; 2]> {
-    match facing {
-        "north" => Some([0, -1]),
-        "south" => Some([0, 1]),
-        "west" => Some([-1, 0]),
-        "east" => Some([1, 0]),
-        _ => None,
-    }
+        && other.state.chest_half == opposite
+        && other.state.facing == Some(facing))
+    .then_some(neighbour)
 }
 
 #[cfg(test)]
@@ -614,22 +623,22 @@ mod tests {
 
     #[test]
     fn the_two_halves_of_a_double_chest_find_each_other() {
-        let left = Arc::new(BlockStateInfo {
-            state_id: 1,
-            block: "chest".to_string(),
-            props: HashMap::from([
+        let left = Arc::new(BlockStateInfo::new(
+            1,
+            "chest".to_string(),
+            HashMap::from([
                 ("type".to_string(), "left".to_string()),
                 ("facing".to_string(), "south".to_string()),
             ]),
-        });
-        let right = Arc::new(BlockStateInfo {
-            state_id: 2,
-            block: "chest".to_string(),
-            props: HashMap::from([
+        ));
+        let right = Arc::new(BlockStateInfo::new(
+            2,
+            "chest".to_string(),
+            HashMap::from([
                 ("type".to_string(), "right".to_string()),
                 ("facing".to_string(), "south".to_string()),
             ]),
-        });
+        ));
         let info = |state: Arc<BlockStateInfo>| BlockEntityInfo {
             kind: BlockEntityKind::Chest,
             state,
@@ -654,14 +663,14 @@ mod tests {
 
     #[test]
     fn a_single_chest_stands_alone() {
-        let single = Arc::new(BlockStateInfo {
-            state_id: 3,
-            block: "chest".to_string(),
-            props: HashMap::from([
+        let single = Arc::new(BlockStateInfo::new(
+            3,
+            "chest".to_string(),
+            HashMap::from([
                 ("type".to_string(), "single".to_string()),
                 ("facing".to_string(), "north".to_string()),
             ]),
-        });
+        ));
         let info = BlockEntityInfo {
             kind: BlockEntityKind::Chest,
             state: single,

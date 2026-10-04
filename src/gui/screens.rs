@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::gui::hud_layout::{ElementId, Hud};
 use crate::gui::painter::Painter;
 use crate::gui::render::GuiInput;
 use crate::gui::slots::{self, CONTAINER_W, INV_H, INV_W, Layout, draw_stack};
@@ -24,7 +25,7 @@ pub fn draw(
     let eye_pos;
     let mut snap = {
         let mut s = shared.lock().unwrap();
-        let menu_slots = if state.screen.is_open() {
+        let menu_slots = if state.screen.is_modal() {
             s.session.menu_slots.clone()
         } else {
             Vec::new()
@@ -104,7 +105,9 @@ pub fn draw(
             sleeping: s.session.sleeping,
             sidebar: s.session.sidebar.clone(),
             boss_bars: s.session.boss_bars.clone(),
-            tab_list: if state.tab_list_held {
+            tab_list: if state.tab_list_held
+                || (cfg!(feature = "mobile_ui") && state.screen == Screen::Pause)
+            {
                 s.session.tab_list.clone()
             } else {
                 Default::default()
@@ -117,6 +120,32 @@ pub fn draw(
         eye_pos[1] as f64 + eye_height,
         eye_pos[2] as f64,
     ) == Some(crate::util::block_model::EyeFluid::Water);
+
+    #[cfg(feature = "mobile_ui")]
+    let lift = {
+        let inset = if input.scale > 0.0 {
+            crate::platform::keyboard::inset_px() / input.scale
+        } else {
+            0.0
+        };
+        crate::gui::widgets::keyboard_lift::begin(
+            state.screen.is_menu(),
+            input.size.y,
+            inset,
+            input.left_down || input.left_release,
+        )
+    };
+    #[cfg(feature = "mobile_ui")]
+    let lifted_input;
+    #[cfg(feature = "mobile_ui")]
+    let input = if lift > 0.0 {
+        let mut shifted = input.clone();
+        shifted.mouse = shifted.mouse.map(|m| m + bevy::math::Vec2::new(0.0, lift));
+        lifted_input = shifted;
+        &lifted_input
+    } else {
+        input
+    };
 
     let ctx = ScreenCtx {
         input,
@@ -140,7 +169,27 @@ pub fn draw(
     let secure_chat = snap.enforces_secure_chat;
     let chat_signing = snap.chat_signing;
 
-    let hud_visible = !state.in_menu() && !state.hide_gui;
+    let in_menu = state.in_menu();
+    #[cfg(feature = "hud_editor")]
+    let editing = state.screen == Screen::HudEditor;
+    #[cfg(not(feature = "hud_editor"))]
+    let editing = false;
+    let hide_gui = state.hide_gui && !editing;
+    let hud_shown = !in_menu || editing;
+    #[cfg(feature = "hud_editor")]
+    if editing {
+        crate::gui::hud_editor::draw_under(p, &state.hud_state, &ctx);
+    }
+    let hud_visible = hud_shown && !hide_gui;
+
+    state.hud_state.frames.begin(ctx.vw, ctx.vh);
+    let mut elements = Hud::new(
+        &state.hud_state.layout,
+        &mut state.hud_state.frames,
+        editing,
+        input.device_scale,
+    );
+
     if hud_visible {
         draw_hud(
             p,
@@ -148,46 +197,83 @@ pub fn draw(
             &snap,
             state.options.main_hand_left,
             &mut state.hearts,
+            &mut elements,
         );
         hud::draw_nametags(p, &ctx, &state.hud.nametags);
-        let show_fps = state.options.fps_counter && !state.hud.debug;
-        hud::draw(p, &ctx, &state.hud, state.screen == Screen::Chat, show_fps);
-        hud::draw_effects(p, &ctx, &state.hud.active_effects);
-        hud::draw_boss_bars(p, &ctx, &snap.boss_bars);
+        let show_fps = state.options.fps_counter && state.hud.debug.is_none();
+        hud::draw(
+            p,
+            &ctx,
+            &state.hud,
+            &snap.sidebar,
+            state.screen == Screen::Chat,
+            show_fps,
+            &mut elements,
+        );
+        elements.draw(p, ctx.vw, ctx.vh, ElementId::BossBars, |p| {
+            hud::draw_boss_bars(p, &ctx, &snap.boss_bars);
+        });
         if snap.gamemode == crate::session::Gamemode::Spectator {
-            spectator_menu::draw(
-                p,
-                &ctx,
-                &mut state.spectator_menu,
-                &snap.tab_list,
-                #[cfg(feature = "skins")]
-                faces,
-            );
+            elements.follow(p, ctx.vw, ctx.vh, ElementId::Hotbar, |p| {
+                spectator_menu::draw(
+                    p,
+                    &ctx,
+                    &mut state.spectator_menu,
+                    &snap.tab_list,
+                    #[cfg(feature = "skins")]
+                    faces,
+                );
+            });
         }
     }
 
-    if !state.hide_gui && !state.in_menu() {
-        hud::draw_sidebar(p, &ctx, &snap.sidebar);
-        hud::draw_overlays(p, &ctx, &state.hud_overlays, snap.gamemode);
+    if !hide_gui && hud_shown {
+        elements.draw(p, ctx.vw, ctx.vh, ElementId::Sidebar, |p| {
+            hud::draw_sidebar(p, &ctx, &snap.sidebar);
+        });
+        hud::draw_overlays(p, &ctx, &state.hud_overlays, snap.gamemode, &mut elements);
     }
 
-    if !state.in_menu() {
+    if !in_menu {
         let focused = state.screen == Screen::Chat;
-        chat::draw(
-            p,
-            &mut state.chat,
-            &ctx,
-            focused,
-            hud_visible,
-            chat_incoming,
-            chat_error,
-            secure_chat,
-            chat_signing,
-            state.advanced_tooltips,
-            shared,
-        );
+        let placed = !focused && hud_visible && elements.shown(ElementId::Chat);
+        let visible = hud_visible && (focused || placed);
+        macro_rules! draw_chat {
+            ($p:expr) => {
+                chat::draw(
+                    $p,
+                    &mut state.chat,
+                    &ctx,
+                    focused,
+                    visible,
+                    chat_incoming,
+                    chat_error,
+                    secure_chat,
+                    chat_signing,
+                    state.advanced_tooltips,
+                    shared,
+                )
+            };
+        }
+        if placed {
+            elements.draw(p, ctx.vw, ctx.vh, ElementId::Chat, |p| draw_chat!(p));
+        } else {
+            draw_chat!(p);
+        }
+    }
+    if in_menu && editing {
+        elements.draw(p, ctx.vw, ctx.vh, ElementId::Chat, |_| {});
+    }
+    #[cfg(feature = "mobile_ui")]
+    if state.screen != Screen::Pause {
+        tablist::hide(&mut state.tablist);
     }
 
+    #[cfg(feature = "mobile_ui")]
+    if chat::texting() && state.screen != Screen::Chat {
+        chat::set_texting(false);
+    }
+    #[cfg(not(feature = "mobile_ui"))]
     if hud_visible && state.tab_list_held {
         tablist::draw(
             p,
@@ -201,8 +287,39 @@ pub fn draw(
         tablist::hide(&mut state.tablist);
     }
 
-    if state.hud.debug && (!state.hide_gui || state.screen.is_open()) {
-        hud::draw_debug(p, &ctx, &state.hud);
+    let debug_gate = !hide_gui || state.screen.is_open();
+    if let Some(d) = &state.hud.debug
+        && debug_gate
+    {
+        elements.draw(p, ctx.vw, ctx.vh, ElementId::Debug, |p| {
+            hud::draw_debug(p, &ctx, &state.hud, d);
+        });
+    }
+    #[cfg(feature = "mobile_ui")]
+    if editing {
+        let view = crate::mobile::View {
+            ui: &state.mobile,
+            movement: state.options.touch_movement,
+            screen: state.screen,
+            hide_gui,
+            in_menu,
+            editing: true,
+        };
+        crate::mobile::draw(p, &ctx, view, &mut elements);
+    }
+
+    #[cfg(feature = "hud_editor")]
+    if state.hud.debug.is_none() && debug_gate && elements.editing() {
+        elements.ghost(
+            p,
+            ctx.vw,
+            ctx.vh,
+            ElementId::Debug,
+            "Debug (F3), off",
+            |p| {
+                hud::draw_debug(p, &ctx, &state.hud, &hud::DebugInfo::default());
+            },
+        );
     }
 
     focus::begin(
@@ -214,6 +331,10 @@ pub fn draw(
         },
     );
 
+    #[cfg(feature = "mobile_ui")]
+    if lift > 0.0 {
+        p.set_lift(lift);
+    }
     let hovered: Option<SlotStack> = match state.screen {
         Screen::None | Screen::Chat => None,
         Screen::Inventory => draw_inventory(p, state, &ctx, &snap, &mut actions),
@@ -229,6 +350,16 @@ pub fn draw(
         Screen::Pause => {
             dim_background(p, ctx.vw, ctx.vh);
             pause::draw(p, state, &ctx);
+            #[cfg(feature = "mobile_ui")]
+            tablist::draw_side(
+                p,
+                &ctx,
+                &snap.tab_list,
+                &mut state.tablist,
+                pause::side_strip_right(ctx.vw, ctx.vh),
+                #[cfg(feature = "skins")]
+                faces,
+            );
             None
         }
         Screen::Options | Screen::VideoSettings | Screen::Controls | Screen::GameSettings => {
@@ -253,6 +384,16 @@ pub fn draw(
                 dim_background(p, ctx.vw, ctx.vh);
             }
             options::draw_audio(p, state, &ctx);
+            None
+        }
+        #[cfg(resource_packs)]
+        Screen::ResourcePacks => {
+            if state.in_menu() {
+                crate::gui::menu::background(p, ctx.vw, ctx.vh);
+            } else {
+                dim_background(p, ctx.vw, ctx.vh);
+            }
+            crate::gui::resourcepacks::draw(p, state, &ctx);
             None
         }
         #[cfg(feature = "shader_support")]
@@ -321,6 +462,15 @@ pub fn draw(
             crate::gui::clickgui::draw(p, &mut state.clickgui, &ctx);
             None
         }
+        #[cfg(feature = "hud_editor")]
+        Screen::HudEditor => {
+            if let Some(next) =
+                crate::gui::hud_editor::draw(p, &mut state.hud_state, &mut state.options, &ctx)
+            {
+                state.nav = Some(next);
+            }
+            None
+        }
         Screen::Sleep => {
             sleep::draw(p, &ctx, shared);
             None
@@ -369,7 +519,7 @@ pub fn draw(
         }
         Screen::SignEdit => {
             dim_background(p, ctx.vw, ctx.vh);
-            if let Some(next) = sign_edit::draw(p, &mut state.sign_edit, &ctx) {
+            if let Some(next) = sign_edit::draw(p, &mut state.sign_edit, &ctx, shared) {
                 state.nav = Some(next);
                 clear_world_clicks(shared);
             }
@@ -395,6 +545,10 @@ pub fn draw(
             None
         }
     };
+    #[cfg(feature = "mobile_ui")]
+    if lift > 0.0 {
+        p.set_lift(0.0);
+    }
 
     focus::end();
 
@@ -417,7 +571,29 @@ pub fn draw(
     toast::draw(p, &ctx, &mut state.toasts, toast_settings);
 
     #[cfg(feature = "mobile_ui")]
-    crate::mobile::draw(p, &ctx, state);
+    {
+        #[cfg(feature = "hud_editor")]
+        let editing = state.screen == Screen::HudEditor;
+        #[cfg(not(feature = "hud_editor"))]
+        let editing = false;
+        if !editing {
+            let view = crate::mobile::View {
+                ui: &state.mobile,
+                movement: state.options.touch_movement,
+                screen: state.screen,
+                hide_gui: state.hide_gui,
+                in_menu,
+                editing: false,
+            };
+            let mut controls = Hud::new(
+                &state.hud_state.layout,
+                &mut state.hud_state.frames,
+                false,
+                input.device_scale,
+            );
+            crate::mobile::draw(p, &ctx, view, &mut controls);
+        }
+    }
 
     if !actions.is_empty() {
         let mut s = shared.lock().unwrap();
@@ -550,6 +726,7 @@ fn draw_hud(
     snap: &Snapshot,
     main_hand_left: bool,
     hearts: &mut health::HeartAnim,
+    elements: &mut Hud,
 ) {
     let (vw, vh) = (ctx.vw, ctx.vh);
 
@@ -565,6 +742,20 @@ fn draw_hud(
 
     draw_attack_indicator(p, vw, vh, snap);
 
+    elements.draw(p, vw, vh, ElementId::Hotbar, |p| {
+        draw_hotbar_cluster(p, vw, vh, snap, main_hand_left, hearts);
+    });
+    draw_sleep_overlay(p, vw, vh, snap);
+}
+
+fn draw_hotbar_cluster(
+    p: &mut Painter,
+    vw: f32,
+    vh: f32,
+    snap: &Snapshot,
+    main_hand_left: bool,
+    hearts: &mut health::HeartAnim,
+) {
     let g = HotbarGeom::new(vw, vh);
     let (left, top) = (g.left, g.top);
     if snap.gamemode != crate::session::Gamemode::Spectator {
@@ -630,7 +821,6 @@ fn draw_hud(
     }
 
     draw_contextual_bar(p, vw, vh, snap);
-    draw_sleep_overlay(p, vw, vh, snap);
 }
 
 fn draw_sleep_overlay(p: &mut Painter, vw: f32, vh: f32, snap: &Snapshot) {

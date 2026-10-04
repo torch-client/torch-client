@@ -25,9 +25,13 @@ mobile_ui = ["bevy/touch"]
 
 click_gui = []
 
+hud_editor = []
+
 builtin_shaders = ["bevy/bevy_anti_alias", "bevy/bevy_post_process"]
 
-shader_support = ["dep:flate2", "dep:naga"]
+shader_support = ["dep:flate2", "dep:naga", "dep:wgpu"]
+
+resourcepacks = ["dep:flate2"]
 
 webgpu = ["bevy/webgpu"]
 
@@ -64,7 +68,7 @@ strip = false
 
 [profile.android]
 inherits = "release"
-strip = false
+strip = true
 
 [profile.dev.package."*"]
 debug = 0
@@ -130,6 +134,7 @@ naga = { version = "27", default-features = false, features = [
     "glsl-in",
     "wgsl-out",
 ], optional = true }
+wgpu = { version = "27", default-features = false, optional = true }
 
 tokio-tungstenite = { version = "0.30", default-features = false, features = [
     "connect",
@@ -198,6 +203,9 @@ features = ["multi_threaded", "android-native-activity"]
 
 [target.'cfg(target_os = "android")'.dependencies.jni]
 version = "0.22"
+
+[target.'cfg(target_os = "android")'.dependencies.webpki-roots]
+version = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.bevy]
 version = "0.18"

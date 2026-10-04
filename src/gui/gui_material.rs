@@ -58,7 +58,10 @@ impl Material for GuiMaterial {
 }
 
 fn shader() -> ShaderRef {
-    let crate_name = module_path!().split(':').next().unwrap_or("torch_client");
+    let crate_name = module_path!()
+        .split(':')
+        .next()
+        .unwrap_or("torch_client");
     ShaderRef::Path(format!("embedded://{crate_name}/gui/gui.wgsl").into())
 }
 

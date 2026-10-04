@@ -12,6 +12,18 @@ pub fn active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
 
+static DIED: AtomicBool = AtomicBool::new(false);
+
+fn deactivate() {
+    if ACTIVE.swap(false, Ordering::Relaxed) {
+        DIED.store(true, Ordering::Relaxed);
+    }
+}
+
+pub fn take_died() -> bool {
+    DIED.swap(false, Ordering::Relaxed)
+}
+
 thread_local! {
     static WORKER: RefCell<Option<Handle>> = const { RefCell::new(None) };
 }
@@ -45,7 +57,7 @@ pub fn spawn(assets: &[u8]) -> bool {
             on_message(e)
         });
     let error = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(|e: web_sys::ErrorEvent| {
-        ACTIVE.store(false, Ordering::Relaxed);
+        deactivate();
         log_error!(
             "mesh",
             "the mesh worker failed ({}); meshing falls back to the frame",
@@ -89,7 +101,7 @@ pub fn send(msg: &ToWorker) {
             .post_message_with_transfer(&buffer, &js_sys::Array::of1(&buffer))
             .is_err()
         {
-            ACTIVE.store(false, Ordering::Relaxed);
+            deactivate();
             log_error!("mesh", "the mesh worker stopped accepting messages");
         }
     });
@@ -104,7 +116,7 @@ fn to_buffer(bytes: &[u8]) -> js_sys::ArrayBuffer {
 fn on_message(event: web_sys::MessageEvent) {
     let data = event.data();
     if let Some(text) = data.as_string() {
-        ACTIVE.store(false, Ordering::Relaxed);
+        deactivate();
         log_error!("mesh", "the mesh worker could not start: {text}");
         return;
     }
@@ -126,7 +138,7 @@ fn apply(msg: FromWorker) {
     match msg {
         FromWorker::Ready => log_info!("mesh", "the mesh worker is ready"),
         FromWorker::Failed(message) => {
-            ACTIVE.store(false, Ordering::Relaxed);
+            deactivate();
             log_error!("mesh", "the mesh worker gave up: {message}");
         }
         FromWorker::Sections { chunks, edits } => {
@@ -138,8 +150,16 @@ fn apply(msg: FromWorker) {
                 (chunks.len() + edits.len()) as u64,
             );
             let mut s = shared.lock().unwrap();
-            s.session.pending_chunks.extend(chunks);
-            s.session.pending_edits.extend(edits);
+            let session = &mut s.session;
+            supersede(
+                &mut session.pending_chunks,
+                &mut session.pending_edits,
+                &chunks,
+                &edits,
+            );
+            session.pending_chunks.extend(chunks);
+            session.pending_edits.extend(edits);
+            super::resend_backlog();
         }
         FromWorker::Light(delta) => {
             let map = crate::client::worldsync::light_map();
@@ -167,4 +187,24 @@ fn describe(value: &JsValue) -> String {
                 .as_string()
         })
         .unwrap_or_else(|| format!("{value:?}"))
+}
+
+fn supersede(
+    pending_chunks: &mut Vec<crate::renderer::PendingSection>,
+    pending_edits: &mut Vec<crate::renderer::PendingSection>,
+    chunks: &[crate::renderer::PendingSection],
+    edits: &[crate::renderer::PendingSection],
+) {
+    if pending_chunks.is_empty() && pending_edits.is_empty() {
+        return;
+    }
+    let fresh: std::collections::HashSet<(i32, i32, i32)> = chunks
+        .iter()
+        .chain(edits)
+        .map(|p| (p.chunk_x, p.chunk_z, p.sec_y))
+        .collect();
+    let keep =
+        |p: &crate::renderer::PendingSection| !fresh.contains(&(p.chunk_x, p.chunk_z, p.sec_y));
+    pending_chunks.retain(keep);
+    pending_edits.retain(keep);
 }

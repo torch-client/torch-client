@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::*;
 
+use crate::entities::TexturePath;
 use crate::entities::models::aquatic::squid;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -61,20 +62,20 @@ fn is_baby(st: &EntityState) -> bool {
     st.extras.is_baby
 }
 
-fn squid_texture(_st: &EntityState) -> String {
-    "entity/squid/squid".to_string()
+fn squid_texture(_st: &EntityState) -> TexturePath {
+    "entity/squid/squid".into()
 }
 
-fn squid_baby_texture(_st: &EntityState) -> String {
-    "entity/squid/squid_baby".to_string()
+fn squid_baby_texture(_st: &EntityState) -> TexturePath {
+    "entity/squid/squid_baby".into()
 }
 
-fn glow_squid_texture(_st: &EntityState) -> String {
-    "entity/squid/glow_squid".to_string()
+fn glow_squid_texture(_st: &EntityState) -> TexturePath {
+    "entity/squid/glow_squid".into()
 }
 
-fn glow_squid_baby_texture(_st: &EntityState) -> String {
-    "entity/squid/glow_squid_baby".to_string()
+fn glow_squid_baby_texture(_st: &EntityState) -> TexturePath {
+    "entity/squid/glow_squid_baby".into()
 }
 
 fn root(st: &EntityState) -> RootPose {

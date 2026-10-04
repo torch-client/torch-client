@@ -46,7 +46,7 @@ fn decode_srgb(c: vec3<f32>) -> vec3<f32> {
 @group(2) @binding(3) var lightmap_sampler: sampler;
 @group(2) @binding(4) var<uniform> params: vec4<f32>;
 
-struct SlotMeta { min: vec3<f32>, first_index: u32, max: vec3<f32>, index_count: u32, origin: vec3<i32>, base_vertex: u32, solid_count: u32, flags: u32, pool: u32, pad: u32 }
+struct SlotMeta { min: vec3<f32>, first_index: u32, max: vec3<f32>, index_count: u32, origin: vec3<i32>, base_vertex: u32, solid_count: u32, flags: u32, pool: u32, cutout_first: u32 }
 #ifdef META_TEXTURE
 const ORIGIN_ROW: i32 = 256;
 @group(2) @binding(5) var origins: texture_2d<i32>;
@@ -363,11 +363,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         lit += color.rgb * sun_color * sky_light * through * sun_shadow * SSS_GAIN;
     }
 
-    let roughness = select(ROUGH_BLOCK, ROUGH_WATER, water);
     let f0 = select(F0_BLOCK, F0_WATER, water);
+#ifdef SUN_SPECULAR
+    let roughness = select(ROUGH_BLOCK, ROUGH_WATER, water);
     if sun_visibility > 0.0 {
         lit += sun_color * sky_light * sun_shadow * specular_ggx(n, v, to_light, roughness, f0);
     }
+#endif
 
     if water {
         let sky_access = saturate(max(max(sky_light.r, sky_light.g), sky_light.b));

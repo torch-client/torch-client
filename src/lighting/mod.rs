@@ -61,3 +61,6 @@ impl ColumnPos {
 pub use crate::direction::Direction;
 
 pub const MAX_LEVEL: u8 = 15;
+
+pub type FastMap<K, V> = std::collections::HashMap<K, V, bevy::platform::hash::FixedHasher>;
+pub type FastSet<K> = std::collections::HashSet<K, bevy::platform::hash::FixedHasher>;

@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::rabbit;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -35,15 +36,15 @@ fn variant(st: &EntityState) -> &'static str {
     }
 }
 
-fn texture(st: &EntityState) -> String {
-    let name = if st.extras.magic_name_toast {
+fn texture(st: &EntityState) -> TexturePath {
+    let name = if st.extras.magic_name_toast() {
         "toast"
     } else {
         variant(st)
     };
     if st.extras.is_baby {
-        format!("entity/rabbit/rabbit_{name}_baby")
+        format!("entity/rabbit/rabbit_{name}_baby").into()
     } else {
-        format!("entity/rabbit/rabbit_{name}")
+        format!("entity/rabbit/rabbit_{name}").into()
     }
 }

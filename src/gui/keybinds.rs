@@ -295,6 +295,8 @@ pub static BINDS: LazyLock<Vec<BindDef>> = LazyLock::new(|| {
     binds.push(BindDef { action: Action::Pause, id: "key.client.pause", name: "Pause Menu", category: CLIENT, default: Bound::Key(KeyCode::Backquote) });
     #[cfg(feature = "click_gui")]
     binds.push(BindDef { action: Action::ClickGui, id: "key.client.clickGui", name: "Click GUI", category: CLIENT, default: Bound::Key(KeyCode::ShiftRight) });
+    #[cfg(feature = "hud_editor")]
+    binds.push(BindDef { action: Action::HudEditor, id: "key.client.hudEditor", name: "Edit HUD", category: CLIENT, default: Bound::Unbound });
     binds
 });
 
@@ -339,6 +341,8 @@ pub enum Action {
     Pause,
     #[cfg(feature = "click_gui")]
     ClickGui,
+    #[cfg(feature = "hud_editor")]
+    HudEditor,
 }
 
 pub const HOTBAR: [Action; 9] = [

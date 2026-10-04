@@ -23,7 +23,8 @@ pub struct SharedState {
     pub quit_requested: bool,
     pub disconnect_requested: bool,
     pub disconnected_pending: bool,
-    pub disconnect_by_player: bool,
+    pub session_ended: bool,
+    pub end_notice: Option<String>,
     pub disconnect_reason: Option<Vec<crate::text::Span>>,
     pub reload_chunks_requested: bool,
     pub leave_bed_requested: bool,
@@ -34,6 +35,35 @@ pub struct SharedState {
     pub skin_prefs_sent: Option<SkinPrefs>,
     pub skin_prefs: SkinPrefs,
     pub chat_signing_allowed: bool,
+}
+
+impl SharedState {
+    pub fn end_session(&mut self, status: String, reason: Option<Vec<crate::text::Span>>) -> bool {
+        let first = !std::mem::replace(&mut self.session_ended, true);
+        if first {
+            self.disconnected_pending = true;
+            self.end_notice = Some(match &reason {
+                Some(spans) if !spans.is_empty() => {
+                    spans.iter().map(|span| span.text.as_str()).collect()
+                }
+                _ => "Connection lost".to_string(),
+            });
+            self.disconnect_reason = reason;
+        }
+        self.clear_session(status);
+        first
+    }
+
+    pub fn clear_session(&mut self, status: String) {
+        self.in_world = false;
+        let health_epoch = self.session.health_epoch;
+        let block_entities_version = self.session.block_entities_version;
+        self.session = SessionState::default();
+        self.session.health_epoch = health_epoch;
+        self.session.block_entities_version = block_entities_version.wrapping_add(1);
+        self.session.clear_chunks = true;
+        self.session.status = Some(status.into());
+    }
 }
 
 #[derive(Default, Clone)]
@@ -84,7 +114,7 @@ pub struct SessionState {
     pub unloaded_chunks: Vec<(i32, i32)>,
     pub clear_chunks: bool,
     pub player_pos: [f32; 3],
-    pub status: String,
+    pub status: Option<std::sync::Arc<str>>,
     pub current_address: Option<String>,
     pub advanced_tooltips: bool,
     pub fly_toggle: bool,
@@ -93,7 +123,7 @@ pub struct SessionState {
     pub fov: FovState,
     pub other_players: Vec<OtherPlayerInfo>,
     pub menu_slots: Vec<SlotStack>,
-    pub hotbar: Vec<SlotStack>,
+    pub hotbar: std::sync::Arc<[SlotStack]>,
     pub armor: crate::renderer::Armor,
     pub carried: SlotStack,
     pub container_id: i32,
@@ -123,6 +153,8 @@ pub struct SessionState {
     pub active_effects: Vec<crate::play::mob_effects::MobEffectInstance>,
     pub gamemode: Gamemode,
     pub crouching: bool,
+    pub fall_flying: bool,
+    pub swimming: bool,
     pub sleeping: bool,
     pub bed_orientation: Option<crate::direction::Direction>,
     pub sleep_timer: u32,
@@ -153,6 +185,7 @@ pub struct SessionState {
     pub crosshair_entity: Option<i32>,
     pub aim_target: Option<i32>,
     pub auto_mine: Option<MineIntent>,
+    pub auto_mace: Option<MaceAim>,
     pub attack_strength: f32,
     pub attack_delay: f32,
     pub breaking: Option<BreakingBlock>,
@@ -571,6 +604,7 @@ pub enum ContainerKind {
     Merchant,
     Lectern,
     Horse(u8),
+    Anvil,
 }
 
 impl ContainerKind {
@@ -732,6 +766,12 @@ pub struct MineIntent {
     pub turn: f32,
 }
 
+#[derive(Clone, Copy)]
+pub struct MaceAim {
+    pub aim: [f32; 3],
+    pub turn: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Gamemode {
     #[default]
@@ -742,6 +782,11 @@ pub enum Gamemode {
 }
 
 impl Gamemode {
+    #[cfg(feature = "shader_support")]
+    pub fn is_survival(self) -> bool {
+        matches!(self, Gamemode::Survival | Gamemode::Adventure)
+    }
+
     pub fn from_azalea(mode: azalea_core::game_type::GameMode) -> Gamemode {
         match mode {
             azalea_core::game_type::GameMode::Survival => Gamemode::Survival,
@@ -767,6 +812,7 @@ pub enum InvAction {
         primary: Option<u32>,
         secondary: Option<u32>,
     },
+    RenameItem(String),
     Close,
 }
 
@@ -806,7 +852,36 @@ pub struct CommandBlockUpdate {
 pub struct SignEditRequest {
     pub pos: azalea_core::position::BlockPos,
     pub front: bool,
-    pub lines: [String; 4],
+    pub kind: SignEditKind,
+    pub wood: &'static str,
+    pub face: crate::blockentities::feed::SignFace,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SignEditKind {
+    Standing { wall: bool },
+    Hanging,
+}
+
+impl SignEditKind {
+    pub fn from_block(block: &str) -> Option<(SignEditKind, &'static str)> {
+        use crate::blockentities::render::sign;
+        use crate::blockentities::text::SignKind;
+        let kind = match SignKind::of(crate::blockentities::feed::kind_for_block(block)?)? {
+            SignKind::Standing => SignEditKind::Standing {
+                wall: sign::is_wall(block),
+            },
+            SignKind::Hanging => SignEditKind::Hanging,
+        };
+        Some((kind, sign::known_wood(block).unwrap_or("oak")))
+    }
+
+    pub fn sign_kind(self) -> crate::blockentities::text::SignKind {
+        match self {
+            SignEditKind::Standing { .. } => crate::blockentities::text::SignKind::Standing,
+            SignEditKind::Hanging => crate::blockentities::text::SignKind::Hanging,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

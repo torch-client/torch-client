@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::protocol::version::ProtocolVersion;
@@ -66,8 +65,7 @@ impl IdSpace {
 }
 
 struct Runs {
-    starts: Vec<i32>,
-    offsets: Vec<Option<i32>>,
+    runs: Vec<(i32, Option<i32>)>,
     count: i32,
 }
 
@@ -76,12 +74,12 @@ impl Runs {
         if id < 0 || id >= self.count {
             return None;
         }
-        let slot = self.starts.partition_point(|start| *start <= id);
-        Some(id + self.offsets[slot - 1]?)
+        let slot = self.runs.partition_point(|(start, _)| *start <= id);
+        Some(id + self.runs[slot - 1].1?)
     }
 
     fn is_identity(&self) -> bool {
-        self.offsets.iter().all(|offset| *offset == Some(0))
+        self.runs.iter().all(|(_, offset)| *offset == Some(0))
     }
 }
 
@@ -140,8 +138,7 @@ impl Remap {
                     .as_array()
                     .ok_or_else(|| format!("{field}.{key}.runs is missing"))?;
 
-                let mut starts = Vec::with_capacity(pairs.len());
-                let mut offsets = Vec::with_capacity(pairs.len());
+                let mut runs = Vec::with_capacity(pairs.len());
                 for pair in pairs {
                     let start = pair[0]
                         .as_i64()
@@ -156,20 +153,15 @@ impl Remap {
                                 .ok_or_else(|| format!("{field}.{key} holds a malformed offset"))?,
                         ),
                     };
-                    starts.push(start);
-                    offsets.push(offset);
+                    runs.push((start, offset));
                 }
-                if starts.first() != Some(&0) {
+                if runs.first().map(|(start, _)| *start) != Some(0) {
                     return Err(format!("{field}.{key} does not start at id 0"));
                 }
-                if starts.windows(2).any(|w| w[0] >= w[1]) {
+                if runs.windows(2).any(|w| w[0].0 >= w[1].0) {
                     return Err(format!("{field}.{key} is not sorted"));
                 }
-                out.push(Runs {
-                    starts,
-                    offsets,
-                    count,
-                });
+                out.push(Runs { runs, count });
             }
             Ok(out)
         };
@@ -194,18 +186,6 @@ fn pair() -> &'static (Remap, Remap) {
     PAIR.get_or_init(|| {
         Remap::parse(include_str!("data/remap-774-775.json"))
             .unwrap_or_else(|e| panic!("embedded 774 -> 775 remap: {e}"))
-    })
-}
-
-#[allow(dead_code, reason = "the second hop selects a remap by number")]
-fn by_protocol() -> &'static HashMap<(i32, i32), &'static Remap> {
-    static BY_PROTOCOL: OnceLock<HashMap<(i32, i32), &'static Remap>> = OnceLock::new();
-    BY_PROTOCOL.get_or_init(|| {
-        let (forward, inverse) = pair();
-        HashMap::from([
-            ((forward.from.protocol, forward.to.protocol), forward),
-            ((inverse.from.protocol, inverse.to.protocol), inverse),
-        ])
     })
 }
 

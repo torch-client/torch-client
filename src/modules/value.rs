@@ -9,14 +9,14 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn default_of(kind: Kind) -> Value {
-        match kind {
+    pub fn default_of(kind: Kind) -> Option<Value> {
+        Some(match kind {
             Kind::Toggle { on } => Value::Bool(on),
             Kind::Slider { value, .. } => Value::Num(value),
             Kind::Range { low, high, .. } => Value::Range(low, high),
             Kind::Enum { index, .. } => Value::Choice(index),
-            Kind::List { .. } | Kind::Text { .. } => Value::Bool(false),
-        }
+            Kind::List { .. } | Kind::Text { .. } => return None,
+        })
     }
 
     pub fn pack(self) -> u64 {
@@ -28,18 +28,41 @@ impl Value {
         }
     }
 
-    pub fn unpack(bits: u64, kind: Kind) -> Value {
-        match kind {
-            Kind::Toggle { .. } => Value::Bool(bits & 1 != 0),
-            Kind::Slider { .. } => Value::Num(f32::from_bits(bits as u32)),
-            Kind::Range { .. } => Value::Range(
-                f32::from_bits((bits >> 32) as u32),
-                f32::from_bits(bits as u32),
-            ),
-            Kind::Enum { .. } => Value::Choice(bits as u8),
-            Kind::List { .. } | Kind::Text { .. } => Value::Bool(false),
-        }
+    pub fn unpack(bits: u64, kind: Kind) -> Option<Value> {
+        Some(match kind {
+            Kind::Toggle { .. } => Value::Bool(flag(bits)),
+            Kind::Slider { .. } => Value::Num(num(bits)),
+            Kind::Range { .. } => {
+                let (lo, hi) = range(bits);
+                Value::Range(lo, hi)
+            }
+            Kind::Enum { .. } => Value::Choice(choice(bits)),
+            Kind::List { .. } | Kind::Text { .. } => return None,
+        })
     }
+}
+
+pub(super) fn flag(bits: u64) -> bool {
+    bits & 1 != 0
+}
+
+pub(super) fn num(bits: u64) -> f32 {
+    f32::from_bits(bits as u32)
+}
+
+pub(super) fn range(bits: u64) -> (f32, f32) {
+    (
+        f32::from_bits((bits >> 32) as u32),
+        f32::from_bits(bits as u32),
+    )
+}
+
+pub(super) fn choice(bits: u64) -> u8 {
+    bits as u8
+}
+
+pub(super) fn default_bits(kind: Kind) -> u64 {
+    Value::default_of(kind).map_or(0, Value::pack)
 }
 
 #[cfg(test)]
@@ -78,7 +101,7 @@ mod tests {
             ),
         ];
         for (v, k) in cases {
-            assert_eq!(Value::unpack(v.pack(), k), v, "{v:?}");
+            assert_eq!(Value::unpack(v.pack(), k), Some(v), "{v:?}");
         }
     }
 }

@@ -3,6 +3,10 @@
 use crate::entities::geom::{BakedModel, CubeList, LayerDef, MeshDef, PartPose, PartState};
 use crate::entities::state::EntityState;
 
+const SEGMENT_NAMES: [&str; 7] = [
+    "segment0", "segment1", "segment2", "segment3", "segment4", "segment5", "segment6",
+];
+
 const SILVERFISH_SIZES: [[i32; 3]; 7] = [
     [3, 2, 2],
     [4, 3, 2],
@@ -101,7 +105,7 @@ fn wriggle(
 ) {
     for i in 0..count {
         let phase = st.age_ticks * 0.9 + i as f32 * 0.15 * 3.1415927;
-        let id = model.id(&format!("segment{i}"));
+        let id = model.id(SEGMENT_NAMES[i]);
         parts[id].y_rot = phase.cos() * 3.1415927 * yaw_scale * (1 + (i as i32 - 2).abs()) as f32;
         parts[id].x = phase.sin() * 3.1415927 * x_scale * (i as i32 - 2).abs() as f32;
     }

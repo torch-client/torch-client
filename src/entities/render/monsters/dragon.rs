@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::{Quat, Transform};
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::dragon;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -24,12 +25,12 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/enderdragon/dragon".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/enderdragon/dragon".into()
 }
 
-fn eyes_texture(_st: &EntityState) -> String {
-    "entity/enderdragon/dragon_eyes".to_string()
+fn eyes_texture(_st: &EntityState) -> TexturePath {
+    "entity/enderdragon/dragon_eyes".into()
 }
 
 fn root(st: &EntityState) -> RootPose {

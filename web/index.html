@@ -71,7 +71,7 @@
 <canvas id="canvas" hidden></canvas>
 
 <script type="module">
-  import init, { start_web, take_web_assets, asset_cache_key } from "./torch-client.js";
+  import init, { start_web, take_web_assets, asset_cache_key, ships_assets } from "./torch-client.js";
 
   const status = document.getElementById("status");
   const label = document.getElementById("label");
@@ -286,9 +286,11 @@
     const fromStore = assets !== null;
     if (assets) {
       say(`using the ${(assets.length / 1048576).toFixed(1)} MB stored earlier…`);
-    } else {
+    } else if (ships_assets()) {
       const assetBytes = await fetchWithProgress("./assets.bin", progress).catch(() => null);
       assets = assetBytes ? new Uint8Array(assetBytes) : new Uint8Array();
+    } else {
+      assets = new Uint8Array();
     }
 
     say("initializing client, this may take a moment…");

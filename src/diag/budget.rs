@@ -10,19 +10,19 @@ fn now_us() -> u64 {
 }
 
 static OURS: AtomicU64 = AtomicU64::new(0);
-#[derive(Clone, Copy)]
-#[repr(usize)]
-pub enum Slot {
-    Light,
-    Mesh,
-    Gui,
-    Occlusion,
-    Poll,
-    Hand,
-    Post,
+
+counted! {
+    pub enum Slot / SLOT_COUNT {
+        Light,
+        Mesh,
+        Gui,
+        Occlusion,
+        Poll,
+        Hand,
+        Post,
+    }
 }
 
-const SLOT_COUNT: usize = Slot::Post as usize + 1;
 static SLOTS: [AtomicU64; SLOT_COUNT] = [const { AtomicU64::new(0) }; SLOT_COUNT];
 
 static VISIBLE_COLUMNS: AtomicU64 = AtomicU64::new(0);
@@ -32,16 +32,16 @@ static DRAWN_ENTITIES: AtomicU64 = AtomicU64::new(0);
 static VIEWS: AtomicU64 = AtomicU64::new(0);
 static DRAWS: AtomicU64 = AtomicU64::new(0);
 static BOT: AtomicU64 = AtomicU64::new(0);
-#[derive(Clone, Copy)]
-#[repr(usize)]
-pub enum Phase {
-    Upload,
-    Acquire,
-    Prepare,
-    Draw,
+
+counted! {
+    pub enum Phase / PHASE_COUNT {
+        Upload,
+        Acquire,
+        Prepare,
+        Draw,
+    }
 }
 
-const PHASE_COUNT: usize = Phase::Draw as usize + 1;
 static PHASES: [AtomicU64; PHASE_COUNT] = [const { AtomicU64::new(0) }; PHASE_COUNT];
 static FRAMES: AtomicU64 = AtomicU64::new(0);
 static RENDERED: AtomicU64 = AtomicU64::new(0);

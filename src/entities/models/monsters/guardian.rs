@@ -4,6 +4,11 @@ use crate::entities::geom::{BakedModel, CubeList, LayerDef, MeshDef, PartPose, P
 use crate::entities::state::EntityState;
 use crate::util::mth::DEG_TO_RAD;
 
+const SPIKE_NAMES: [&str; 12] = [
+    "spike0", "spike1", "spike2", "spike3", "spike4", "spike5", "spike6", "spike7", "spike8",
+    "spike9", "spike10", "spike11",
+];
+
 const SPIKE_X_ROT: [f32; 12] = [
     1.75, 0.25, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 1.25, 0.75, 0.0, 0.0,
 ];
@@ -124,7 +129,7 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
 
     let withdrawal = (1.0 - st.extras.spikes_animation) * 0.55;
     for i in 0..12 {
-        let id = model.id(&format!("spike{i}"));
+        let id = model.id(SPIKE_NAMES[i]);
         parts[id].x = spike_x(i, st.age_ticks, withdrawal);
         parts[id].y = spike_y(i, st.age_ticks, withdrawal);
         parts[id].z = spike_z(i, st.age_ticks, withdrawal);

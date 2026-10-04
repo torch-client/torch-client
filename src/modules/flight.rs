@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 
-use super::registry::{Id, flight as setting};
+use super::registry::{Id, flight as setting, options};
 use super::{Edge, Phase, store};
 
 pub const SINK_STEP: f64 = 0.031_30;
@@ -18,11 +18,12 @@ pub enum State {
     Release,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum AntiKick {
-    Off,
-    Drop,
-    Packet,
+options! {
+    pub enum AntiKick {
+        Off = "Off",
+        Drop = "Drop",
+        Packet = "Packet",
+    }
 }
 
 pub fn poll() -> State {
@@ -37,19 +38,15 @@ pub fn poll() -> State {
         Phase::Running => {}
     }
 
-    let speed = s.num(Id::Flight, setting::SPEED);
-    let mode = match s.choice(Id::Flight, setting::ANTI_KICK) {
-        1 => AntiKick::Drop,
-        2 => AntiKick::Packet,
-        _ => AntiKick::Off,
-    };
+    let speed = s.num(setting::SPEED);
+    let mode = s.choice(setting::ANTI_KICK);
     if mode == AntiKick::Off {
         idle();
         return State::On(speed);
     }
 
-    let every = s.num(Id::Flight, setting::EVERY).max(1.0) as u32;
-    let hold = s.num(Id::Flight, setting::FOR).max(1.0) as u32;
+    let every = s.num(setting::EVERY).max(1.0) as u32;
+    let hold = s.num(setting::FOR).max(1.0) as u32;
     let window = PHASE.fetch_add(1, Relaxed) % (every + hold) >= every;
 
     SINK.store(window && mode == AntiKick::Packet, Relaxed);

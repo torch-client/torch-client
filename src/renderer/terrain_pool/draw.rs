@@ -1,5 +1,6 @@
 use std::mem::size_of;
 use std::num::NonZeroU64;
+use std::sync::atomic::Ordering;
 
 use bevy::asset::uuid::Uuid;
 use bevy::asset::{AssetId, UntypedAssetId};
@@ -36,12 +37,12 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::sync_world::MainEntity;
 use bevy::render::texture::GpuImage;
-use bevy::render::view::ExtractedView;
+use bevy::render::view::{ExtractedView, RetainedViewEntity};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::{Shader, ShaderDefVal};
 
 use super::cull::{CullBuffers, DirectLists, TerrainViews};
-use super::pools::TerrainPools;
+use super::pools::{SlotTable, TerrainPools};
 use super::{
     STREAM_CUTOUT, STREAM_SOLID, STREAM_WATER, STREAMS, SlotMeta, TerrainParams, TerrainShaders,
     TerrainTextures, TerrainTier, TerrainView,
@@ -60,13 +61,13 @@ use bevy::render::render_resource::{
     StencilFaceState, StencilState, VertexState,
 };
 
-const TERRAIN_GROUP: usize = 2;
+pub const TERRAIN_GROUP: usize = 2;
 
 const VERTEX_STRIDE: u64 = 20;
 
 const TERRAIN_ASSET_TAG: u128 = 0x7e_77a1 << 64;
 
-fn packed_vertex_layout() -> VertexBufferLayout {
+pub(crate) fn packed_vertex_layout() -> VertexBufferLayout {
     VertexBufferLayout {
         array_stride: VERTEX_STRIDE,
         step_mode: VertexStepMode::Vertex,
@@ -171,6 +172,9 @@ pub struct TerrainPipeline {
     layout_direct: BindGroupLayoutDescriptor,
 }
 
+#[derive(Resource, Default)]
+pub struct PackTakeover(pub bool);
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TerrainPipelineKey {
     pub view: MeshPipelineKey,
@@ -178,7 +182,11 @@ pub struct TerrainPipelineKey {
     pub direct: bool,
     pub shadow: bool,
     pub fancy: bool,
+    pub specular: bool,
 }
+
+#[cfg(feature = "shader_support")]
+pub const SLOT_TABLE_BINDING: u32 = 5;
 
 fn terrain_layouts() -> (BindGroupLayoutDescriptor, BindGroupLayoutDescriptor) {
     let meta_size = NonZeroU64::new(size_of::<SlotMeta>() as u64);
@@ -250,7 +258,7 @@ impl FromWorld for TerrainPipeline {
 }
 
 impl TerrainPipeline {
-    fn terrain_layout(&self, direct: bool) -> BindGroupLayoutDescriptor {
+    pub fn terrain_layout(&self, direct: bool) -> BindGroupLayoutDescriptor {
         if direct {
             self.layout_direct.clone()
         } else {
@@ -262,6 +270,9 @@ impl TerrainPipeline {
         let mut defs = Vec::new();
         if key.fancy {
             defs.push("FANCY_SHADERS".into());
+        }
+        if key.specular {
+            defs.push("SUN_SPECULAR".into());
         }
         if key.stream == STREAM_CUTOUT {
             defs.push("ALPHA_CUTOUT".into());
@@ -317,6 +328,7 @@ impl TerrainPipeline {
                 fragment.shader_defs.push(def);
             }
         }
+
         descriptor
     }
 
@@ -447,82 +459,138 @@ impl<P: TerrainItem> RenderCommand<P> for DrawTerrain {
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let (pool_index, stream) = item.pool_stream();
-        let pools = pools.into_inner();
-        let Some(pool) = pools.pools.get(pool_index as usize) else {
-            return RenderCommandResult::Skip;
+        let sources = StreamSources {
+            tier: tier.into_inner(),
+            pools: pools.into_inner(),
+            cull: cull.into_inner(),
+            views: views.into_inner(),
+            lists: lists.into_inner(),
         };
-        pass.set_vertex_buffer(0, pool.vertices.slice(..));
-        pass.set_index_buffer(pool.indices.slice(..), IndexFormat::Uint32);
-
-        if tier.indirect {
-            let cull = cull.into_inner();
-            let Some(&view_index) = views.into_inner().index.get(&view.retained_view_entity) else {
-                return RenderCommandResult::Failure("terrain view has no cull slot");
-            };
-            let region = ((view_index * cull.pool_count) + pool_index) * STREAMS + stream;
-            let commands_offset = region as u64 * cull.slot_cap as u64 * INDIRECT_ARGS_SIZE;
-            if tier.count {
-                pass.multi_draw_indexed_indirect_count(
-                    &cull.commands,
-                    commands_offset,
-                    &cull.counts,
-                    region as u64 * 4,
-                    cull.slot_cap,
-                );
-            } else {
-                pass.multi_draw_indexed_indirect(&cull.commands, commands_offset, cull.slot_cap);
-            }
-            return RenderCommandResult::Success;
-        }
-
-        let Some(slots) = lists
-            .into_inner()
-            .0
-            .get(&(view.retained_view_entity, stream))
-        else {
-            return RenderCommandResult::Success;
-        };
-
-        let mut run: Option<(u32, u32, i32)> = None;
-
-        for &slot in slots {
-            let meta = &pools.meta_cpu[slot as usize];
-            if meta.pool != pool_index {
-                continue;
-            }
-            let (first, count) = match stream {
-                STREAM_SOLID => (meta.first_index, meta.solid_count),
-                STREAM_CUTOUT => (
-                    meta.first_index + meta.solid_count,
-                    meta.index_count - meta.solid_count,
-                ),
-                _ => (meta.first_index, meta.index_count),
-            };
-            if count == 0 {
-                continue;
-            }
-
-            let base = meta.base_vertex as i32;
-            match run {
-                Some((start, end, run_base)) if end == first && run_base == base => {
-                    run = Some((start, first + count, base));
-                }
-                Some((start, end, run_base)) => {
-                    pass.draw_indexed(start..end, run_base, 0..1);
-                    run = Some((first, first + count, base));
-                }
-                None => {
-                    run = Some((first, first + count, base));
-                }
+        match draw_region(
+            pass,
+            &sources,
+            view.retained_view_entity,
+            pool_index,
+            stream,
+        ) {
+            Ok(()) => RenderCommandResult::Success,
+            Err(DrawSkipped::NoPool) => RenderCommandResult::Skip,
+            Err(DrawSkipped::NoCullSlot) => {
+                RenderCommandResult::Failure("terrain view has no cull slot")
             }
         }
-
-        if let Some((start, end, base)) = run {
-            pass.draw_indexed(start..end, base, 0..1);
-        }
-
-        RenderCommandResult::Success
     }
+}
+
+pub struct StreamSources<'w> {
+    pub tier: &'w TerrainTier,
+    pub pools: &'w TerrainPools,
+    pub cull: &'w CullBuffers,
+    pub views: &'w TerrainViews,
+    pub lists: &'w DirectLists,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawSkipped {
+    NoPool,
+    NoCullSlot,
+}
+
+pub fn draw_region<'w>(
+    pass: &mut TrackedRenderPass<'w>,
+    sources: &StreamSources<'w>,
+    view: RetainedViewEntity,
+    pool_index: u32,
+    stream: u32,
+) -> Result<(), DrawSkipped> {
+    let StreamSources {
+        tier,
+        pools,
+        cull,
+        views,
+        lists,
+    } = *sources;
+    let Some(pool) = pools.pools.get(pool_index as usize) else {
+        return Err(DrawSkipped::NoPool);
+    };
+    pass.set_vertex_buffer(0, pool.vertices.slice(..));
+    pass.set_index_buffer(pool.indices.slice(..), IndexFormat::Uint32);
+
+    if tier.indirect {
+        let Some(&view_index) = views.index.get(&view) else {
+            return Err(DrawSkipped::NoCullSlot);
+        };
+        let region = ((view_index * cull.pool_count) + pool_index) * STREAMS + stream;
+        let commands_offset = region as u64 * cull.slot_cap as u64 * INDIRECT_ARGS_SIZE;
+        if stream == STREAM_WATER {
+            let count = cull.water_count(view_index, pool_index);
+            if count > 0 {
+                pass.multi_draw_indexed_indirect(&cull.commands, commands_offset, count);
+            }
+        } else if tier.count {
+            pass.multi_draw_indexed_indirect_count(
+                &cull.commands,
+                commands_offset,
+                &cull.counts,
+                region as u64 * 4,
+                cull.slot_cap,
+            );
+        } else {
+            let draw_end = pools.draw_end.min(cull.slot_cap);
+            if draw_end > 0 {
+                pass.multi_draw_indexed_indirect(&cull.commands, commands_offset, draw_end);
+            }
+        }
+        return Ok(());
+    }
+
+    let Some(slots) = lists
+        .0
+        .get(&view)
+        .and_then(|per_view| per_view.get(stream as usize))
+    else {
+        return Ok(());
+    };
+
+    let mut run: Option<(u32, u32)> = None;
+    let mut draws = 0usize;
+
+    let pool_of = |slot: u32| pools.meta_cpu[slot as usize].pool;
+    let start = slots.partition_point(|&slot| pool_of(slot) < pool_index);
+    let end = start + slots[start..].partition_point(|&slot| pool_of(slot) == pool_index);
+
+    for &slot in &slots[start..end] {
+        let (first, count) = pools.meta_cpu[slot as usize].stream_range(stream);
+        if count == 0 {
+            continue;
+        }
+        match run {
+            Some((start, end)) if end == first => {
+                run = Some((start, first + count));
+            }
+            Some((start, end)) => {
+                pass.draw_indexed(start..end, 0, 0..1);
+                draws += 1;
+                run = Some((first, first + count));
+            }
+            None => {
+                run = Some((first, first + count));
+            }
+        }
+    }
+
+    if let Some((start, end)) = run {
+        pass.draw_indexed(start..end, 0, 0..1);
+        draws += 1;
+    }
+    if draws > 0 {
+        pools
+            .stats
+            .0
+            .draws_pending
+            .fetch_add(draws, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 const INDIRECT_ARGS_SIZE: u64 = 20;
@@ -572,18 +640,26 @@ pub fn queue_terrain(
         Query<(&ExtractedView, &LightEntity)>,
     ),
     ticks: SystemChangeTick,
+    #[cfg(feature = "shader_support")] takeover: Option<Res<PackTakeover>>,
 ) {
     if pools.pools.is_empty() {
         return;
     }
     let direct = !tier.indirect;
-    let fancy = crate::renderer::terrain::builtin_shaders_enabled();
+    let fancy = crate::renderer::terrain::builtin_world_shading();
+    let specular = fancy && crate::renderer::terrain::sun_specular_enabled();
     let change_tick = ticks.this_run();
-    let opaque_draw = opaque_draws.read().id::<DrawTerrainMain>();
-    let alpha_draw = alpha_draws.read().id::<DrawTerrainMain>();
     let transparent_draw = transparent_draws.read().id::<DrawTerrainMain>();
     #[cfg(feature = "builtin_shaders")]
     let shadow_draw = shadow_draws.read().id::<DrawTerrainShadow>();
+
+    let opaque_draw = opaque_draws.read().id::<DrawTerrainMain>();
+    let alpha_draw = alpha_draws.read().id::<DrawTerrainMain>();
+
+    #[cfg(feature = "shader_support")]
+    if takeover.is_some_and(|t| t.0) {
+        return;
+    }
 
     for (view, is_terrain, lights) in views.iter() {
         if !is_terrain {
@@ -604,6 +680,7 @@ pub fn queue_terrain(
                         direct,
                         shadow,
                         fancy,
+                        specular,
                     },
                 )
             };
@@ -687,6 +764,7 @@ pub fn queue_terrain(
                                 direct,
                                 shadow: true,
                                 fancy,
+                                specular: false,
                             },
                         );
                         phase.add(
@@ -729,7 +807,6 @@ pub fn prepare_terrain_bind_group(
     device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<TerrainPipeline>,
-    tier: Res<TerrainTier>,
     pools: Res<TerrainPools>,
     textures: Option<Res<TerrainTextures>>,
     images: Res<RenderAssets<GpuImage>>,
@@ -752,40 +829,31 @@ pub fn prepare_terrain_bind_group(
         return;
     }
 
-    let layout = pipeline_cache.get_bind_group_layout(if tier.indirect {
-        &pipeline.layout_indirect
-    } else {
-        &pipeline.layout_direct
-    });
-    let group = if tier.indirect {
-        device.create_bind_group(
+    let group = match &pools.table {
+        SlotTable::Indirect { meta, .. } => device.create_bind_group(
             "terrain",
-            &layout,
+            &pipeline_cache.get_bind_group_layout(&pipeline.layout_indirect),
             &BindGroupEntries::sequential((
                 &atlas.texture_view,
                 &atlas.sampler,
                 &lightmap.texture_view,
                 &lightmap.sampler,
                 params.0.as_entire_binding(),
-                pools.meta.as_entire_binding(),
+                meta.as_entire_binding(),
             )),
-        )
-    } else {
-        let Some(origins) = pools.origins_view.as_ref() else {
-            return;
-        };
-        device.create_bind_group(
+        ),
+        SlotTable::Direct { origins_view, .. } => device.create_bind_group(
             "terrain",
-            &layout,
+            &pipeline_cache.get_bind_group_layout(&pipeline.layout_direct),
             &BindGroupEntries::sequential((
                 &atlas.texture_view,
                 &atlas.sampler,
                 &lightmap.texture_view,
                 &lightmap.sampler,
                 params.0.as_entire_binding(),
-                origins,
+                origins_view,
             )),
-        )
+        ),
     };
     bind_group.group = Some(group);
     bind_group.key = Some(key);
@@ -803,17 +871,18 @@ pub fn build(app: &mut App) {
     render_app
         .init_resource::<SpecializedRenderPipelines<TerrainPipeline>>()
         .init_resource::<TerrainBindGroup>()
+        .init_resource::<PackTakeover>()
         .add_render_command::<Opaque3d, DrawTerrainMain>()
         .add_render_command::<AlphaMask3d, DrawTerrainMain>()
-        .add_render_command::<Transparent3d, DrawTerrainMain>()
-        .add_systems(
-            Render,
-            (
-                prepare_params.in_set(RenderSystems::PrepareResources),
-                prepare_terrain_bind_group.in_set(RenderSystems::PrepareBindGroups),
-                queue_terrain.in_set(RenderSystems::Queue),
-            ),
-        );
+        .add_render_command::<Transparent3d, DrawTerrainMain>();
+    render_app.add_systems(
+        Render,
+        (
+            prepare_params.in_set(RenderSystems::PrepareResources),
+            prepare_terrain_bind_group.in_set(RenderSystems::PrepareBindGroups),
+            queue_terrain.in_set(RenderSystems::Queue),
+        ),
+    );
 
     #[cfg(feature = "builtin_shaders")]
     render_app

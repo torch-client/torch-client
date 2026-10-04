@@ -21,9 +21,11 @@ pub mod dialog;
 pub mod disconnected;
 pub mod draw;
 pub mod focus;
-pub mod gui_material;
 pub mod health;
 pub mod hud;
+#[cfg(feature = "hud_editor")]
+pub mod hud_editor;
+pub mod hud_layout;
 pub mod keybinds;
 pub mod menu;
 pub mod multiplayer;
@@ -31,13 +33,15 @@ pub mod options;
 pub mod painter;
 pub mod pause;
 pub mod ping;
-pub mod player_faces;
 #[cfg(feature = "skins")]
+pub mod player_faces;
 pub mod pool;
 #[cfg(test)]
 pub mod preview;
 pub mod profile;
 pub mod render;
+#[cfg(resource_packs)]
+pub mod resourcepacks;
 pub mod screens;
 pub mod serverlist;
 #[cfg(feature = "shader_support")]
@@ -88,6 +92,8 @@ pub enum Screen {
     GameSettings,
     #[cfg(feature = "audio")]
     AudioSettings,
+    #[cfg(resource_packs)]
+    ResourcePacks,
     #[cfg(feature = "shader_support")]
     ShaderPacks,
     #[cfg(feature = "shader_support")]
@@ -111,6 +117,9 @@ pub enum Screen {
 
     #[cfg(feature = "click_gui")]
     ClickGui,
+
+    #[cfg(feature = "hud_editor")]
+    HudEditor,
 }
 
 impl Screen {
@@ -157,6 +166,10 @@ impl Screen {
         if self == Screen::Dialog {
             return true;
         }
+        #[cfg(feature = "hud_editor")]
+        if self == Screen::HudEditor {
+            return true;
+        }
         #[cfg(feature = "click_gui")]
         {
             self == Screen::ClickGui
@@ -174,6 +187,10 @@ impl Screen {
         }
         #[cfg(feature = "audio")]
         if self == Screen::AudioSettings {
+            return true;
+        }
+        #[cfg(resource_packs)]
+        if self == Screen::ResourcePacks {
             return true;
         }
         matches!(
@@ -310,6 +327,8 @@ pub const MAX_FPS_MIN: u32 = 10;
 pub const MAX_FPS_UNLIMITED: u32 = 260;
 pub const MAX_FPS_DEFAULT: u32 = if cfg!(feature = "mobile_ui") { 30 } else { 60 };
 
+pub const VSYNC_DEFAULT: bool = !cfg!(target_os = "android");
+
 pub const RENDER_DISTANCE_DEFAULT: u32 = if cfg!(feature = "mobile_ui") { 2 } else { 8 };
 
 pub const SMOOTH_LIGHTING_DEFAULT: bool = !cfg!(feature = "mobile_ui");
@@ -391,7 +410,9 @@ impl Default for GuiOptions {
                 .map(|v| v as u32)
                 .unwrap_or(MAX_FPS_DEFAULT)
                 .clamp(MAX_FPS_MIN, MAX_FPS_UNLIMITED),
-            vsync: value("vsync").and_then(|v| v.as_bool()).unwrap_or(true),
+            vsync: value("vsync")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(VSYNC_DEFAULT),
             auto_jump: value("autoJump")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(AUTO_JUMP_DEFAULT),
@@ -532,6 +553,7 @@ pub struct GuiState {
     pub clickgui: clickgui::ClickGuiState,
     #[cfg(feature = "click_gui")]
     pub clickgui_parent: Screen,
+    pub hud_state: hud_layout::HudState,
     pub options: GuiOptions,
     pub keybinds: keybinds::KeyBinds,
     pub controls_scroll: f32,
@@ -551,6 +573,8 @@ pub struct GuiState {
     pub confirm_clear_assets: bool,
     #[cfg(feature = "shader_support")]
     pub shaderpacks: shaderpacks::State,
+    #[cfg(resource_packs)]
+    pub resourcepacks: resourcepacks::State,
     pub options_parent: Screen,
     pub disconnect_reason: Option<Vec<crate::text::Span>>,
     pub connect: Option<String>,
@@ -563,11 +587,19 @@ pub struct GuiState {
 }
 
 impl GuiState {
+    pub fn anvil_typing(&self) -> bool {
+        self.screen == Screen::Container(ContainerKind::Anvil) && self.container.anvil.editable()
+    }
+
     pub fn in_menu(&self) -> bool {
         if self.screen.is_menu() || (self.screen.is_options() && self.options_parent.is_menu()) {
             return true;
         }
         if self.screen == Screen::Dialog && self.dialog.parent().is_menu() {
+            return true;
+        }
+        #[cfg(feature = "hud_editor")]
+        if self.screen == Screen::HudEditor && self.hud_state.over_menu {
             return true;
         }
         #[cfg(feature = "click_gui")]
@@ -592,7 +624,7 @@ pub struct Snapshot {
     pub attack_strength: f32,
     pub attack_delay: f32,
     pub targeted_entity: bool,
-    pub hotbar: Vec<SlotStack>,
+    pub hotbar: std::sync::Arc<[SlotStack]>,
     pub carried: SlotStack,
     pub selected: u8,
     pub gamemode: Gamemode,
@@ -679,7 +711,7 @@ mod tests {
 
         let snap = Snapshot {
             menu_slots,
-            hotbar,
+            hotbar: hotbar.into(),
             ..Default::default()
         };
 

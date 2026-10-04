@@ -22,11 +22,15 @@ pub struct Glyph {
     pub advance: f32,
 }
 
+pub struct FontPixels {
+    pub pages: RgbaImage,
+    pub unihex: Vec<u8>,
+}
+
 pub struct Font {
-    pub image: RgbaImage,
     glyphs: HashMap<char, Glyph>,
+    ascii: [Option<Glyph>; 128],
     unihex_glyphs: HashMap<char, Glyph>,
-    pub unihex_image: Vec<u8>,
     pub unihex_dims: (u32, u32),
     by_advance: HashMap<i32, Vec<char>>,
     missing: Glyph,
@@ -222,14 +226,30 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 
 fn resolve(assets: &Path, id: &str, out: &mut Vec<Provider>) {
     let path = font_json_path(assets, id);
-    let text = crate::platform::assets::read_to_string(&path)
-        .unwrap_or_else(|| panic!("font definition {} is missing", path.display()));
-    let json: serde_json::Value = serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("font definition {}: {e}", path.display()));
+    let mut parsed = false;
+    for text in crate::platform::assets::read_stack(&path) {
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(json) => {
+                parsed = true;
+                resolve_file(assets, &json, out);
+            }
+            Err(e) => crate::log_warn!("font", "font definition {}: {e}", path.display()),
+        }
+    }
+    if !parsed {
+        panic!("font definition {} is missing", path.display());
+    }
+}
+
+fn resolve_file(assets: &Path, json: &serde_json::Value, out: &mut Vec<Provider>) {
     let providers = json["providers"].as_array().cloned().unwrap_or_default();
     for p in providers.iter().rev() {
         match p["type"].as_str().unwrap_or("") {
-            "reference" => resolve(assets, p["id"].as_str().unwrap(), out),
+            "reference" => {
+                if let Some(id) = p["id"].as_str() {
+                    resolve(assets, id, out);
+                }
+            }
             "space" => {
                 let mut advances = Vec::new();
                 if let Some(map) = p["advances"].as_object() {
@@ -242,14 +262,15 @@ fn resolve(assets: &Path, id: &str, out: &mut Vec<Provider>) {
                 out.push(Provider::Space(advances));
             }
             "bitmap" => {
-                let chars = p["chars"]
-                    .as_array()
-                    .unwrap()
+                let (Some(rows), Some(file)) = (p["chars"].as_array(), p["file"].as_str()) else {
+                    continue;
+                };
+                let chars = rows
                     .iter()
-                    .map(|row| row.as_str().unwrap().chars().collect::<Vec<char>>())
+                    .map(|row| row.as_str().unwrap_or("").chars().collect::<Vec<char>>())
                     .collect();
                 out.push(Provider::Bitmap {
-                    file: texture_path(assets, p["file"].as_str().unwrap()),
+                    file: texture_path(assets, file),
                     height: p["height"].as_i64().unwrap_or(8) as i32,
                     ascent: p["ascent"].as_i64().unwrap_or(7) as i32,
                     chars,
@@ -266,25 +287,33 @@ fn resolve(assets: &Path, id: &str, out: &mut Vec<Provider>) {
 }
 
 impl Font {
-    pub fn load(assets: &Path) -> Font {
+    pub fn load(assets: &Path) -> (Font, FontPixels) {
         let mut providers = Vec::new();
         resolve(assets, "minecraft:default", &mut providers);
         providers.reverse();
 
         let mut pages: Vec<(PathBuf, RgbaImage)> = Vec::new();
         let mut page_y: HashMap<PathBuf, u32> = HashMap::new();
+        let mut unreadable: Vec<PathBuf> = Vec::new();
         for p in &providers {
             if let Provider::Bitmap { file, .. } = p {
-                if page_y.contains_key(file) {
+                if page_y.contains_key(file) || unreadable.contains(file) {
                     continue;
                 }
-                let img = crate::platform::assets::open_image(file)
-                    .unwrap_or_else(|e| panic!("font page {}: {e}", file.display()))
-                    .to_rgba8();
+                let img = match crate::platform::assets::open_image(file) {
+                    Ok(img) => img.to_rgba8(),
+                    Err(e) => {
+                        crate::log_warn!("font", "font page {}: {e}", file.display());
+                        unreadable.push(file.clone());
+                        continue;
+                    }
+                };
                 page_y.insert(file.clone(), pages.iter().map(|(_, i)| i.height()).sum());
                 pages.push((file.clone(), img));
             }
         }
+        providers
+            .retain(|p| !matches!(p, Provider::Bitmap { file, .. } if unreadable.contains(file)));
         let mut unihex_paths: Vec<PathBuf> = Vec::new();
         for p in &providers {
             if let Provider::Unihex(path) = p {
@@ -362,8 +391,12 @@ impl Font {
         };
 
         const UNIHEX_COLS: u32 = 256;
-        let unihex_rows = (unihex_glyphs.len() as u32).div_ceil(UNIHEX_COLS).max(1);
-        let (unihex_w, unihex_h) = (UNIHEX_COLS * 16, unihex_rows * 16);
+        let (unihex_w, unihex_h) = if unihex_glyphs.is_empty() {
+            (0, 0)
+        } else {
+            let rows = (unihex_glyphs.len() as u32).div_ceil(UNIHEX_COLS);
+            (UNIHEX_COLS * 16, rows * 16)
+        };
         let mut unihex_image = vec![0u8; unihex_w as usize * unihex_h as usize];
         let mut unihex_rects: HashMap<char, [u32; 4]> = HashMap::new();
         for (i, (c, width, raw)) in unihex_glyphs.iter().enumerate() {
@@ -472,19 +505,26 @@ impl Font {
             v.sort_unstable();
         }
 
-        Font {
-            image,
+        let font = Font {
+            ascii: ascii_table(&glyphs),
             glyphs,
             unihex_glyphs: unihex_glyphs_out,
-            unihex_image,
             unihex_dims: (unihex_w, unihex_h),
             by_advance,
             missing,
             empty_chars: Vec::new(),
-        }
+        };
+        let pixels = FontPixels {
+            pages: image,
+            unihex: unihex_image,
+        };
+        (font, pixels)
     }
 
     pub fn glyph(&self, c: char) -> Option<&Glyph> {
+        if let Some(Some(g)) = self.ascii.get(c as usize) {
+            return Some(g);
+        }
         match self.glyphs.get(&c).or_else(|| self.unihex_glyphs.get(&c)) {
             Some(g) => Some(g),
             None if (c as u32) < 0x20 || (0x7f..0xa0).contains(&(c as u32)) => None,
@@ -493,6 +533,9 @@ impl Font {
     }
 
     pub fn is_unihex(&self, c: char) -> bool {
+        if let Some(Some(_)) = self.ascii.get(c as usize) {
+            return false;
+        }
         !self.glyphs.contains_key(&c) && self.unihex_glyphs.contains_key(&c)
     }
 
@@ -658,6 +701,10 @@ impl Font {
     }
 }
 
+fn ascii_table(glyphs: &HashMap<char, Glyph>) -> [Option<Glyph>; 128] {
+    std::array::from_fn(|i| glyphs.get(&(i as u8 as char)).copied())
+}
+
 fn merge_spans(chars: &[(char, Style)]) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
     for (c, style) in chars {
@@ -771,7 +818,7 @@ const BUILTIN: [(char, [u8; 8]); 66] = [
 ];
 
 impl Font {
-    pub fn builtin() -> Font {
+    pub fn builtin() -> (Font, FontPixels) {
         let cells = BUILTIN.len() as u32;
         let mut image = RgbaImage::new(cells * 8, 16);
         let white = image::Rgba([255, 255, 255, 255]);
@@ -840,16 +887,20 @@ impl Font {
             v.sort_unstable();
         }
 
-        Font {
-            image,
+        let font = Font {
+            ascii: ascii_table(&glyphs),
             glyphs,
             unihex_glyphs: HashMap::new(),
-            unihex_image: Vec::new(),
             unihex_dims: (0, 0),
             by_advance,
             missing,
             empty_chars: Vec::new(),
-        }
+        };
+        let pixels = FontPixels {
+            pages: image,
+            unihex: Vec::new(),
+        };
+        (font, pixels)
     }
 }
 
@@ -881,7 +932,7 @@ mod tests {
     }
 
     fn font() -> Font {
-        Font::load(&assets())
+        Font::load(&assets()).0
     }
 
     #[test]
@@ -1048,14 +1099,14 @@ mod tests {
 
     #[test]
     fn dump_atlas_stats() {
-        let f = font();
+        let (f, pixels) = Font::load(&assets());
         println!(
             "font image {}x{}, {} glyphs, {} advance groups",
-            f.image.width(),
-            f.image.height(),
+            pixels.pages.width(),
+            pixels.pages.height(),
             f.glyphs.len(),
             f.by_advance.len()
         );
-        assert!(f.image.width() > 0 && f.image.height() > 0);
+        assert!(pixels.pages.width() > 0 && pixels.pages.height() > 0);
     }
 }

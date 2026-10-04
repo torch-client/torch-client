@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::Quat;
 
+use crate::entities::TexturePath;
 use crate::entities::models::animals::fox;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -29,13 +30,17 @@ fn root(st: &EntityState) -> RootPose {
     pose
 }
 
-fn texture(st: &EntityState) -> String {
-    let variant = if st.extras.variant_id == 1 {
-        "fox_snow"
-    } else {
-        "fox"
-    };
-    let sleep = if st.extras.sleeping { "_sleep" } else { "" };
-    let baby = if st.extras.is_baby { "_baby" } else { "" };
-    format!("entity/fox/{variant}{sleep}{baby}")
+fn texture(st: &EntityState) -> TexturePath {
+    let snow = st.extras.variant_id == 1;
+    match (snow, st.extras.sleeping, st.extras.is_baby) {
+        (false, false, false) => "entity/fox/fox",
+        (false, false, true) => "entity/fox/fox_baby",
+        (false, true, false) => "entity/fox/fox_sleep",
+        (false, true, true) => "entity/fox/fox_sleep_baby",
+        (true, false, false) => "entity/fox/fox_snow",
+        (true, false, true) => "entity/fox/fox_snow_baby",
+        (true, true, false) => "entity/fox/fox_snow_sleep",
+        (true, true, true) => "entity/fox/fox_snow_sleep_baby",
+    }
+    .into()
 }

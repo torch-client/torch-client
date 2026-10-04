@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 pub const SIZE: usize = 2048;
 const CELLS: usize = 4096;
 
@@ -9,7 +11,7 @@ const fn index(x: usize, y: usize, z: usize) -> usize {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct DataLayer {
-    data: Option<Box<[u8; SIZE]>>,
+    data: Option<Arc<[u8; SIZE]>>,
     default: u8,
 }
 
@@ -28,15 +30,29 @@ impl DataLayer {
         }
     }
 
-    pub fn from_bytes(data: Box<[u8; SIZE]>) -> Self {
+    pub fn from_bytes(data: &[u8; SIZE]) -> Self {
         Self {
-            data: Some(data),
+            data: Some(Arc::new(*data)),
             default: 0,
+        }
+    }
+
+    pub fn from_wire(data: &[u8; SIZE]) -> Self {
+        match uniform_nibble(data) {
+            Some(value) => Self::filled(value),
+            None => Self::from_bytes(data),
         }
     }
 
     pub fn bytes(&self) -> u64 {
         if self.data.is_some() { SIZE as u64 } else { 0 }
+    }
+
+    pub fn unshared_bytes(&self) -> u64 {
+        match &self.data {
+            Some(d) if Arc::strong_count(d) == 1 => SIZE as u64,
+            _ => 0,
+        }
     }
 
     #[inline]
@@ -81,7 +97,7 @@ impl DataLayer {
 
     fn materialise(&mut self) -> &mut [u8; SIZE] {
         let byte = self.default | (self.default << 4);
-        self.data.get_or_insert_with(|| Box::new([byte; SIZE]))
+        Arc::make_mut(self.data.get_or_insert_with(|| Arc::new([byte; SIZE])))
     }
 
     pub fn repeat_first_layer(&self) -> Self {
@@ -89,12 +105,21 @@ impl DataLayer {
             return self.clone();
         }
         let src = self.data.as_ref().expect("not homogenous");
-        let mut out = Box::new([0u8; SIZE]);
+        let mut out = Arc::new([0u8; SIZE]);
+        let dst = Arc::make_mut(&mut out);
         for slice in 0..16 {
-            out[slice * 128..(slice + 1) * 128].copy_from_slice(&src[..128]);
+            dst[slice * 128..(slice + 1) * 128].copy_from_slice(&src[..128]);
         }
-        Self::from_bytes(out)
+        Self {
+            data: Some(out),
+            default: 0,
+        }
     }
+}
+
+fn uniform_nibble(data: &[u8; SIZE]) -> Option<u8> {
+    let first = data[0];
+    ((first >> 4) == (first & 15) && data.iter().all(|&b| b == first)).then_some(first & 15)
 }
 
 impl Default for DataLayer {
@@ -130,6 +155,43 @@ mod tests {
         layer.set(3, 4, 5, 2);
         assert_eq!(layer.get(3, 4, 5), 2);
         assert_eq!(layer.get(4, 4, 5), 15);
+    }
+
+    #[test]
+    fn a_uniform_wire_layer_collapses_to_its_fill() {
+        let lit = DataLayer::from_wire(&[0xFF; SIZE]);
+        assert!(lit.is_definitely_homogenous());
+        assert_eq!(lit.bytes(), 0);
+        assert_eq!(lit.get(7, 7, 7), 15);
+
+        let dark = DataLayer::from_wire(&[0; SIZE]);
+        assert!(dark.is_definitely_homogenous());
+        assert_eq!(dark.get(0, 15, 0), 0);
+
+        let striped = DataLayer::from_wire(&[0x10; SIZE]);
+        assert!(!striped.is_definitely_homogenous());
+        assert_eq!(striped.get(0, 0, 0), 0);
+        assert_eq!(striped.get(1, 0, 0), 1);
+
+        let mut one_off = [0x77; SIZE];
+        one_off[SIZE - 1] = 0x78;
+        let one_off = DataLayer::from_wire(&one_off);
+        assert!(!one_off.is_definitely_homogenous());
+        assert_eq!(one_off.get(15, 15, 15), 7);
+        assert_eq!(one_off.get(14, 15, 15), 8);
+    }
+
+    #[test]
+    fn a_write_after_clone_copies_and_leaves_the_clone_alone() {
+        let mut engine = DataLayer::empty();
+        engine.set(1, 2, 3, 9);
+        let published = engine.clone();
+        assert_eq!(engine.unshared_bytes(), 0, "shared after the clone");
+        engine.set(1, 2, 3, 4);
+        assert_eq!(engine.get(1, 2, 3), 4);
+        assert_eq!(published.get(1, 2, 3), 9);
+        assert_eq!(engine.unshared_bytes(), SIZE as u64);
+        assert_eq!(published.unshared_bytes(), SIZE as u64);
     }
 
     #[test]

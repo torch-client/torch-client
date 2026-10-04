@@ -1,3 +1,5 @@
+#![cfg_attr(target_arch = "wasm32", feature(alloc_error_hook))]
+
 #[cfg(feature = "audio")]
 mod audio;
 mod blockentities;
@@ -20,6 +22,8 @@ mod play;
 #[cfg(feature = "multiversion")]
 mod protocol;
 mod renderer;
+#[cfg(resource_packs)]
+mod resourcepacks;
 mod session;
 #[cfg(feature = "shader_support")]
 mod shaderpack;
@@ -44,7 +48,7 @@ macro_rules! prof_span {
 use crate::session::SharedMutex;
 use azalea_protocol::packets::PROTOCOL_VERSION;
 use client::worker::JobQueue;
-use renderer::{build_block_atlas, build_item_ui_atlas};
+use renderer::build_block_atlas;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -129,6 +133,25 @@ pub(crate) fn install_crypto_provider() {
     });
 }
 
+#[cfg(all(
+    target_os = "android",
+    any(feature = "online_mode", feature = "asset_download", feature = "skins")
+))]
+pub(crate) fn android_tls_config() -> Option<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    match rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+    {
+        Ok(builder) => Some(builder.with_root_certificates(roots).with_no_client_auth()),
+        Err(e) => {
+            log_warn!("net", "no TLS config for Android: {e}");
+            None
+        }
+    }
+}
+
 #[cfg(not(any(
     feature = "online_mode",
     feature = "eagler",
@@ -140,6 +163,7 @@ pub(crate) fn install_crypto_provider() {}
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn start_web(assets: Vec<u8>, username: String, address: String) -> Result<(), String> {
     console_error_panic_hook::set_once();
+    diag::panic_report::install_alloc_error_hook();
     step("start_web entered (build: breadcrumbs)");
 
     platform::keyboard::install_devtools_passthrough();
@@ -174,9 +198,7 @@ pub(crate) fn bake_block_lookups() {
     let textures_dir = textures_dir().to_string_lossy().into_owned();
     let textures = renderer::Textures::blocks(&textures_dir);
     let (atlas, tiles) = build_block_atlas(&textures, &textures_dir);
-    ATLAS_ROWS
-        .set((atlas.height() / renderer::TILE_PX).max(1))
-        .ok();
+    ATLAS_ROWS.set(renderer::atlas_rows(&atlas)).ok();
     TEXTURE_MAP.set(tiles).ok();
 }
 
@@ -184,6 +206,12 @@ pub(crate) fn bake_block_lookups() {
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn take_web_assets() -> Option<Vec<u8>> {
     client::assets::take_installed()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn ships_assets() -> bool {
+    !cfg!(feature = "asset_download")
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -243,13 +271,20 @@ fn android_main(app: bevy::android::android_activity::AndroidApp) {
     let _ = bevy::android::ANDROID_APP.set(app.clone());
     platform::fullscreen::android_init();
 
-    let packed = match platform::assets::android::read_apk_archive(&app) {
-        Ok(packed) => packed,
+    match platform::assets::android::read_apk_archive(&app) {
+        Ok(packed) => {
+            step(&format!(
+                "unpacking {} bytes of bundled assets",
+                packed.len()
+            ));
+            if let Err(e) = load_assets(packed) {
+                return step(&format!("assets refused: {e}"));
+            }
+        }
+        Err(_) if cfg!(feature = "asset_download") => {
+            step("no bundled assets; mounting a downloaded set or asking for one");
+        }
         Err(e) => return step(&format!("no assets in the apk: {e}")),
-    };
-    step(&format!("unpacking {} bytes of assets", packed.len()));
-    if let Err(e) = load_assets(packed) {
-        return step(&format!("assets refused: {e}"));
     }
 
     platform::assets::android::apply_env(&app);
@@ -378,7 +413,11 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
     log_info!("assets", "textures {textures_dir}");
 
     let have_assets = assets_present();
-    let (atlas_image, tex_map, item_atlas_image, item_tile_map, gui_atlas) = if have_assets {
+    #[cfg(resource_packs)]
+    if have_assets {
+        resourcepacks::mount();
+    }
+    let (atlas_image, tex_map, gui_atlas) = if have_assets {
         step("building the atlases");
         let started = platform::time::Instant::now();
         let atlas_work = |assets_root: &std::path::Path| {
@@ -393,31 +432,27 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
         };
         let block_work = || {
             let t = platform::time::Instant::now();
-            let textures = renderer::Textures::load(&textures_dir);
+            let textures = renderer::Textures::blocks(&textures_dir);
             let decoded = t.elapsed();
             let (atlas_image, tex_map) = build_block_atlas(&textures, &textures_dir);
-            let (item_atlas_image, item_tile_map) = build_item_ui_atlas(&textures);
             log_info!(
                 "assets",
-                "block + item atlases: {:.0} ms ({:.0} ms decoding {} block and {} item sprites)",
+                "block atlas: {:.0} ms ({:.0} ms decoding {} block sprites)",
                 t.elapsed().as_secs_f32() * 1000.0,
                 decoded.as_secs_f32() * 1000.0,
-                textures.block.len(),
-                textures.item.len()
+                textures.block.len()
             );
-            (atlas_image, tex_map, item_atlas_image, item_tile_map)
+            (atlas_image, tex_map)
         };
 
         #[cfg(target_arch = "wasm32")]
-        let (gui_atlas, (atlas_image, tex_map, item_atlas_image, item_tile_map)) =
-            (atlas_work(assets_root), block_work());
+        let (gui_atlas, (atlas_image, tex_map)) = (atlas_work(assets_root), block_work());
         #[cfg(not(target_arch = "wasm32"))]
-        let (gui_atlas, (atlas_image, tex_map, item_atlas_image, item_tile_map)) =
-            std::thread::scope(|scope| {
-                let gui = scope.spawn(|| atlas_work(assets_root));
-                let rest = block_work();
-                (gui.join().expect("the gui atlas thread panicked"), rest)
-            });
+        let (gui_atlas, (atlas_image, tex_map)) = std::thread::scope(|scope| {
+            let gui = scope.spawn(|| atlas_work(assets_root));
+            let rest = block_work();
+            (gui.join().expect("the gui atlas thread panicked"), rest)
+        });
 
         log_info!(
             "assets",
@@ -425,19 +460,11 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
             started.elapsed().as_secs_f32() * 1000.0
         );
         let gui_atlas = Arc::new(gui_atlas);
-        (
-            atlas_image,
-            tex_map,
-            item_atlas_image,
-            item_tile_map,
-            gui_atlas,
-        )
+        (atlas_image, tex_map, gui_atlas)
     } else {
         log_info!("assets", "no asset set found; opening the download screen");
         step("no assets: building the boot atlas");
         (
-            renderer::placeholder_atlas(),
-            HashMap::new(),
             renderer::placeholder_atlas(),
             HashMap::new(),
             Arc::new(gui::atlas::GuiAtlas::boot()),
@@ -445,9 +472,7 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
     };
     if have_assets {
         TEXTURE_MAP.set(tex_map.clone()).ok();
-        ATLAS_ROWS
-            .set((atlas_image.height() / renderer::TILE_PX).max(1))
-            .ok();
+        ATLAS_ROWS.set(renderer::atlas_rows(&atlas_image)).ok();
     }
 
     let address = args.address;
@@ -519,8 +544,6 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
         shared,
         atlas_image,
         tex_map,
-        item_atlas_image,
-        item_tile_map,
         gui_atlas,
         startup,
         have_assets,

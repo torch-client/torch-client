@@ -19,21 +19,12 @@ fn is_fully_opaque(rgba: &image::RgbaImage) -> bool {
 
 pub struct Textures {
     pub block: BTreeMap<String, image::RgbaImage>,
-    pub item: BTreeMap<String, image::RgbaImage>,
 }
 
 impl Textures {
-    pub fn load(textures_dir: &str) -> Textures {
-        Textures {
-            block: decode_dir(&format!("{textures_dir}/block")),
-            item: decode_dir(&format!("{textures_dir}/item")),
-        }
-    }
-
     pub fn blocks(textures_dir: &str) -> Textures {
         Textures {
             block: decode_dir(&format!("{textures_dir}/block")),
-            item: BTreeMap::new(),
         }
     }
 }
@@ -90,26 +81,55 @@ fn decode_dir(dir: &str) -> BTreeMap<String, image::RgbaImage> {
     }
 }
 
-pub fn build_item_ui_atlas(textures: &Textures) -> (Image, HashMap<String, u32>) {
-    let mut entries: Vec<(&str, &image::RgbaImage)> =
-        Vec::with_capacity(textures.item.len() + textures.block.len());
-    entries.extend(textures.item.iter().map(|(k, v)| (k.as_str(), v)));
-    entries.extend(
-        textures
-            .block
-            .iter()
-            .filter(|(k, _)| !textures.item.contains_key(*k))
-            .map(|(k, v)| (k.as_str(), v)),
-    );
+#[cfg(feature = "shader_support")]
+pub(crate) type UntintedTiles = Vec<(u32, Vec<Vec<u8>>)>;
 
-    let (atlas_data, atlas_w, atlas_h, tile_map) = pack_tiles(&entries);
+#[cfg(feature = "shader_support")]
+static UNTINTED: std::sync::RwLock<Option<std::sync::Arc<UntintedTiles>>> =
+    std::sync::RwLock::new(None);
 
-    let image = super::rgba_image(atlas_w, atlas_h, atlas_data, RenderAssetUsages::default());
-    println!(
-        "[ItemAtlas] {} item/block UI textures loaded",
-        entries.len()
-    );
-    (image, tile_map)
+#[cfg(feature = "shader_support")]
+pub(crate) fn untinted_tiles() -> Option<std::sync::Arc<UntintedTiles>> {
+    UNTINTED.read().ok().and_then(|t| t.clone())
+}
+
+#[cfg(feature = "shader_support")]
+fn publish_untinted(
+    entries: &[(&str, &image::RgbaImage)],
+    biome_tinted: &[&str],
+    tiles: &HashMap<String, u32>,
+    n_mips: u32,
+) {
+    let (level0, atlas_w, atlas_h, _) = pack_tiles(entries);
+    let tile_px = atlas_w / ATLAS_COLS;
+    let chain = if n_mips > 1 {
+        build_mip_chain(&level0, atlas_w, atlas_h, n_mips)
+    } else {
+        level0
+    };
+    let mut out: UntintedTiles = Vec::with_capacity(biome_tinted.len());
+    for stem in biome_tinted {
+        let Some(&tile) = tiles.get(*stem) else {
+            continue;
+        };
+        let (tx, ty) = (tile % ATLAS_COLS, tile / ATLAS_COLS);
+        let mut offset = 0usize;
+        let mut levels = Vec::with_capacity(n_mips as usize);
+        for level in 0..n_mips {
+            let (lw, lh, ts) = (atlas_w >> level, atlas_h >> level, tile_px >> level);
+            let mut bytes = Vec::with_capacity((ts * ts * 4) as usize);
+            for row in 0..ts {
+                let start = offset + (((ty * ts + row) * lw + tx * ts) * 4) as usize;
+                bytes.extend_from_slice(&chain[start..start + (ts * 4) as usize]);
+            }
+            levels.push(bytes);
+            offset += (lw * lh * 4) as usize;
+        }
+        out.push((tile, levels));
+    }
+    if let Ok(mut slot) = UNTINTED.write() {
+        *slot = Some(std::sync::Arc::new(out));
+    }
 }
 
 pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> (Image, HashMap<String, u32>) {
@@ -128,11 +148,13 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> (Image, Has
     }
     let mut opaque: HashSet<String> = HashSet::new();
     let mut recoloured: BTreeMap<&str, image::RgbaImage> = BTreeMap::new();
+    #[cfg(feature = "shader_support")]
+    let mut biome_tinted: Vec<&str> = Vec::new();
     for (stem, rgba) in &textures.block {
         if stem == "grass_block_side_overlay" {
             continue;
         }
-        if let Some(new) = tinted(
+        if let Some((new, biome)) = tinted(
             rgba,
             stem,
             grass_tint,
@@ -141,6 +163,12 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> (Image, Has
             &textures.block,
         ) {
             recoloured.insert(stem.as_str(), new);
+            #[cfg(feature = "shader_support")]
+            if biome {
+                biome_tinted.push(stem.as_str());
+            }
+            #[cfg(not(feature = "shader_support"))]
+            let _ = biome;
         }
     }
     let mut entries: Vec<(&str, &image::RgbaImage)> = Vec::with_capacity(textures.block.len());
@@ -158,13 +186,23 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> (Image, Has
     OPAQUE_TEXTURES.set(opaque).ok();
 
     let (atlas_data, atlas_w, atlas_h, tex_to_tile) = pack_tiles(&entries);
+    #[cfg(feature = "shader_support")]
+    let untinted_entries: Vec<(&str, &image::RgbaImage)> = entries
+        .iter()
+        .map(|(stem, rgba)| match textures.block.get(*stem) {
+            Some(source) if biome_tinted.contains(stem) => (*stem, source),
+            _ => (*stem, *rgba),
+        })
+        .collect();
 
-    let n_mips = TILE_PX.trailing_zeros() + 1;
+    let n_mips = (atlas_w / ATLAS_COLS).trailing_zeros() + 1;
     let mip_data = if n_mips > 1 {
         build_mip_chain(&atlas_data, atlas_w, atlas_h, n_mips)
     } else {
         atlas_data
     };
+    #[cfg(feature = "shader_support")]
+    publish_untinted(&untinted_entries, &biome_tinted, &tex_to_tile, n_mips);
 
     let mut image = Image::new_uninit(
         Extent3d {
@@ -179,6 +217,8 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> (Image, Has
     image.texture_descriptor.mip_level_count = n_mips;
     image.data = Some(mip_data);
     image.sampler = block_atlas_sampler();
+    #[cfg(feature = "shader_support")]
+    super::packdraw::allow_display_view(&mut image);
     println!(
         "[Atlas] {} block textures loaded ({} fully opaque), atlas {}×{}, {} mip levels",
         entries.len(),
@@ -204,9 +244,10 @@ fn build_mip_chain(level0: &[u8], atlas_w: u32, atlas_h: u32, n_mips: u32) -> Ve
     let mut out = Vec::with_capacity(level0.len() * 2);
     out.extend_from_slice(level0);
 
+    let tile_px = atlas_w / ATLAS_COLS;
     for level in 1..n_mips {
-        let ts = TILE_PX >> level;
-        let f = TILE_PX / ts;
+        let ts = tile_px >> level;
+        let f = tile_px / ts;
         let lw = atlas_w >> level;
         let lh = atlas_h >> level;
         let tiles_x = ATLAS_COLS;
@@ -215,8 +256,8 @@ fn build_mip_chain(level0: &[u8], atlas_w: u32, atlas_h: u32, n_mips: u32) -> Ve
 
         for ty in 0..tiles_y {
             for tx in 0..tiles_x {
-                let s_ox = tx * TILE_PX;
-                let s_oy = ty * TILE_PX;
+                let s_ox = tx * tile_px;
+                let s_oy = ty * tile_px;
                 let d_ox = tx * ts;
                 let d_oy = ty * ts;
                 for py in 0..ts {
@@ -254,6 +295,12 @@ fn build_mip_chain(level0: &[u8], atlas_w: u32, atlas_h: u32, n_mips: u32) -> Ve
     out
 }
 
+const FIXED_TINTED: &[(&str, [u8; 4])] = &[
+    ("spruce_leaves", [0x61, 0x99, 0x61, 255]),
+    ("birch_leaves", [0x80, 0xa7, 0x55, 255]),
+    ("lily_pad", [0x20, 0x80, 0x30, 255]),
+];
+
 fn tinted(
     src: &image::RgbaImage,
     stem: &str,
@@ -261,7 +308,7 @@ fn tinted(
     foliage_tint: [u8; 4],
     dry_foliage_tint: [u8; 4],
     block: &BTreeMap<String, image::RgbaImage>,
-) -> Option<image::RgbaImage> {
+) -> Option<(image::RgbaImage, bool)> {
     const GRASS_TINTED: &[&str] = &[
         "grass_block_top",
         "short_grass",
@@ -284,11 +331,6 @@ fn tinted(
         "dark_oak_leaves",
         "mangrove_leaves",
         "vine",
-    ];
-    const FIXED_TINTED: &[(&str, [u8; 4])] = &[
-        ("spruce_leaves", [0x61, 0x99, 0x61, 255]),
-        ("birch_leaves", [0x80, 0xa7, 0x55, 255]),
-        ("lily_pad", [0x20, 0x80, 0x30, 255]),
     ];
     const UNTINTED_LEAVES: &[&str] = &[
         "pale_oak_leaves",
@@ -315,7 +357,8 @@ fn tinted(
     if let Some(tint) = flat {
         let mut rgba = src.clone();
         tint_rgba(&mut rgba, tint);
-        return Some(rgba);
+        let biome = !FIXED_TINTED.iter().any(|(s, _)| *s == stem);
+        return Some((rgba, biome));
     }
     if stem == "grass_block_side" {
         let overlay = block.get("grass_block_side_overlay")?;
@@ -323,7 +366,7 @@ fn tinted(
         tint_rgba(&mut overlay, grass_tint);
         let mut rgba = src.clone();
         composite_over(&mut rgba, &overlay);
-        return Some(rgba);
+        return Some((rgba, false));
     }
 
     None
@@ -341,13 +384,14 @@ fn tint_rgba(img: &mut image::RgbaImage, tint: [u8; 4]) {
 }
 
 fn composite_over(base: &mut image::RgbaImage, overlay: &image::RgbaImage) {
-    let (w, h) = (
-        base.width().min(overlay.width()),
-        base.height().min(overlay.height()),
-    );
+    let (w, h) = base.dimensions();
+    let (ow, oh) = overlay.dimensions();
+    if ow == 0 || oh == 0 {
+        return;
+    }
     for y in 0..h {
         for x in 0..w {
-            let s = overlay.get_pixel(x, y);
+            let s = overlay.get_pixel(x * ow / w, y * oh / h);
             if s[3] == 0 {
                 continue;
             }
@@ -363,13 +407,15 @@ fn composite_over(base: &mut image::RgbaImage, overlay: &image::RgbaImage) {
 }
 
 fn blit_tile(atlas: &mut [u8], tile: u32, atlas_w: u32, rgba: &image::RgbaImage) {
+    let tile_px = atlas_w / ATLAS_COLS;
     let col = tile % ATLAS_COLS;
     let row = tile / ATLAS_COLS;
-    let (ox, oy) = (col * TILE_PX, row * TILE_PX);
-    for py in 0..TILE_PX {
-        for px in 0..TILE_PX {
-            let sx = px.min(rgba.width() - 1);
-            let sy = py.min(rgba.height() - 1);
+    let (ox, oy) = (col * tile_px, row * tile_px);
+    let frame = rgba.width().min(rgba.height());
+    for py in 0..tile_px {
+        for px in 0..tile_px {
+            let sx = (px * frame / tile_px).min(rgba.width() - 1);
+            let sy = (py * frame / tile_px).min(rgba.height() - 1);
             let p = rgba.get_pixel(sx, sy);
             let dst = (((oy + py) * atlas_w + (ox + px)) * 4) as usize;
             atlas[dst..dst + 4].copy_from_slice(&p.0);
@@ -377,14 +423,15 @@ fn blit_tile(atlas: &mut [u8], tile: u32, atlas_w: u32, rgba: &image::RgbaImage)
     }
 }
 
-fn blit_gray_placeholder(atlas: &mut [u8], tile: u32, atlas_w: u32) {
+fn blit_gray_placeholder(atlas: &mut [u8], tile: u32, atlas_w: u32, tile_px: u32) {
     let col = tile % ATLAS_COLS;
     let row = tile / ATLAS_COLS;
-    let (ox, oy) = (col * TILE_PX, row * TILE_PX);
-    for py in 0..TILE_PX {
-        for px in 0..TILE_PX {
-            let edge = px == 0 || py == 0 || px == TILE_PX - 1 || py == TILE_PX - 1;
-            let checker = ((px / 4) + (py / 4)) % 2 == 0;
+    let (ox, oy) = (col * tile_px, row * tile_px);
+    let texel = tile_px / TILE_PX;
+    for py in 0..tile_px {
+        for px in 0..tile_px {
+            let edge = px < texel || py < texel || px >= tile_px - texel || py >= tile_px - texel;
+            let checker = ((px / (4 * texel)) + (py / (4 * texel))) % 2 == 0;
             let v: u8 = if edge {
                 90
             } else if checker {
@@ -402,18 +449,41 @@ fn blit_gray_placeholder(atlas: &mut [u8], tile: u32, atlas_w: u32) {
 }
 
 pub fn placeholder_atlas() -> Image {
+    #[cfg(feature = "shader_support")]
+    if let Ok(mut slot) = UNTINTED.write() {
+        *slot = None;
+    }
     let mut data = vec![0u8; (TILE_PX * TILE_PX * 4) as usize];
-    blit_gray_placeholder(&mut data, 0, TILE_PX);
-    super::rgba_image(TILE_PX, TILE_PX, data, RenderAssetUsages::RENDER_WORLD)
+    blit_gray_placeholder(&mut data, 0, TILE_PX, TILE_PX);
+    #[cfg_attr(not(feature = "shader_support"), allow(unused_mut))]
+    let mut image = super::rgba_image(TILE_PX, TILE_PX, data, RenderAssetUsages::RENDER_WORLD);
+    #[cfg(feature = "shader_support")]
+    super::packdraw::allow_display_view(&mut image);
+    image
+}
+
+const MAX_TILE_PX: u32 = 64;
+
+fn tile_px(entries: &[(&str, &image::RgbaImage)]) -> u32 {
+    let mut counts: HashMap<u32, u32> = HashMap::new();
+    for (_, rgba) in entries {
+        let side = rgba.width().min(rgba.height()).next_power_of_two();
+        *counts.entry(side.clamp(TILE_PX, MAX_TILE_PX)).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|&(side, count)| (count, side))
+        .map_or(TILE_PX, |(side, _)| side)
 }
 
 fn pack_tiles(entries: &[(&str, &image::RgbaImage)]) -> (Vec<u8>, u32, u32, HashMap<String, u32>) {
+    let tile_px = tile_px(entries);
     let n_tiles = 1 + entries.len() as u32;
-    let atlas_w = ATLAS_COLS * TILE_PX;
-    let atlas_h = n_tiles.div_ceil(ATLAS_COLS) * TILE_PX;
+    let atlas_w = ATLAS_COLS * tile_px;
+    let atlas_h = n_tiles.div_ceil(ATLAS_COLS) * tile_px;
 
     let mut data = vec![0u8; (atlas_w * atlas_h * 4) as usize];
-    blit_gray_placeholder(&mut data, 0, atlas_w);
+    blit_gray_placeholder(&mut data, 0, atlas_w, tile_px);
 
     let mut tiles: HashMap<String, u32> = HashMap::new();
     for (idx, (stem, rgba)) in entries.iter().enumerate() {

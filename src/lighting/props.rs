@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use azalea::block::{BlockState, BlockTrait};
 use parking_lot::RwLock;
@@ -120,8 +121,17 @@ static CACHE: RwLock<Option<Interner>> = RwLock::new(None);
 
 #[derive(Default)]
 struct Interner {
-    by_state: Vec<Option<&'static LightProps>>,
     unique: HashMap<LightProps, &'static LightProps>,
+}
+
+static BY_STATE: OnceLock<Box<[OnceLock<&'static LightProps>]>> = OnceLock::new();
+
+fn by_state() -> &'static [OnceLock<&'static LightProps>] {
+    BY_STATE.get_or_init(|| {
+        (0..=BlockState::MAX_STATE as usize)
+            .map(|_| OnceLock::new())
+            .collect()
+    })
 }
 
 pub fn air() -> &'static LightProps {
@@ -134,31 +144,22 @@ pub fn air() -> &'static LightProps {
     })
 }
 
+#[inline]
 pub fn of(state: BlockState) -> &'static LightProps {
-    let id = state.id() as usize;
-    {
-        let guard = CACHE.read();
-        if let Some(interner) = guard.as_ref()
-            && let Some(Some(hit)) = interner.by_state.get(id)
-        {
-            return hit;
-        }
+    match by_state().get(state.id() as usize) {
+        Some(slot) => slot.get_or_init(|| intern(build(state))),
+        None => intern(build(state)),
     }
-    let built = build(state);
+}
+
+#[cold]
+fn intern(built: LightProps) -> &'static LightProps {
     let mut guard = CACHE.write();
     let interner = guard.get_or_insert_with(Interner::default);
-    if interner.by_state.len() <= id {
-        interner.by_state.resize(id + 1, None);
-    }
-    if let Some(hit) = interner.by_state[id] {
-        return hit;
-    }
-    let interned = *interner
+    *interner
         .unique
         .entry(built.clone())
-        .or_insert_with(|| &*Box::leak(Box::new(built)));
-    interner.by_state[id] = Some(interned);
-    interned
+        .or_insert_with(|| &*Box::leak(Box::new(built)))
 }
 
 fn build(state: BlockState) -> LightProps {

@@ -82,8 +82,8 @@ pub fn build_decoration_sheet(images: &mut Assets<Image>) -> Handle<Image> {
     let dir = crate::assets_root().join("textures/map/decorations");
     for (index, name) in DECORATION_SPRITES.iter().enumerate() {
         let path = dir.join(format!("{name}.png"));
-        let decoded = match crate::platform::assets::open_image(&path) {
-            Ok(image) => image.to_rgba8(),
+        let decoded = match crate::platform::assets::open_gui_image(&path) {
+            Ok(image) => image,
             Err(e) => {
                 crate::log_warn!("maps", "map decoration {name}: {e}");
                 continue;

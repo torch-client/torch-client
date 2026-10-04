@@ -1,5 +1,5 @@
 use crate::platform::time::Instant;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -53,17 +53,62 @@ struct Job {
 
 struct QueueInner {
     edits: VecDeque<Job>,
+    relights: VecDeque<Job>,
     loads: VecDeque<Job>,
-    queued: HashSet<JobKey>,
-    in_flight: HashSet<JobKey>,
-    dirty_again: HashSet<JobKey>,
-    latest_seq: HashMap<(i32, i32, i32), u64>,
+    keys: HashMap<JobKey, KeyState>,
+    latest_seq: HashMap<(i32, i32), ColumnSeq>,
     next_seq: u64,
 }
 
-const MAX_PENDING_SECTIONS: usize = 512;
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KeyState {
+    Queued,
+    InFlight { dirty_again: bool, by_edit: bool },
+}
 
-const BACKPRESSURE_POLL: Duration = Duration::from_millis(2);
+const MAX_COLUMN_SECTIONS: usize = 1024;
+
+#[derive(Default)]
+struct ColumnSeq {
+    base: i32,
+    seqs: Vec<u64>,
+    queued_column: u64,
+}
+
+impl ColumnSeq {
+    fn get(&self, sec_y: i32) -> Option<u64> {
+        let i = usize::try_from((sec_y >> 4).checked_sub(self.base)?).ok()?;
+        self.seqs.get(i).copied().filter(|&seq| seq != 0)
+    }
+
+    fn set(&mut self, sec_y: i32, seq: u64) {
+        let sy = sec_y >> 4;
+        if self.seqs.is_empty() {
+            self.base = sy;
+        }
+        let max = MAX_COLUMN_SECTIONS as i64;
+        if sy < self.base {
+            let grow = self.base as i64 - sy as i64;
+            if self.seqs.len() as i64 + grow > max {
+                return;
+            }
+            self.seqs
+                .splice(0..0, std::iter::repeat(0).take(grow as usize));
+            self.base = sy;
+        }
+        let i = sy as i64 - self.base as i64;
+        if i >= max {
+            return;
+        }
+        let i = i as usize;
+        if i >= self.seqs.len() {
+            self.seqs.resize(i + 1, 0);
+        }
+        self.seqs[i] = seq;
+    }
+}
+
+const MAX_PENDING_SECTIONS: usize = 512;
 
 const DEFAULT_MESH_THREADS: usize = 2;
 
@@ -78,10 +123,9 @@ impl JobQueue {
         Self {
             inner: SideMutex::new(QueueInner {
                 edits: VecDeque::new(),
+                relights: VecDeque::new(),
                 loads: VecDeque::new(),
-                queued: HashSet::new(),
-                in_flight: HashSet::new(),
-                dirty_again: HashSet::new(),
+                keys: HashMap::new(),
                 latest_seq: HashMap::new(),
                 next_seq: 0,
             }),
@@ -91,10 +135,29 @@ impl JobQueue {
     }
 
     pub fn set_backlog(&self, sections: usize) {
-        self.backlog.store(sections, Ordering::Relaxed);
+        let before = self.backlog.swap(sections, Ordering::Relaxed);
+        if before >= MAX_PENDING_SECTIONS && sections < MAX_PENDING_SECTIONS {
+            let _inner = self.inner.lock().unwrap();
+            self.ready.notify_all();
+        }
     }
 
     pub fn push(&self, world: Arc<RwLock<World>>, chunk_x: i32, chunk_z: i32, scope: JobScope) {
+        self.push_in(world, chunk_x, chunk_z, scope, false);
+    }
+
+    pub fn push_relight(&self, world: Arc<RwLock<World>>, chunk_x: i32, chunk_z: i32, sy: i32) {
+        self.push_in(world, chunk_x, chunk_z, JobScope::Section(sy), true);
+    }
+
+    fn push_in(
+        &self,
+        world: Arc<RwLock<World>>,
+        chunk_x: i32,
+        chunk_z: i32,
+        scope: JobScope,
+        relight: bool,
+    ) {
         let column_geometry = match scope {
             JobScope::Section(_) => None,
             JobScope::Column => {
@@ -102,32 +165,66 @@ impl JobQueue {
                 Some((w.chunks.min_y(), (w.chunks.height() / 16) as i32))
             }
         };
-        let mut inner = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap();
+        let inner = &mut *guard;
         let key = (chunk_x, chunk_z, scope);
-        if inner.queued.contains(&key) {
+        if relight
+            && let JobScope::Section(sy) = scope
+            && !inner.keys.contains_key(&key)
+            && let Some(column) = inner.latest_seq.get(&(chunk_x, chunk_z))
+            && column.queued_column != 0
+            && column.get(sy * 16) == Some(column.queued_column)
+        {
             return;
         }
-        if inner.in_flight.contains(&key) {
-            inner.dirty_again.insert(key);
-            return;
+        match inner.keys.get_mut(&key) {
+            Some(KeyState::Queued) => {
+                if !relight
+                    && !inner.relights.is_empty()
+                    && let Some(i) = inner
+                        .relights
+                        .iter()
+                        .position(|j| (j.chunk_x, j.chunk_z, j.scope) == key)
+                    && let Some(job) = inner.relights.remove(i)
+                {
+                    inner.edits.push_back(job);
+                    self.ready.notify_one();
+                }
+                return;
+            }
+            Some(KeyState::InFlight {
+                dirty_again,
+                by_edit,
+            }) => {
+                *dirty_again = true;
+                *by_edit |= !relight;
+                return;
+            }
+            None => {
+                inner.keys.insert(key, KeyState::Queued);
+            }
         }
-        inner.queued.insert(key);
         inner.next_seq += 1;
         let seq = inner.next_seq;
         match (scope, column_geometry) {
             (JobScope::Section(sy), _) => {
-                inner.latest_seq.insert((chunk_x, chunk_z, sy * 16), seq);
+                inner
+                    .latest_seq
+                    .entry((chunk_x, chunk_z))
+                    .or_default()
+                    .set(sy * 16, seq);
             }
             (JobScope::Column, Some((min_y, sec_count))) => {
+                let column = inner.latest_seq.entry((chunk_x, chunk_z)).or_default();
                 for si in 0..sec_count {
                     let sec_y = min_y + si * 16;
                     let edit = (chunk_x, chunk_z, JobScope::Section(sec_y >> 4));
-                    let live = inner.queued.contains(&edit) || inner.in_flight.contains(&edit);
-                    if live && inner.latest_seq.contains_key(&(chunk_x, chunk_z, sec_y)) {
+                    if inner.keys.contains_key(&edit) && column.get(sec_y).is_some() {
                         continue;
                     }
-                    inner.latest_seq.insert((chunk_x, chunk_z, sec_y), seq);
+                    column.set(sec_y, seq);
                 }
+                column.queued_column = seq;
             }
             (JobScope::Column, None) => {}
         }
@@ -140,6 +237,7 @@ impl JobQueue {
             sec_from: 0,
         };
         match scope {
+            JobScope::Section(_) if relight => inner.relights.push_back(job),
             JobScope::Section(_) => inner.edits.push_back(job),
             JobScope::Column => inner.loads.push_back(job),
         }
@@ -149,14 +247,22 @@ impl JobQueue {
     fn finish(&self, job_key: JobKey, world: Arc<RwLock<World>>) -> bool {
         let redo = {
             let mut inner = self.inner.lock().unwrap();
-            inner.in_flight.remove(&job_key);
-            inner.dirty_again.remove(&job_key)
+            match inner.keys.get(&job_key) {
+                Some(&KeyState::InFlight {
+                    dirty_again,
+                    by_edit,
+                }) => {
+                    inner.keys.remove(&job_key);
+                    dirty_again.then_some(by_edit)
+                }
+                _ => None,
+            }
         };
-        if redo {
+        if let Some(by_edit) = redo {
             let (cx, cz, scope) = job_key;
-            self.push(world, cx, cz, scope);
+            self.push_in(world, cx, cz, scope, !by_edit);
         }
-        redo
+        redo.is_some()
     }
 
     fn resume(&self, job: Job) {
@@ -166,22 +272,49 @@ impl JobQueue {
 
     fn is_current(&self, chunk_x: i32, chunk_z: i32, sec_y: i32, seq: u64) -> bool {
         let inner = self.inner.lock().unwrap();
-        inner.latest_seq.get(&(chunk_x, chunk_z, sec_y)) == Some(&seq)
+        inner
+            .latest_seq
+            .get(&(chunk_x, chunk_z))
+            .and_then(|column| column.get(sec_y))
+            == Some(seq)
     }
 
     pub fn forget_chunk(&self, chunk_x: i32, chunk_z: i32) {
-        let mut inner = self.inner.lock().unwrap();
-        inner
-            .latest_seq
-            .retain(|&(cx, cz, _), _| (cx, cz) != (chunk_x, chunk_z));
+        let mut guard = self.inner.lock().unwrap();
+        let inner = &mut *guard;
+        inner.latest_seq.remove(&(chunk_x, chunk_z));
+        let mut dropped = Vec::new();
+        let mut keep = |job: &Job| {
+            let mine = job.chunk_x == chunk_x && job.chunk_z == chunk_z;
+            if mine {
+                dropped.push((job.chunk_x, job.chunk_z, job.scope));
+            }
+            !mine
+        };
+        inner.loads.retain(&mut keep);
+        inner.edits.retain(&mut keep);
+        inner.relights.retain(&mut keep);
+        for key in dropped {
+            inner.keys.remove(&key);
+        }
     }
 
     pub fn reset(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.edits.clear();
+        inner.relights.clear();
         inner.loads.clear();
-        inner.queued.clear();
-        inner.dirty_again.clear();
+        inner.keys.retain(|_, state| match state {
+            KeyState::Queued => false,
+            KeyState::InFlight {
+                dirty_again,
+                by_edit,
+            } => {
+                *dirty_again = false;
+                *by_edit = false;
+                true
+            }
+        });
         inner.latest_seq.clear();
     }
 
@@ -191,7 +324,7 @@ impl JobQueue {
             if let Some(job) = Self::take(&self.backlog, &mut inner) {
                 return job;
             }
-            self.ready.wait_for(&mut inner, BACKPRESSURE_POLL);
+            self.ready.wait(&mut inner);
         }
     }
 
@@ -203,14 +336,28 @@ impl JobQueue {
     fn take(backlog: &AtomicUsize, inner: &mut QueueInner) -> Option<Job> {
         let job = inner.edits.pop_front().or_else(|| {
             if backlog.load(Ordering::Relaxed) < MAX_PENDING_SECTIONS {
-                inner.loads.pop_front()
+                inner
+                    .relights
+                    .pop_front()
+                    .or_else(|| inner.loads.pop_front())
             } else {
                 None
             }
         })?;
         let key = (job.chunk_x, job.chunk_z, job.scope);
-        inner.queued.remove(&key);
-        inner.in_flight.insert(key);
+        if job.scope == JobScope::Column
+            && let Some(column) = inner.latest_seq.get_mut(&(job.chunk_x, job.chunk_z))
+            && column.queued_column == job.seq
+        {
+            column.queued_column = 0;
+        }
+        let state = inner.keys.entry(key).or_insert(KeyState::Queued);
+        if *state == KeyState::Queued {
+            *state = KeyState::InFlight {
+                dirty_again: false,
+                by_edit: false,
+            };
+        }
         Some(job)
     }
 }
@@ -351,13 +498,14 @@ fn mesh_budget() -> Duration {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn drain_all(queue: &JobQueue, shared: &Arc<SharedMutex>, scratch: &mut Scratch) -> usize {
-    let mut ran = 0;
+pub fn drain_all(queue: &JobQueue, shared: &Arc<SharedMutex>, scratch: &mut Scratch, cap: usize) {
     while let Some(job) = queue.try_pop() {
         run_job(job, queue, shared, scratch, None);
-        ran += 1;
+        let s = shared.lock().unwrap();
+        if s.session.pending_chunks.len() + s.session.pending_edits.len() >= cap {
+            return;
+        }
     }
-    ran
 }
 
 pub fn drain_for(
@@ -722,10 +870,10 @@ fn fill_occupancy(
                     }
                     if rb.is_solid {
                         occ.set_solid(x, y, z);
-                    } else if let renderer::BlockGeom::Fluid { amount, .. } = rb.geom {
-                        occ.set_fluid(x, y, z, amount);
+                    } else if let renderer::BlockGeom::Fluid { amount, lava, .. } = rb.geom {
+                        occ.set_fluid(x, y, z, amount, lava);
                     } else if rb.waterlogged {
-                        occ.set_fluid(x, y, z, 8);
+                        occ.set_fluid(x, y, z, 8, false);
                     }
                 }
             }

@@ -2,8 +2,8 @@ pub mod cull;
 pub mod draw;
 pub mod pools;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::{Arc, OnceLock};
 
 use bevy::prelude::*;
 use bevy::render::extract_component::ExtractComponent;
@@ -18,6 +18,16 @@ pub const STREAM_SOLID: u32 = 0;
 pub const STREAM_CUTOUT: u32 = 1;
 pub const STREAM_WATER: u32 = 2;
 pub const STREAMS: u32 = 3;
+
+#[cfg(feature = "shader_support")]
+pub fn stream(geometry: crate::shaderpack::programs::Geometry) -> u32 {
+    use crate::shaderpack::programs::Geometry;
+    match geometry {
+        Geometry::TerrainSolid => STREAM_SOLID,
+        Geometry::TerrainCutout => STREAM_CUTOUT,
+        Geometry::Water => STREAM_WATER,
+    }
+}
 
 pub const SLOTS_INITIAL: u32 = 8192;
 
@@ -40,7 +50,22 @@ pub struct SlotMeta {
     pub solid_count: u32,
     pub flags: u32,
     pub pool: u32,
-    pub _pad: u32,
+    pub cutout_first: u32,
+}
+
+impl SlotMeta {
+    pub fn stream_range(&self, stream: u32) -> (u32, u32) {
+        match stream {
+            STREAM_SOLID => (self.first_index, self.solid_count),
+            STREAM_CUTOUT => (self.cutout_first, self.index_count - self.solid_count),
+            _ => (self.first_index, self.index_count),
+        }
+    }
+
+    pub fn world_box(&self) -> ([f32; 3], [f32; 3]) {
+        let at = |local: [f32; 3]| [0, 1, 2].map(|a| self.origin[a] as f32 + local[a]);
+        (at(self.min), at(self.max))
+    }
 }
 
 pub enum TerrainOp {
@@ -105,7 +130,15 @@ pub struct TerrainStatsInner {
     pub capacity_bytes: AtomicU64,
     pub pools: AtomicUsize,
     pub drawn: AtomicUsize,
+    pub draws: AtomicUsize,
+    draws_pending: AtomicUsize,
     pub indirect: AtomicUsize,
+}
+
+static STATS: OnceLock<TerrainStats> = OnceLock::new();
+
+pub fn stats() -> Option<&'static TerrainStats> {
+    STATS.get()
 }
 
 #[derive(Resource, Clone)]
@@ -132,6 +165,7 @@ pub struct TerrainPoolPlugin;
 impl Plugin for TerrainPoolPlugin {
     fn build(&self, app: &mut App) {
         let stats = TerrainStats::default();
+        let _ = STATS.set(stats.clone());
         app.init_resource::<TerrainOps>()
             .init_resource::<TerrainParams>()
             .insert_resource(stats.clone())
@@ -167,6 +201,7 @@ impl Plugin for TerrainPoolPlugin {
             tier.base_vertex
         );
         render_app.insert_resource(tier);
+        app.insert_resource(tier);
         pools::finish(app);
         cull::finish(app);
         draw::finish(app);
@@ -191,9 +226,10 @@ fn decide_tier(world: &World) -> TerrainTier {
         && storage_ok
         && indirect_ok
         && features.contains(bevy::render::render_resource::WgpuFeatures::INDIRECT_FIRST_INSTANCE);
-    let count = indirect
-        && features
-            .contains(bevy::render::render_resource::WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT);
+    let count_ok =
+        features.contains(bevy::render::render_resource::WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT);
+    let indirect = indirect && (count_ok || !cfg!(target_os = "android"));
+    let count = indirect && count_ok;
     let base_vertex = world
         .resource::<bevy::render::renderer::RenderAdapter>()
         .get_downlevel_capabilities()

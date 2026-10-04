@@ -159,9 +159,9 @@ fn segment_degrees(segment: u32) -> f32 {
 
 fn transform(st: &BeState) -> Transform {
     let angle = if banner::is_wall(&st.state.block) {
-        facing_y_rot(st.state.prop("facing"))
+        facing_y_rot(st.state.facing)
     } else {
-        segment_degrees(st.state.prop("rotation").parse().unwrap_or(0))
+        segment_degrees(st.state.rotation)
     };
     Transform {
         translation: Vec3::new(0.5, 0.0, 0.5),

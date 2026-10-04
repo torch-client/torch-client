@@ -61,7 +61,13 @@ fn no_fall_claim_ground(
         ) {
             continue;
         }
-        let mace = matches!(inventory.held_item(), ItemStack::Present(data) if data.kind == ItemKind::Mace);
+        let is_mace = |stack: &ItemStack| matches!(stack, ItemStack::Present(data) if data.kind == ItemKind::Mace);
+        let mace = is_mace(inventory.held_item())
+            || (crate::modules::auto_mace::enabled() && {
+                let menu = inventory.menu();
+                menu.hotbar_slots_range()
+                    .any(|i| menu.slot(i).is_some_and(is_mace))
+            });
         if !module::spoofing(physics.velocity.y, fall_flying.is_some_and(|f| **f), mace) {
             continue;
         }

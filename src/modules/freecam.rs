@@ -1,4 +1,6 @@
-use super::registry::{Id, freecam as setting};
+#[cfg(feature = "click_gui")]
+use super::registry::Id;
+use super::registry::freecam as setting;
 use super::store;
 
 #[cfg(feature = "click_gui")]
@@ -8,8 +10,7 @@ pub fn active() -> bool {
 
 #[cfg(feature = "click_gui")]
 pub fn toggle() {
-    let s = store();
-    s.set_enabled(Id::Freecam, !s.armed(Id::Freecam));
+    store().toggle(Id::Freecam);
 }
 
 #[cfg(not(feature = "click_gui"))]
@@ -31,5 +32,5 @@ pub fn speed(sprint: bool) -> f32 {
     } else {
         setting::SPEED
     };
-    store().num(Id::Freecam, n)
+    store().num(n)
 }

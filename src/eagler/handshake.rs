@@ -1,7 +1,7 @@
 use super::socket::{Frame, Socket};
 use crate::log_warn;
 
-pub(super) const HANDSHAKE_VERSION: u16 = 5;
+pub(super) const HANDSHAKE_VERSIONS: [u16; 2] = [5, 4];
 
 fn offered_protocol() -> i32 {
     #[cfg(feature = "multiversion")]
@@ -52,9 +52,10 @@ pub(super) async fn run(
     let minecraft = version.u16()?;
     let brand = version.str()?;
     let server_version = version.str()?;
-    if eagler != HANDSHAKE_VERSION {
+    if !HANDSHAKE_VERSIONS.contains(&eagler) {
         eyre::bail!(
-            "the server negotiated eagler handshake version {eagler}, which was not offered"
+            "the server ({brand} {server_version}) negotiated eagler handshake version \
+             {eagler}, which was not offered (offered {HANDSHAKE_VERSIONS:?})"
         );
     }
     crate::log_info!(
@@ -70,7 +71,7 @@ pub(super) async fn run(
         );
     }
 
-    send(socket, request_login(username)?).await?;
+    send(socket, request_login(username, eagler)?).await?;
 
     let mut allow = expect(socket, SERVER_ALLOW_LOGIN).await?;
     let name = allow.str()?;
@@ -85,8 +86,10 @@ pub(super) async fn run(
 fn client_version(username: &str) -> eyre::Result<Vec<u8>> {
     let mut out = vec![CLIENT_VERSION];
     out.push(2);
-    out.extend_from_slice(&1u16.to_be_bytes());
-    out.extend_from_slice(&HANDSHAKE_VERSION.to_be_bytes());
+    out.extend_from_slice(&(HANDSHAKE_VERSIONS.len() as u16).to_be_bytes());
+    for version in HANDSHAKE_VERSIONS {
+        out.extend_from_slice(&version.to_be_bytes());
+    }
     let protocol = u16::try_from(offered_protocol())
         .map_err(|_| eyre::eyre!("minecraft protocol version does not fit the eagler handshake"))?;
     out.extend_from_slice(&1u16.to_be_bytes());
@@ -98,13 +101,16 @@ fn client_version(username: &str) -> eyre::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn request_login(username: &str) -> eyre::Result<Vec<u8>> {
+fn request_login(username: &str, eagler: u16) -> eyre::Result<Vec<u8>> {
     let mut out = vec![CLIENT_REQUEST_LOGIN];
     put_str(&mut out, username)?;
     out.push(0);
     out.push(0);
     out.push(0);
     out.push(0);
+    if eagler < 5 {
+        return Ok(out);
+    }
     out.push(0);
     out.push(0);
     Ok(out)
@@ -160,9 +166,9 @@ fn describe(opcode: u8, reader: &mut Reader) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "the server does not support eagler handshake version {HANDSHAKE_VERSION}; it \
-                 accepts {allowed:?}. Only version 5 is implemented, so this server cannot be \
-                 joined; see src/eagler/handshake.rs."
+                "the server does not support eagler handshake versions {HANDSHAKE_VERSIONS:?}; \
+                 it accepts {allowed:?}. Only 5 and 4 are implemented, so this server cannot \
+                 be joined; see src/eagler/handshake.rs."
             )
         }
         _ => format!("the server sent an unexpected handshake packet 0x{opcode:02x}"),

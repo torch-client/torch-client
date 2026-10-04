@@ -107,5 +107,6 @@ pub(crate) fn masked(input: &crate::gui::render::GuiInput) -> crate::gui::render
     input.left_click = false;
     input.left_down = false;
     input.typed.clear();
+    input.edits.clear();
     input
 }

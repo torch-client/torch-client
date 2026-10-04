@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::chicken;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -53,18 +54,18 @@ fn is_cold(st: &EntityState) -> bool {
     }
 }
 
-fn adult_texture(st: &EntityState) -> String {
+fn adult_texture(st: &EntityState) -> TexturePath {
     let name = variant(st);
     match crate::util::variants::chicken(name) {
-        Some(entry) => entry.texture(false).to_string(),
-        None => format!("entity/chicken/chicken_{name}"),
+        Some(entry) => entry.texture(false).into(),
+        None => format!("entity/chicken/chicken_{name}").into(),
     }
 }
 
-fn baby_texture(st: &EntityState) -> String {
+fn baby_texture(st: &EntityState) -> TexturePath {
     let name = variant(st);
     match crate::util::variants::chicken(name) {
-        Some(entry) => entry.texture(true).to_string(),
-        None => format!("entity/chicken/chicken_{name}_baby"),
+        Some(entry) => entry.texture(true).into(),
+        None => format!("entity/chicken/chicken_{name}_baby").into(),
     }
 }

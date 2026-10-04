@@ -63,8 +63,10 @@ pub async fn join(opts: SessionServerJoinOpts<'_>) -> Result<(), ClientSessionSe
     let client = if let Some(proxy) = opts.proxy {
         reqwest::ClientBuilder::new().proxy(proxy).build()?
     } else {
-        static REQWEST_CLIENT: LazyLock<reqwest::Client> =
-            LazyLock::new(|| reqwest::ClientBuilder::new().no_proxy().build().unwrap());
+        static REQWEST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+            crate::http_client()
+                .unwrap_or_else(|| reqwest::ClientBuilder::new().no_proxy().build().unwrap())
+        });
 
         REQWEST_CLIENT.clone()
     };

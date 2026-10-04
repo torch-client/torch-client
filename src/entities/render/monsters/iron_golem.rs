@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::Quat;
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::iron_golem;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -30,15 +31,15 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/iron_golem/iron_golem".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/iron_golem/iron_golem".into()
 }
 
-fn crackiness_texture(st: &EntityState) -> String {
+fn crackiness_texture(st: &EntityState) -> TexturePath {
     match st.extras.crackiness {
-        3 => "entity/iron_golem/iron_golem_crackiness_high".to_string(),
-        2 => "entity/iron_golem/iron_golem_crackiness_medium".to_string(),
-        _ => "entity/iron_golem/iron_golem_crackiness_low".to_string(),
+        3 => "entity/iron_golem/iron_golem_crackiness_high".into(),
+        2 => "entity/iron_golem/iron_golem_crackiness_medium".into(),
+        _ => "entity/iron_golem/iron_golem_crackiness_low".into(),
     }
 }
 

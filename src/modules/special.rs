@@ -7,7 +7,7 @@ pub fn filter(spans: Vec<Span>) -> Vec<Span> {
     if !s.enabled(Id::Special) {
         return spans;
     }
-    let phrase = s.text(Id::Special, setting::PHRASE);
+    let phrase = s.text(setting::PHRASE);
     if phrase.is_empty() {
         return spans;
     }

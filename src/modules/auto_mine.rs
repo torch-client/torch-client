@@ -10,13 +10,8 @@ use azalea_core::position::BlockPos;
 use super::registry::{Id, auto_mine as setting};
 use super::{Edge, MS_PER_TICK, Phase, Store, roll, store};
 use crate::session::{Gamemode, MineIntent, SharedMutex, SharedState};
-use crate::util::mth::wrap_degrees;
 
 const RELEASE: f64 = 0.15;
-
-const DEADZONE: f32 = 0.4;
-
-const EASE: f32 = 9.0;
 
 const STALL_TICKS: i64 = 60;
 
@@ -73,7 +68,7 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>, hit: Option<&BlockHitResult
         return false;
     };
 
-    let in_gui = s.flag(Id::AutoMine, setting::IN_GUI);
+    let in_gui = s.flag(setting::IN_GUI);
     let (blocked, yaw) = {
         let st = shared.lock().unwrap();
         let blocked = !st.in_world
@@ -153,7 +148,7 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>, hit: Option<&BlockHitResult
                 }
                 run.col += 1;
                 run.sideways = jitter(JITTER_YAW);
-                let length = s.num(Id::AutoMine, setting::LENGTH) as i32;
+                let length = s.num(setting::LENGTH) as i32;
                 if length > 0 && run.col > length {
                     halted = Some(Halt::Done);
                     break;
@@ -251,11 +246,11 @@ fn choose(bot: &Client, run: &Run, now: i64, s: &Store) -> Result<Stage, Halt> {
             Cell::Unbreakable => return Err(Halt::Unbreakable),
             Cell::Diggable => {}
         }
-        if s.flag(Id::AutoMine, setting::HAZARDS) && exposes_fluid(bot, pos) {
+        if s.flag(setting::HAZARDS) && exposes_fluid(bot, pos) {
             return Err(Halt::Hazard);
         }
-        let (lo, hi) = s.range(Id::AutoMine, setting::TURN);
-        let (dlo, dhi) = s.range(Id::AutoMine, setting::DELAY);
+        let (lo, hi) = s.range(setting::TURN);
+        let (dlo, dhi) = s.range(setting::DELAY);
         return Ok(Stage::Mine {
             pos,
             up: jitter(JITTER_PITCH),
@@ -344,27 +339,7 @@ pub fn look_step(s: &SharedState, yaw: f32, pitch: f32, dt: f32, d: (f32, f32)) 
     let Some(aim) = intent.aim else {
         return d;
     };
-    let partial = crate::renderer::systems::partial_ticks(s);
-    let (want_yaw, want_pitch) =
-        super::aim_assist::look_at(super::aim_assist::eye(s, partial), aim);
-
-    let cap = intent.turn * dt;
-    let k = 1.0 - (-EASE * dt).exp();
-    let step = |err: f32| {
-        if err.abs() < DEADZONE {
-            return 0.0;
-        }
-        quantise((err * k).clamp(-cap, cap))
-    };
-    (
-        d.0 - step(wrap_degrees(want_yaw - yaw)),
-        d.1 - step(want_pitch - pitch),
-    )
-}
-
-fn quantise(deg: f32) -> f32 {
-    let grid = crate::renderer::input::LOOK_SCALE;
-    (deg / grid).round() * grid
+    super::turn::look_toward(s, yaw, pitch, dt, d, aim, intent.turn)
 }
 
 #[cfg(test)]
@@ -433,18 +408,5 @@ mod tests {
             }
         }
         assert!(JITTER_YAW <= JITTER_PITCH, "yaw is the one that shows");
-    }
-
-    #[test]
-    fn a_turn_lands_on_the_pointer_grid() {
-        let grid = crate::renderer::input::LOOK_SCALE;
-        for deg in [0.0, 0.01, 0.37, -2.4, 17.9] {
-            let q = quantise(deg);
-            assert!(
-                (q / grid - (q / grid).round()).abs() < 1e-4,
-                "{deg} quantised to {q}, which is not a multiple of {grid}"
-            );
-            assert!((q - deg).abs() <= grid * 0.5 + 1e-6);
-        }
     }
 }

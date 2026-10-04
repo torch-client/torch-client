@@ -11,7 +11,74 @@ pub(crate) fn hide() {
     #[cfg(target_arch = "wasm32")]
     web::hide();
     #[cfg(target_os = "android")]
-    android::want(false);
+    {
+        android::set_dismissed(false);
+        android::want(false);
+    }
+}
+
+pub(crate) fn dismiss() {
+    #[cfg(target_os = "android")]
+    {
+        if android::pinned() {
+            return;
+        }
+        android::set_dismissed(true);
+        android::want(false);
+    }
+}
+
+#[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
+pub(crate) fn pin(on: bool) {
+    #[cfg(target_os = "android")]
+    {
+        android::set_pinned(on);
+        if on {
+            android::set_dismissed(false);
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+#[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
+pub(crate) fn reassert() {
+    #[cfg(target_os = "android")]
+    if android::wanted() && !android::dismissed() {
+        android::want(true);
+    }
+}
+
+#[cfg_attr(
+    not(target_os = "android"),
+    allow(
+        dead_code,
+        reason = "read only by the Android arm of TextBox::sync_keyboard"
+    )
+)]
+pub(crate) fn dismissed() -> bool {
+    #[cfg(target_os = "android")]
+    return android::dismissed();
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
+pub(crate) fn note_tap(inside: bool) {
+    #[cfg(target_os = "android")]
+    android::note_tap(inside);
+    #[cfg(not(target_os = "android"))]
+    let _ = inside;
+}
+
+pub(crate) fn resolve_taps() {
+    #[cfg(target_os = "android")]
+    if android::take_outside_tap() {
+        crate::log_info!(
+            "input",
+            "tap outside the text field: dismissing the keyboard"
+        );
+        dismiss();
+    }
 }
 
 pub(crate) fn has_focus() -> bool {
@@ -373,6 +440,42 @@ pub(crate) mod android {
 
     pub(super) fn wanted() -> bool {
         WANTED.load(Ordering::Relaxed)
+    }
+
+    static DISMISSED: AtomicBool = AtomicBool::new(false);
+    static PINNED: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn set_pinned(on: bool) {
+        PINNED.store(on, Ordering::Relaxed);
+    }
+
+    pub(super) fn pinned() -> bool {
+        PINNED.load(Ordering::Relaxed)
+    }
+    static TAP_OUTSIDE: AtomicBool = AtomicBool::new(false);
+    static TAP_INSIDE: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn set_dismissed(on: bool) {
+        DISMISSED.store(on, Ordering::Relaxed);
+    }
+
+    pub(super) fn dismissed() -> bool {
+        DISMISSED.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn note_tap(inside: bool) {
+        if inside {
+            TAP_INSIDE.store(true, Ordering::Relaxed);
+            DISMISSED.store(false, Ordering::Relaxed);
+        } else {
+            TAP_OUTSIDE.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn take_outside_tap() -> bool {
+        let outside = TAP_OUTSIDE.swap(false, Ordering::Relaxed);
+        let inside = TAP_INSIDE.swap(false, Ordering::Relaxed);
+        outside && !inside
     }
 
     pub(super) fn inset_px() -> f32 {

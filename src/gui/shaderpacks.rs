@@ -1,15 +1,15 @@
 use crate::gui::painter::Painter;
-use crate::gui::render::GuiInput;
-use crate::gui::widgets::{self, Button, Slider};
+use crate::gui::widgets::{Button, Slider};
 use crate::gui::{GuiState, Screen, ScreenCtx};
 use crate::shaderpack::lang::{self, Lang};
 use crate::shaderpack::options::{Kind, Opt, Options, Values};
 use crate::shaderpack::properties::{self, Element, Properties, ROOT_SCREEN};
-use crate::shaderpack::{discover, features, source::Source};
+use crate::shaderpack::{discover, features};
+use crate::util::pack::{Pack, Source};
 
 use super::options::{
     BIG_W, COLUMN_STEP, COLUMN_W, GRID_LEFT_OFFSET, LAYOUT, ROW_H, ROW_INSET, draw_done,
-    draw_title, scroll_input,
+    draw_title, masked_input, scroll_input,
 };
 use super::widgets::WIDGET_HEIGHT;
 
@@ -19,6 +19,7 @@ const NONE_ROW: &str = "(none)";
 const NO_PACKS: &str = "No packs in the shaders folder";
 const SETTINGS: &str = "Settings...";
 const RESET: &str = "Reset";
+const DONE: &str = "Done";
 const PROFILE: &str = "Profile";
 const CUSTOM: &str = "Custom";
 const ON: &str = "ON";
@@ -33,11 +34,48 @@ pub struct Loaded {
     options: Options,
     values: Values,
     props: Properties,
+    properties_text: Option<String>,
     lang: Lang,
     profile: Option<usize>,
+    menu: Menu,
+    unmet: Vec<String>,
+}
+
+#[derive(Default)]
+struct Menu {
+    every: Vec<Element>,
+    unplaced: Vec<Element>,
+}
+
+impl Menu {
+    fn of(options: &Options, props: &Properties) -> Menu {
+        let placed: std::collections::HashSet<&str> = props
+            .screens
+            .values()
+            .flatten()
+            .filter_map(|e| match e {
+                Element::Option(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let every: Vec<Element> = options
+            .iter()
+            .map(|opt| Element::Option(opt.name.clone()))
+            .collect();
+        let unplaced = every
+            .iter()
+            .filter(|e| matches!(e, Element::Option(name) if !placed.contains(name.as_str())))
+            .cloned()
+            .collect();
+        Menu { every, unplaced }
+    }
 }
 
 impl Loaded {
+    pub(crate) fn values(&self) -> &Values {
+        &self.values
+    }
+
     fn option_label(&self, name: &str) -> String {
         self.lang
             .option(name)
@@ -51,7 +89,7 @@ impl Loaded {
 
 #[derive(Default)]
 pub struct State {
-    packs: Vec<discover::Pack>,
+    packs: Vec<Pack>,
     pub loaded: Option<Loaded>,
     nav: Vec<String>,
     scroll: f32,
@@ -88,29 +126,9 @@ impl State {
 }
 
 fn load(name: &str) -> Result<Loaded, String> {
-    let source = Source::open(&discover::dir().join(name))?;
+    let source = Source::open(&discover::dir().join(name), crate::shaderpack::ROOT)?;
 
-    let mut defines = features::base_defines();
-    let props = match source.read_text("/shaders.properties") {
-        Some(text) => properties::parse(&text, &mut defines),
-        None => Properties::default(),
-    };
-
-    let unmet = features::unmet(props.features("iris.features.required"));
-    if !unmet.is_empty() {
-        return Err(format!("needs {}", unmet.join(", ")));
-    }
-
-    let texts: Vec<String> = source
-        .files()
-        .into_iter()
-        .filter(|f| {
-            [".glsl", ".vsh", ".fsh", ".gsh", ".csh"]
-                .iter()
-                .any(|e| f.ends_with(e))
-        })
-        .filter_map(|f| source.read_text(&f))
-        .collect();
+    let texts: Vec<String> = crate::shaderpack::include::option_texts(&source);
     let options = crate::shaderpack::options::discover(texts.iter().map(String::as_str));
 
     let values = match std::fs::read_to_string(values_path(name)) {
@@ -118,16 +136,52 @@ fn load(name: &str) -> Result<Loaded, String> {
         Err(_) => Values::default(),
     };
 
+    let properties_text = source.read_text("/shaders.properties");
+    let props = parse_properties(name, properties_text.as_deref(), &options, &values);
+
+    let unmet = features::unmet(props.features("iris.features.required"));
+    if !unmet.is_empty() {
+        crate::log_warn!(
+            "shaders",
+            "{name} asks for {}; loading without",
+            unmet.join(", ")
+        );
+    }
+
     let mut loaded = Loaded {
         name: name.to_owned(),
         options,
         values,
         props,
+        properties_text,
         lang: Lang::load(&source),
         profile: None,
+        menu: Menu::default(),
+        unmet,
     };
+    loaded.menu = Menu::of(&loaded.options, &loaded.props);
     loaded.profile = matching_profile(&loaded);
     Ok(loaded)
+}
+
+fn parse_properties(
+    pack: &str,
+    text: Option<&str>,
+    options: &Options,
+    values: &Values,
+) -> Properties {
+    let Some(text) = text else {
+        return Properties::default();
+    };
+    let props = properties::parse_with_options(text, options, values);
+    if !props.unknown.is_empty() {
+        crate::log_info!(
+            "shaders",
+            "{pack}: unreadable in shaders.properties: {}",
+            props.unknown.join(", ")
+        );
+    }
+    props
 }
 
 fn values_path(name: &str) -> std::path::PathBuf {
@@ -146,25 +200,37 @@ fn save(loaded: &Loaded) {
 }
 
 fn matching_profile(loaded: &Loaded) -> Option<usize> {
-    (0..loaded.props.profiles.len()).find(|at| profile_matches(loaded, *at))
+    sorted_profiles(loaded).into_iter().find(|at| {
+        profile_settings(loaded, *at).is_some_and(|settings| {
+            settings.iter().all(|(name, value)| {
+                loaded
+                    .options
+                    .get(name)
+                    .is_some_and(|opt| loaded.values.get(opt) == value)
+            })
+        })
+    })
 }
 
-fn profile_matches(loaded: &Loaded, at: usize) -> bool {
-    let mut wanted = Values::default();
-    if !apply_profile(loaded, at, &mut wanted) {
-        return false;
-    }
-    loaded
-        .options
-        .iter()
-        .all(|opt| wanted.get(opt) == loaded.values.get(opt))
+fn sorted_profiles(loaded: &Loaded) -> Vec<usize> {
+    let mut order: Vec<(usize, usize)> = (0..loaded.props.profiles.len())
+        .map(|at| (at, profile_settings(loaded, at).map_or(0, |s| s.len())))
+        .collect();
+    order.sort_by(|a, b| b.1.cmp(&a.1));
+    order.into_iter().map(|(at, _)| at).collect()
 }
 
-fn apply_profile(loaded: &Loaded, at: usize, into: &mut Values) -> bool {
-    apply_profile_depth(loaded, at, into, 0)
+fn profile_settings(loaded: &Loaded, at: usize) -> Option<Vec<(String, String)>> {
+    let mut settings = Vec::new();
+    collect_profile(loaded, at, &mut settings, 0).then_some(settings)
 }
 
-fn apply_profile_depth(loaded: &Loaded, at: usize, into: &mut Values, depth: u32) -> bool {
+fn collect_profile(
+    loaded: &Loaded,
+    at: usize,
+    into: &mut Vec<(String, String)>,
+    depth: u32,
+) -> bool {
     if depth > 8 {
         return false;
     }
@@ -175,21 +241,28 @@ fn apply_profile_depth(loaded: &Loaded, at: usize, into: &mut Values, depth: u32
         if let Some(name) = token.strip_prefix("profile.") {
             match loaded.props.profiles.iter().position(|(n, _)| n == name) {
                 Some(other) => {
-                    apply_profile_depth(loaded, other, into, depth + 1);
+                    if !collect_profile(loaded, other, into, depth + 1) {
+                        return false;
+                    }
                 }
                 None => return false,
             }
             continue;
         }
         let (name, value) = match token.split_once('=') {
-            Some((name, value)) => (name, value.to_owned()),
+            Some((name, value)) => (name, value),
             None => match token.strip_prefix('!') {
-                Some(name) => (name, OFF_VALUE.to_owned()),
-                None => (token.as_str(), ON_VALUE.to_owned()),
+                Some(name) => (name, OFF_VALUE),
+                None => (token.as_str(), ON_VALUE),
             },
         };
-        if let Some(opt) = loaded.options.get(name) {
-            into.set(opt, &value);
+        if loaded
+            .options
+            .get(name)
+            .is_some_and(|opt| opt.accepts(value))
+        {
+            into.retain(|(n, _)| n != name);
+            into.push((name.to_owned(), value.to_owned()));
         }
     }
     true
@@ -201,8 +274,31 @@ const OFF_VALUE: &str = "false";
 pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     draw_title(p, ctx, PACKS_TITLE);
 
-    let (list_x, list_y, list_w, list_h) = LAYOUT.content_rect(ctx.vw, ctx.vh);
+    let (list_x, list_y, list_w, full_h) = LAYOUT.content_rect(ctx.vw, ctx.vh);
     let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
+
+    let message = match (&state.shaderpacks.error, &state.shaderpacks.loaded) {
+        (Some(error), _) => Some((error.clone(), MESSAGE_ERROR)),
+        (None, Some(loaded)) if !loaded.unmet.is_empty() => Some((
+            format!("{}: runs without {}", loaded.name, loaded.unmet.join(", ")),
+            MESSAGE_WARNING,
+        )),
+        _ => None,
+    };
+    let mut message_lines: Vec<std::ops::Range<usize>> = Vec::new();
+    if let Some((text, _)) = &message {
+        p.atlas.font.wrap_ranges(
+            text,
+            (list_w - 2.0 * MESSAGE_MARGIN).max(1.0),
+            &mut message_lines,
+        );
+    }
+    let message_h = if message_lines.is_empty() {
+        0.0
+    } else {
+        message_lines.len() as f32 * crate::text::LINE_HEIGHT + MESSAGE_MARGIN
+    };
+    let list_h = (full_h - message_h).max(LIST_ROW_H);
     let rows = state.shaderpacks.packs.len() + 1;
     let content_h = rows as f32 * LIST_ROW_H;
 
@@ -259,8 +355,17 @@ pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         }
     }
 
-    if let Some(error) = state.shaderpacks.error.clone() {
-        text_center(p, &error, ctx.vw / 2.0, list_y + list_h + 4.0, 0xFF_5555);
+    if let Some((text, color)) = &message {
+        let mut y = list_y + list_h + MESSAGE_MARGIN / 2.0;
+        for range in &message_lines {
+            let line: String = text
+                .chars()
+                .skip(range.start)
+                .take(range.end - range.start)
+                .collect();
+            text_center(p, line.trim_end(), ctx.vw / 2.0, y, *color);
+            y += crate::text::LINE_HEIGHT;
+        }
     }
 
     let footer_y = LAYOUT.footer_y(ctx.vh);
@@ -275,13 +380,7 @@ pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             state.shaderpacks.open_options();
             state.nav = Some(Screen::ShaderOptions);
         }
-        let done = Button::new(
-            left + COLUMN_STEP,
-            footer_y,
-            COLUMN_W,
-            WIDGET_HEIGHT,
-            "Done",
-        );
+        let done = Button::new(left + COLUMN_STEP, footer_y, COLUMN_W, WIDGET_HEIGHT, DONE);
         if done.draw(p, ctx) {
             state.nav = Some(Screen::VideoSettings);
         }
@@ -365,7 +464,7 @@ pub fn draw_options(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         if y + ROW_H < list_y || y > list_y + list_h {
             continue;
         }
-        if let Element::Option(name) = element.as_ref()
+        if let Element::Option(name) = element
             && masked.hovering(x, y, cell_w, WIDGET_HEIGHT)
         {
             hovered = loaded.lang.comment(name);
@@ -381,7 +480,20 @@ pub fn draw_options(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         draw_comment(p, ctx, text);
     }
 
-    if draw_done(p, ctx) {
+    let footer_y = LAYOUT.footer_y(ctx.vh);
+    let footer_left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
+    if Button::new(footer_left, footer_y, COLUMN_W, WIDGET_HEIGHT, RESET).draw(p, ctx) {
+        action = Some(Action::ResetAll);
+    }
+    if Button::new(
+        footer_left + COLUMN_STEP,
+        footer_y,
+        COLUMN_W,
+        WIDGET_HEIGHT,
+        DONE,
+    )
+    .draw(p, ctx)
+    {
         if state.shaderpacks.nav.pop().is_none() {
             state.nav = Some(Screen::ShaderPacks);
         }
@@ -398,6 +510,7 @@ enum Action {
     Enter(String),
     Set(String, String),
     Reset(String),
+    ResetAll,
     Profile(usize),
 }
 
@@ -423,56 +536,38 @@ fn apply_action(state: &mut GuiState, action: Action) {
                 loaded.values.reset(&opt);
             }
         }
+        Action::ResetAll => loaded.values.reset_all(),
         Action::Profile(at) => {
-            let mut values = Values::default();
-            if apply_profile(loaded, at, &mut values) {
-                loaded.values = values;
+            if let Some(settings) = profile_settings(loaded, at) {
+                for (name, value) in settings {
+                    if let Some(opt) = loaded.options.get(&name).cloned() {
+                        loaded.values.set(&opt, &value);
+                    }
+                }
             }
         }
     }
+    loaded.props = parse_properties(
+        &loaded.name,
+        loaded.properties_text.as_deref(),
+        &loaded.options,
+        &loaded.values,
+    );
+    loaded.menu = Menu::of(&loaded.options, &loaded.props);
     loaded.profile = matching_profile(loaded);
     save(loaded);
     state.shaderpacks.revision += 1;
 }
 
-fn layout<'a>(loaded: &'a Loaded, screen: &str) -> Vec<std::borrow::Cow<'a, Element>> {
-    use std::borrow::Cow;
-    let declared = loaded.props.screens.get(screen);
-
-    let Some(declared) = declared else {
-        return loaded
-            .options
-            .iter()
-            .map(|opt| Cow::Owned(Element::Option(opt.name.clone())))
-            .collect();
+fn layout<'a>(loaded: &'a Loaded, screen: &str) -> Vec<&'a Element> {
+    let Some(declared) = loaded.props.screens.get(screen) else {
+        return loaded.menu.every.iter().collect();
     };
-
-    if !declared.contains(&Element::Rest) {
-        return declared.iter().map(Cow::Borrowed).collect();
-    }
-
-    let placed: std::collections::HashSet<&str> = loaded
-        .props
-        .screens
-        .values()
-        .flatten()
-        .filter_map(|e| match e {
-            Element::Option(name) => Some(name.as_str()),
-            _ => None,
-        })
-        .collect();
-    let rest: Vec<Element> = loaded
-        .options
-        .iter()
-        .filter(|opt| !placed.contains(opt.name.as_str()))
-        .map(|opt| Element::Option(opt.name.clone()))
-        .collect();
-
     declared
         .iter()
         .flat_map(|element| match element {
-            Element::Rest => rest.iter().cloned().map(Cow::Owned).collect::<Vec<_>>(),
-            other => vec![Cow::Borrowed(other)],
+            Element::Rest => loaded.menu.unplaced.iter().collect::<Vec<_>>(),
+            other => vec![other],
         })
         .collect()
 }
@@ -522,9 +617,11 @@ fn element_widget(
             Button::new(x, y, w, WIDGET_HEIGHT, &label)
                 .draw(p, ctx)
                 .then(|| {
+                    let order = sorted_profiles(loaded);
                     let next = loaded
                         .profile
-                        .map_or(0, |at| (at + 1) % loaded.props.profiles.len());
+                        .and_then(|current| order.iter().position(|at| *at == current))
+                        .map_or(order[0], |i| order[(i + 1) % order.len()]);
                     Action::Profile(next)
                 })
         }
@@ -612,19 +709,6 @@ fn tag(label: &str, value: &str, changed: bool) -> String {
     format!("{mark}{label}: {value}")
 }
 
-fn masked_input(ctx: &ScreenCtx, rect: (f32, f32, f32, f32), dragging: bool) -> GuiInput {
-    let (x, y, w, h) = rect;
-    let over = ctx.hovering(x, y, w, h);
-    let mut input = ctx.input.clone();
-    if dragging || (!over && !widgets::slider_dragging()) {
-        input.mouse = None;
-    }
-    if dragging || !over {
-        input.left_click = false;
-    }
-    input
-}
-
 fn draw_comment(p: &mut Painter, ctx: &ScreenCtx, text: &str) {
     let Some(mouse) = ctx.input.mouse else { return };
     let spans = [crate::text::Span {
@@ -642,6 +726,10 @@ fn draw_comment(p: &mut Painter, ctx: &ScreenCtx, text: &str) {
         super::options::draw_bind_tooltip(p, &lines, mouse.x, mouse.y, ctx.vw);
     }
 }
+
+const MESSAGE_ERROR: u32 = 0xFF_5555;
+const MESSAGE_WARNING: u32 = 0xFF_FF55;
+const MESSAGE_MARGIN: f32 = 8.0;
 
 fn text_center(p: &mut Painter, s: &str, cx: f32, y: f32, color: u32) {
     let x = (cx - p.atlas.font.width_str(s) / 2.0).floor();

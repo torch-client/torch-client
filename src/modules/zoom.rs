@@ -12,7 +12,7 @@ pub fn settings() -> Settings {
     let s = store();
     Settings {
         on: s.enabled(Id::Zoom),
-        fov: s.num(Id::Zoom, setting::FOV),
-        duration: s.num(Id::Zoom, setting::DURATION).max(0.001),
+        fov: s.num(setting::FOV),
+        duration: s.num(setting::DURATION).max(0.001),
     }
 }

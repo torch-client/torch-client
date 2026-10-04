@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::{Quat, Transform};
 
+use crate::entities::TexturePath;
 use crate::entities::models::animals::panda;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -41,18 +42,18 @@ fn gene(st: &EntityState) -> &'static str {
     GENES[(st.extras.variant_id.clamp(0, 6)) as usize]
 }
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     let gene = gene(st);
     if st.extras.is_baby {
         if gene == "normal" {
-            "entity/panda/panda_baby".to_string()
+            "entity/panda/panda_baby".into()
         } else {
-            format!("entity/panda/{gene}_panda_baby")
+            format!("entity/panda/{gene}_panda_baby").into()
         }
     } else if gene == "normal" {
-        "entity/panda/panda".to_string()
+        "entity/panda/panda".into()
     } else {
-        format!("entity/panda/panda_{gene}")
+        format!("entity/panda/panda_{gene}").into()
     }
 }
 

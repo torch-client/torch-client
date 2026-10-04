@@ -260,14 +260,16 @@ pub enum Blend {
     Additive,
 }
 
+pub type TexturePath = std::borrow::Cow<'static, str>;
+
 pub struct ModelGeom {
     pub layer: fn() -> LayerDef,
-    pub texture: fn(&EntityState) -> String,
+    pub texture: fn(&EntityState) -> TexturePath,
     pub setup: fn(&BakedModel, &mut [PartState], &EntityState),
 }
 
 pub struct ItemGeom {
-    pub item: fn(&EntityState) -> String,
+    pub item: fn(&EntityState) -> TexturePath,
     pub display: &'static str,
     pub inner: fn(&EntityState) -> Transform,
     pub cluster: Option<ItemCluster>,
@@ -297,30 +299,28 @@ const FLAT_ITEM_DEPTH_THRESHOLD: f32 = 0.0625;
 
 const ITEM_COPIES_MAX: usize = 5;
 
-fn cluster_offsets(count: usize, depth: f32, seed: i64) -> Vec<Vec3> {
+fn cluster_offsets(count: usize, depth: f32, seed: i64, mut out: impl FnMut(Vec3)) {
     let mut rng = crate::util::javarandom::JavaRandom::new(seed);
-    let mut out = Vec::with_capacity(count);
     let signed = |rng: &mut crate::util::javarandom::JavaRandom| rng.next_f32() * 2.0 - 1.0;
     if depth > FLAT_ITEM_DEPTH_THRESHOLD {
-        out.push(Vec3::ZERO);
+        out(Vec3::ZERO);
         for _ in 1..count {
             let x = signed(&mut rng) * ITEM_BUNDLE_OFFSET_SCALE;
             let y = signed(&mut rng) * ITEM_BUNDLE_OFFSET_SCALE;
             let z = signed(&mut rng) * ITEM_BUNDLE_OFFSET_SCALE;
-            out.push(Vec3::new(x, y, z));
+            out(Vec3::new(x, y, z));
         }
     } else {
         let step = depth * 1.5;
         let mut z = -step * (count as f32 - 1.0) / 2.0;
-        out.push(Vec3::new(0.0, 0.0, z));
+        out(Vec3::new(0.0, 0.0, z));
         for _ in 1..count {
             z += step;
             let x = signed(&mut rng) * ITEM_BUNDLE_OFFSET_SCALE * 0.5;
             let y = signed(&mut rng) * ITEM_BUNDLE_OFFSET_SCALE * 0.5;
-            out.push(Vec3::new(x, y, z));
+            out(Vec3::new(x, y, z));
         }
     }
-    out
 }
 
 pub fn display_bounds(bounds: (Vec3, Vec3), display: &Transform) -> (Vec3, Vec3) {
@@ -370,9 +370,9 @@ pub struct BlockGeom {
 }
 
 pub struct BuiltGeom {
-    pub key: fn(&EntityState) -> String,
+    pub key: fn(&EntityState) -> TexturePath,
     pub build: fn(&EntityState) -> Mesh,
-    pub texture: fn(&EntityState) -> Option<String>,
+    pub texture: fn(&EntityState) -> Option<TexturePath>,
 }
 
 pub enum Geom {
@@ -398,7 +398,7 @@ impl RenderSpec {
     pub fn new(
         name: &'static str,
         layer: fn() -> LayerDef,
-        texture: fn(&EntityState) -> String,
+        texture: fn(&EntityState) -> TexturePath,
         setup: fn(&BakedModel, &mut [PartState], &EntityState),
     ) -> RenderSpec {
         RenderSpec::with_geom(
@@ -413,7 +413,7 @@ impl RenderSpec {
 
     pub fn item(
         name: &'static str,
-        item: fn(&EntityState) -> String,
+        item: fn(&EntityState) -> TexturePath,
         display: &'static str,
         inner: fn(&EntityState) -> Transform,
     ) -> RenderSpec {
@@ -447,9 +447,9 @@ impl RenderSpec {
 
     pub fn built(
         name: &'static str,
-        key: fn(&EntityState) -> String,
+        key: fn(&EntityState) -> TexturePath,
         build: fn(&EntityState) -> Mesh,
-        texture: fn(&EntityState) -> Option<String>,
+        texture: fn(&EntityState) -> Option<TexturePath>,
     ) -> RenderSpec {
         RenderSpec::with_geom(
             name,
@@ -556,7 +556,7 @@ pub struct GpuSpec {
 
 #[derive(Resource, Default)]
 pub struct EntityAssets {
-    specs: HashMap<usize, GpuSpec>,
+    specs: Vec<Option<GpuSpec>>,
     images: HashMap<String, Option<Handle<Image>>>,
     block_atlas: Option<Handle<Image>>,
     block_meshes: HashMap<BlockRef, Option<Handle<Mesh>>>,
@@ -615,7 +615,10 @@ fn max_rendered_entities() -> usize {
 
 impl EntityAssets {
     fn spec(&mut self, idx: usize, model: &ModelGeom) -> &GpuSpec {
-        self.specs.entry(idx).or_insert_with(|| GpuSpec {
+        if self.specs.len() <= idx {
+            self.specs.resize_with(idx + 1, || None);
+        }
+        self.specs[idx].get_or_insert_with(|| GpuSpec {
             model: geom::bake(&(model.layer)()),
         })
     }
@@ -1029,7 +1032,7 @@ struct LayerRig {
     extra: Entity,
     hook: Entity,
     body: RigBody,
-    texture: String,
+    texture: TexturePath,
     material: Option<Handle<EntityMaterial>>,
     tex: Option<Handle<Image>>,
     lit: Lit,
@@ -1050,6 +1053,16 @@ impl EntityRigs {
     pub fn len(&self) -> usize {
         self.live.len()
     }
+
+    #[cfg(feature = "shader_support")]
+    pub(crate) fn roots(&self) -> impl Iterator<Item = (Entity, EntityKind)> + '_ {
+        self.live.values().flat_map(|rig| {
+            rig.layers
+                .iter()
+                .flatten()
+                .map(move |layer| (layer.pose_root, rig.kind))
+        })
+    }
 }
 
 #[derive(Component)]
@@ -1067,6 +1080,7 @@ impl Plugin for EntityPlugin {
                 Update,
                 (crate::renderer::maps::upload_maps, sync_entities)
                     .chain()
+                    .after(crate::renderer::FrameViewSystems)
                     .run_if(in_state(crate::renderer::AppState::InGame)),
             );
     }
@@ -1075,7 +1089,7 @@ impl Plugin for EntityPlugin {
 #[allow(clippy::too_many_arguments)]
 fn sync_entities(
     mut commands: Commands,
-    shared: Res<crate::renderer::Shared>,
+    view: Res<crate::renderer::FrameView>,
     registry: Res<Registry>,
     mut assets: ResMut<EntityAssets>,
     mut rigs: ResMut<EntityRigs>,
@@ -1116,11 +1130,8 @@ fn sync_entities(
         .unwrap_or_default();
 
     let cap = max_rendered_entities();
-    let (anims, partial) = {
-        let state = shared.0.lock().unwrap();
-        let partial = crate::renderer::systems::partial_ticks(&state);
-        (state.session.entities.clone(), partial)
-    };
+    let anims = &*view.entities;
+    let partial = view.partial;
     let frame = &mut *frame;
     frame.clear();
     if anims.len() <= cap {
@@ -1249,7 +1260,9 @@ fn sync_entities(
                             }
                         }
                     }
-                    let gpu = &assets.specs[&layer.spec];
+                    let gpu = assets.specs[layer.spec]
+                        .as_ref()
+                        .expect("a baked layer's spec is baked when the layer spawns");
                     gpu.model.reset_pose(&mut layer.states);
                     (model.setup)(&gpu.model, &mut layer.states, st);
 
@@ -1277,7 +1290,7 @@ fn sync_entities(
                     if recompute_variants {
                         let item = (geom.item)(st);
                         if !single.key.is_named(&item) {
-                            single.key = GeomKey::Named(item.as_str().into());
+                            single.key = GeomKey::Named(Box::from(&*item));
                             let built = item_assets
                                 .get(
                                     &item,
@@ -1333,14 +1346,11 @@ fn sync_entities(
                             }
                             None => (1, 0),
                         };
-                        copy_locals.extend(
-                            cluster_offsets(count, max.z - min.z, seed)
-                                .into_iter()
-                                .map(|offset| {
-                                    Transform::from_translation(offset)
-                                        .mul_transform(single.display)
-                                }),
-                        );
+                        let display = single.display;
+                        cluster_offsets(count, max.z - min.z, seed, |offset| {
+                            copy_locals
+                                .push(Transform::from_translation(offset).mul_transform(display));
+                        });
                     }
                 }
                 (Geom::Block(geom), RigBody::Single(single)) => {
@@ -1387,7 +1397,7 @@ fn sync_entities(
                         let texture = (geom.texture)(st);
                         let key = (geom.key)(st);
                         if !single.key.is_named(&key) {
-                            single.key = GeomKey::Named(key.as_str().into());
+                            single.key = GeomKey::Named(Box::from(&*key));
                             let mesh = assets.built_mesh(layer.spec, &key, geom, st, &mut meshes);
                             let image = match &texture {
                                 Some(path)
@@ -1586,7 +1596,7 @@ fn spawn_model_rig(
     idx: usize,
     states: Vec<PartState>,
     name: &'static str,
-    texture: String,
+    texture: TexturePath,
     lit: Lit,
     material: Option<Handle<EntityMaterial>>,
     tex: Option<Handle<Image>>,
@@ -1661,7 +1671,7 @@ fn spawn_single_rig(
                 material: None,
                 collapsed: true,
             }),
-            texture: String::new(),
+            texture: TexturePath::Borrowed(""),
             material: None,
             tex: None,
             lit: Lit::full_bright(),
@@ -1707,7 +1717,7 @@ fn spawn_single_rig(
             bounds: None,
             material: None,
         }),
-        texture: String::new(),
+        texture: TexturePath::Borrowed(""),
         material: None,
         tex: None,
         lit: Lit::full_bright(),

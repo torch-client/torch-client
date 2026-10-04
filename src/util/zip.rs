@@ -13,6 +13,7 @@ pub struct Entry {
     pub name: String,
     offset: u64,
     compressed: u64,
+    uncompressed: u64,
     method: u16,
 }
 
@@ -24,17 +25,22 @@ fn u32_at(b: &[u8], i: usize) -> u32 {
     u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
 }
 
+const EOCD_FIXED: usize = 22;
+
 fn at(jar: &[u8], from: usize, len: usize) -> Result<&[u8], String> {
-    jar.get(from..from + len)
+    from.checked_add(len)
+        .and_then(|end| jar.get(from..end))
         .ok_or_else(|| "the archive ends mid-record".to_owned())
 }
 
 pub fn entries(jar: &[u8]) -> Result<Vec<Entry>, String> {
-    let size = jar.len() as u64;
-    let tail_len = (MAX_COMMENT + 22).min(size) as usize;
+    if jar.len() < EOCD_FIXED {
+        return Err("the file is too short to be a zip archive".into());
+    }
+    let tail_len = (MAX_COMMENT as usize + EOCD_FIXED).min(jar.len());
     let tail = &jar[jar.len() - tail_len..];
 
-    let eocd = (0..=tail.len().saturating_sub(22))
+    let eocd = (0..=tail.len() - EOCD_FIXED)
         .rev()
         .find(|&i| u32_at(tail, i) == EOCD_SIG)
         .ok_or("no end of central directory record")?;
@@ -63,6 +69,7 @@ pub fn entries(jar: &[u8]) -> Result<Vec<Entry>, String> {
             name,
             offset: u32_at(cd, pos + 42) as u64,
             compressed: u32_at(cd, pos + 20) as u64,
+            uncompressed: u32_at(cd, pos + 24) as u64,
             method: u16_at(cd, pos + 10),
         });
         pos = name_at + name_len + extra_len + comment_len;
@@ -81,12 +88,49 @@ pub fn read(jar: &[u8], entry: &Entry) -> Result<Vec<u8>, String> {
     match entry.method {
         0 => Ok(raw.to_vec()),
         8 => {
-            let mut out = Vec::new();
+            let mut out = Vec::with_capacity(entry.uncompressed as usize);
             flate2::read::DeflateDecoder::new(raw)
+                .take(entry.uncompressed + 1)
                 .read_to_end(&mut out)
                 .map_err(|e| e.to_string())?;
+            if out.len() as u64 > entry.uncompressed {
+                return Err(format!(
+                    "{} inflates past the {} bytes its directory entry declares",
+                    entry.name, entry.uncompressed
+                ));
+            }
             Ok(out)
         }
         m => Err(format!("compression method {m} is not supported")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_too_short_to_be_an_archive_is_an_error() {
+        for bytes in [
+            &[][..],
+            &[0x50, 0x4b][..],
+            &[0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0][..],
+        ] {
+            assert!(entries(bytes).is_err(), "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_archive_has_no_entries() {
+        let mut bytes = vec![0u8; EOCD_FIXED];
+        bytes[..4].copy_from_slice(&EOCD_SIG.to_le_bytes());
+        assert_eq!(entries(&bytes).map(|e| e.len()), Ok(0));
+    }
+
+    #[test]
+    fn a_slice_past_the_end_or_overflowing_is_an_error() {
+        assert!(at(&[1, 2, 3], 2, 2).is_err());
+        assert!(at(&[1, 2, 3], usize::MAX, 2).is_err());
+        assert_eq!(at(&[1, 2, 3], 1, 2), Ok(&[2, 3][..]));
     }
 }

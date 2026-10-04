@@ -28,6 +28,7 @@ pub(crate) fn container_kind(menu: &Menu) -> ContainerKind {
         Menu::BrewingStand { .. } => ContainerKind::BrewingStand,
         Menu::Merchant { .. } => ContainerKind::Merchant,
         Menu::Lectern { .. } => ContainerKind::Lectern,
+        Menu::Anvil { .. } => ContainerKind::Anvil,
         _ => ContainerKind::None,
     }
 }
@@ -406,6 +407,7 @@ fn creative_stack(
 pub(crate) fn apply_inv_actions(bot: &Client, actions: Vec<InvAction>, horse: Option<HorseMenu>) {
     use azalea_protocol::packets::game::s_container_button_click::ServerboundContainerButtonClick;
     use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
+    use azalea_protocol::packets::game::s_rename_item::ServerboundRenameItem;
     use azalea_protocol::packets::game::s_select_trade::ServerboundSelectTrade;
     use azalea_protocol::packets::game::s_set_beacon::ServerboundSetBeacon;
     use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
@@ -470,6 +472,9 @@ pub(crate) fn apply_inv_actions(bot: &Client, actions: Vec<InvAction>, horse: Op
             }
             InvAction::SetBeacon { primary, secondary } => {
                 bot.write_packet(ServerboundSetBeacon { primary, secondary });
+            }
+            InvAction::RenameItem(name) => {
+                bot.write_packet(ServerboundRenameItem { name });
             }
             InvAction::Close => {
                 if let Some(horse) = horse.as_ref() {

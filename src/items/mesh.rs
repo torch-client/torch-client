@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use bevy::math::Mat4;
@@ -13,7 +12,8 @@ use super::icons::{
     model_quads, rgb_of, rigid_quads, shield_quads, tint_at,
 };
 use super::model::{
-    Assets, DIR_SHADE, DOWN, EAST, NORTH, Resolved, SOUTH, Tex, UP, WEST, corner_uv, face_positions,
+    Assets, DIR_SHADE, DOWN, DisplayTransforms, EAST, NORTH, Resolved, SOUTH, Tex, UP, WEST,
+    corner_uv, face_positions,
 };
 use super::raster::{self, Quad};
 
@@ -31,20 +31,18 @@ pub struct ItemMesh {
     pub vertices: Vec<ItemVertex>,
     pub indices: Vec<u32>,
     pub image: RgbaImage,
-    pub display: HashMap<String, Transform>,
+    pub display: DisplayTransforms,
     #[allow(dead_code, reason = "asserted on by this module's tests")]
     pub generated: bool,
 }
 
 pub struct ItemMeshes {
-    assets: Assets,
+    assets: &'static Assets,
 }
 
 impl ItemMeshes {
-    pub fn new(assets: &Path) -> ItemMeshes {
-        ItemMeshes {
-            assets: Assets::new(assets),
-        }
+    pub fn new(assets: &'static Assets) -> ItemMeshes {
+        ItemMeshes { assets }
     }
 
     pub fn context_sensitive(&self, id: &str) -> bool {
@@ -79,7 +77,7 @@ impl ItemMeshes {
 
         let mut parts = Vec::new();
         collect_parts(
-            &self.assets,
+            self.assets,
             &root,
             "gui",
             false,
@@ -90,11 +88,11 @@ impl ItemMeshes {
         let mut quads = Vec::new();
         let model = parts.iter().find_map(|part| match &part.synthetic {
             Some(Synthetic::Banner(color, local)) => {
-                banner_quads(&self.assets, *color, &layers, *local, &mut quads);
+                banner_quads(self.assets, *color, &layers, *local, &mut quads);
                 Some(&part.model)
             }
             Some(Synthetic::Shield(local)) => {
-                shield_quads(&self.assets, &layers, *local, &mut quads);
+                shield_quads(self.assets, &layers, *local, &mut quads);
                 Some(&part.model)
             }
             _ => None,
@@ -112,7 +110,7 @@ impl ItemMeshes {
     }
 
     pub fn build(&self, id: &str, ctx: &str, using: bool) -> Option<ItemMesh> {
-        let assets = &self.assets;
+        let assets = self.assets;
         let (id, banner_layers) = match crate::blockentities::banner::parse_model_key(id) {
             Some((item, layers)) => (item, layers),
             None => (id, Vec::new()),
@@ -136,7 +134,7 @@ impl ItemMeshes {
         }
 
         let mut quads: Vec<Quad> = Vec::new();
-        let mut display: Option<HashMap<String, Transform>> = None;
+        let mut display: Option<DisplayTransforms> = None;
         let mut generated = false;
         let mut synthesised = false;
 
@@ -191,7 +189,7 @@ impl ItemMeshes {
             }
             if quads.len() > before {
                 synthesised |= part.synthetic.is_some();
-                display.get_or_insert_with(|| model.display.clone());
+                display.get_or_insert(model.display);
             }
         }
 
@@ -201,7 +199,7 @@ impl ItemMeshes {
 
         let mut display = display.unwrap_or_default();
         if display.is_empty() && synthesised {
-            display = assets.model("block/block").display.clone();
+            display = assets.model("block/block").display;
         }
 
         let packed = Packed::of(&quads);
@@ -453,16 +451,16 @@ pub fn apply_transform(p: [f32; 3], t: &Transform, left_hand: bool) -> [f32; 3] 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::items::model::DisplayContext;
 
     const ASSETS: &str = "reference/minecraft-26.1.1/assets/minecraft";
 
     fn meshes() -> Option<ItemMeshes> {
-        let root = Path::new(ASSETS);
-        if !root.exists() {
+        if !std::path::Path::new(ASSETS).exists() {
             eprintln!("assets missing, skipping");
             return None;
         }
-        Some(ItemMeshes::new(root))
+        Some(ItemMeshes::new(crate::items::model::shared()))
     }
 
     #[test]
@@ -535,7 +533,11 @@ mod tests {
                 [1, 0, 0]
             ]
         );
-        assert!(mesh.display.contains_key("thirdperson_righthand"));
+        assert!(
+            mesh.display
+                .get(DisplayContext::ThirdPersonRightHand)
+                .is_some()
+        );
     }
 
     #[test]
@@ -545,7 +547,11 @@ mod tests {
             .build("chest", "thirdperson_righthand", false)
             .expect("chest");
         assert_eq!(mesh.vertices.len(), 3 * 6 * 4);
-        assert!(mesh.display.contains_key("thirdperson_righthand"));
+        assert!(
+            mesh.display
+                .get(DisplayContext::ThirdPersonRightHand)
+                .is_some()
+        );
     }
 
     #[test]
@@ -563,14 +569,17 @@ mod tests {
         let mesh = meshes
             .build("diamond_sword", "thirdperson_righthand", false)
             .expect("diamond_sword");
-        let t = mesh.display.get("thirdperson_righthand").expect("slot");
+        let t = mesh
+            .display
+            .get(DisplayContext::ThirdPersonRightHand)
+            .expect("slot");
         assert_eq!(t.rotation, [0.0, -90.0, 55.0]);
 
-        let right = apply_transform([1.0, 0.5, 0.5], t, false);
+        let right = apply_transform([1.0, 0.5, 0.5], &t, false);
         for (got, want) in right.iter().zip([0.0, 0.59813962, 0.27501999].iter()) {
             assert!((got - want).abs() < 1e-5, "{:?} != {:?}", right, want);
         }
-        let left = apply_transform([1.0, 0.5, 0.5], t, true);
+        let left = apply_transform([1.0, 0.5, 0.5], &t, true);
         for (got, want) in left.iter().zip([0.0, -0.09813962, -0.21251999].iter()) {
             assert!((got - want).abs() < 1e-5, "{:?} != {:?}", left, want);
         }

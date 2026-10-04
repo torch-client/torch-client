@@ -11,6 +11,11 @@ pub(crate) fn epoch() -> Instant {
     *EPOCH.get_or_init(Instant::now)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn sleep(duration: std::time::Duration) {
+    tokio::time::sleep(duration).await;
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn sleep(duration: std::time::Duration) {
     use wasm_bindgen::{JsCast, JsValue};

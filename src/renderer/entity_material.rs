@@ -49,7 +49,16 @@ impl Default for EntityParams {
             light1: DIFFUSE_LIGHT[1].normalize().extend(1.0),
             light_floor: Vec4::ZERO,
             light_block: Vec4::ZERO,
-            light_sky: Vec4::new(1.0, 1.0, 1.0, 0.0),
+            light_sky: Vec4::new(
+                1.0,
+                1.0,
+                1.0,
+                if cfg!(feature = "shader_support") {
+                    240.0
+                } else {
+                    0.0
+                },
+            ),
             mode: LightMode::Cardinal as u32,
         }
     }
@@ -97,6 +106,11 @@ impl EntityParams {
         self.light_floor = Vec3::from(lit.light.floor).extend(0.0);
         self.light_block = Vec3::from(lit.light.block).extend(0.0);
         self.light_sky = Vec3::from(lit.light.sky).extend(0.0);
+        #[cfg(feature = "shader_support")]
+        {
+            self.light_block.w = f32::from(lit.light.levels[0]) * 16.0;
+            self.light_sky.w = f32::from(lit.light.levels[1]) * 16.0;
+        }
     }
 }
 

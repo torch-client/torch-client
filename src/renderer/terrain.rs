@@ -121,8 +121,26 @@ fn recentre_cascades(
 
 static BUILTIN_SHADERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+static SUN_SPECULAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn sun_specular_enabled() -> bool {
+    SUN_SPECULAR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn builtin_shaders_enabled() -> bool {
     cfg!(feature = "builtin_shaders") && BUILTIN_SHADERS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn pack_drawing() -> bool {
+    #[cfg(feature = "shader_support")]
+    if crate::renderer::packvertex::active() {
+        return true;
+    }
+    false
+}
+
+pub fn builtin_world_shading() -> bool {
+    builtin_shaders_enabled() && !pack_drawing()
 }
 
 #[cfg(feature = "builtin_shaders")]
@@ -137,11 +155,21 @@ fn sync_builtin_shaders(
     for _ in entity_materials.iter_mut() {}
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ShaderQuality {
-    #[default]
     Fancy,
     Fast,
+    Mobile,
+}
+
+impl Default for ShaderQuality {
+    fn default() -> Self {
+        if cfg!(target_os = "android") {
+            ShaderQuality::Mobile
+        } else {
+            ShaderQuality::Fancy
+        }
+    }
 }
 
 impl ShaderQuality {
@@ -150,6 +178,7 @@ impl ShaderQuality {
         match self {
             ShaderQuality::Fancy => "Fancy",
             ShaderQuality::Fast => "Fast",
+            ShaderQuality::Mobile => "Mobile",
         }
     }
 
@@ -157,6 +186,7 @@ impl ShaderQuality {
         match self {
             ShaderQuality::Fancy => "fancy",
             ShaderQuality::Fast => "fast",
+            ShaderQuality::Mobile => "mobile",
         }
     }
 
@@ -164,6 +194,7 @@ impl ShaderQuality {
         match name {
             "fancy" => Some(ShaderQuality::Fancy),
             "fast" => Some(ShaderQuality::Fast),
+            "mobile" => Some(ShaderQuality::Mobile),
             _ => None,
         }
     }
@@ -172,7 +203,8 @@ impl ShaderQuality {
     pub fn next(self) -> ShaderQuality {
         match self {
             ShaderQuality::Fancy => ShaderQuality::Fast,
-            ShaderQuality::Fast => ShaderQuality::Fancy,
+            ShaderQuality::Fast => ShaderQuality::Mobile,
+            ShaderQuality::Mobile => ShaderQuality::Fancy,
         }
     }
 }
@@ -188,6 +220,9 @@ const FIRST_CASCADE_FAR_BOUND_FAST: f32 = 12.0;
 #[cfg(all(feature = "builtin_shaders", not(target_arch = "wasm32")))]
 const SHADOW_MAX_DISTANCE_FAST: f32 = 64.0;
 
+#[cfg(all(feature = "builtin_shaders", not(target_arch = "wasm32")))]
+const SHADOW_DISTANCE_MOBILE: f32 = 64.0;
+
 #[cfg(all(feature = "builtin_shaders", target_arch = "wasm32"))]
 const WEB_SHADOW_DISTANCE: f32 = 96.0;
 #[cfg(all(feature = "builtin_shaders", target_arch = "wasm32"))]
@@ -197,7 +232,7 @@ const WEB_SHADOW_DISTANCE_FAST: f32 = 64.0;
 fn shadow_map_size(quality: ShaderQuality) -> usize {
     match quality {
         ShaderQuality::Fancy => 2048,
-        ShaderQuality::Fast => 1024,
+        ShaderQuality::Fast | ShaderQuality::Mobile => 1024,
     }
 }
 
@@ -205,7 +240,7 @@ fn shadow_map_size(quality: ShaderQuality) -> usize {
 fn shadow_map_size(quality: ShaderQuality) -> usize {
     match quality {
         ShaderQuality::Fancy => 1024,
-        ShaderQuality::Fast => 512,
+        ShaderQuality::Fast | ShaderQuality::Mobile => 512,
     }
 }
 
@@ -213,7 +248,9 @@ fn shadow_map_size(quality: ShaderQuality) -> usize {
 fn shadow_filtering(quality: ShaderQuality) -> bevy::light::ShadowFilteringMethod {
     match quality {
         ShaderQuality::Fancy => bevy::light::ShadowFilteringMethod::Gaussian,
-        ShaderQuality::Fast => bevy::light::ShadowFilteringMethod::Hardware2x2,
+        ShaderQuality::Fast | ShaderQuality::Mobile => {
+            bevy::light::ShadowFilteringMethod::Hardware2x2
+        }
     }
 }
 
@@ -222,6 +259,7 @@ fn cascades(quality: ShaderQuality) -> bevy::light::CascadeShadowConfig {
     let (num_cascades, first, max) = match quality {
         ShaderQuality::Fancy => (4, FIRST_CASCADE_FAR_BOUND, SHADOW_MAX_DISTANCE),
         ShaderQuality::Fast => (2, FIRST_CASCADE_FAR_BOUND_FAST, SHADOW_MAX_DISTANCE_FAST),
+        ShaderQuality::Mobile => (1, SHADOW_DISTANCE_MOBILE, SHADOW_DISTANCE_MOBILE),
     };
     CascadeShadowConfigBuilder {
         num_cascades,
@@ -237,7 +275,7 @@ fn cascades(quality: ShaderQuality) -> bevy::light::CascadeShadowConfig {
 fn cascades(quality: ShaderQuality) -> bevy::light::CascadeShadowConfig {
     let max = match quality {
         ShaderQuality::Fancy => WEB_SHADOW_DISTANCE,
-        ShaderQuality::Fast => WEB_SHADOW_DISTANCE_FAST,
+        ShaderQuality::Fast | ShaderQuality::Mobile => WEB_SHADOW_DISTANCE_FAST,
     };
     CascadeShadowConfigBuilder {
         num_cascades: 1,
@@ -259,8 +297,13 @@ fn apply_shader_quality(
         (Entity, Option<&bevy::light::ShadowFilteringMethod>),
         With<super::systems::WorldCamera>,
     >,
+    sun: Query<&Visibility, With<SunLight>>,
 ) {
     let quality = gui.options.shader_quality;
+    SUN_SPECULAR.store(
+        quality != ShaderQuality::Mobile,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let filtering = shadow_filtering(quality);
     for (entity, current) in &cameras {
         if current != Some(&filtering) {
@@ -268,7 +311,12 @@ fn apply_shader_quality(
         }
     }
 
-    let size = shadow_map_size(quality);
+    let sun_drawn = sun.iter().any(|v| *v != Visibility::Hidden);
+    let size = if sun_drawn {
+        shadow_map_size(quality)
+    } else {
+        UNUSED_SHADOW_MAP_SIZE
+    };
     if shadow_map.size != size {
         shadow_map.size = size;
     }
@@ -383,7 +431,7 @@ fn palette_hue(color: Vec3) -> Vec3 {
 
 #[cfg(feature = "builtin_shaders")]
 fn drive_sun(
-    shared: Res<crate::renderer::systems::Shared>,
+    view: Res<crate::renderer::frame_view::FrameView>,
     mut ambient: ResMut<bevy::light::GlobalAmbientLight>,
     mut daylight: ResMut<Daylight>,
     mut clock: ResMut<SunClock>,
@@ -395,7 +443,7 @@ fn drive_sun(
     };
 
     let sunlit = crate::renderer::dimension::current().has_sun();
-    let wanted = if sunlit && builtin_shaders_enabled() {
+    let wanted = if sunlit && builtin_world_shading() {
         Visibility::Inherited
     } else {
         Visibility::Hidden
@@ -403,14 +451,7 @@ fn drive_sun(
     if *visibility != wanted {
         *visibility = wanted;
     }
-    let (authoritative, rate) = {
-        let state = shared.0.lock().unwrap();
-        let partial = crate::renderer::systems::partial_ticks(&state);
-        (
-            state.session.day_clock.at(partial),
-            state.session.day_clock.rate as f64,
-        )
-    };
+    let (authoritative, rate) = (view.day_ticks, view.day_rate as f64);
 
     let ticks = {
         let drift = authoritative - clock.ticks;
@@ -473,12 +514,22 @@ fn drive_sun(
     *transform = Transform::from_translation(to_light).looking_at(Vec3::ZERO, Vec3::Z);
 }
 
+const UNUSED_SHADOW_MAP_SIZE: usize = 1;
+
 pub struct TerrainMaterialPlugin;
 
 impl Plugin for TerrainMaterialPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "terrain.wgsl");
         embedded_asset!(app, "terrain_prepass.wgsl");
+
+        app.insert_resource(bevy::light::PointLightShadowMap {
+            size: UNUSED_SHADOW_MAP_SIZE,
+        });
+        #[cfg(not(feature = "builtin_shaders"))]
+        app.insert_resource(bevy::light::DirectionalLightShadowMap {
+            size: UNUSED_SHADOW_MAP_SIZE,
+        });
 
         #[cfg(feature = "builtin_shaders")]
         {
@@ -510,7 +561,12 @@ impl Plugin for TerrainMaterialPlugin {
             app.init_resource::<Daylight>();
             app.init_resource::<SunClock>();
             app.add_systems(PreUpdate, sync_builtin_shaders);
-            app.add_systems(Update, (drive_sun, apply_shader_quality));
+            app.add_systems(
+                Update,
+                (drive_sun, apply_shader_quality)
+                    .chain()
+                    .after(crate::renderer::frame_view::FrameViewSystems),
+            );
             app.add_systems(
                 PostUpdate,
                 recentre_cascades
@@ -589,6 +645,8 @@ pub fn new_lightmap_image() -> Image {
         bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
     );
     image.sampler = ImageSampler::linear();
+    #[cfg(feature = "shader_support")]
+    super::packdraw::allow_display_view(&mut image);
     image
 }
 

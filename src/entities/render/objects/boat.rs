@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::math::{Mat4, Quat, Vec3};
 
+use crate::entities::TexturePath;
 use crate::entities::models::objects::boat;
 use crate::entities::registry::Registry;
 use crate::entities::render::objects::{hook_for, mirror};
@@ -77,20 +78,20 @@ fn wood(kind: EntityKind) -> &'static str {
     }
 }
 
-fn boat_texture(st: &EntityState) -> String {
-    format!("entity/boat/{}", wood(st.kind))
+fn boat_texture(st: &EntityState) -> TexturePath {
+    format!("entity/boat/{}", wood(st.kind)).into()
 }
 
-fn chest_boat_texture(st: &EntityState) -> String {
-    format!("entity/chest_boat/{}", wood(st.kind))
+fn chest_boat_texture(st: &EntityState) -> TexturePath {
+    format!("entity/chest_boat/{}", wood(st.kind)).into()
 }
 
-fn raft_texture(_st: &EntityState) -> String {
-    "entity/boat/bamboo".to_string()
+fn raft_texture(_st: &EntityState) -> TexturePath {
+    "entity/boat/bamboo".into()
 }
 
-fn chest_raft_texture(_st: &EntityState) -> String {
-    "entity/chest_boat/bamboo".to_string()
+fn chest_raft_texture(_st: &EntityState) -> TexturePath {
+    "entity/chest_boat/bamboo".into()
 }
 
 fn root(st: &EntityState) -> RootPose {

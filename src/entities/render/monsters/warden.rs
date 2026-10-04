@@ -2,6 +2,7 @@
 
 use azalea_registry::builtin::EntityKind;
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::warden;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -72,24 +73,24 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/warden/warden".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/warden/warden".into()
 }
 
-fn bioluminescent_texture(_st: &EntityState) -> String {
-    "entity/warden/warden_bioluminescent_layer".to_string()
+fn bioluminescent_texture(_st: &EntityState) -> TexturePath {
+    "entity/warden/warden_bioluminescent_layer".into()
 }
 
-fn pulsating_spots_1_texture(_st: &EntityState) -> String {
-    "entity/warden/warden_pulsating_spots_1".to_string()
+fn pulsating_spots_1_texture(_st: &EntityState) -> TexturePath {
+    "entity/warden/warden_pulsating_spots_1".into()
 }
 
-fn pulsating_spots_2_texture(_st: &EntityState) -> String {
-    "entity/warden/warden_pulsating_spots_2".to_string()
+fn pulsating_spots_2_texture(_st: &EntityState) -> TexturePath {
+    "entity/warden/warden_pulsating_spots_2".into()
 }
 
-fn heart_texture(_st: &EntityState) -> String {
-    "entity/warden/warden_heart".to_string()
+fn heart_texture(_st: &EntityState) -> TexturePath {
+    "entity/warden/warden_heart".into()
 }
 
 fn spots_1_alpha(st: &EntityState) -> f32 {

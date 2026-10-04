@@ -1,7 +1,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use crate::gui::accountlist::{self, AccountKind};
-use crate::{log_error, log_info};
+use crate::{log_error, log_info, log_warn};
 
 #[derive(Clone)]
 pub enum Auth {
@@ -161,13 +161,19 @@ async fn run(generation: u64) {
         },
     );
 
-    let msa = match azalea_auth::get_ms_auth_token(client, code, None).await {
-        Ok(msa) => msa,
-        Err(e) => return fail(generation, format!("Sign-in did not complete: {e}")),
+    let msa = match poll_for_token(client, &code, generation).await {
+        Poll::Token(msa) => msa,
+        Poll::Superseded => return,
+        Poll::Expired => {
+            return fail(
+                generation,
+                "Sign-in did not complete: the code expired before it was used".to_string(),
+            );
+        }
     };
-    let token = msa.data.refresh_token.clone();
+    let token = msa.refresh_token.clone();
 
-    let minecraft = match azalea_auth::get_minecraft_token(client, &msa.data.access_token).await {
+    let minecraft = match azalea_auth::get_minecraft_token(client, &msa.access_token).await {
         Ok(minecraft) => minecraft,
         Err(e) => return fail(generation, format!("Microsoft accepted the code, but: {e}")),
     };
@@ -196,6 +202,61 @@ async fn run(generation: u64) {
     );
 }
 
+const MS_CLIENT_ID: &str = "00000000441cc96b";
+
+enum Poll {
+    Token(azalea_auth::AccessTokenResponse),
+    Superseded,
+    Expired,
+}
+
+async fn poll_for_token(
+    client: &reqwest::Client,
+    code: &azalea_auth::DeviceCodeResponse,
+    generation: u64,
+) -> Poll {
+    let deadline = unix_secs() + code.expires_in;
+    let interval = std::time::Duration::from_secs(code.interval.max(1));
+    let url = format!("https://login.live.com/oauth20_token.srf?client_id={MS_CLIENT_ID}");
+    let mut failing = false;
+    while unix_secs() < deadline {
+        crate::platform::time::sleep(interval).await;
+        if slot().lock().unwrap().generation != generation {
+            return Poll::Superseded;
+        }
+        let sent = client
+            .post(&url)
+            .form(&[
+                ("client_id", MS_CLIENT_ID),
+                ("device_code", code.device_code.as_str()),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ])
+            .send()
+            .await;
+        match sent {
+            Ok(response) => {
+                failing = false;
+                if let Ok(token) = response.json::<azalea_auth::AccessTokenResponse>().await {
+                    return Poll::Token(token);
+                }
+            }
+            Err(e) => {
+                if !std::mem::replace(&mut failing, true) {
+                    log_warn!("auth", "could not ask Microsoft yet, will keep trying: {e}");
+                }
+            }
+        }
+    }
+    Poll::Expired
+}
+
+fn unix_secs() -> u64 {
+    crate::platform::time::SystemTime::now()
+        .duration_since(crate::platform::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn fail(generation: u64, message: String) {
     log_error!("auth", "{message}");
     publish(generation, Auth::Failed(message.into()));
@@ -211,6 +272,7 @@ fn now() -> u64 {
 }
 
 pub async fn account() -> Result<azalea::account::Account, String> {
+    client();
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(session) = CLI_SESSION.get() {
         log_info!(
@@ -416,6 +478,15 @@ fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         crate::install_crypto_provider();
+        #[cfg(target_os = "android")]
+        if let Some(tls) = crate::android_tls_config() {
+            let client = reqwest::Client::builder()
+                .tls_backend_preconfigured(tls)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+            azalea_auth::set_http_client(client.clone());
+            return client;
+        }
         reqwest::Client::new()
     })
 }

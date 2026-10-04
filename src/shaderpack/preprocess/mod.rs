@@ -1,6 +1,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+mod condition;
+
+use condition::eval;
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Defines {
     map: HashMap<String, String>,
@@ -15,7 +19,7 @@ impl Defines {
         self.map.insert(name.into(), value.into());
     }
 
-    pub(crate) fn undefine(&mut self, name: &str) {
+    fn undefine(&mut self, name: &str) {
         self.map.remove(name);
     }
 
@@ -25,6 +29,12 @@ impl Defines {
 
     pub(crate) fn get(&self, name: &str) -> Option<&str> {
         self.map.get(name).map(String::as_str)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.map
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
     }
 }
 
@@ -119,15 +129,16 @@ pub(crate) fn preprocess(source: &str, defines: &mut Defines) -> Result<String, 
                 emit(&mut out, None);
             }
             "endif" => {
-                if stack.pop().is_none() {
-                    return Err(err(line, "#endif with no #if"));
-                }
+                stack.pop();
                 emit(&mut out, None);
             }
             "define" if active => {
                 let (ident, value) = split_directive(strip_comment(rest).trim());
                 if ident.is_empty() {
                     return Err(err(line, "#define names nothing"));
+                }
+                if defines.is_defined(ident) {
+                    out.push_str(&format!("#undef {ident}\n"));
                 }
                 defines.define(ident, value.trim());
                 emit(&mut out, Some(text.as_ref()));
@@ -185,7 +196,7 @@ fn scan_comments(line: &str, mut inside: bool) -> bool {
     inside
 }
 
-fn logical_lines(source: &str) -> impl Iterator<Item = (Cow<'_, str>, usize, usize)> {
+pub(crate) fn logical_lines(source: &str) -> impl Iterator<Item = (Cow<'_, str>, usize, usize)> {
     let mut lines = source.lines().enumerate().peekable();
     std::iter::from_fn(move || {
         let (index, first) = lines.next()?;
@@ -215,240 +226,6 @@ fn continued(line: &str) -> Option<&str> {
     line.strip_suffix('\\')
 }
 
-const MAX_EXPANSION: u32 = 32;
-
-fn eval(expr: &str, defines: &Defines, line: usize) -> Result<i64, Error> {
-    let tokens = tokenize(expr, line)?;
-    let mut parser = Parser {
-        tokens: &tokens,
-        at: 0,
-        defines,
-        line,
-        depth: 0,
-    };
-    let value = parser.expression(0)?;
-    if parser.at != parser.tokens.len() {
-        return Err(err(line, format!("trailing text in condition: {expr:?}")));
-    }
-    Ok(value)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Token<'a> {
-    Number(i64),
-    Ident(&'a str),
-    Op(&'a str),
-}
-
-const OPERATORS: &[&str] = &[
-    "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "(", ")", "+", "-", "*", "/", "%", "<", ">",
-    "!", "~", "&", "|", "^",
-];
-
-fn tokenize(expr: &str, line: usize) -> Result<Vec<Token<'_>>, Error> {
-    let mut out = Vec::new();
-    let bytes = expr.as_bytes();
-    let mut at = 0;
-
-    while at < bytes.len() {
-        let c = bytes[at];
-        if c.is_ascii_whitespace() {
-            at += 1;
-        } else if c.is_ascii_digit() {
-            let start = at;
-            let radix = if expr[at..].starts_with("0x") || expr[at..].starts_with("0X") {
-                at += 2;
-                16
-            } else {
-                10
-            };
-            let digits = at;
-            while at < bytes.len() && (bytes[at] as char).is_digit(radix) {
-                at += 1;
-            }
-            let value = i64::from_str_radix(&expr[digits..at], radix).map_err(|_| {
-                err(
-                    line,
-                    format!("cannot read the number {:?}", &expr[start..at]),
-                )
-            })?;
-            while at < bytes.len() && bytes[at].is_ascii_alphabetic() {
-                at += 1;
-            }
-            out.push(Token::Number(value));
-        } else if c == b'_' || c.is_ascii_alphabetic() {
-            let start = at;
-            while at < bytes.len() && (bytes[at] == b'_' || bytes[at].is_ascii_alphanumeric()) {
-                at += 1;
-            }
-            out.push(Token::Ident(&expr[start..at]));
-        } else {
-            let op = OPERATORS
-                .iter()
-                .find(|op| expr[at..].starts_with(**op))
-                .ok_or_else(|| err(line, format!("unexpected {:?} in condition", c as char)))?;
-            at += op.len();
-            out.push(Token::Op(op));
-        }
-    }
-    Ok(out)
-}
-
-struct Parser<'a> {
-    tokens: &'a [Token<'a>],
-    at: usize,
-    defines: &'a Defines,
-    line: usize,
-    depth: u32,
-}
-
-fn precedence(op: &str) -> Option<u8> {
-    Some(match op {
-        "||" => 1,
-        "&&" => 2,
-        "|" => 3,
-        "^" => 4,
-        "&" => 5,
-        "==" | "!=" => 6,
-        "<" | ">" | "<=" | ">=" => 7,
-        "<<" | ">>" => 8,
-        "+" | "-" => 9,
-        "*" | "/" | "%" => 10,
-        _ => return None,
-    })
-}
-
-impl<'a> Parser<'a> {
-    fn peek(&self) -> Option<&'a Token<'a>> {
-        self.tokens.get(self.at)
-    }
-
-    fn eat_op(&mut self, op: &str) -> bool {
-        if self.peek() == Some(&Token::Op(op)) {
-            self.at += 1;
-            return true;
-        }
-        false
-    }
-
-    fn expression(&mut self, min: u8) -> Result<i64, Error> {
-        let mut left = self.unary()?;
-        while let Some(Token::Op(op)) = self.peek() {
-            let Some(power) = precedence(op) else { break };
-            if power < min {
-                break;
-            }
-            self.at += 1;
-            let right = self.expression(power + 1)?;
-            left = apply(op, left, right);
-        }
-        Ok(left)
-    }
-
-    fn unary(&mut self) -> Result<i64, Error> {
-        match self.peek() {
-            Some(Token::Op("!")) => {
-                self.at += 1;
-                Ok((self.unary()? == 0) as i64)
-            }
-            Some(Token::Op("~")) => {
-                self.at += 1;
-                Ok(!self.unary()?)
-            }
-            Some(Token::Op("-")) => {
-                self.at += 1;
-                Ok(self.unary()?.wrapping_neg())
-            }
-            Some(Token::Op("+")) => {
-                self.at += 1;
-                self.unary()
-            }
-            Some(Token::Op("(")) => {
-                self.at += 1;
-                let value = self.expression(0)?;
-                if !self.eat_op(")") {
-                    return Err(err(self.line, "a ( in the condition is never closed"));
-                }
-                Ok(value)
-            }
-            Some(Token::Number(value)) => {
-                self.at += 1;
-                Ok(*value)
-            }
-            Some(Token::Ident("defined")) => {
-                self.at += 1;
-                let parenthesised = self.eat_op("(");
-                let Some(Token::Ident(name)) = self.peek() else {
-                    return Err(err(self.line, "defined names nothing"));
-                };
-                self.at += 1;
-                if parenthesised && !self.eat_op(")") {
-                    return Err(err(self.line, "defined( is never closed"));
-                }
-                Ok(self.defines.is_defined(name) as i64)
-            }
-            Some(Token::Ident(name)) => {
-                self.at += 1;
-                self.substitute(name)
-            }
-            _ => Err(err(self.line, "the condition ends early")),
-        }
-    }
-
-    fn substitute(&mut self, name: &str) -> Result<i64, Error> {
-        let Some(value) = self.defines.get(name) else {
-            return Ok(0);
-        };
-        let value = value.trim();
-        if value.is_empty() {
-            return Ok(1);
-        }
-        if self.depth >= MAX_EXPANSION {
-            return Err(err(self.line, format!("{name} expands into itself")));
-        }
-        let tokens = tokenize(value, self.line)?;
-        let mut inner = Parser {
-            tokens: &tokens,
-            at: 0,
-            defines: self.defines,
-            line: self.line,
-            depth: self.depth + 1,
-        };
-        let result = inner.expression(0)?;
-        if inner.at != inner.tokens.len() {
-            return Err(err(
-                self.line,
-                format!("{name} is not a number in a condition: {value:?}"),
-            ));
-        }
-        Ok(result)
-    }
-}
-
-fn apply(op: &str, left: i64, right: i64) -> i64 {
-    match op {
-        "||" => (left != 0 || right != 0) as i64,
-        "&&" => (left != 0 && right != 0) as i64,
-        "|" => left | right,
-        "^" => left ^ right,
-        "&" => left & right,
-        "==" => (left == right) as i64,
-        "!=" => (left != right) as i64,
-        "<" => (left < right) as i64,
-        ">" => (left > right) as i64,
-        "<=" => (left <= right) as i64,
-        ">=" => (left >= right) as i64,
-        "<<" => left.wrapping_shl(right as u32),
-        ">>" => left.wrapping_shr(right as u32),
-        "+" => left.wrapping_add(right),
-        "-" => left.wrapping_sub(right),
-        "*" => left.wrapping_mul(right),
-        "/" => left.checked_div(right).unwrap_or(0),
-        "%" => left.checked_rem(right).unwrap_or(0),
-        _ => 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +236,18 @@ mod tests {
             table.define(*name, *value);
         }
         preprocess(source, &mut table).expect("preprocessing failed")
+    }
+
+    #[test]
+    fn an_exponential_macro_is_stopped() {
+        let mut table = Defines::new();
+        let names: Vec<String> = (0..30).map(|i| format!("M{i}")).collect();
+        for pair in names.windows(2) {
+            table.define(pair[0].clone(), format!("{0}+{0}", pair[1]));
+        }
+        table.define(names[29].clone(), "1");
+        let error = preprocess("#if M0 > 0\nx\n#endif\n", &mut table).unwrap_err();
+        assert!(error.message.contains("more than"), "{error:?}");
     }
 
     #[test]
@@ -506,6 +295,18 @@ mod tests {
     }
 
     #[test]
+    fn a_redefinition_forgets_the_old_value_first() {
+        let out = run("#define A 0\n#define A 1\n#if A == 1\nok\n#endif\n", &[]);
+        assert_eq!(out, "#define A 0\n#undef A\n#define A 1\n\nok\n\n");
+    }
+
+    #[test]
+    fn a_decimal_in_a_condition_reads_its_integer_part() {
+        let source = "#if F == 1 && G == 2 && 1.5e2 == 100 && 25e-1 == 2\nok\n#endif\n";
+        assert_eq!(run(source, &[("F", "1.0"), ("G", "2.5")]), "\nok\n\n");
+    }
+
+    #[test]
     fn comments_yield_no_values_and_no_directives() {
         let source = "#define DRM 1 //[1]\n/*\n#endif\n*/\n#if DRM != 1\nbad\n#endif\n";
         assert_eq!(
@@ -527,9 +328,9 @@ mod tests {
             preprocess("a\n#ifdef X\nb\n", &mut table).unwrap_err().line,
             2
         );
-        assert!(preprocess("#endif\n", &mut table).is_err());
+        assert_eq!(preprocess("#endif\nx\n", &mut table).unwrap(), "\nx\n");
 
-        table.define("SHADOW_DISTANCE", "192.0");
+        table.define("SHADOW_DISTANCE", "\"far\"");
         assert!(preprocess("#if SHADOW_DISTANCE > 1\nx\n#endif\n", &mut table).is_err());
     }
 }

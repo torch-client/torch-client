@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::aquatic::axolotl;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -46,10 +47,10 @@ fn variant_name(st: &EntityState) -> &'static str {
     }
 }
 
-fn adult_texture(st: &EntityState) -> String {
-    format!("entity/axolotl/axolotl_{}", variant_name(st))
+fn adult_texture(st: &EntityState) -> TexturePath {
+    format!("entity/axolotl/axolotl_{}", variant_name(st)).into()
 }
 
-fn baby_texture(st: &EntityState) -> String {
-    format!("entity/axolotl/axolotl_{}_baby", variant_name(st))
+fn baby_texture(st: &EntityState) -> TexturePath {
+    format!("entity/axolotl/axolotl_{}_baby", variant_name(st)).into()
 }

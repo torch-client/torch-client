@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::wolf;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -59,7 +60,7 @@ fn wet_shade(st: &EntityState) -> [f32; 4] {
     [shade, shade, shade, 1.0]
 }
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     let variant = match &st.extras.variant {
         Some(id) => id.rsplit(':').next().unwrap_or("pale"),
         None => "pale",
@@ -68,7 +69,7 @@ fn texture(st: &EntityState) -> String {
     if let Some(entry) = crate::util::variants::wolf(variant) {
         return entry
             .texture(st.extras.tame, angry, st.extras.is_baby)
-            .to_string();
+            .into();
     }
     let base = if variant == "pale" {
         "wolf".to_string()
@@ -83,17 +84,17 @@ fn texture(st: &EntityState) -> String {
         ""
     };
     let baby = if st.extras.is_baby { "_baby" } else { "" };
-    format!("entity/wolf/{base}{state}{baby}")
+    format!("entity/wolf/{base}{state}{baby}").into()
 }
 
-fn armor_texture(_st: &EntityState) -> String {
-    "entity/equipment/wolf_body/armadillo_scute".to_string()
+fn armor_texture(_st: &EntityState) -> TexturePath {
+    "entity/equipment/wolf_body/armadillo_scute".into()
 }
 
-fn collar_texture(st: &EntityState) -> String {
+fn collar_texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/wolf/wolf_collar_baby".to_string()
+        "entity/wolf/wolf_collar_baby".into()
     } else {
-        "entity/wolf/wolf_collar".to_string()
+        "entity/wolf/wolf_collar".into()
     }
 }

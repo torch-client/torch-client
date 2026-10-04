@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::{Quat, Vec3};
 
+use crate::entities::TexturePath;
 use crate::entities::models::animals::feline;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -71,25 +72,25 @@ fn rot_lerp(a: f32, from: f32, to: f32) -> f32 {
     from + a * (to - from)
 }
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     let variant = match &st.extras.variant {
         Some(id) => id.rsplit(':').next().unwrap_or("tabby"),
         None => "tabby",
     };
     if let Some(entry) = crate::util::variants::cat(variant) {
-        return entry.texture(st.extras.is_baby).to_string();
+        return entry.texture(st.extras.is_baby).into();
     }
     if st.extras.is_baby {
-        format!("entity/cat/cat_{variant}_baby")
+        format!("entity/cat/cat_{variant}_baby").into()
     } else {
-        format!("entity/cat/cat_{variant}")
+        format!("entity/cat/cat_{variant}").into()
     }
 }
 
-fn collar_texture(st: &EntityState) -> String {
+fn collar_texture(st: &EntityState) -> TexturePath {
     if st.extras.is_baby {
-        "entity/cat/cat_collar_baby".to_string()
+        "entity/cat/cat_collar_baby".into()
     } else {
-        "entity/cat/cat_collar".to_string()
+        "entity/cat/cat_collar".into()
     }
 }

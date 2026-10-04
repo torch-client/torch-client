@@ -1,5 +1,6 @@
 const W: i32 = 18;
 const LAYER: i32 = W * W;
+const LAVA_BIT: u8 = 0x80;
 
 pub struct Occupancy {
     x_base: i32,
@@ -189,9 +190,17 @@ impl Occupancy {
     }
 
     #[inline]
-    pub fn set_fluid(&mut self, x: i32, y: i32, z: i32, amount: u8) {
+    pub fn set_fluid(&mut self, x: i32, y: i32, z: i32, amount: u8, lava: bool) {
         if let Some(i) = self.index(x, y, z) {
-            self.fluid[i] = amount;
+            self.fluid[i] = amount | if lava { LAVA_BIT } else { 0 };
+        }
+    }
+
+    #[inline]
+    pub fn same_fluid(&self, x: i32, y: i32, z: i32, lava: bool) -> bool {
+        match self.index(x, y, z) {
+            Some(i) => self.fluid[i] != 0 && (self.fluid[i] & LAVA_BIT != 0) == lava,
+            None => false,
         }
     }
 
@@ -217,25 +226,8 @@ impl Occupancy {
     #[inline]
     pub fn fluid_amount(&self, x: i32, y: i32, z: i32) -> u8 {
         match self.index(x, y, z) {
-            Some(i) => self.fluid[i],
+            Some(i) => self.fluid[i] & !LAVA_BIT,
             None => 0,
-        }
-    }
-
-    #[inline]
-    pub fn is_fluid(&self, x: i32, y: i32, z: i32) -> bool {
-        self.fluid_amount(x, y, z) != 0
-    }
-
-    #[inline]
-    pub fn fluid_top(&self, x: i32, y: i32, z: i32) -> f32 {
-        let amount = self.fluid_amount(x, y, z);
-        if amount == 0 {
-            0.0
-        } else if self.fluid_amount(x, y + 1, z) != 0 {
-            1.0
-        } else {
-            super::fluid_surface(amount)
         }
     }
 

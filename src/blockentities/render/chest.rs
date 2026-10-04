@@ -1,8 +1,10 @@
 use std::f32::consts::FRAC_PI_2;
 
+use azalea_core::direction::Direction;
 use azalea_registry::builtin::BlockEntityKind;
 use bevy::prelude::*;
 
+use crate::blockentities::feed::ChestHalf;
 use crate::blockentities::models;
 use crate::blockentities::{BeRegistry, BeSpec, BeState, GeomKey};
 use crate::entities::geom::{BakedModel, LayerDef, PartState};
@@ -19,10 +21,10 @@ pub fn register(registry: &mut BeRegistry) {
 }
 
 fn chest_type(st: &BeState) -> &str {
-    match st.state.prop("type") {
-        "left" => "left",
-        "right" => "right",
-        _ => "single",
+    match st.state.chest_half {
+        ChestHalf::Left => "left",
+        ChestHalf::Right => "right",
+        ChestHalf::Single => "single",
     }
 }
 
@@ -82,7 +84,7 @@ fn texture(st: &BeState) -> String {
 }
 
 fn transform(st: &BeState) -> Transform {
-    let rotation = Quat::from_rotation_y(-facing_y_rot(st.state.prop("facing")).to_radians());
+    let rotation = Quat::from_rotation_y(-facing_y_rot(st.state.facing).to_radians());
     let pivot = Vec3::new(0.5, 0.0, 0.5);
     Transform {
         translation: pivot - rotation * pivot,
@@ -91,11 +93,11 @@ fn transform(st: &BeState) -> Transform {
     }
 }
 
-pub fn facing_y_rot(facing: &str) -> f32 {
+pub fn facing_y_rot(facing: Option<Direction>) -> f32 {
     match facing {
-        "west" => 90.0,
-        "north" => 180.0,
-        "east" => 270.0,
+        Some(Direction::West) => 90.0,
+        Some(Direction::North) => 180.0,
+        Some(Direction::East) => 270.0,
         _ => 0.0,
     }
 }
@@ -144,10 +146,11 @@ mod tests {
 
     #[test]
     fn facing_maps_to_vanilla_yaw() {
-        assert_eq!(facing_y_rot("south"), 0.0);
-        assert_eq!(facing_y_rot("west"), 90.0);
-        assert_eq!(facing_y_rot("north"), 180.0);
-        assert_eq!(facing_y_rot("east"), 270.0);
+        assert_eq!(facing_y_rot(Some(Direction::South)), 0.0);
+        assert_eq!(facing_y_rot(Some(Direction::West)), 90.0);
+        assert_eq!(facing_y_rot(Some(Direction::North)), 180.0);
+        assert_eq!(facing_y_rot(Some(Direction::East)), 270.0);
+        assert_eq!(facing_y_rot(None), 0.0);
     }
 
     #[test]

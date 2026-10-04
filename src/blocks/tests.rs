@@ -644,7 +644,10 @@ fn the_mesher_culls_a_face_against_a_solid_neighbour() {
         let (opaque, water) = build_section_mesh(&blocks, 0, 0, 0, 16, &occ);
         assert!(water.is_empty());
         assert_eq!(opaque.verts.len() % 4, 0);
-        assert_eq!(opaque.idxs.len(), opaque.verts.len() / 4 * 6);
+        assert_eq!(
+            opaque.idx.len() + opaque.cutout_idx.len(),
+            opaque.verts.len() / 4 * 6
+        );
         opaque.verts.len() / 4
     };
 

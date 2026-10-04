@@ -1,6 +1,6 @@
 use crate::gui::focus;
 use crate::gui::painter::Painter;
-use crate::gui::render::auto_gui_scale;
+use crate::gui::render::{GuiInput, auto_gui_scale};
 use crate::gui::widgets::{
     self, Button, HeaderFooter, Slider, WIDGET_HEIGHT, WIDGET_WIDTH_BIG, centered_x,
 };
@@ -168,9 +168,23 @@ const VOLUME_SLIDER_ID_BASE: u32 = 7;
 const ROW_SPACING: f32 = 4.0;
 
 #[cfg(not(feature = "audio"))]
-const MENU_CONTENT_H: f32 = 4.0 * WIDGET_HEIGHT + 3.0 * ROW_SPACING;
+const MENU_CONTENT_H: f32 =
+    4.0 * WIDGET_HEIGHT + 3.0 * ROW_SPACING + EDIT_HUD_ROW + RESOURCE_PACKS_ROW;
 #[cfg(feature = "audio")]
-const MENU_CONTENT_H: f32 = 5.0 * WIDGET_HEIGHT + 4.0 * ROW_SPACING;
+const MENU_CONTENT_H: f32 =
+    5.0 * WIDGET_HEIGHT + 4.0 * ROW_SPACING + EDIT_HUD_ROW + RESOURCE_PACKS_ROW;
+
+const EDIT_HUD_ROW: f32 = if cfg!(feature = "hud_editor") {
+    WIDGET_HEIGHT + ROW_SPACING
+} else {
+    0.0
+};
+
+const RESOURCE_PACKS_ROW: f32 = if cfg!(resource_packs) {
+    WIDGET_HEIGHT + ROW_SPACING
+} else {
+    0.0
+};
 
 pub(in crate::gui) const ROW_H: f32 = 25.0;
 
@@ -220,13 +234,13 @@ const LIST_PAD_BOTTOM: f32 = 4.0;
 
 const VIDEO_LIST_H: f32 = VIDEO_CONTENT_H + LIST_PAD_BOTTOM;
 
-const SCROLLBAR_W: f32 = 6.0;
+pub(in crate::gui) const SCROLLBAR_W: f32 = 6.0;
 
 const SCROLLBAR_MIN_H: f32 = 32.0;
 
 const SCROLLBAR_MAX_SLACK: f32 = 8.0;
 
-const SCROLLBAR_GAP: f32 = SCROLLBAR_W + 2.0;
+pub(in crate::gui) const SCROLLBAR_GAP: f32 = SCROLLBAR_W + 2.0;
 
 const SCROLL_RATE: f32 = ROW_H / 2.0;
 
@@ -300,11 +314,46 @@ pub(in crate::gui) fn scroll_input(
     *scroll = scroll.clamp(0.0, max_scroll);
 }
 
+#[cfg_attr(not(any(feature = "shader_support", resource_packs)), allow(dead_code))]
+pub(in crate::gui) fn masked_input(
+    ctx: &ScreenCtx,
+    rect: (f32, f32, f32, f32),
+    dragging: bool,
+) -> GuiInput {
+    let (x, y, w, h) = rect;
+    let over = ctx.hovering(x, y, w, h);
+    let mut input = ctx.input.clone();
+    if dragging || (!over && !widgets::slider_dragging()) {
+        input.mouse = None;
+    }
+    if dragging || !over {
+        input.left_click = false;
+    }
+    input
+}
+
 #[cfg(feature = "mobile_ui")]
 pub(in crate::gui) fn content_drag(
     scroll: &mut f32,
     ctx: &ScreenCtx,
     list_y: f32,
+    list_h: f32,
+    over_bar: bool,
+    max_scroll: f32,
+) {
+    content_drag_in(
+        scroll, ctx, 0.0, list_y, ctx.vw, list_h, over_bar, max_scroll,
+    );
+}
+
+#[cfg(feature = "mobile_ui")]
+#[allow(clippy::too_many_arguments)]
+pub(in crate::gui) fn content_drag_in(
+    scroll: &mut f32,
+    ctx: &ScreenCtx,
+    list_x: f32,
+    list_y: f32,
+    list_w: f32,
     list_h: f32,
     over_bar: bool,
     max_scroll: f32,
@@ -329,7 +378,7 @@ pub(in crate::gui) fn content_drag(
     }
 
     if ctx.input.left_click {
-        let inside = ctx.hovering(0.0, list_y, ctx.vw, list_h);
+        let inside = ctx.hovering(list_x, list_y, list_w, list_h);
         ACTIVE.store(inside && !over_bar, Ordering::Relaxed);
         LAST_Y.store(m.y.to_bits(), Ordering::Relaxed);
         START_Y.store(m.y.to_bits(), Ordering::Relaxed);
@@ -523,7 +572,7 @@ fn reset_video_options(o: &mut crate::gui::GuiOptions) {
     o.smooth_lighting = crate::gui::SMOOTH_LIGHTING_DEFAULT;
     o.lighting_enabled = crate::gui::LIGHTING_ENABLED_DEFAULT;
     o.max_fps = crate::gui::MAX_FPS_DEFAULT;
-    o.vsync = true;
+    o.vsync = crate::gui::VSYNC_DEFAULT;
     o.fps_counter = crate::gui::FPS_COUNTER_DEFAULT;
     o.shaders_enabled = false;
     o.shader_quality = Default::default();
@@ -589,9 +638,47 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         }
     }
 
+    #[cfg(resource_packs)]
+    {
+        let packs = Button::new(
+            x,
+            row(entries.len() as f32),
+            WIDGET_WIDTH_BIG,
+            WIDGET_HEIGHT,
+            crate::gui::resourcepacks::RESOURCE_PACKS,
+        );
+        if packs.draw(p, ctx) {
+            state.resourcepacks.open();
+            state.nav = Some(Screen::ResourcePacks);
+        }
+    }
+    let after_categories = entries.len() as f32 + if cfg!(resource_packs) { 1.0 } else { 0.0 };
+
+    #[cfg(feature = "hud_editor")]
+    {
+        let edit = Button::new(
+            x,
+            row(after_categories),
+            WIDGET_WIDTH_BIG,
+            WIDGET_HEIGHT,
+            "Edit HUD...",
+        );
+        if edit.draw(p, ctx) {
+            state.hud_state.parent = Screen::Options;
+            state.hud_state.over_menu = state.in_menu();
+            state.nav = Some(Screen::HudEditor);
+        }
+    }
+
+    let reset_row = after_categories
+        + if cfg!(feature = "hud_editor") {
+            1.0
+        } else {
+            0.0
+        };
     let reset_all = Button::new(
         x,
-        row(entries.len() as f32),
+        row(reset_row),
         WIDGET_WIDTH_BIG,
         WIDGET_HEIGHT,
         RESET_ALL,
@@ -744,25 +831,14 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         crate::gui::save_options(&state.options);
     }
 
-    #[cfg(feature = "mobile_ui")]
+    #[cfg(not(target_arch = "wasm32"))]
+    let vsync_cell = Some(cell(1.0, Y_DISPLAY_ROW_2));
+    #[cfg(target_arch = "wasm32")]
+    let vsync_cell: Option<(f32, f32)> = None;
+    if let Some(at) = vsync_cell
+        && toggle(p, ctx, at, VSYNC, &mut state.options.vsync)
     {
-        let (x, y) = cell(1.0, Y_DISPLAY_ROW_2);
-        let label = format!(
-            "{TOUCH_MOVEMENT}: {}",
-            state.options.touch_movement.caption()
-        );
-        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &label).draw(p, ctx) {
-            state.options.touch_movement = state.options.touch_movement.next();
-            crate::gui::save_options(&state.options);
-        }
-    }
-
-    #[cfg(not(feature = "mobile_ui"))]
-    {
-        let at = cell(1.0, Y_DISPLAY_ROW_2);
-        if toggle(p, ctx, at, VSYNC, &mut state.options.vsync) {
-            crate::gui::save_options(&state.options);
-        }
+        crate::gui::save_options(&state.options);
     }
 
     let (x, y) = cell(0.0, Y_DISPLAY_ROW_3);
@@ -987,6 +1063,22 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     let left = (ctx.vw / 2.0 - BIND_ROW_W / 2.0).floor();
     let (list_x, list_y, list_w, list_h) = LAYOUT.content_rect(ctx.vw, ctx.vh);
+
+    #[cfg(feature = "mobile_ui")]
+    let (list_y, list_h) = {
+        let x = centered_x(ctx.vw) + (WIDGET_WIDTH_BIG - COLUMN_W) / 2.0;
+        let label = format!(
+            "{TOUCH_MOVEMENT}: {}",
+            state.options.touch_movement.caption()
+        );
+        if Button::new(x, list_y, COLUMN_W, WIDGET_HEIGHT, &label).draw(p, ctx) {
+            state.options.touch_movement = state.options.touch_movement.next();
+            crate::gui::save_options(&state.options);
+        }
+        let advance = WIDGET_HEIGHT + ROW_SPACING;
+        (list_y + advance, (list_h - advance).max(0.0))
+    };
+
     scroll_input(
         &mut state.controls_scroll,
         &mut state.controls_scroll_drag,

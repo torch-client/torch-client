@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::math::{Quat, Vec3};
 
+use crate::entities::TexturePath;
 use crate::entities::models::objects::minecart;
 use crate::entities::registry::Registry;
 use crate::entities::render::objects::{hook_for, mirror};
@@ -24,8 +25,8 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/minecart/minecart".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/minecart/minecart".into()
 }
 
 fn root(st: &EntityState) -> RootPose {

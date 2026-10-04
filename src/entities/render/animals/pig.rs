@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::quadruped;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -72,31 +73,31 @@ fn is_cold(st: &EntityState) -> bool {
     }
 }
 
-fn adult_texture(st: &EntityState) -> String {
+fn adult_texture(st: &EntityState) -> TexturePath {
     let name = variant(st);
     if let Some(entry) = crate::util::variants::pig(name) {
-        return entry.texture(false).to_string();
+        return entry.texture(false).into();
     }
     match name {
-        "cold" => "entity/pig/pig_cold".to_string(),
-        "warm" => "entity/pig/pig_warm".to_string(),
-        _ => "entity/pig/pig_temperate".to_string(),
+        "cold" => "entity/pig/pig_cold".into(),
+        "warm" => "entity/pig/pig_warm".into(),
+        _ => "entity/pig/pig_temperate".into(),
     }
 }
 
-fn saddle_texture(_st: &EntityState) -> String {
-    "entity/equipment/pig_saddle/saddle".to_string()
+fn saddle_texture(_st: &EntityState) -> TexturePath {
+    "entity/equipment/pig_saddle/saddle".into()
 }
 
-fn baby_texture(st: &EntityState) -> String {
+fn baby_texture(st: &EntityState) -> TexturePath {
     let name = variant(st);
     if let Some(entry) = crate::util::variants::pig(name) {
-        return entry.texture(true).to_string();
+        return entry.texture(true).into();
     }
     match name {
-        "cold" => "entity/pig/pig_cold_baby".to_string(),
-        "warm" => "entity/pig/pig_warm_baby".to_string(),
-        _ => "entity/pig/pig_temperate_baby".to_string(),
+        "cold" => "entity/pig/pig_cold_baby".into(),
+        "warm" => "entity/pig/pig_warm_baby".into(),
+        _ => "entity/pig/pig_temperate_baby".into(),
     }
 }
 

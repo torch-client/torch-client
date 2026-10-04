@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub(crate) fn dir() -> PathBuf {
     crate::client::assets::root().join("sounds")
@@ -47,8 +47,8 @@ struct Span {
 
 pub(crate) struct Pack {
     table: HashMap<String, Span>,
-    file: Mutex<File>,
-    cache: Mutex<HashMap<String, Arc<[u8]>>>,
+    file: File,
+    cache: HashMap<String, Arc<[u8]>>,
 }
 
 const MAX_CACHED: usize = 512;
@@ -59,35 +59,8 @@ impl Pack {
         let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut reader = std::io::BufReader::new(file);
 
-        let mut header = [0u8; 12];
-        reader
-            .read_exact(&mut header)
-            .map_err(|_| "the sound pack ends mid-header".to_owned())?;
-        if &header[..8] != b"MCASSET2" {
-            return Err("the sound pack is not MCASSET2".to_owned());
-        }
-        let count = u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
-
-        let mut consumed = 12u64;
-        let mut spans: Vec<(String, u32)> = Vec::with_capacity(count.min(1 << 16));
-        let mut u32_at = |reader: &mut std::io::BufReader<File>| -> Result<u32, String> {
-            let mut n = [0u8; 4];
-            reader
-                .read_exact(&mut n)
-                .map_err(|_| "the sound pack ends mid-table".to_owned())?;
-            Ok(u32::from_le_bytes(n))
-        };
-        for _ in 0..count {
-            let key_len = u32_at(&mut reader)? as usize;
-            let mut key = vec![0u8; key_len];
-            reader
-                .read_exact(&mut key)
-                .map_err(|_| "the sound pack ends mid-key".to_owned())?;
-            let key = String::from_utf8(key).map_err(|_| "a sound pack key is not UTF-8")?;
-            let blob_len = u32_at(&mut reader)?;
-            consumed += 8 + key_len as u64;
-            spans.push((key, blob_len));
-        }
+        let (spans, consumed) = crate::platform::assets::read_table(&mut reader)
+            .map_err(|e| format!("the sound pack: {e}"))?;
 
         let mut table = HashMap::with_capacity(spans.len());
         let mut offset = consumed;
@@ -99,29 +72,26 @@ impl Pack {
         crate::log_info!("audio", "sound pack {index_id}: {} files", table.len());
         Ok(Pack {
             table,
-            file: Mutex::new(reader.into_inner()),
-            cache: Mutex::new(HashMap::new()),
+            file: reader.into_inner(),
+            cache: HashMap::new(),
         })
     }
 
-    pub(crate) fn read(&self, key: &str) -> Option<Arc<[u8]>> {
-        if let Some(hit) = self.cache.lock().ok()?.get(key) {
+    pub(crate) fn read(&mut self, key: &str) -> Option<Arc<[u8]>> {
+        if let Some(hit) = self.cache.get(key) {
             return Some(hit.clone());
         }
         let span = *self.table.get(key)?;
         let bytes: Arc<[u8]> = {
-            let mut file = self.file.lock().ok()?;
-            file.seek(SeekFrom::Start(span.offset)).ok()?;
+            self.file.seek(SeekFrom::Start(span.offset)).ok()?;
             let mut buf = vec![0u8; span.length as usize];
-            file.read_exact(&mut buf).ok()?;
+            self.file.read_exact(&mut buf).ok()?;
             buf.into()
         };
-        if let Ok(mut cache) = self.cache.lock() {
-            if cache.len() >= MAX_CACHED {
-                cache.clear();
-            }
-            cache.insert(key.to_owned(), bytes.clone());
+        if self.cache.len() >= MAX_CACHED {
+            self.cache.clear();
         }
+        self.cache.insert(key.to_owned(), bytes.clone());
         Some(bytes)
     }
 

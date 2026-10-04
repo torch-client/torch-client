@@ -30,7 +30,7 @@ fn sheep_color(ordinal: usize) -> u32 {
 const SHEEP_COLOR_DURATION: i32 = 25;
 
 pub fn sheep_wool_tint(st: &EntityState) -> [f32; 4] {
-    if !st.extras.magic_name_jeb {
+    if !st.extras.magic_name_jeb() {
         return tint(sheep_color(st.extras.wool_color as usize));
     }
     let tick_count = st.age_ticks.floor() as i32;

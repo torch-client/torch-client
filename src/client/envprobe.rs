@@ -37,6 +37,12 @@ pub(crate) fn camera_has_precipitation() -> bool {
     crate::util::biome_color::env(row).has_precipitation
 }
 
+#[cfg(feature = "shader_support")]
+pub(crate) fn camera_biome() -> Option<u8> {
+    let row = CAMERA_BIOME.load(std::sync::atomic::Ordering::Relaxed);
+    (row != UNRESOLVED).then_some(row)
+}
+
 pub(crate) fn reset() {
     if let Ok(mut probe) = probe().lock() {
         probe.key = None;

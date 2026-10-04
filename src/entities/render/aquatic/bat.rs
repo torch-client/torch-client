@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::aquatic::bat;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -12,6 +13,6 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/bat/bat".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/bat/bat".into()
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::source::Source;
+use crate::util::pack::Source;
 
 #[derive(Debug, Default)]
 pub(crate) struct Lang {
@@ -9,10 +9,15 @@ pub(crate) struct Lang {
 
 impl Lang {
     pub(crate) fn load(source: &Source) -> Lang {
-        let Some(text) = source.read_text("/lang/en_US.lang") else {
-            return Lang::default();
-        };
-        Lang::parse(&text)
+        const WANTED: &str = "/lang/en_us.lang";
+        let text = source.read_text("/lang/en_US.lang").or_else(|| {
+            let found = source
+                .files()
+                .into_iter()
+                .find(|f| f.eq_ignore_ascii_case(WANTED))?;
+            source.read_text(&found)
+        });
+        text.map_or_else(Lang::default, |text| Lang::parse(&text))
     }
 
     pub(crate) fn parse(text: &str) -> Lang {
@@ -30,6 +35,7 @@ impl Lang {
         Lang { entries }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -140,29 +146,16 @@ not an entry
     #[test]
     #[ignore = "needs a shader pack installed"]
     fn a_real_pack_names_its_own_options() {
-        use super::super::{discover, features, options, properties, source::Source};
+        use super::super::{discover, features, options, properties};
 
-        for pack in discover::list() {
-            let at = discover::dir().join(&pack.name);
-            let Ok(source) = Source::open(&at) else {
-                continue;
-            };
+        for (pack, source) in discover::installed() {
             let lang = Lang::load(&source);
             if lang.is_empty() {
-                println!("{}: ships no lang file", pack.name);
+                println!("{}: ships no lang file", pack);
                 continue;
             }
 
-            let texts: Vec<String> = source
-                .files()
-                .into_iter()
-                .filter(|f| {
-                    [".glsl", ".vsh", ".fsh", ".gsh", ".csh"]
-                        .iter()
-                        .any(|e| f.ends_with(e))
-                })
-                .filter_map(|f| source.read_text(&f))
-                .collect();
+            let texts: Vec<String> = crate::shaderpack::include::option_texts(&source);
             let found = options::discover(texts.iter().map(String::as_str));
 
             let named = found
@@ -187,7 +180,7 @@ not an entry
             println!(
                 "{}: {named}/{} options named, {described} described, \
                  {titled}/{} screens titled",
-                pack.name,
+                pack,
                 found.len(),
                 screens.count(),
             );
@@ -195,7 +188,7 @@ not an entry
             assert!(
                 named * 2 > found.len(),
                 "{}: only {named} of {} options are named",
-                pack.name,
+                pack,
                 found.len()
             );
         }

@@ -4,6 +4,7 @@ use crate::gui::slots::{self, CONTAINER_W, INV_H, INV_W, Layout};
 use crate::gui::{GuiState, ScreenCtx, Snapshot, tooltip};
 use crate::session::{ContainerKind, InvAction, SlotStack};
 
+mod anvil;
 mod banner;
 mod beacon;
 mod book;
@@ -17,11 +18,23 @@ pub struct ContainerUi {
     pub scroll: f32,
     pub dragging: bool,
     pub selected: i16,
-    pub beacon: (i16, i16),
-    pub merchant_title: Option<(i32, u32, String)>,
+    pub beacon: BeaconPick,
+    pub merchant_title: Option<TitleCache>,
+    pub anvil: anvil::AnvilUi,
 }
 
-pub const NO_EFFECT: i16 = -1;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BeaconPick {
+    pub primary: Option<i16>,
+    pub secondary: Option<i16>,
+}
+
+#[derive(Debug)]
+pub struct TitleCache {
+    pub container_id: i32,
+    pub level: u32,
+    pub text: String,
+}
 
 impl Default for ContainerUi {
     fn default() -> ContainerUi {
@@ -29,8 +42,9 @@ impl Default for ContainerUi {
             scroll: 0.0,
             dragging: false,
             selected: -1,
-            beacon: (NO_EFFECT, NO_EFFECT),
+            beacon: BeaconPick::default(),
             merchant_title: None,
+            anvil: anvil::AnvilUi::default(),
         }
     }
 }
@@ -66,6 +80,7 @@ pub fn draw(
         ContainerKind::Merchant => merchant::draw(p, state, ctx, snap, out),
         ContainerKind::Lectern => book::draw(p, state, ctx, snap, out),
         ContainerKind::Horse(columns) => horse::draw(p, state, ctx, snap, columns, out),
+        ContainerKind::Anvil => anvil::draw(p, state, ctx, snap, out),
     }
 }
 

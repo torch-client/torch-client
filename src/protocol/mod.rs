@@ -134,5 +134,5 @@ pub(crate) fn entity_metadata_is_native() -> bool {
 }
 
 pub(crate) fn translator() -> Option<Box<dyn azalea::connection::PacketTranslator>> {
-    (session() == 774).then(|| Box::new(hop::Translator::v774()) as Box<_>)
+    hop::Translator::for_protocol(session()).map(|t| Box::new(t) as Box<_>)
 }

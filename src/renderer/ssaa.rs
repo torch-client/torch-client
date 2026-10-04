@@ -1,11 +1,7 @@
-use bevy::asset::RenderAssetUsages;
-use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
-use bevy::camera::{
-    Camera, ClearColorConfig, OrthographicProjection, Projection, RenderTarget, ScalingMode,
-};
+use bevy::camera::RenderTarget;
 use bevy::image::ImageSampler;
-use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
+use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::TextureFormat;
 use bevy::window::PrimaryWindow;
 use bevy::window::WindowRef;
@@ -13,10 +9,6 @@ use bevy::window::WindowRef;
 use super::hand::HandCamera;
 use super::panorama::PanoramaCamera;
 use super::systems::WorldCamera;
-
-const SSAA_LAYER: usize = 6;
-
-const SSAA_CAMERA_ORDER: isize = 5;
 
 const SSAA_SCALE: f32 = 2.0;
 
@@ -39,124 +31,56 @@ fn render_scale(antialiasing: bool, scale_factor: f32) -> f32 {
 
 #[derive(Resource)]
 struct SsaaTarget {
-    material: Handle<StandardMaterial>,
-    mesh: Handle<Mesh>,
     window_size: UVec2,
     scale: f32,
     camera_count: usize,
 }
 
-#[derive(Component)]
-struct SsaaCamera;
+impl Default for SsaaTarget {
+    fn default() -> Self {
+        Self {
+            window_size: UVec2::ZERO,
+            scale: f32::NAN,
+            camera_count: 0,
+        }
+    }
+}
+
+#[derive(Resource, Clone, Default, ExtractResource)]
+pub struct SceneImage(pub Option<Handle<Image>>);
 
 pub struct SsaaPlugin;
 
 impl Plugin for SsaaPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostStartup, setup_ssaa)
+        app.init_resource::<SsaaTarget>()
+            .init_resource::<SceneImage>()
+            .add_plugins(ExtractResourcePlugin::<SceneImage>::default())
             .add_systems(Update, apply_ssaa);
     }
-}
-
-fn quad_positions(w: f32, h: f32) -> Vec<[f32; 3]> {
-    vec![
-        [-w / 2.0, h / 2.0, 0.0],
-        [w / 2.0, h / 2.0, 0.0],
-        [w / 2.0, -h / 2.0, 0.0],
-        [-w / 2.0, -h / 2.0, 0.0],
-    ]
-}
-
-fn setup_ssaa(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-) {
-    let Ok(window) = windows.single() else { return };
-    let (w, h) = (
-        window.physical_width().max(1) as f32,
-        window.physical_height().max(1) as f32,
-    );
-
-    let material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        unlit: true,
-        alpha_mode: AlphaMode::Opaque,
-        double_sided: true,
-        cull_mode: None,
-        ..default()
-    });
-
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, quad_positions(w, h));
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; 4]);
-    mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
-    let mesh_handle = meshes.add(mesh);
-
-    commands.spawn((
-        Mesh3d(mesh_handle.clone()),
-        MeshMaterial3d(material.clone()),
-        Transform::default(),
-        RenderLayers::layer(SSAA_LAYER),
-        NoFrustumCulling,
-    ));
-
-    commands.spawn((
-        super::systems::scene_camera(
-            SSAA_CAMERA_ORDER,
-            ClearColorConfig::None,
-            super::systems::CameraStart::Active,
-            SSAA_LAYER,
-        ),
-        Projection::Orthographic(OrthographicProjection {
-            scaling_mode: ScalingMode::Fixed {
-                width: w,
-                height: h,
-            },
-            near: -1000.0,
-            far: 1000.0,
-            ..OrthographicProjection::default_3d()
-        }),
-        Transform::from_xyz(0.0, 0.0, 500.0),
-        SsaaCamera,
-    ));
-
-    commands.insert_resource(SsaaTarget {
-        material,
-        mesh: mesh_handle,
-        window_size: UVec2::ZERO,
-        scale: f32::NAN,
-        camera_count: 0,
-    });
 }
 
 #[allow(clippy::too_many_arguments)]
 fn apply_ssaa(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut scene_image: ResMut<SceneImage>,
     mut terrain_params: ResMut<crate::renderer::terrain_pool::TerrainParams>,
     mut target: ResMut<SsaaTarget>,
     windows: Query<&Window, With<PrimaryWindow>>,
     state: Res<crate::gui::GuiState>,
     scene_cameras: Query<Entity, Or<(With<PanoramaCamera>, With<WorldCamera>, With<HandCamera>)>>,
-    mut quad_camera: Query<(&mut Projection, &mut Camera), With<SsaaCamera>>,
 ) {
     let Ok(window) = windows.single() else { return };
     let window_size = UVec2::new(
         window.physical_width().max(1),
         window.physical_height().max(1),
     );
-    let scale = render_scale(state.options.antialiasing, window.scale_factor());
+    #[cfg(feature = "shader_support")]
+    let antialiasing = state.options.antialiasing && !crate::renderer::packvertex::active();
+    #[cfg(not(feature = "shader_support"))]
+    let antialiasing = state.options.antialiasing;
+    let scale = render_scale(antialiasing, window.scale_factor());
     let enabled = scale != 1.0;
     let camera_count = scene_cameras.iter().count();
     if window_size == target.window_size
@@ -182,8 +106,8 @@ fn apply_ssaa(
                 .entity(entity)
                 .insert(RenderTarget::Window(WindowRef::Primary));
         }
-        if let Ok((_, mut camera)) = quad_camera.single_mut() {
-            camera.is_active = false;
+        if scene_image.0.is_some() {
+            scene_image.0 = None;
         }
         return;
     }
@@ -206,28 +130,12 @@ fn apply_ssaa(
     };
     let image_handle = images.add(image);
 
-    if let Some(material) = materials.get_mut(&target.material) {
-        material.base_color_texture = Some(image_handle.clone());
-    }
     for entity in &scene_cameras {
         commands
             .entity(entity)
             .insert(RenderTarget::Image(image_handle.clone().into()));
     }
-
-    let (w, h) = (window_size.x as f32, window_size.y as f32);
-    if let Ok((mut projection, mut camera)) = quad_camera.single_mut() {
-        camera.is_active = true;
-        if let Projection::Orthographic(ortho) = &mut *projection {
-            ortho.scaling_mode = ScalingMode::Fixed {
-                width: w,
-                height: h,
-            };
-        }
-    }
-    if let Some(mesh) = meshes.get_mut(&target.mesh) {
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, quad_positions(w, h));
-    }
+    scene_image.0 = Some(image_handle);
 }
 
 #[cfg(test)]

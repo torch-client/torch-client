@@ -4,6 +4,12 @@ use crate::entities::state::EntityState;
 const NECK_PART_COUNT: usize = 5;
 const TAIL_PART_COUNT: usize = 12;
 
+const NECK_NAMES: [&str; NECK_PART_COUNT] = ["neck0", "neck1", "neck2", "neck3", "neck4"];
+const TAIL_NAMES: [&str; TAIL_PART_COUNT] = [
+    "tail0", "tail1", "tail2", "tail3", "tail4", "tail5", "tail6", "tail7", "tail8", "tail9",
+    "tail10", "tail11",
+];
+
 pub fn layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
@@ -218,13 +224,13 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
     let mut tail_x_rot = 0.0;
     for i in 0..TAIL_PART_COUNT {
         tail_x_rot += (i as f32 * 0.45 + flap_time).sin() * 0.05;
-        let id = model.id(&format!("tail{i}"));
+        let id = model.id(TAIL_NAMES[i]);
         parts[id].x_rot = tail_x_rot;
         parts[id].y_rot = 180.0 * 0.017_453_292;
     }
 
     for i in 0..NECK_PART_COUNT {
-        let id = model.id(&format!("neck{i}"));
+        let id = model.id(NECK_NAMES[i]);
         parts[id].x_rot = (i as f32 * 0.45 + flap_time).cos() * 0.15;
     }
 }

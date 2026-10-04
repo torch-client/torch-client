@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::blaze;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -12,6 +13,6 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/blaze/blaze".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/blaze/blaze".into()
 }

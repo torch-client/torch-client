@@ -9,6 +9,7 @@ use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
+use crate::gui::hud_layout::{ElementId, Hud, Transforms};
 use crate::gui::painter::Painter;
 use crate::gui::render::effective_gui_scale;
 use crate::gui::{GuiState, Screen, ScreenCtx};
@@ -24,10 +25,33 @@ use pointer::{Pointer, PointerId};
 
 struct Owner {
     id: PointerId,
-    control: Control,
-    look: Option<LookTrack>,
-    stick_at: Vec2,
+    claim: Claim,
     seen: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Claim {
+    Pad(Cell),
+    Stick { at: Vec2 },
+    Use,
+    Hotbar(u8),
+    Chat,
+    Look(LookTrack),
+    LookOnly(LookTrack),
+}
+
+impl Claim {
+    fn new(control: Control, pos: Vec2, now: f32, stick_at: impl FnOnce() -> Vec2) -> Claim {
+        match control {
+            Control::Pad(cell) => Claim::Pad(cell),
+            Control::Stick => Claim::Stick { at: stick_at() },
+            Control::Use => Claim::Use,
+            Control::Hotbar(slot) => Claim::Hotbar(slot),
+            Control::Chat => Claim::Chat,
+            Control::Look => Claim::Look(LookTrack::new(pos, now)),
+            Control::LookOnly => Claim::LookOnly(LookTrack::new(pos, now)),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -63,6 +87,7 @@ pub fn register(app: &mut App) {
         Update,
         mobile_input
             .before(crate::renderer::intent::publish)
+            .before(crate::renderer::FrameViewSystems)
             .after(crate::gui::render::collect_input)
             .before(crate::gui::render::draw_gui)
             .run_if(pad_is_drawn),
@@ -70,6 +95,10 @@ pub fn register(app: &mut App) {
 }
 
 fn pad_is_drawn(state: Res<GuiState>) -> bool {
+    #[cfg(feature = "hud_editor")]
+    if state.screen == Screen::HudEditor {
+        return true;
+    }
     !state.in_menu()
 }
 
@@ -113,16 +142,39 @@ fn mobile_input(
         window.scale_factor(),
     );
 
+    let xf: Transforms = gui.hud_state.frames.transforms;
+
+    #[cfg(feature = "hud_editor")]
+    if gui.screen == Screen::HudEditor {
+        gui.hud_state
+            .set_touches(ui.pointers.iter().filter(|p| !p.released).map(|p| p.pos));
+        ui.release_all();
+        return;
+    }
+
     if gui.screen.is_open() {
         let closed = gui.screen != Screen::Death
-            && ui
-                .pointers
-                .iter()
-                .any(|p| p.pressed && layout.close_button.contains(p.pos));
+            && ui.pointers.iter().any(|p| {
+                p.pressed
+                    && layout
+                        .close_button
+                        .contains(xf.to_local(ElementId::ChatButton, p.pos))
+            });
+        let swapped = gui.screen == Screen::Chat
+            && crate::platform::orientation::SUPPORTED
+            && ui.pointers.iter().any(|p| {
+                p.pressed
+                    && layout
+                        .texting_button
+                        .contains(xf.to_local(ElementId::ChatButton, p.pos))
+            });
         ui.release_all();
         if closed {
             let next = close_target(gui);
             gui.nav = Some(next);
+            swallow_click(&mut gui_input);
+        } else if swapped {
+            crate::gui::chat::set_texting(!crate::gui::chat::texting());
             swallow_click(&mut gui_input);
         }
         return;
@@ -162,7 +214,7 @@ fn mobile_input(
 
     for p in pointers.iter() {
         if p.pressed {
-            let control = layout.hit(p.pos);
+            let control = layout.hit_in(p.pos, &xf);
             match control {
                 Control::Pad(Cell::Inventory) => nav = Some(inventory_screen(&shared)),
                 Control::Pad(Cell::Pause) => nav = Some(Screen::Pause),
@@ -176,15 +228,14 @@ fn mobile_input(
                     gui.chat.open("");
                     nav = Some(Screen::Chat);
                 }
-                Control::Stick | Control::Look => {}
+                Control::Stick | Control::Look | Control::LookOnly => {}
             }
-            claimed |= control != Control::Look;
+            let camera = matches!(control, Control::Look | Control::LookOnly);
+            claimed |= !camera;
             owners.retain(|o| o.id != p.id);
             owners.push(Owner {
                 id: p.id,
-                control,
-                look: (control == Control::Look).then(|| LookTrack::new(p.pos, now)),
-                stick_at: p.pos,
+                claim: Claim::new(control, p.pos, now, || xf.to_local(ElementId::Pad, p.pos)),
                 seen: true,
             });
             continue;
@@ -194,23 +245,27 @@ fn mobile_input(
             continue;
         };
         owner.seen = !p.released;
-        if owner.control == Control::Stick {
-            owner.stick_at = p.pos;
-        }
-        if let Some(track) = owner.look.as_mut() {
-            let moved = track.advance(p.pos);
-            look_delta += moved;
-            if p.released && track.is_tap(now, &cfg) {
-                if last_tap.is_some_and(|t| t.doubles(track.start, now, &cfg)) {
-                    use_click = true;
-                    *last_tap = None;
-                } else {
-                    attack_click = true;
-                    *last_tap = Some(LastTap {
-                        pos: track.start,
-                        time: now,
-                    });
-                }
+        let (track, attacks) = match &mut owner.claim {
+            Claim::Stick { at } => {
+                *at = xf.to_local(ElementId::Pad, p.pos);
+                continue;
+            }
+            Claim::Look(track) => (track, true),
+            Claim::LookOnly(track) => (track, false),
+            Claim::Pad(_) | Claim::Use | Claim::Hotbar(_) | Claim::Chat => continue,
+        };
+        let moved = track.advance(p.pos);
+        look_delta += moved;
+        if attacks && p.released && track.is_tap(now, &cfg) {
+            if last_tap.is_some_and(|t| t.doubles(track.start, now, &cfg)) {
+                use_click = true;
+                *last_tap = None;
+            } else {
+                attack_click = true;
+                *last_tap = Some(LastTap {
+                    pos: track.start,
+                    time: now,
+                });
             }
         }
     }
@@ -224,8 +279,8 @@ fn mobile_input(
     *stick_at = None;
     hold_hints.clear();
     for owner in owners.iter() {
-        match owner.control {
-            Control::Pad(cell) => {
+        match owner.claim {
+            Claim::Pad(cell) => {
                 *pressed_cells |= 1 << cell.index();
                 move_bits |= match cell {
                     Cell::Forward => MOVE_FORWARD,
@@ -236,10 +291,10 @@ fn mobile_input(
                     _ => 0,
                 };
             }
-            Control::Stick => {
+            Claim::Stick { at } => {
                 let Some(stick) = layout.stick else { continue };
-                *stick_at = Some(stick.knob(owner.stick_at));
-                let Some((x, y)) = stick.direction(owner.stick_at) else {
+                *stick_at = Some(stick.knob(at));
+                let Some((x, y)) = stick.direction(at) else {
                     continue;
                 };
                 if x > 0 {
@@ -253,18 +308,18 @@ fn mobile_input(
                     move_bits |= MOVE_BACK;
                 }
             }
-            Control::Use => {
+            Claim::Use => {
                 *use_pressed = true;
                 use_held = true;
             }
-            Control::Look => {
-                let Some(track) = owner.look else { continue };
+            Claim::Look(track) => {
                 if track.attacking(now, &cfg) {
                     attack_held = true;
                 }
                 hold_hints.push((track.last, track.progress(now, &cfg)));
             }
-            Control::Hotbar(_) | Control::Chat => {}
+            Claim::LookOnly(track) => hold_hints.push((track.last, 0.0)),
+            Claim::Hotbar(_) | Claim::Chat => {}
         }
     }
     if pad.auto_walk {
@@ -325,6 +380,8 @@ fn close_target(gui: &mut GuiState) -> Screen {
     match gui.screen {
         Screen::Options => gui.options_parent,
         Screen::VideoSettings | Screen::Controls | Screen::GameSettings => Screen::Options,
+        #[cfg(resource_packs)]
+        Screen::ResourcePacks => Screen::Options,
         #[cfg(feature = "shader_support")]
         Screen::ShaderPacks => Screen::VideoSettings,
         #[cfg(feature = "shader_support")]
@@ -357,86 +414,112 @@ const LABEL_PRESSED: u32 = 0x20_2020;
 const LINE_H: f32 = 8.0;
 const GAP: f32 = 1.5;
 
-pub fn draw(p: &mut Painter, ctx: &ScreenCtx, state: &GuiState) {
-    if state.in_menu() {
+pub struct View<'a> {
+    pub ui: &'a MobileUi,
+    pub movement: Movement,
+    pub screen: Screen,
+    pub hide_gui: bool,
+    pub in_menu: bool,
+    pub editing: bool,
+}
+
+pub fn draw(p: &mut Painter, ctx: &ScreenCtx, view: View, hud: &mut Hud) {
+    if view.in_menu && !view.editing {
         return;
     }
-    let ui = &state.mobile;
-    let layout = Layout::new(
-        ctx.vw,
-        ctx.vh,
-        ui.cfg.safe_inset,
-        state.options.touch_movement,
-    );
-    if state.screen.is_open() {
-        if state.screen != Screen::Death {
-            button(p, layout.close_button, "X", false, false);
-        }
-        return;
-    }
-    if state.hide_gui {
-        return;
-    }
-    match layout.movement {
-        Movement::Buttons => {
-            for (i, cell) in Cell::ALL.iter().enumerate() {
-                button(
-                    p,
-                    layout.cell_rect(i),
-                    cell.label(),
-                    ui.pressed(i),
-                    ui.pad.latched(*cell),
-                );
-            }
-        }
-        Movement::PadStick => {
-            for (i, cell) in Cell::ALL.iter().enumerate() {
-                if *cell == Cell::Jump {
-                    continue;
-                }
-                let pressable = matches!(
-                    cell,
-                    Cell::SneakToggle | Cell::SprintToggle | Cell::Inventory | Cell::Pause
-                );
-                button(
-                    p,
-                    layout.cell_rect(i),
-                    cell.label(),
-                    pressable && ui.pressed(i),
-                    ui.pad.latched(*cell),
-                );
-            }
-        }
-        Movement::Joystick => {
-            if let Some(round) = layout.round_cells {
-                for (cell, at) in round {
-                    round_button(
+    let ui = view.ui;
+    let (vw, vh) = (ctx.vw, ctx.vh);
+    let layout = Layout::new(vw, vh, ui.cfg.safe_inset, view.movement);
+    if view.screen.is_open() && !view.editing {
+        if view.screen != Screen::Death {
+            hud.draw(p, vw, vh, ElementId::ChatButton, |p| {
+                button(p, layout.close_button, "X", false, false);
+            });
+            if view.screen == Screen::Chat && crate::platform::orientation::SUPPORTED {
+                hud.follow(p, vw, vh, ElementId::ChatButton, |p| {
+                    button(
                         p,
-                        at,
-                        layout.cell * 0.5,
+                        layout.texting_button,
+                        "SWAP",
+                        false,
+                        crate::gui::chat::texting(),
+                    );
+                });
+            }
+        }
+        return;
+    }
+    if view.hide_gui {
+        return;
+    }
+    hud.draw(p, vw, vh, ElementId::Pad, |p| {
+        match layout.movement {
+            Movement::Buttons => {
+                for (i, cell) in Cell::ALL.iter().enumerate() {
+                    button(
+                        p,
+                        layout.cell_rect(i),
                         cell.label(),
-                        ui.pressed(cell.index()),
-                        ui.pad.latched(cell),
+                        ui.pressed(i),
+                        ui.pad.latched(*cell),
                     );
                 }
             }
+            Movement::PadStick => {
+                for (i, cell) in Cell::ALL.iter().enumerate() {
+                    if *cell == Cell::Jump {
+                        continue;
+                    }
+                    let pressable = matches!(
+                        cell,
+                        Cell::SneakToggle | Cell::SprintToggle | Cell::Inventory | Cell::Pause
+                    );
+                    button(
+                        p,
+                        layout.cell_rect(i),
+                        cell.label(),
+                        pressable && ui.pressed(i),
+                        ui.pad.latched(*cell),
+                    );
+                }
+            }
+            Movement::Joystick => {
+                if let Some(round) = layout.round_cells {
+                    for (cell, at) in round {
+                        round_button(
+                            p,
+                            at,
+                            layout.cell * 0.5,
+                            cell.label(),
+                            ui.pressed(cell.index()),
+                            ui.pad.latched(cell),
+                        );
+                    }
+                }
+            }
         }
-    }
-    if let Some(stick) = layout.stick {
-        draw_stick(p, stick, ui.stick_at);
-    }
+        if let Some(stick) = layout.stick {
+            draw_stick(p, stick, ui.stick_at);
+        }
+    });
     if let Some(jump) = layout.jump_button {
-        round_button(
-            p,
-            jump.center(),
-            jump.w * 0.5,
-            "JUMP",
-            ui.pressed(Cell::Jump.index()),
-            false,
-        );
+        hud.draw(p, vw, vh, ElementId::JumpButton, |p| {
+            round_button(
+                p,
+                jump.center(),
+                jump.w * 0.5,
+                "JUMP",
+                ui.pressed(Cell::Jump.index()),
+                false,
+            );
+        });
     }
-    button(p, layout.use_button, "USE", ui.use_pressed, false);
-    button(p, layout.close_button, "CHAT", false, false);
+    hud.draw(p, vw, vh, ElementId::UseButton, |p| {
+        button(p, layout.use_button, "USE", ui.use_pressed, false);
+    });
+    hud.draw(p, vw, vh, ElementId::ChatButton, |p| {
+        button(p, layout.close_button, "CHAT", false, false);
+    });
 
     let radius = layout.cell * HINT_RADIUS;
     for (at, progress) in &ui.hold_hints {

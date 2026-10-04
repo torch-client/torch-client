@@ -4,8 +4,19 @@ use crate::entities::geom::{BakedModel, CubeList, Grow, LayerDef, MeshDef, PartP
 use crate::entities::models::aquatic::scaling;
 use crate::entities::state::EntityState;
 
-fn tentacle_name(i: usize) -> String {
-    format!("tentacle{i}")
+fn tentacle_name(i: usize) -> &'static str {
+    const NAMES: [&str; 9] = [
+        "tentacle0",
+        "tentacle1",
+        "tentacle2",
+        "tentacle3",
+        "tentacle4",
+        "tentacle5",
+        "tentacle6",
+        "tentacle7",
+        "tentacle8",
+    ];
+    NAMES[i]
 }
 
 const GHAST_TENTACLE_LENGTHS: [f32; 9] = [8.0, 13.0, 9.0, 11.0, 11.0, 10.0, 12.0, 9.0, 12.0];
@@ -24,7 +35,7 @@ pub fn ghast_layer() -> LayerDef {
         let xo = (((i % 3) as f32 - (i / 3 % 2) as f32 * 0.5 + 0.25) / 2.0 * 2.0 - 1.0) * 5.0;
         let yo = ((i / 3) as f32 / 2.0 * 2.0 - 1.0) * 5.0;
         root.child(
-            &tentacle_name(i),
+            tentacle_name(i),
             CubeList::new()
                 .tex_offs(0, 0)
                 .add_box(-1.0, 0.0, -1.0, 2.0, *len, 2.0),
@@ -41,8 +52,7 @@ pub fn animate_tentacles(
     count: usize,
 ) {
     for i in 0..count {
-        parts[model.id(&tentacle_name(i))].x_rot =
-            0.2 * (st.age_ticks * 0.3 + i as f32).sin() + 0.4;
+        parts[model.id(tentacle_name(i))].x_rot = 0.2 * (st.age_ticks * 0.3 + i as f32).sin() + 0.4;
     }
 }
 
@@ -95,7 +105,7 @@ fn happy_ghast_mesh(is_baby: bool, deformation: Grow) -> MeshDef {
     ];
     for (i, (w, h, x, z)) in TENTACLES.iter().enumerate() {
         body.child(
-            &tentacle_name(i),
+            tentacle_name(i),
             CubeList::new()
                 .tex_offs(0, 0)
                 .add_box_grow(-1.0, 0.0, -1.0, *w, *h, 2.0, deformation),
@@ -183,7 +193,7 @@ const GOGGLES_Y_OFFSET: f32 = 14.0;
 
 pub fn harness_setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
     let goggles = model.id("goggles");
-    if st.extras.is_ridden {
+    if st.extras.ridden {
         parts[goggles].x_rot = 0.0;
         parts[goggles].y = GOGGLES_Y_OFFSET;
     } else {

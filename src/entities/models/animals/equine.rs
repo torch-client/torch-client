@@ -585,11 +585,7 @@ fn setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState, t: &Trai
     parts[id.tail].x_rot = t.tail_x_rot_offset + DEG_30 + speed * 0.75;
     parts[id.tail].y += speed * age_scale;
     parts[id.tail].z += speed * 2.0 * age_scale;
-    parts[id.tail].y_rot = if e.animate_tail {
-        (age * 0.7).cos()
-    } else {
-        0.0
-    };
+    parts[id.tail].y_rot = if e.rearing { (age * 0.7).cos() } else { 0.0 };
 }
 
 fn head_parts_placement(parts: &mut [PartState], id: &Ids, t: &Traits, eating: f32, standing: f32) {

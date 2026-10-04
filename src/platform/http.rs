@@ -17,8 +17,13 @@ mod imp {
         static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
         CLIENT.get_or_init(|| {
             crate::install_crypto_provider();
-            reqwest::blocking::Client::builder()
-                .user_agent(USER_AGENT)
+            let builder = reqwest::blocking::Client::builder().user_agent(USER_AGENT);
+            #[cfg(target_os = "android")]
+            let builder = match crate::android_tls_config() {
+                Some(tls) => builder.tls_backend_preconfigured(tls),
+                None => builder,
+            };
+            builder
                 .build()
                 .unwrap_or_else(|_| reqwest::blocking::Client::new())
         })

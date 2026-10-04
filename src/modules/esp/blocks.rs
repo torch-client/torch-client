@@ -3,20 +3,20 @@ use std::sync::OnceLock;
 
 use azalea::block::BlockState;
 
-use crate::modules::list::{BitList, Built, Entry};
+use crate::modules::list::{BitList, Built, Entry, Preset};
 
 pub use crate::modules::list::NO_ROW;
 
-struct Preset {
+struct Tint {
     name: &'static str,
     color: u32,
 }
 
-const fn p(name: &'static str, color: u32) -> Preset {
-    Preset { name, color }
+const fn p(name: &'static str, color: u32) -> Tint {
+    Tint { name, color }
 }
 
-static ORE_PRESETS: &[Preset] = &[
+static ORE_PRESETS: &[Tint] = &[
     p("diamond_ore", 0x3A_ED_E4),
     p("deepslate_diamond_ore", 0x3A_ED_E4),
     p("emerald_ore", 0x17_DD_62),
@@ -36,7 +36,7 @@ static ORE_PRESETS: &[Preset] = &[
     p("nether_quartz_ore", 0xED_E4_DE),
 ];
 
-static TINTS: &[Preset] = &[
+static TINTS: &[Tint] = &[
     p("coal_ore", 0x4A_4A_4A),
     p("deepslate_coal_ore", 0x4A_4A_4A),
     p("budding_amethyst", 0xA5_66_E8),
@@ -151,7 +151,7 @@ fn color_of(name: &str) -> u32 {
     }
 }
 
-const PRESETS: &[(&str, bool)] = &[("Defaults", true), ("None", false)];
+const PRESETS: &[Preset] = &[Preset::Defaults, Preset::Clear];
 
 fn id_of(state: BlockState) -> &'static str {
     const PREFIX: usize = "minecraft:".len();

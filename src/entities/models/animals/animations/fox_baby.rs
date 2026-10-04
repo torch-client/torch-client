@@ -1,20 +1,9 @@
 #![allow(clippy::approx_constant, dead_code)]
 
 use crate::entities::keyframe::{
-    AnimationDefinition, Channel, DEG_TO_RAD, Interpolation, Keyframe, Target,
+    AnimationDefinition, Channel, Interpolation, Keyframe, Target, degree_vec as deg,
+    pos_vec as pos, scale_vec as scale,
 };
-
-const fn deg(x: f32, y: f32, z: f32) -> [f32; 3] {
-    [x * DEG_TO_RAD, y * DEG_TO_RAD, z * DEG_TO_RAD]
-}
-
-const fn pos(x: f32, y: f32, z: f32) -> [f32; 3] {
-    [x, -y, z]
-}
-
-const fn scale(x: f32, y: f32, z: f32) -> [f32; 3] {
-    [x - 1.0, y - 1.0, z - 1.0]
-}
 
 static FOX_BABY_WALK_C0: &[Keyframe] = &[Keyframe::new(
     0.0,

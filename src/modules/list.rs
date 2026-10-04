@@ -2,8 +2,6 @@ use std::borrow::Cow;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
-use super::registry::ListKind;
-
 pub const MAX_GROUPS: usize = 5;
 
 pub const NO_ROW: u16 = u16::MAX;
@@ -16,6 +14,21 @@ pub struct Entry {
 }
 
 pub type Built = (Vec<Entry>, Vec<(u32, u32)>);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Preset {
+    Defaults,
+    Clear,
+}
+
+impl Preset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Preset::Defaults => "Defaults",
+            Preset::Clear => "None",
+        }
+    }
+}
 
 const fn pack(on: bool, color: u32) -> u32 {
     (color & 0xFF_FF_FF) << 8 | on as u32
@@ -35,7 +48,7 @@ pub struct BitList {
     pub width: f32,
     pub groups: &'static [&'static str],
     pub colored: bool,
-    pub presets: &'static [(&'static str, bool)],
+    pub presets: &'static [Preset],
     build: fn() -> Built,
     table: OnceLock<Table>,
     generation: AtomicU32,
@@ -50,7 +63,7 @@ impl BitList {
         width: f32,
         groups: &'static [&'static str],
         colored: bool,
-        presets: &'static [(&'static str, bool)],
+        presets: &'static [Preset],
         build: fn() -> Built,
     ) -> BitList {
         BitList {
@@ -72,6 +85,19 @@ impl BitList {
         self.table.get_or_init(|| {
             let (entries, keys) = (self.build)();
             debug_assert!(entries.len() < NO_ROW as usize);
+            assert!(
+                self.groups.len() <= MAX_GROUPS,
+                "{} has {} groups, MAX_GROUPS is {MAX_GROUPS}",
+                self.key,
+                self.groups.len()
+            );
+            assert!(
+                entries
+                    .iter()
+                    .all(|e| (e.group as usize) < self.groups.len()),
+                "{} has a row outside its groups",
+                self.key
+            );
 
             let mut tagged: Vec<(u32, Entry)> = entries
                 .into_iter()
@@ -153,15 +179,11 @@ impl BitList {
         self.bump();
     }
 
-    pub fn set_range(&self, range: std::ops::Range<usize>, on: bool) {
-        for i in range {
+    pub fn set_group(&self, g: usize, on: bool) {
+        for i in self.group_range(g) {
             self.write(i, on);
         }
         self.bump();
-    }
-
-    pub fn set_group(&self, g: usize, on: bool) {
-        self.set_range(self.group_range(g), on);
     }
 
     pub fn set_color(&self, i: usize, color: u32) {
@@ -172,32 +194,20 @@ impl BitList {
     }
 
     pub fn is_default(&self, i: usize) -> bool {
-        !self.colored || {
-            let t = self.table();
-            t.rows[i].load(Relaxed) == t.defaults[i]
-        }
-    }
-
-    pub fn reset(&self, i: usize) {
         let t = self.table();
-        t.rows[i].store(t.defaults[i], Relaxed);
-        self.bump();
+        t.rows[i].load(Relaxed) == t.defaults[i]
     }
 
     pub fn default_on(&self, i: usize) -> bool {
         self.table().defaults[i] & 1 != 0
     }
 
-    pub fn apply_preset(&self, p: usize) {
-        let Some((_, defaults)) = self.presets.get(p) else {
-            return;
-        };
+    pub fn apply_preset(&self, p: Preset) {
         let t = self.table();
         for i in 0..t.rows.len() {
-            if *defaults {
-                t.rows[i].store(t.defaults[i], Relaxed);
-            } else {
-                self.write(i, false);
+            match p {
+                Preset::Defaults => t.rows[i].store(t.defaults[i], Relaxed),
+                Preset::Clear => self.write(i, false),
             }
         }
         self.bump();
@@ -251,14 +261,8 @@ impl BitList {
     }
 }
 
-pub fn of(kind: ListKind) -> &'static BitList {
-    match kind {
-        ListKind::Blocks => &super::esp::blocks::XRAY,
-        ListKind::Ores => &super::esp::blocks::ORES,
-        ListKind::Storage => &super::esp::blocks::STORAGE,
-        ListKind::Entities => &super::entities::LIST,
-        ListKind::Items => &super::items::LIST,
-    }
+pub fn widest() -> f32 {
+    ALL.iter().map(|l| l.width).fold(0.0, f32::max)
 }
 
 pub static ALL: [&BitList; 5] = [

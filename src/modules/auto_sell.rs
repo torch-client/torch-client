@@ -46,7 +46,7 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
         return;
     };
 
-    let template = s.text(Id::AutoSell, setting::COMMAND);
+    let template = s.text(setting::COMMAND);
     if template.trim().is_empty() {
         return;
     }

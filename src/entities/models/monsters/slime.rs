@@ -51,6 +51,10 @@ pub fn setup_anim(_model: &BakedModel, _parts: &mut [PartState], _st: &EntitySta
 
 const SEGMENT_COUNT: usize = 8;
 
+const CUBE_NAMES: [&str; SEGMENT_COUNT] = [
+    "cube0", "cube1", "cube2", "cube3", "cube4", "cube5", "cube6", "cube7",
+];
+
 pub fn magma_cube_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
@@ -84,7 +88,7 @@ pub fn magma_cube_layer() -> LayerDef {
 pub fn magma_cube_setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
     let squish = st.extras.squish.max(0.0);
     for i in 0..SEGMENT_COUNT {
-        let id = model.id(&format!("cube{i}"));
+        let id = model.id(CUBE_NAMES[i]);
         parts[id].y = -((4 - i as i32) as f32) * squish * 1.7;
     }
 }

@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::Vec3;
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::wither;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -25,17 +26,17 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     let ticks = st.extras.invulnerable_ticks.floor() as i32;
     if ticks > 0 && (ticks > 80 || ticks / 5 % 2 != 1) {
-        "entity/wither/wither_invulnerable".to_string()
+        "entity/wither/wither_invulnerable".into()
     } else {
-        "entity/wither/wither".to_string()
+        "entity/wither/wither".into()
     }
 }
 
-fn armor_texture(_st: &EntityState) -> String {
-    "entity/wither/wither_armor".to_string()
+fn armor_texture(_st: &EntityState) -> TexturePath {
+    "entity/wither/wither_armor".into()
 }
 
 fn is_powered(st: &EntityState) -> bool {

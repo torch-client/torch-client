@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::aquatic::ghast;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -86,20 +87,20 @@ fn is_baby(st: &EntityState) -> bool {
     st.extras.is_baby
 }
 
-fn ghast_texture(st: &EntityState) -> String {
+fn ghast_texture(st: &EntityState) -> TexturePath {
     if st.extras.charged {
-        "entity/ghast/ghast_shooting".to_string()
+        "entity/ghast/ghast_shooting".into()
     } else {
-        "entity/ghast/ghast".to_string()
+        "entity/ghast/ghast".into()
     }
 }
 
-fn happy_ghast_texture(_st: &EntityState) -> String {
-    "entity/ghast/happy_ghast".to_string()
+fn happy_ghast_texture(_st: &EntityState) -> TexturePath {
+    "entity/ghast/happy_ghast".into()
 }
 
-fn happy_ghast_baby_texture(_st: &EntityState) -> String {
-    "entity/ghast/happy_ghast_baby".to_string()
+fn happy_ghast_baby_texture(_st: &EntityState) -> TexturePath {
+    "entity/ghast/happy_ghast_baby".into()
 }
 
 fn shows_adult_harness(st: &EntityState) -> bool {
@@ -111,18 +112,18 @@ fn shows_baby_harness(st: &EntityState) -> bool {
 }
 
 fn shows_adult_ropes(st: &EntityState) -> bool {
-    shows_adult_harness(st) && st.extras.is_ridden
+    shows_adult_harness(st) && st.extras.ridden
 }
 
 fn shows_baby_ropes(st: &EntityState) -> bool {
-    shows_baby_harness(st) && st.extras.is_ridden
+    shows_baby_harness(st) && st.extras.ridden
 }
 
-fn ropes_texture(_st: &EntityState) -> String {
-    "entity/ghast/happy_ghast_ropes".to_string()
+fn ropes_texture(_st: &EntityState) -> TexturePath {
+    "entity/ghast/happy_ghast_ropes".into()
 }
 
-fn harness_texture(st: &EntityState) -> String {
+fn harness_texture(st: &EntityState) -> TexturePath {
     const COLORS: [&str; 16] = [
         "white",
         "orange",
@@ -151,5 +152,5 @@ fn harness_texture(st: &EntityState) -> String {
     } else {
         "white"
     };
-    format!("entity/equipment/happy_ghast_body/{color}_harness")
+    format!("entity/equipment/happy_ghast_body/{color}_harness").into()
 }

@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use super::{COUNT, ESPS, Shape};
 use crate::modules::list::{BitList, NO_ROW};
-use crate::modules::registry::{Id, ore_esp, storage_esp, xray};
 use crate::modules::store;
 
 pub const NONE_ENTRY: u32 = u32::MAX;
@@ -49,9 +49,6 @@ impl Merged {
     }
 }
 
-const SHAPE_LINES: u8 = 0;
-const SHAPE_SIDES: u8 = 1;
-
 struct Source {
     list: &'static BitList,
     range: i32,
@@ -60,7 +57,7 @@ struct Source {
     sides: bool,
 }
 
-fn key(sources: &[Option<Source>; 3]) -> u64 {
+fn key(sources: &[Option<Source>; COUNT]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |v: u64| {
         h ^= v;
@@ -79,56 +76,33 @@ fn key(sources: &[Option<Source>; 3]) -> u64 {
     h
 }
 
-fn sources() -> [Option<Source>; 3] {
+fn sources() -> [Option<Source>; COUNT] {
     let s = store();
-    let one = |id: Id, list: &'static BitList, range: usize, shape: usize, fill: usize| {
-        if !s.enabled(id) {
+    ESPS.each_ref().map(|e| {
+        if !s.enabled(e.edge.id()) {
             return None;
         }
-        let mode = s.choice(id, shape);
+        let shape = s.choice(e.shape);
         Some(Source {
-            list,
-            range: s.num(id, range).max(0.0) as i32,
-            alpha: if mode == SHAPE_LINES {
+            list: e.list,
+            range: s.num(e.range).max(0.0) as i32,
+            alpha: if shape == Shape::Lines {
                 0
             } else {
-                s.num(id, fill).clamp(0.0, 255.0) as u8
+                s.num(e.fill).clamp(0.0, 255.0) as u8
             },
-            lines: mode != SHAPE_SIDES,
-            sides: mode != SHAPE_LINES,
+            lines: shape != Shape::Sides,
+            sides: shape != Shape::Lines,
         })
-    };
-    [
-        one(
-            Id::OreEsp,
-            &super::blocks::ORES,
-            ore_esp::RANGE,
-            ore_esp::SHAPE,
-            ore_esp::FILL,
-        ),
-        one(
-            Id::StorageEsp,
-            &super::blocks::STORAGE,
-            storage_esp::RANGE,
-            storage_esp::SHAPE,
-            storage_esp::FILL,
-        ),
-        one(
-            Id::Xray,
-            &super::blocks::XRAY,
-            xray::RANGE,
-            xray::SHAPE,
-            xray::FILL,
-        ),
-    ]
+    })
 }
 
-fn fold(sources: &[Option<Source>; 3]) -> Merged {
+fn fold(sources: &[Option<Source>; COUNT]) -> Merged {
     let mut slots: Vec<Slot> = Vec::new();
     let mut max_range = 0;
     let mut any = false;
 
-    let mut of_row: [Vec<u16>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut of_row: [Vec<u16>; COUNT] = std::array::from_fn(|_| Vec::new());
     let mut of_state = vec![NONE_ENTRY; azalea::block::BlockState::MAX_STATE as usize + 1];
 
     for (m, source) in sources.iter().enumerate() {

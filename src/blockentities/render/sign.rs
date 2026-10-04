@@ -53,6 +53,16 @@ pub fn register(registry: &mut BeRegistry) {
 
 fn no_anim(_model: &BakedModel, _parts: &mut [PartState], _st: &BeState) {}
 
+pub const WOODS: &[&str] = &[
+    "oak", "spruce", "birch", "acacia", "cherry", "jungle", "dark_oak", "pale_oak", "crimson",
+    "warped", "mangrove", "bamboo",
+];
+
+pub fn known_wood(block: &str) -> Option<&'static str> {
+    let wood = wood_type(block);
+    WOODS.iter().copied().find(|w| *w == wood)
+}
+
 pub fn wood_type(block: &str) -> &str {
     for suffix in ["_wall_hanging_sign", "_hanging_sign", "_wall_sign", "_sign"] {
         if let Some(wood) = block.strip_suffix(suffix) {
@@ -62,7 +72,7 @@ pub fn wood_type(block: &str) -> &str {
     block
 }
 
-fn is_wall(block: &str) -> bool {
+pub(crate) fn is_wall(block: &str) -> bool {
     block.ends_with("_wall_sign") || block.ends_with("_wall_hanging_sign")
 }
 
@@ -72,9 +82,9 @@ fn segment_degrees(segment: u32) -> f32 {
 
 fn sign_angle(st: &BeState) -> f32 {
     if is_wall(&st.state.block) {
-        super::chest::facing_y_rot(st.state.prop("facing"))
+        super::chest::facing_y_rot(st.state.facing)
     } else {
-        segment_degrees(st.state.prop("rotation").parse().unwrap_or(0))
+        segment_degrees(st.state.rotation)
     }
 }
 
@@ -219,7 +229,13 @@ fn back_key(st: &BeState) -> Option<u64> {
 
 fn build_text(st: &BeState, atlas: &GuiAtlas, front: bool) -> Option<Mesh> {
     let face = face(st, front)?;
-    text::sign_text_mesh(atlas, face, text::text_style(face, st.draw_outline))
+    let metrics = text::SignKind::of(st.kind)?.metrics();
+    text::sign_text_mesh(
+        atlas,
+        face,
+        text::text_style(face, st.draw_outline),
+        metrics,
+    )
 }
 
 fn build_front(st: &BeState, atlas: &GuiAtlas) -> Option<Mesh> {

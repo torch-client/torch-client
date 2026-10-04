@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::llama;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -42,12 +43,12 @@ pub fn register(registry: &mut Registry) {
 
 const VARIANTS: [&str; 4] = ["creamy", "white", "brown", "gray"];
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     let variant = VARIANTS[(st.extras.variant_id.clamp(0, 3)) as usize];
     if st.extras.is_baby {
-        format!("entity/llama/llama_{variant}_baby")
+        format!("entity/llama/llama_{variant}_baby").into()
     } else {
-        format!("entity/llama/llama_{variant}")
+        format!("entity/llama/llama_{variant}").into()
     }
 }
 
@@ -71,7 +72,7 @@ fn decor_texture_name(st: &EntityState) -> Option<String> {
     None
 }
 
-fn decor_texture(st: &EntityState) -> String {
+fn decor_texture(st: &EntityState) -> TexturePath {
     let name = decor_texture_name(st).unwrap_or_else(|| "white".to_string());
-    format!("entity/equipment/llama_body/{name}")
+    format!("entity/equipment/llama_body/{name}").into()
 }

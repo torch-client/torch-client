@@ -41,7 +41,9 @@ pub fn read_with_u32_length<'a>(
     width: usize,
 ) -> Result<&'a [u8], UnexpectedEofError> {
     let length = data.read_u32()?;
-    let length_in_bytes = length as usize * width;
+    let length_in_bytes = (length as usize)
+        .checked_mul(width)
+        .ok_or(UnexpectedEofError)?;
     data.read_slice(length_in_bytes)
 }
 

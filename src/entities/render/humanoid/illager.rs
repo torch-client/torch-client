@@ -1,5 +1,6 @@
 use azalea_registry::builtin::EntityKind;
 
+use crate::entities::TexturePath;
 use crate::entities::models::humanoid::{illager, vex};
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -49,26 +50,26 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn evoker_texture(_st: &EntityState) -> String {
-    "entity/illager/evoker".to_string()
+fn evoker_texture(_st: &EntityState) -> TexturePath {
+    "entity/illager/evoker".into()
 }
 
-fn illusioner_texture(_st: &EntityState) -> String {
-    "entity/illager/illusioner".to_string()
+fn illusioner_texture(_st: &EntityState) -> TexturePath {
+    "entity/illager/illusioner".into()
 }
 
-fn pillager_texture(_st: &EntityState) -> String {
-    "entity/illager/pillager".to_string()
+fn pillager_texture(_st: &EntityState) -> TexturePath {
+    "entity/illager/pillager".into()
 }
 
-fn vindicator_texture(_st: &EntityState) -> String {
-    "entity/illager/vindicator".to_string()
+fn vindicator_texture(_st: &EntityState) -> TexturePath {
+    "entity/illager/vindicator".into()
 }
 
-fn vex_texture(st: &EntityState) -> String {
+fn vex_texture(st: &EntityState) -> TexturePath {
     if st.extras.charging {
-        "entity/illager/vex_charging".to_string()
+        "entity/illager/vex_charging".into()
     } else {
-        "entity/illager/vex".to_string()
+        "entity/illager/vex".into()
     }
 }

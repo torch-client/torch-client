@@ -43,9 +43,8 @@ pub(super) fn prepare(socket: Socket, profile: GameProfile) {
         pending: Vec::new(),
         taken: 0,
         partial: Vec::new(),
-        login: Login::Intention,
+        login: Login::Intention(open_gate),
         profile,
-        gate: Some(open_gate),
         closed: false,
     };
 
@@ -208,11 +207,10 @@ fn unwrappable(payload: Vec<u8>, first: u32, at: usize, why: &str) -> Vec<Vec<u8
     vec![payload]
 }
 
-#[derive(PartialEq)]
 enum Login {
-    Intention,
-    Hello,
-    Acknowledged,
+    Intention(oneshot::Sender<()>),
+    Hello(oneshot::Sender<()>),
+    Acknowledged(oneshot::Sender<()>),
     Done,
 }
 
@@ -231,7 +229,6 @@ pub(super) struct Bridge {
     partial: Vec<u8>,
     login: Login,
     profile: GameProfile,
-    gate: Option<oneshot::Sender<()>>,
     closed: bool,
 }
 
@@ -300,9 +297,9 @@ impl AsyncWrite for Bridge {
 impl Bridge {
     fn absorb(&mut self, body: Vec<u8>) -> io::Result<()> {
         let expected = match self.login {
-            Login::Intention => Some((ID_INTENTION, "intention")),
-            Login::Hello => Some((ID_HELLO, "hello")),
-            Login::Acknowledged => Some((ID_LOGIN_ACKNOWLEDGED, "login acknowledged")),
+            Login::Intention(_) => Some((ID_INTENTION, "intention")),
+            Login::Hello(_) => Some((ID_HELLO, "hello")),
+            Login::Acknowledged(_) => Some((ID_LOGIN_ACKNOWLEDGED, "login acknowledged")),
             Login::Done => None,
         };
         let Some((id, name)) = expected else {
@@ -327,28 +324,26 @@ impl Bridge {
             }
         }
 
-        match self.login {
-            Login::Intention => self.login = Login::Hello,
-            Login::Hello => {
-                let packet =
-                    azalea_protocol::packets::Packet::into_variant(ClientboundLoginFinished {
-                        game_profile: self.profile.clone(),
-                    });
-                let raw = azalea_protocol::write::serialize_packet(&packet)
-                    .map_err(|e| io::Error::other(format!("eagler: {e}")))?;
-                self.inject.send(raw.into_vec()).map_err(|_| {
-                    io::Error::new(io::ErrorKind::BrokenPipe, "the eagler connection is gone")
-                })?;
-                self.login = Login::Acknowledged;
-            }
-            Login::Acknowledged => {
-                self.login = Login::Done;
-                if let Some(gate) = self.gate.take() {
-                    let _ = gate.send(());
-                }
+        if let Login::Hello(_) = self.login {
+            let packet = azalea_protocol::packets::Packet::into_variant(ClientboundLoginFinished {
+                game_profile: self.profile.clone(),
+            });
+            let raw = azalea_protocol::write::serialize_packet(&packet)
+                .map_err(|e| io::Error::other(format!("eagler: {e}")))?;
+            self.inject.send(raw.into_vec()).map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "the eagler connection is gone")
+            })?;
+        }
+
+        self.login = match std::mem::replace(&mut self.login, Login::Done) {
+            Login::Intention(gate) => Login::Hello(gate),
+            Login::Hello(gate) => Login::Acknowledged(gate),
+            Login::Acknowledged(gate) => {
+                let _ = gate.send(());
+                Login::Done
             }
             Login::Done => unreachable!("handled above"),
-        }
+        };
         Ok(())
     }
 }

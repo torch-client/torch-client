@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use crate::generated_items::{CREATIVE_TABS, TabRow, item};
@@ -8,7 +9,6 @@ use crate::gui::widgets::TextBox;
 use crate::gui::{ScreenCtx, Snapshot};
 use crate::items::potions;
 use crate::session::{InvAction, SlotStack};
-use crate::text::{Span, Style};
 
 const IMAGE_W: f32 = 195.0;
 const IMAGE_H: f32 = 136.0;
@@ -147,18 +147,61 @@ fn tab_draw_y(t: &TabInfo) -> f32 {
     if t.top_row { -28.0 } else { IMAGE_H - 4.0 }
 }
 
-fn tab_sprite(t: &TabInfo, selected: bool) -> String {
-    let edge = if t.top_row { "top" } else { "bottom" };
-    let state = if selected { "selected" } else { "unselected" };
-    let n = (t.column as usize).min(6) + 1;
-    format!("container/creative_inventory/tab_{edge}_{state}_{n}")
+const TAB_SPRITES: [[[&str; 7]; 2]; 2] = [
+    [
+        [
+            "container/creative_inventory/tab_top_unselected_1",
+            "container/creative_inventory/tab_top_unselected_2",
+            "container/creative_inventory/tab_top_unselected_3",
+            "container/creative_inventory/tab_top_unselected_4",
+            "container/creative_inventory/tab_top_unselected_5",
+            "container/creative_inventory/tab_top_unselected_6",
+            "container/creative_inventory/tab_top_unselected_7",
+        ],
+        [
+            "container/creative_inventory/tab_top_selected_1",
+            "container/creative_inventory/tab_top_selected_2",
+            "container/creative_inventory/tab_top_selected_3",
+            "container/creative_inventory/tab_top_selected_4",
+            "container/creative_inventory/tab_top_selected_5",
+            "container/creative_inventory/tab_top_selected_6",
+            "container/creative_inventory/tab_top_selected_7",
+        ],
+    ],
+    [
+        [
+            "container/creative_inventory/tab_bottom_unselected_1",
+            "container/creative_inventory/tab_bottom_unselected_2",
+            "container/creative_inventory/tab_bottom_unselected_3",
+            "container/creative_inventory/tab_bottom_unselected_4",
+            "container/creative_inventory/tab_bottom_unselected_5",
+            "container/creative_inventory/tab_bottom_unselected_6",
+            "container/creative_inventory/tab_bottom_unselected_7",
+        ],
+        [
+            "container/creative_inventory/tab_bottom_selected_1",
+            "container/creative_inventory/tab_bottom_selected_2",
+            "container/creative_inventory/tab_bottom_selected_3",
+            "container/creative_inventory/tab_bottom_selected_4",
+            "container/creative_inventory/tab_bottom_selected_5",
+            "container/creative_inventory/tab_bottom_selected_6",
+            "container/creative_inventory/tab_bottom_selected_7",
+        ],
+    ],
+];
+
+fn tab_sprite(t: &TabInfo, selected: bool) -> &'static str {
+    let edge = usize::from(!t.top_row);
+    let state = usize::from(selected);
+    let n = (t.column as usize).min(6);
+    TAB_SPRITES[edge][state][n]
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ListItem {
     Plain(&'static str),
     EnchantedBook {
-        enchantment: String,
+        enchantment: &'static str,
         level: i32,
     },
     Potion {
@@ -178,7 +221,9 @@ impl ListItem {
 
     fn enchantments(&self) -> Vec<(String, i32)> {
         match self {
-            ListItem::EnchantedBook { enchantment, level } => vec![(enchantment.clone(), *level)],
+            ListItem::EnchantedBook { enchantment, level } => {
+                vec![(enchantment.to_string(), *level)]
+            }
             _ => Vec::new(),
         }
     }
@@ -193,10 +238,10 @@ impl ListItem {
         }
     }
 
-    fn model_key(&self) -> String {
+    fn model_key(&self) -> Cow<'static, str> {
         match self.potion() {
-            Some(contents) => potions::tint_key(self.base_id(), contents.color()),
-            None => self.base_id().to_string(),
+            Some(contents) => Cow::Owned(potions::tint_key(self.base_id(), contents.color())),
+            None => Cow::Borrowed(self.base_id()),
         }
     }
 }
@@ -209,7 +254,7 @@ fn enchanted_books(all_levels: bool) -> Vec<ListItem> {
         if all_levels {
             for level in 1..=max_level {
                 out.push(ListItem::EnchantedBook {
-                    enchantment: id.clone(),
+                    enchantment: id,
                     level,
                 });
             }
@@ -421,15 +466,7 @@ pub fn draw(
     p.blit_sheet(info.background, 0.0, 0.0, IMAGE_W, IMAGE_H, left, top);
 
     if info.show_title {
-        p.text(
-            &[Span {
-                text: info.title.to_string(),
-                style: Style::colored(TITLE_COLOR),
-            }],
-            left + 8.0,
-            top + SEARCH_Y,
-            false,
-        );
+        p.text_plain(info.title, left + 8.0, top + SEARCH_Y, TITLE_COLOR, false);
     }
     if st.tab == TAB_SEARCH {
         let frame = p.frame;
@@ -615,7 +652,7 @@ fn select_tab(st: &mut CreativeState, tab: usize) {
 fn draw_tab(p: &mut Painter, t: &TabInfo, selected: bool, left: f32, top: f32) {
     let x = left + tab_x(t);
     let y = top + tab_draw_y(t);
-    p.sprite(&tab_sprite(t, selected), x, y, TAB_W, TAB_H);
+    p.sprite(tab_sprite(t, selected), x, y, TAB_W, TAB_H);
     let iy = y + 8.0 + if t.top_row { 1.0 } else { -1.0 };
     p.item_icon(t.icon, x + 5.0, iy);
 }
@@ -668,7 +705,7 @@ fn draw_item_grid(
     let base = row_index_for_scroll(st.scroll, len) * COLS;
     let hover_cell = ctx.mouse().and_then(|m| grid_cell_at(m.x, m.y, left, top));
     for cell in 0..PAGE {
-        let Some(it) = st.visible.get(base + cell).cloned() else {
+        let Some(it) = st.visible.get(base + cell).copied() else {
             if hover_cell == Some(cell)
                 && !cursor.is_empty()
                 && (ctx.input.left_click || ctx.input.right_click)

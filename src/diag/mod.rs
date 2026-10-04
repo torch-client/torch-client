@@ -1,3 +1,17 @@
+macro_rules! counted {
+    (
+        $(#[$m:meta])*
+        $vis:vis enum $name:ident / $count:ident { $($(#[$vm:meta])* $v:ident,)* }
+    ) => {
+        $(#[$m])*
+        #[derive(Clone, Copy)]
+        #[repr(usize)]
+        $vis enum $name { $($(#[$vm])* $v,)* }
+
+        const $count: usize = [$($name::$v),*].len();
+    };
+}
+
 pub(crate) mod alloc;
 pub(crate) mod budget;
 mod layer;
@@ -8,15 +22,14 @@ mod runtime;
 mod stats;
 mod watchdog;
 
-pub use budget::Budget;
 pub use layer::custom_layers;
 pub use runtime::{CPU_METRICS, MEMORY_METRICS, Runtime, runtime};
 pub use stats::{Counts, Stat, add, bump, counts, get};
 pub use watchdog::{
-    Phase, TickGuard, clear_session_killed, light_thread_died, note_bot_stopped, note_bot_update,
-    note_cache_center, note_chunk_packet, note_event, note_frame, note_packet, note_packet_detail,
-    note_sent_packet, note_view, on_chunk_received, on_connected, on_disconnected, on_spawned,
-    session_killed, start_watchdog, timed, trace_enabled, tracing_packets,
+    Phase, TickGuard, light_thread_died, note_bot_stopped, note_bot_update, note_cache_center,
+    note_chunk_packet, note_event, note_frame, note_packet, note_packet_detail, note_sent_packet,
+    note_view, on_chunk_received, on_connected, on_disconnected, on_spawned, set_watching,
+    start_watchdog, timed, trace_enabled, tracing_packets,
 };
 
 #[cfg_attr(not(feature = "profiling"), allow(unused_imports))]

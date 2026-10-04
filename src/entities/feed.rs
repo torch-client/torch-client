@@ -1057,7 +1057,7 @@ impl EntityAnim {
             for (slot, active) in k.panda.iter_mut().zip([
                 input.shared.sitting,
                 input.shared.on_back,
-                input.shared.rolling,
+                input.shared.panda_rolling,
             ]) {
                 *slot = if active {
                     (*slot + 0.15).min(1.0)
@@ -1194,7 +1194,7 @@ impl EntityAnim {
             k.flap += k.flapping * 2.0;
 
             k.bee_roll_old = k.bee_roll;
-            k.bee_roll = if input.shared.rolling {
+            k.bee_roll = if input.shared.bee_rolling {
                 (k.bee_roll + 0.2).min(1.0)
             } else {
                 (k.bee_roll - 0.24).max(0.0)
@@ -1215,7 +1215,7 @@ impl EntityAnim {
                 *slot = binary_animator_tick(*slot, active);
             }
 
-            if input.shared.rolling {
+            if input.shared.panda_rolling {
                 k.roll_counter += 1;
                 if k.roll_counter > 32 {
                     k.roll_counter = 0;
@@ -2406,12 +2406,12 @@ mod tests {
     fn a_knocked_over_bee_rolls_in_five_ticks_and_back_out_in_five() {
         let mut anim = EntityAnim::new(1, EntityKind::Bee);
         let mut input = TickInput::new();
-        input.shared_mut().rolling = true;
+        input.shared_mut().bee_rolling = true;
         for _ in 0..5 {
             anim.tick(input.clone());
         }
         assert!((anim.sample(1.0).extras.bee_roll - 1.0).abs() < 1e-6);
-        input.shared_mut().rolling = false;
+        input.shared_mut().bee_rolling = false;
         for _ in 0..5 {
             anim.tick(input.clone());
         }
@@ -2433,7 +2433,7 @@ mod tests {
     fn a_rolling_panda_counts_its_roll_out_over_thirty_two_ticks() {
         let mut anim = EntityAnim::new(1, EntityKind::Panda);
         let mut input = TickInput::new();
-        input.shared_mut().rolling = true;
+        input.shared_mut().panda_rolling = true;
         anim.tick(input.clone());
         assert!((anim.sample(0.5).extras.roll_time - 1.5).abs() < 1e-6);
         for _ in 0..31 {

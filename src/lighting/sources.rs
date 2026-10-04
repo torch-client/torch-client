@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-
-use super::ColumnPos;
 use super::props::{self, LightProps};
+use super::{ColumnPos, FastMap};
 
 pub const NEGATIVE_INFINITY: i32 = i32::MIN;
 
@@ -142,7 +140,7 @@ impl ChunkSources {
 pub struct SkySources {
     world_min_y: i32,
     empty: ChunkSources,
-    columns: HashMap<ColumnPos, ChunkSources>,
+    columns: FastMap<ColumnPos, ChunkSources>,
 }
 
 impl SkySources {
@@ -150,7 +148,7 @@ impl SkySources {
         Self {
             world_min_y,
             empty: ChunkSources::empty(world_min_y),
-            columns: HashMap::new(),
+            columns: FastMap::default(),
         }
     }
 

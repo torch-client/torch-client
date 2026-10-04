@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::hoglin;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -25,15 +26,12 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(st: &EntityState) -> String {
-    let base = if st.kind == EntityKind::Zoglin {
-        "zoglin"
-    } else {
-        "hoglin"
-    };
-    if st.extras.is_baby {
-        format!("entity/hoglin/{base}_baby")
-    } else {
-        format!("entity/hoglin/{base}")
+fn texture(st: &EntityState) -> TexturePath {
+    match (st.kind == EntityKind::Zoglin, st.extras.is_baby) {
+        (true, true) => "entity/hoglin/zoglin_baby",
+        (true, false) => "entity/hoglin/zoglin",
+        (false, true) => "entity/hoglin/hoglin_baby",
+        (false, false) => "entity/hoglin/hoglin",
     }
+    .into()
 }

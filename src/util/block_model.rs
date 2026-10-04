@@ -185,6 +185,8 @@ pub fn block_visual(state: azalea::block::BlockState) -> RenderedBlock {
         TintKind::Foliage
     } else if name == "leaf_litter" {
         TintKind::DryFoliage
+    } else if name == "water_cauldron" {
+        TintKind::Water
     } else if name == "redstone_wire" {
         let power: u8 = props.get("power").and_then(|v| v.parse().ok()).unwrap_or(0);
         TintKind::Redstone(power)
@@ -223,6 +225,10 @@ pub fn block_visual(state: azalea::block::BlockState) -> RenderedBlock {
             offset: ShapeOffset::None,
             #[cfg(feature = "builtin_shaders")]
             sways: false,
+            #[cfg(feature = "shader_support")]
+            state: state.id(),
+            #[cfg(feature = "shader_support")]
+            translucent: false,
         };
     }
 
@@ -242,6 +248,7 @@ pub fn block_visual(state: azalea::block::BlockState) -> RenderedBlock {
                 amount,
                 still,
                 flow,
+                lava: is_lava,
             },
             is_solid: false,
             waterlogged: false,
@@ -253,6 +260,10 @@ pub fn block_visual(state: azalea::block::BlockState) -> RenderedBlock {
             offset: ShapeOffset::None,
             #[cfg(feature = "builtin_shaders")]
             sways: false,
+            #[cfg(feature = "shader_support")]
+            state: state.id(),
+            #[cfg(feature = "shader_support")]
+            translucent: false,
         };
     }
 
@@ -275,6 +286,41 @@ pub fn block_visual(state: azalea::block::BlockState) -> RenderedBlock {
         offset: ShapeOffset::for_block(name),
         #[cfg(feature = "builtin_shaders")]
         sways,
+        #[cfg(feature = "shader_support")]
+        state: state.id(),
+        #[cfg(feature = "shader_support")]
+        translucent: translucent_layer(name),
+    }
+}
+
+#[cfg(feature = "shader_support")]
+fn translucent_layer(name: &str) -> bool {
+    matches!(
+        name,
+        "ice" | "frosted_ice" | "slime_block" | "honey_block" | "tinted_glass" | "nether_portal"
+    ) || name.ends_with("_stained_glass")
+        || name.ends_with("_stained_glass_pane")
+}
+
+pub fn is_solid(state: azalea::block::BlockState) -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
+    const UNKNOWN: u8 = 0;
+    const SOLID: u8 = 1;
+    const OPEN: u8 = 2;
+    const STATES: usize = azalea::block::BlockState::MAX_STATE as usize + 1;
+    static CACHE: [AtomicU8; STATES] = [const { AtomicU8::new(UNKNOWN) }; STATES];
+
+    let Some(slot) = CACHE.get(state.id() as usize) else {
+        return block_visual(state).is_solid;
+    };
+    match slot.load(Relaxed) {
+        SOLID => true,
+        OPEN => false,
+        _ => {
+            let solid = block_visual(state).is_solid;
+            slot.store(if solid { SOLID } else { OPEN }, Relaxed);
+            solid
+        }
     }
 }
 
@@ -311,6 +357,24 @@ fn fluid_at(block: &dyn BlockTrait) -> Option<(EyeFluid, u8)> {
         _ if block.get_property("waterlogged") == Some("true") => Some((EyeFluid::Water, 8)),
         _ => None,
     }
+}
+
+#[cfg(feature = "shader_support")]
+pub fn powder_snow_at(x: f64, y: f64, z: f64) -> bool {
+    let Some(world) = crate::client::tracking::current_world()
+        .lock()
+        .unwrap()
+        .clone()
+    else {
+        return false;
+    };
+    let world = world.read();
+    let pos =
+        azalea_core::position::BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
+    world.get_block_state(pos).is_some_and(|state| {
+        let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
+        block.id() == "powder_snow"
+    })
 }
 
 pub fn eye_fluid_at(x: f64, y: f64, z: f64) -> Option<EyeFluid> {

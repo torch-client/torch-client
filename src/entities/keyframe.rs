@@ -33,18 +33,15 @@ impl Keyframe {
     }
 }
 
-#[allow(dead_code, reason = "KeyframeAnimations authoring helpers")]
 pub const fn pos_vec(x: f32, y: f32, z: f32) -> [f32; 3] {
     [x, -y, z]
 }
 
-#[allow(dead_code, reason = "KeyframeAnimations authoring helpers")]
-pub fn degree_vec(x: f32, y: f32, z: f32) -> [f32; 3] {
+pub const fn degree_vec(x: f32, y: f32, z: f32) -> [f32; 3] {
     [x * DEG_TO_RAD, y * DEG_TO_RAD, z * DEG_TO_RAD]
 }
 
-#[allow(dead_code, reason = "KeyframeAnimations authoring helpers")]
-pub fn scale_vec(x: f32, y: f32, z: f32) -> [f32; 3] {
+pub const fn scale_vec(x: f32, y: f32, z: f32) -> [f32; 3] {
     [x - 1.0, y - 1.0, z - 1.0]
 }
 

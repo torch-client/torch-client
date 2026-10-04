@@ -1,7 +1,8 @@
 #![allow(clippy::excessive_precision)]
 
-use crate::entities::keyframe::{AnimationDefinition, Channel, Interpolation, Keyframe, Target};
-use crate::entities::models::aquatic::animation::{degree_vec, scale_vec};
+use crate::entities::keyframe::{
+    AnimationDefinition, Channel, Interpolation, Keyframe, Target, degree_vec, scale_vec,
+};
 
 static SWIMMING_0_BODY_SCALE: &[Keyframe] = &[
     Keyframe::new(0.0, scale_vec(1.0, 1.0, 1.0), Interpolation::Linear),

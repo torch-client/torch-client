@@ -1,5 +1,5 @@
 use crate::gui::atlas::{GuiAtlas, Region, Scaling};
-use crate::gui::gui_material::UNIHEX_UV_BIAS;
+use crate::gui::draw::UNIHEX_UV_BIAS;
 use crate::text::{Glyph, Span, Style};
 use crate::util::mth::srgb_to_linear;
 
@@ -151,6 +151,11 @@ impl<'a> Painter<'a> {
 
     pub fn pop_clip(&mut self, saved: ClipGuard) {
         self.clip = saved.0;
+    }
+
+    #[cfg(feature = "mobile_ui")]
+    pub fn set_lift(&mut self, dy: f32) {
+        self.xform = (1.0, 0.0, -dy);
     }
 
     fn place(&self, x: f32, y: f32) -> [f32; 3] {
@@ -553,11 +558,7 @@ impl<'a> Painter<'a> {
     }
 
     pub fn text_str(&mut self, s: &str, x: f32, y: f32, argb_rgb: u32, shadow: bool) -> f32 {
-        let spans = [Span {
-            text: s.to_string(),
-            style: Style::colored(argb_rgb),
-        }];
-        self.text(&spans, x, y, shadow)
+        self.text_plain(s, x, y, argb_rgb, shadow)
     }
 
     fn draw_spans(&mut self, spans: &[Span], x: f32, y: f32, as_shadow: bool, alpha: f32) -> f32 {

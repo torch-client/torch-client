@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::math::{Mat4, Quat, Vec3};
 
+use crate::entities::TexturePath;
 use crate::entities::models::objects::misc;
 use crate::entities::registry::Registry;
 use crate::entities::render::objects::{hook_for, mirror};
@@ -41,16 +42,16 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn end_crystal_texture(_st: &EntityState) -> String {
-    "entity/end_crystal/end_crystal".to_string()
+fn end_crystal_texture(_st: &EntityState) -> TexturePath {
+    "entity/end_crystal/end_crystal".into()
 }
 
-fn evoker_fangs_texture(_st: &EntityState) -> String {
-    "entity/illager/evoker_fangs".to_string()
+fn evoker_fangs_texture(_st: &EntityState) -> TexturePath {
+    "entity/illager/evoker_fangs".into()
 }
 
-fn leash_knot_texture(_st: &EntityState) -> String {
-    "entity/lead_knot/lead_knot".to_string()
+fn leash_knot_texture(_st: &EntityState) -> TexturePath {
+    "entity/lead_knot/lead_knot".into()
 }
 
 fn end_crystal_root(_st: &EntityState) -> RootPose {

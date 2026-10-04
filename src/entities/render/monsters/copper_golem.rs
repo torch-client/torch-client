@@ -1,5 +1,6 @@
 use azalea_registry::builtin::EntityKind;
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::copper_golem;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -27,20 +28,20 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     match st.extras.weather_state {
-        1 => "entity/copper_golem/copper_golem_exposed".to_string(),
-        2 => "entity/copper_golem/copper_golem_weathered".to_string(),
-        3 => "entity/copper_golem/copper_golem_oxidized".to_string(),
-        _ => "entity/copper_golem/copper_golem".to_string(),
+        1 => "entity/copper_golem/copper_golem_exposed".into(),
+        2 => "entity/copper_golem/copper_golem_weathered".into(),
+        3 => "entity/copper_golem/copper_golem_oxidized".into(),
+        _ => "entity/copper_golem/copper_golem".into(),
     }
 }
 
-fn eye_texture(st: &EntityState) -> String {
+fn eye_texture(st: &EntityState) -> TexturePath {
     match st.extras.weather_state {
-        1 => "entity/copper_golem/copper_golem_eyes_exposed".to_string(),
-        2 => "entity/copper_golem/copper_golem_eyes_weathered".to_string(),
-        3 => "entity/copper_golem/copper_golem_eyes_oxidized".to_string(),
-        _ => "entity/copper_golem/copper_golem_eyes".to_string(),
+        1 => "entity/copper_golem/copper_golem_eyes_exposed".into(),
+        2 => "entity/copper_golem/copper_golem_eyes_weathered".into(),
+        3 => "entity/copper_golem/copper_golem_eyes_oxidized".into(),
+        _ => "entity/copper_golem/copper_golem_eyes".into(),
     }
 }

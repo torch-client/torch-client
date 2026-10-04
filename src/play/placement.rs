@@ -1,5 +1,10 @@
-use std::{collections::HashSet, str::FromStr, sync::LazyLock};
+use std::{
+    collections::HashSet,
+    str::FromStr,
+    sync::{LazyLock, OnceLock},
+};
 
+use crate::blocks::facing::{clockwise, name as direction_name};
 use crate::play::redstone::has_neighbor_signal;
 use azalea::block::{BlockState, BlockTrait};
 use azalea::physics::collision::{
@@ -7,6 +12,7 @@ use azalea::physics::collision::{
     sturdy::{can_support_center, is_face_sturdy, is_solid},
 };
 use azalea_core::{
+    aabb::Aabb,
     direction::Direction,
     hit_result::BlockHitResult,
     position::{BlockPos, Vec3},
@@ -99,8 +105,10 @@ pub fn predict(
         return None;
     }
 
+    let attachment = attachment(block);
     let state = state_for_placement(
         block,
+        attachment,
         hit,
         yaw,
         pitch,
@@ -111,7 +119,7 @@ pub fn predict(
         &block_at,
     )?;
 
-    if state.is_collision_shape_empty() && !attaches_to_a_face(block) {
+    if state.is_collision_shape_empty() && attachment == Attachment::None {
         return None;
     }
     if accepts(block, "half", "upper") || accepts(block, "part", "head") {
@@ -119,6 +127,14 @@ pub fn predict(
     }
 
     Some((pos, state))
+}
+
+pub fn is_unobstructed(state: BlockState, pos: BlockPos, entities: &[Aabb]) -> bool {
+    let offset = pos.to_vec3_floored();
+    state.collision_shape(pos).to_aabbs().iter().all(|part| {
+        let part = part.move_relative(offset);
+        entities.iter().all(|entity| !part.intersects_aabb(entity))
+    })
 }
 
 pub fn predict_bucket(
@@ -205,6 +221,22 @@ fn replaceable(state: BlockState, item_block: BlockKind) -> Option<bool> {
 }
 
 pub(crate) fn has_use_interaction(state: BlockState) -> bool {
+    let kind = state.as_block_kind();
+    match USE_INTERACTION.get(kind.to_u32() as usize) {
+        Some(slot) => *slot.get_or_init(|| block_has_use_interaction(state)),
+        None => block_has_use_interaction(state),
+    }
+}
+
+static USE_INTERACTION: LazyLock<Box<[OnceLock<bool>]>> = LazyLock::new(|| {
+    (0u32..)
+        .take_while(|id| BlockKind::is_valid_id(*id))
+        .map(|_| OnceLock::new())
+        .collect()
+});
+
+#[cold]
+fn block_has_use_interaction(state: BlockState) -> bool {
     let block = Box::<dyn BlockTrait>::from(state);
     if BLOCK_ENTITY_IDS.contains(&format!("minecraft:{}", block.id()).as_str())
         || MENU_BLOCK_IDS.contains(&block.id())
@@ -216,8 +248,10 @@ pub(crate) fn has_use_interaction(state: BlockState) -> bool {
         .any(|name| block.get_property(name).is_some())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn state_for_placement(
     block: BlockKind,
+    attachment: Attachment,
     hit: &BlockHitResult,
     yaw: f32,
     pitch: f32,
@@ -236,23 +270,32 @@ fn state_for_placement(
 
     let _ = placed.set_property("axis", axis_name(face));
 
-    if accepts(block, "face", "ceiling") {
-        return face_attached_placement(placed, hit, yaw, pitch, pos, replacing_clicked, block_at);
-    }
-    if accepts(block, "attachment", "single_wall") {
-        return bell_placement(placed, face, yaw, pos, block_at);
-    }
-    if accepts(block, "hanging", "true") {
-        return lantern_placement(
-            placed,
-            yaw,
-            pitch,
-            face,
-            pos,
-            replacing_clicked,
-            replaced_state,
-            block_at,
-        );
+    match attachment {
+        Attachment::FaceAttached => {
+            return face_attached_placement(
+                placed,
+                hit,
+                yaw,
+                pitch,
+                pos,
+                replacing_clicked,
+                block_at,
+            );
+        }
+        Attachment::Bell => return bell_placement(placed, face, yaw, pos, block_at),
+        Attachment::Lantern => {
+            return lantern_placement(
+                placed,
+                yaw,
+                pitch,
+                face,
+                pos,
+                replacing_clicked,
+                replaced_state,
+                block_at,
+            );
+        }
+        Attachment::None => {}
     }
 
     match block {
@@ -299,14 +342,7 @@ fn state_for_placement(
             let _ = placed.set_property("open", "true");
             let _ = placed.set_property("powered", "true");
         }
-        let _ = placed.set_property(
-            "waterlogged",
-            if is_water(replaced_state) {
-                "true"
-            } else {
-                "false"
-            },
-        );
+        let _ = placed.set_property("waterlogged", bool_str(is_water(replaced_state)));
         return Some(placed.as_block_state());
     }
 
@@ -334,11 +370,7 @@ fn state_for_placement(
         _ => &[],
     };
     if !signalled.is_empty() {
-        let value = if has_neighbor_signal(pos, block_at) {
-            "true"
-        } else {
-            "false"
-        };
+        let value = bool_str(has_neighbor_signal(pos, block_at));
         for name in signalled {
             let _ = placed.set_property(name, value);
         }
@@ -350,11 +382,8 @@ fn state_for_placement(
 
     let _ = placed.set_property("rotation", rotation_segment(yaw));
 
-    let replaced_water = matches!(
-        azalea::block::fluid_state::FluidState::from(replaced_state).kind,
-        azalea::block::fluid_state::FluidKind::Water
-    );
-    let _ = placed.set_property("waterlogged", if replaced_water { "true" } else { "false" });
+    let replaced_water = is_water(replaced_state);
+    let _ = placed.set_property("waterlogged", bool_str(replaced_water));
 
     if replaced_water {
         let _ = placed.set_property("lit", "false");
@@ -417,12 +446,8 @@ fn lantern_placement(
         if !block_at(neighbour).is_some_and(|state| can_support_center(state, support.opposite())) {
             continue;
         }
-        let _ = placed.set_property("hanging", if hanging { "true" } else { "false" });
-        let replaced_water = matches!(
-            azalea::block::fluid_state::FluidState::from(replaced_state).kind,
-            azalea::block::fluid_state::FluidKind::Water
-        );
-        let _ = placed.set_property("waterlogged", if replaced_water { "true" } else { "false" });
+        let _ = placed.set_property("hanging", bool_str(hanging));
+        let _ = placed.set_property("waterlogged", bool_str(is_water(replaced_state)));
         return Some(placed.as_block_state());
     }
     None
@@ -440,15 +465,8 @@ fn scaffolding_placement(
     let bottom = distance > 0 && !below_is_scaffolding;
 
     let _ = placed.set_property("distance", DIGITS[distance as usize]);
-    let _ = placed.set_property("bottom", if bottom { "true" } else { "false" });
-    let _ = placed.set_property(
-        "waterlogged",
-        if is_water(replaced_state) {
-            "true"
-        } else {
-            "false"
-        },
-    );
+    let _ = placed.set_property("bottom", bool_str(bottom));
+    let _ = placed.set_property("waterlogged", bool_str(is_water(replaced_state)));
     Some(placed.as_block_state())
 }
 
@@ -509,14 +527,7 @@ fn pointed_dripstone_placement(
     let thickness = dripstone_thickness(pos, tip, !secondary_use, block_at);
     let _ = placed.set_property("vertical_direction", direction_name(tip));
     let _ = placed.set_property("thickness", thickness);
-    let _ = placed.set_property(
-        "waterlogged",
-        if is_water(replaced_state) {
-            "true"
-        } else {
-            "false"
-        },
-    );
+    let _ = placed.set_property("waterlogged", bool_str(is_water(replaced_state)));
     Some(placed.as_block_state())
 }
 
@@ -586,10 +597,7 @@ fn huge_mushroom_placement(
     for direction in DIRECTIONS {
         let same = block_at(pos + direction.normal())
             .is_some_and(|neighbour| neighbour.as_block_kind() == block);
-        let _ = placed.set_property(
-            direction_name(direction),
-            if same { "false" } else { "true" },
-        );
+        let _ = placed.set_property(direction_name(direction), bool_str(!same));
     }
     Some(placed.as_block_state())
 }
@@ -673,6 +681,10 @@ fn substituted_placement(
     }
 }
 
+fn bool_str(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
 fn is_water(state: BlockState) -> bool {
     matches!(
         azalea::block::fluid_state::FluidState::from(state).kind,
@@ -687,10 +699,24 @@ fn is_lava(state: BlockState) -> bool {
     )
 }
 
-fn attaches_to_a_face(block: BlockKind) -> bool {
-    accepts(block, "face", "ceiling")
-        || accepts(block, "attachment", "single_wall")
-        || accepts(block, "hanging", "true")
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Attachment {
+    FaceAttached,
+    Bell,
+    Lantern,
+    None,
+}
+
+fn attachment(block: BlockKind) -> Attachment {
+    if accepts(block, "face", "ceiling") {
+        Attachment::FaceAttached
+    } else if accepts(block, "attachment", "single_wall") {
+        Attachment::Bell
+    } else if accepts(block, "hanging", "true") {
+        Attachment::Lantern
+    } else {
+        Attachment::None
+    }
 }
 
 fn exceptional_facing(
@@ -991,16 +1017,6 @@ fn look_vector(yaw: f32, pitch: f32) -> Vec3 {
     }
 }
 
-fn clockwise(dir: Direction) -> Direction {
-    match dir {
-        Direction::North => Direction::East,
-        Direction::East => Direction::South,
-        Direction::South => Direction::West,
-        Direction::West => Direction::North,
-        other => other,
-    }
-}
-
 fn player_facing(yaw: f32) -> Direction {
     match (yaw as f64 / 90.0 + 0.5).floor() as i64 & 3 {
         0 => Direction::South,
@@ -1015,17 +1031,6 @@ fn axis_name(face: Direction) -> &'static str {
         Direction::Up | Direction::Down => "y",
         Direction::North | Direction::South => "z",
         Direction::East | Direction::West => "x",
-    }
-}
-
-fn direction_name(dir: Direction) -> &'static str {
-    match dir {
-        Direction::Down => "down",
-        Direction::Up => "up",
-        Direction::North => "north",
-        Direction::South => "south",
-        Direction::West => "west",
-        Direction::East => "east",
     }
 }
 
@@ -1584,6 +1589,69 @@ mod tests {
     fn two_block_placements_are_not_predicted() {
         assert!(place(ItemKind::OakDoor, Direction::Up, 1.0, 0., BlockKind::Stone).is_none());
         assert!(place(ItemKind::RedBed, Direction::Up, 1.0, 0., BlockKind::Stone).is_none());
+    }
+
+    fn player_at(x: f64, y: f64, z: f64) -> Aabb {
+        Aabb {
+            min: Vec3 {
+                x: x - 0.3,
+                y,
+                z: z - 0.3,
+            },
+            max: Vec3 {
+                x: x + 0.3,
+                y: y + 1.8,
+                z: z + 0.3,
+            },
+        }
+    }
+
+    #[test]
+    fn a_block_in_the_players_own_cell_is_obstructed() {
+        let stone = BlockState::from(BlockKind::Stone);
+        let feet = BlockPos { x: 0, y: 1, z: 0 };
+        let head = BlockPos { x: 0, y: 2, z: 0 };
+        let player = [player_at(0.5, 1.0, 0.5)];
+        assert!(!is_unobstructed(stone, feet, &player));
+        assert!(!is_unobstructed(stone, head, &player));
+    }
+
+    #[test]
+    fn a_block_touching_the_player_is_not_obstructed() {
+        let stone = BlockState::from(BlockKind::Stone);
+        let player = [player_at(0.5, 1.0, 0.5)];
+        assert!(is_unobstructed(
+            stone,
+            BlockPos { x: 0, y: 0, z: 0 },
+            &player
+        ));
+        assert!(is_unobstructed(
+            stone,
+            BlockPos { x: 0, y: 3, z: 0 },
+            &player
+        ));
+        assert!(is_unobstructed(
+            stone,
+            BlockPos { x: 1, y: 1, z: 0 },
+            &player
+        ));
+    }
+
+    #[test]
+    fn a_bottom_slab_under_a_player_standing_on_it_is_not_obstructed() {
+        let slab = BlockState::from(BlockKind::StoneSlab);
+        let player = [player_at(0.5, 1.5, 0.5)];
+        assert!(is_unobstructed(
+            slab,
+            BlockPos { x: 0, y: 1, z: 0 },
+            &player
+        ));
+        let stone = BlockState::from(BlockKind::Stone);
+        assert!(!is_unobstructed(
+            stone,
+            BlockPos { x: 0, y: 1, z: 0 },
+            &player
+        ));
     }
 
     #[test]

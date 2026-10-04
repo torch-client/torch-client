@@ -1,30 +1,25 @@
 use bevy::prelude::*;
 use bevy::render::Extract;
-use bevy::render::extract_component::ExtractComponent;
 use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_resource::{Buffer, BufferDescriptor, BufferUsages};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
-use bevy::render::sync_world::MainEntity;
 use bytemuck::{Pod, Zeroable};
 use parking_lot::Mutex;
-
-pub const VIEW_HUD: u32 = 0;
-#[allow(dead_code, reason = "the packet-log window moves onto it in step 3")]
-pub const VIEW_LOG: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct GuiVertex {
-    pub pos: [f32; 3],
+    pub pos: [f32; 2],
     pub uv: [f32; 2],
     pub color: [f32; 4],
 }
 
-pub const GUI_VERTEX_STRIDE: u64 = 36;
+pub const GUI_VERTEX_STRIDE: u64 = 32;
+const _: () = assert!(size_of::<GuiVertex>() as u64 == GUI_VERTEX_STRIDE);
 
 #[derive(Clone, Copy)]
 pub struct GuiRange {
-    pub view: u32,
+    pub window: Entity,
     pub first_index: u32,
     pub index_count: u32,
     pub base_vertex: i32,
@@ -41,9 +36,10 @@ pub struct GuiFrame {
 pub struct GuiFrames(pub Mutex<GuiFrame>);
 
 impl GuiFrames {
+    #[allow(clippy::too_many_arguments, reason = "one range's whole description")]
     pub fn push(
         &self,
-        view: u32,
+        window: Entity,
         positions: &[[f32; 3]],
         uvs: &[[f32; 2]],
         colors: &[[f32; 4]],
@@ -54,27 +50,25 @@ impl GuiFrames {
         let mut frame = self.0.lock();
         let base_vertex = frame.vertices.len() as i32;
         let first_index = frame.indices.len() as u32;
+        let (sx, sy) = (2.0 / vw, 2.0 / vh);
         frame.vertices.reserve(positions.len());
         for i in 0..positions.len() {
             let p = positions[i];
             frame.vertices.push(GuiVertex {
-                pos: [p[0] - vw / 2.0, vh / 2.0 - p[1], p[2]],
+                pos: [p[0] * sx - 1.0, 1.0 - p[1] * sy],
                 uv: uvs[i],
                 color: colors[i],
             });
         }
         frame.indices.extend_from_slice(indices);
         frame.ranges.push(GuiRange {
-            view,
+            window,
             first_index,
             index_count: indices.len() as u32,
             base_vertex,
         });
     }
 }
-
-#[derive(Component, Clone, Copy, ExtractComponent)]
-pub struct GuiView(pub u32);
 
 #[derive(Resource, Clone, ExtractResource)]
 pub struct GuiTextures {
@@ -127,14 +121,16 @@ impl GuiPool {
 
 pub fn extract_gui(
     frames: Extract<Res<GuiFrames>>,
+    gate: Extract<Option<Res<crate::renderer::systems::FrameGate>>>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     mut pool: ResMut<GuiPool>,
 ) {
     let mut frame = frames.0.lock();
     pool.ranges.clear();
+    let render = gate.as_ref().is_none_or(|g| g.render);
 
-    if !frame.indices.is_empty() {
+    if render && !frame.indices.is_empty() {
         pool.ensure(&device, frame.vertices.len(), frame.indices.len());
         if let (Some(vertices), Some(indices)) = (&pool.vertices, &pool.indices) {
             queue.write_buffer(vertices, 0, bytemuck::cast_slice(&frame.vertices));
@@ -146,9 +142,4 @@ pub fn extract_gui(
     frame.vertices.clear();
     frame.indices.clear();
     frame.ranges.clear();
-}
-
-pub fn item_entity(range: u32) -> (Entity, MainEntity) {
-    let entity = Entity::from_raw_u32(0xFE00_0000 + range).expect("below u32::MAX");
-    (entity, MainEntity::from(entity))
 }

@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use azalea_registry::Registry as _;
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::Resource;
 
@@ -8,16 +7,14 @@ use super::RenderSpec;
 #[derive(Resource)]
 pub struct Registry {
     pub specs: Vec<RenderSpec>,
-    by_kind: HashMap<EntityKind, Vec<usize>>,
-    empty: Vec<usize>,
+    by_kind: Vec<Vec<usize>>,
 }
 
 impl Registry {
     pub fn build() -> Registry {
         let mut registry = Registry {
             specs: Vec::new(),
-            by_kind: HashMap::new(),
-            empty: Vec::new(),
+            by_kind: Vec::new(),
         };
         super::render::register_all(&mut registry);
         registry
@@ -25,14 +22,22 @@ impl Registry {
 
     pub fn add(&mut self, kind: EntityKind, spec: RenderSpec) {
         let idx = self.push(spec);
-        self.by_kind.entry(kind).or_default().push(idx);
+        self.slot(kind).push(idx);
     }
 
     pub fn add_many(&mut self, kinds: &[EntityKind], spec: RenderSpec) {
         let idx = self.push(spec);
         for kind in kinds {
-            self.by_kind.entry(*kind).or_default().push(idx);
+            self.slot(*kind).push(idx);
         }
+    }
+
+    fn slot(&mut self, kind: EntityKind) -> &mut Vec<usize> {
+        let id = kind.to_u32() as usize;
+        if self.by_kind.len() <= id {
+            self.by_kind.resize_with(id + 1, Vec::new);
+        }
+        &mut self.by_kind[id]
     }
 
     fn push(&mut self, spec: RenderSpec) -> usize {
@@ -46,12 +51,19 @@ impl Registry {
     }
 
     pub fn specs_for(&self, kind: EntityKind) -> &[usize] {
-        self.by_kind.get(&kind).unwrap_or(&self.empty)
+        self.by_kind
+            .get(kind.to_u32() as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     #[allow(dead_code, reason = "read by the entity coverage test")]
     pub fn registered_kinds(&self) -> impl Iterator<Item = EntityKind> + '_ {
-        self.by_kind.keys().copied()
+        self.by_kind
+            .iter()
+            .enumerate()
+            .filter(|(_, specs)| !specs.is_empty())
+            .filter_map(|(id, _)| EntityKind::from_u32(id as u32))
     }
 }
 

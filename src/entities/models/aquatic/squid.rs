@@ -5,8 +5,18 @@ use crate::entities::geom::{
 };
 use crate::entities::state::EntityState;
 
-fn tentacle_name(i: usize) -> String {
-    format!("tentacle{i}")
+fn tentacle_name(i: usize) -> &'static str {
+    const NAMES: [&str; 8] = [
+        "tentacle0",
+        "tentacle1",
+        "tentacle2",
+        "tentacle3",
+        "tentacle4",
+        "tentacle5",
+        "tentacle6",
+        "tentacle7",
+    ];
+    NAMES[i]
 }
 
 fn tentacle_ring(root: &mut PartDef, cubes: CubeList, radius: f32, y: f32) {
@@ -17,7 +27,7 @@ fn tentacle_ring(root: &mut PartDef, cubes: CubeList, radius: f32, y: f32) {
         let y_rot =
             (i as f64 * std::f64::consts::PI * -2.0 / 8.0 + std::f64::consts::FRAC_PI_2) as f32;
         root.child(
-            &tentacle_name(i),
+            tentacle_name(i),
             cubes.clone(),
             PartPose::offset_rotation(x, y, z, 0.0, y_rot, 0.0),
         );
@@ -61,6 +71,6 @@ pub fn baby_squid_layer() -> LayerDef {
 
 pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
     for i in 0..8 {
-        parts[model.id(&tentacle_name(i))].x_rot = st.extras.tentacle_angle;
+        parts[model.id(tentacle_name(i))].x_rot = st.extras.tentacle_angle;
     }
 }

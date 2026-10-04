@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::equine;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -50,29 +51,25 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(st: &EntityState) -> String {
-    let base = if st.kind == EntityKind::ZombieHorse {
-        "horse_zombie"
-    } else {
-        "horse_skeleton"
-    };
-    if st.extras.is_baby {
-        format!("entity/horse/{base}_baby")
-    } else {
-        format!("entity/horse/{base}")
+fn texture(st: &EntityState) -> TexturePath {
+    match (st.kind == EntityKind::ZombieHorse, st.extras.is_baby) {
+        (true, true) => "entity/horse/horse_zombie_baby",
+        (true, false) => "entity/horse/horse_zombie",
+        (false, true) => "entity/horse/horse_skeleton_baby",
+        (false, false) => "entity/horse/horse_skeleton",
     }
+    .into()
 }
 
-fn armor_texture(st: &EntityState) -> String {
+fn armor_texture(st: &EntityState) -> TexturePath {
     let material = super::horse::armor_material(st).unwrap_or("iron");
-    format!("entity/equipment/horse_body/{material}")
+    format!("entity/equipment/horse_body/{material}").into()
 }
 
-fn saddle_texture(st: &EntityState) -> String {
-    let base = if st.kind == EntityKind::ZombieHorse {
-        "zombie_horse_saddle"
+fn saddle_texture(st: &EntityState) -> TexturePath {
+    if st.kind == EntityKind::ZombieHorse {
+        "entity/equipment/zombie_horse_saddle/saddle".into()
     } else {
-        "skeleton_horse_saddle"
-    };
-    format!("entity/equipment/{base}/saddle")
+        "entity/equipment/skeleton_horse_saddle/saddle".into()
+    }
 }

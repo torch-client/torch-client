@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use crate::entities::RenderSpec;
+use crate::entities::TexturePath;
 use crate::entities::models::animals::camel;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -47,20 +48,20 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(st: &EntityState) -> String {
+fn texture(st: &EntityState) -> TexturePath {
     if st.kind == EntityKind::CamelHusk {
-        "entity/camel/camel_husk".to_string()
+        "entity/camel/camel_husk".into()
     } else if st.extras.is_baby {
-        "entity/camel/camel_baby".to_string()
+        "entity/camel/camel_baby".into()
     } else {
-        "entity/camel/camel".to_string()
+        "entity/camel/camel".into()
     }
 }
 
-fn saddle_texture(st: &EntityState) -> String {
+fn saddle_texture(st: &EntityState) -> TexturePath {
     if st.kind == EntityKind::CamelHusk {
-        "entity/equipment/camel_husk_saddle/saddle".to_string()
+        "entity/equipment/camel_husk_saddle/saddle".into()
     } else {
-        "entity/equipment/camel_saddle/saddle".to_string()
+        "entity/equipment/camel_saddle/saddle".into()
     }
 }

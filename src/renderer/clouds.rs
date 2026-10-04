@@ -137,7 +137,7 @@ impl Plugin for CloudPlugin {
 }
 
 #[derive(Component)]
-struct CloudLayer;
+pub(crate) struct CloudLayer;
 
 struct CloudTexture {
     width: usize,
@@ -249,6 +249,8 @@ fn empty_mesh() -> Mesh {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
+    #[cfg(feature = "shader_support")]
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
     mesh.insert_indices(Indices::U32(Vec::new()));
     mesh
@@ -335,6 +337,8 @@ fn build_mesh(
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     let normals = vec![[0.0, 1.0, 0.0]; b.positions.len()];
+    #[cfg(feature = "shader_support")]
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; b.positions.len()]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, b.positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, b.colors);
@@ -389,7 +393,7 @@ fn try_cell(
 
 fn update_clouds(
     gui: Res<GuiState>,
-    shared: Res<super::systems::Shared>,
+    view: Res<super::frame_view::FrameView>,
     env: Res<super::environment::Environment>,
     mut assets: ResMut<CloudAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -403,10 +407,7 @@ fn update_clouds(
     };
     let status = gui.options.clouds;
 
-    let partial = {
-        let state = shared.0.lock().unwrap();
-        super::systems::partial_ticks(&state)
-    };
+    let partial = view.partial;
     let color = env.sky.cloud_color;
 
     let Some((texture_cells_w, texture_cells_h)) =

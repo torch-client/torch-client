@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::json::Json;
 use crate::direction::Direction;
@@ -159,12 +159,101 @@ impl Transform {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum DisplayContext {
+    ThirdPersonLeftHand,
+    ThirdPersonRightHand,
+    FirstPersonLeftHand,
+    FirstPersonRightHand,
+    Head,
+    Gui,
+    Ground,
+    Fixed,
+    OnShelf,
+}
+
+impl DisplayContext {
+    pub const ALL: [DisplayContext; 9] = [
+        DisplayContext::ThirdPersonLeftHand,
+        DisplayContext::ThirdPersonRightHand,
+        DisplayContext::FirstPersonLeftHand,
+        DisplayContext::FirstPersonRightHand,
+        DisplayContext::Head,
+        DisplayContext::Gui,
+        DisplayContext::Ground,
+        DisplayContext::Fixed,
+        DisplayContext::OnShelf,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DisplayContext::ThirdPersonLeftHand => "thirdperson_lefthand",
+            DisplayContext::ThirdPersonRightHand => "thirdperson_righthand",
+            DisplayContext::FirstPersonLeftHand => "firstperson_lefthand",
+            DisplayContext::FirstPersonRightHand => "firstperson_righthand",
+            DisplayContext::Head => "head",
+            DisplayContext::Gui => "gui",
+            DisplayContext::Ground => "ground",
+            DisplayContext::Fixed => "fixed",
+            DisplayContext::OnShelf => "on_shelf",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<DisplayContext> {
+        DisplayContext::ALL
+            .into_iter()
+            .find(|ctx| ctx.name() == name)
+    }
+
+    pub fn right_hand_of(self) -> Option<DisplayContext> {
+        match self {
+            DisplayContext::ThirdPersonLeftHand => Some(DisplayContext::ThirdPersonRightHand),
+            DisplayContext::FirstPersonLeftHand => Some(DisplayContext::FirstPersonRightHand),
+            _ => None,
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayTransforms([Option<Transform>; 9]);
+
+impl DisplayTransforms {
+    pub fn get(&self, ctx: DisplayContext) -> Option<Transform> {
+        self.0[ctx.index()]
+    }
+
+    pub fn get_named(&self, name: &str) -> Option<Transform> {
+        DisplayContext::parse(name).and_then(|ctx| self.get(ctx))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+
+    pub fn for_context(&self, ctx: DisplayContext) -> Transform {
+        self.get(ctx)
+            .or_else(|| ctx.right_hand_of().and_then(|right| self.get(right)))
+            .unwrap_or(Transform::NONE)
+    }
+
+    fn set_if_absent(&mut self, ctx: DisplayContext, transform: impl FnOnce() -> Transform) {
+        let slot = &mut self.0[ctx.index()];
+        if slot.is_none() {
+            *slot = Some(transform());
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Resolved {
     pub textures: HashMap<String, String>,
     pub elements: Vec<Elem>,
     pub gui: Option<Transform>,
-    pub display: HashMap<String, Transform>,
+    pub display: DisplayTransforms,
     pub generated: bool,
     pub ambient_occlusion: bool,
 }
@@ -175,7 +264,7 @@ impl Default for Resolved {
             textures: HashMap::new(),
             elements: Vec::new(),
             gui: None,
-            display: HashMap::new(),
+            display: DisplayTransforms::default(),
             generated: false,
             ambient_occlusion: true,
         }
@@ -225,6 +314,11 @@ pub struct Assets {
     files: Mutex<HashMap<String, Option<Arc<Json>>>>,
     models: Mutex<HashMap<String, Arc<Resolved>>>,
     textures: Mutex<HashMap<String, Option<Arc<Tex>>>>,
+}
+
+pub fn shared() -> &'static Assets {
+    static SHARED: OnceLock<Assets> = OnceLock::new();
+    SHARED.get_or_init(|| Assets::new(crate::assets_root()))
 }
 
 impl Assets {
@@ -370,9 +464,9 @@ impl Assets {
             }
             if let Some(Json::Obj(slots)) = node.get("display") {
                 for (name, value) in slots {
-                    out.display
-                        .entry(name.clone())
-                        .or_insert_with(|| Transform::parse(value));
+                    if let Some(ctx) = DisplayContext::parse(name) {
+                        out.display.set_if_absent(ctx, || Transform::parse(value));
+                    }
                 }
             }
         }

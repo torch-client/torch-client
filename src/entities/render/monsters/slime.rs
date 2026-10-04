@@ -1,6 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::prelude::Vec3;
 
+use crate::entities::TexturePath;
 use crate::entities::models::monsters::slime;
 use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
@@ -35,12 +36,12 @@ pub fn register(registry: &mut Registry) {
     );
 }
 
-fn texture(_st: &EntityState) -> String {
-    "entity/slime/slime".to_string()
+fn texture(_st: &EntityState) -> TexturePath {
+    "entity/slime/slime".into()
 }
 
-fn magma_cube_texture(_st: &EntityState) -> String {
-    "entity/slime/magmacube".to_string()
+fn magma_cube_texture(_st: &EntityState) -> TexturePath {
+    "entity/slime/magmacube".into()
 }
 
 fn slime_root(st: &EntityState) -> RootPose {

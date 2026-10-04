@@ -1,24 +1,18 @@
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
-use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
-use bevy::camera::{Camera, ClearColorConfig, OrthographicProjection, Projection, ScalingMode};
-use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::image::ImageSampler;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::AccumulatedMouseScroll;
 #[cfg(feature = "mobile_ui")]
 use bevy::input::touch::Touches;
-use bevy::light::cluster::ClusterConfig;
-use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
 
 use crate::gui::atlas::GuiAtlas;
-use crate::gui::gui_material::GuiMaterial;
 use crate::gui::painter::Painter;
-use crate::gui::pool::{GuiFrames, GuiTextures, GuiView, VIEW_HUD};
+use crate::gui::pool::{GuiFrames, GuiTextures};
 use crate::gui::{GuiState, Screen, keybinds, screens};
 use crate::session::SharedMutex;
 
@@ -30,23 +24,25 @@ pub fn clipboard_set(text: &str) {
     crate::platform::clipboard::set(text)
 }
 
-pub const GUI_LAYER: usize = 1;
-
-#[derive(Component)]
-pub struct GuiCamera;
-
-pub const GUI_CAMERA_ORDER: isize = 10;
-
-#[derive(Component)]
-struct GuiMeshTag;
-
 #[derive(Resource)]
 pub struct GuiAssets {
     pub atlas: Arc<GuiAtlas>,
-    mesh: Handle<Mesh>,
     pub image: Handle<Image>,
-    pub material: Handle<GuiMaterial>,
     pub unihex_image: Handle<Image>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EditKey {
+    Char(char),
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+    Up,
+    Down,
+    Enter,
 }
 
 #[derive(Resource, Default, Clone)]
@@ -66,6 +62,7 @@ pub struct GuiInput {
     pub right_release: bool,
     pub scroll: f32,
     pub typed: Vec<char>,
+    pub edits: Vec<EditKey>,
     pub backspace: bool,
     pub delete: bool,
     pub left_arrow: bool,
@@ -91,6 +88,14 @@ pub struct GuiInput {
     pub paste: bool,
     pub cut: bool,
     pub select_all: bool,
+    #[cfg(feature = "hud_editor")]
+    pub undo: bool,
+    #[cfg(feature = "hud_editor")]
+    pub hud_hide: bool,
+    #[cfg(feature = "hud_editor")]
+    pub hud_remove: bool,
+    #[cfg(feature = "hud_editor")]
+    pub hud_reset: bool,
     pub profile_down: bool,
     pub profile_up: bool,
     pub pressed_key: Option<KeyCode>,
@@ -131,11 +136,9 @@ impl Plugin for GuiPlugin {
         let options = crate::gui::GuiOptions::default();
         #[cfg(feature = "audio")]
         crate::audio::set_volumes(&options.volumes);
-        app.add_plugins(crate::gui::gui_material::GuiMaterialPlugin);
-        app.init_resource::<GuiFrames>().add_plugins((
+        app.init_resource::<GuiFrames>().add_plugins(
             bevy::render::extract_resource::ExtractResourcePlugin::<GuiTextures>::default(),
-            bevy::render::extract_component::ExtractComponentPlugin::<GuiView>::default(),
-        ));
+        );
         crate::gui::draw::build(app);
         app.insert_resource(GuiShared(self.shared.clone()))
             .insert_resource(PendingGuiAtlas(self.atlas.clone()))
@@ -151,6 +154,7 @@ impl Plugin for GuiPlugin {
                 ),
                 options,
                 chat: crate::gui::chat::ChatState::with_saved_history(),
+                hud_state: crate::gui::hud_layout::HudState::load(),
                 ..Default::default()
             })
             .init_resource::<crate::gui::atlas_writes::AtlasWrites>()
@@ -192,119 +196,84 @@ impl Plugin for GuiPlugin {
     }
 
     fn finish(&self, app: &mut App) {
-        let crate_name = module_path!().split(':').next().unwrap_or("torch_client");
-        let shader = app
-            .world()
-            .resource::<AssetServer>()
-            .load(format!("embedded://{crate_name}/gui/gui.wgsl"));
-        crate::gui::draw::finish(app, shader);
+        crate::gui::draw::finish(app);
     }
-}
-
-pub fn mesh_path() -> bool {
-    static MESH_PATH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MESH_PATH.get_or_init(|| std::env::var("MC_GUI_MESH").as_deref() == Ok("1"))
 }
 
 #[derive(Resource)]
 struct PendingGuiAtlas(Arc<GuiAtlas>);
 
+pub(crate) fn atlas_textures(atlas: &GuiAtlas) -> (Image, Image) {
+    let (width, height) = atlas.size();
+    let size = Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let pixels = atlas.take_pixels();
+    if pixels.is_none() {
+        crate::log_warn!(
+            "gui",
+            "atlas pixels already uploaded; binding a blank atlas"
+        );
+    }
+    let (rgba, unihex) = match pixels {
+        Some(p) => (Some(p.rgba.into_raw()), p.unihex),
+        None => (None, Vec::new()),
+    };
+
+    let mut image = match rgba {
+        Some(data) => Image::new(
+            size,
+            TextureDimension::D2,
+            data,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        ),
+        None => Image::new_uninit(
+            size,
+            TextureDimension::D2,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        ),
+    };
+    image.sampler = ImageSampler::nearest();
+
+    let (uw, uh) = atlas.font.unihex_dims;
+    let has_unihex = uw > 0 && uh > 0 && unihex.len() == uw as usize * uh as usize;
+    let (unihex_size, unihex_data) = if has_unihex {
+        ((uw, uh), unihex)
+    } else {
+        ((1, 1), vec![0u8])
+    };
+    let mut unihex_image = Image::new(
+        Extent3d {
+            width: unihex_size.0,
+            height: unihex_size.1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        unihex_data,
+        TextureFormat::R8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    unihex_image.sampler = ImageSampler::nearest();
+
+    (image, unihex_image)
+}
+
 fn setup_gui(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<GuiMaterial>>,
     mut images: ResMut<Assets<Image>>,
     pending: Res<PendingGuiAtlas>,
     mut writes: ResMut<crate::gui::atlas_writes::AtlasWrites>,
 ) {
     let atlas = pending.0.clone();
 
-    let mut image = Image::new(
-        Extent3d {
-            width: atlas.image.width(),
-            height: atlas.image.height(),
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        atlas.image.as_raw().clone(),
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    image.sampler = ImageSampler::nearest();
+    let (image, unihex_image) = atlas_textures(&atlas);
     let image_handle = images.add(image);
     writes.image = Some(image_handle.clone());
-
-    let (uw, uh) = atlas.font.unihex_dims;
-    let has_unihex = uw > 0 && uh > 0;
-    let mut unihex_image = Image::new(
-        Extent3d {
-            width: if has_unihex { uw } else { 1 },
-            height: if has_unihex { uh } else { 1 },
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        if has_unihex {
-            atlas.font.unihex_image.clone()
-        } else {
-            vec![0u8]
-        },
-        TextureFormat::R8Unorm,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    unihex_image.sampler = ImageSampler::nearest();
     let unihex_image_handle = images.add(unihex_image);
-
-    let material_handle = materials.add(GuiMaterial {
-        atlas: image_handle.clone(),
-        unihex: unihex_image_handle.clone(),
-    });
-
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
-    mesh.insert_indices(Indices::U32(Vec::new()));
-    let mesh_handle = meshes.add(mesh);
-
-    if mesh_path() {
-        commands.spawn((
-            Mesh3d(mesh_handle.clone()),
-            MeshMaterial3d(material_handle.clone()),
-            Transform::default(),
-            RenderLayers::layer(GUI_LAYER),
-            NoFrustumCulling,
-            GuiMeshTag,
-        ));
-    }
-
-    commands.spawn((
-        Camera3d::default(),
-        Msaa::Off,
-        ClusterConfig::None,
-        Camera {
-            order: GUI_CAMERA_ORDER,
-            clear_color: ClearColorConfig::None,
-            ..default()
-        },
-        Projection::Orthographic(OrthographicProjection {
-            scaling_mode: ScalingMode::Fixed {
-                width: 320.0,
-                height: 240.0,
-            },
-            near: -1000.0,
-            far: 1000.0,
-            ..OrthographicProjection::default_3d()
-        }),
-        Tonemapping::None,
-        DebandDither::Disabled,
-        Transform::from_xyz(0.0, 0.0, 500.0),
-        RenderLayers::layer(GUI_LAYER),
-        GuiCamera,
-        GuiView(VIEW_HUD),
-    ));
 
     commands.insert_resource(GuiTextures {
         atlas: image_handle.clone(),
@@ -312,9 +281,7 @@ fn setup_gui(
     });
     commands.insert_resource(GuiAssets {
         atlas,
-        mesh: mesh_handle,
         image: image_handle,
-        material: material_handle,
         unihex_image: unihex_image_handle,
     });
     commands.remove_resource::<PendingGuiAtlas>();
@@ -427,6 +394,7 @@ pub(crate) fn collect_input(
     mut last_left_press: Local<Option<f32>>,
     mut click_run: Local<u32>,
     mut wheel_acc: Local<(f64, f64)>,
+    #[cfg(target_os = "android")] mut keyboard_seen: Local<bool>,
 ) {
     let Ok(window) = windows.single() else { return };
     let (w, h) = (
@@ -499,6 +467,7 @@ pub(crate) fn collect_input(
     input.page_down = false;
     input.tab = false;
     input.typed.clear();
+    input.edits.clear();
     input.defocus = false;
     input.escape = !elsewhere && keys.just_pressed(KeyCode::Escape);
     #[cfg(feature = "mobile_ui")]
@@ -506,8 +475,14 @@ pub(crate) fn collect_input(
         crate::gui::widgets::touch_tap::note_press(input.mouse);
     }
     let binds = &state.keybinds;
-    input.drop_key = !elsewhere && binds.just(keybinds::Action::Drop, &keys, &buttons);
-    input.swap_key = !elsewhere && binds.just(keybinds::Action::SwapOffhand, &keys, &buttons);
+    let anvil_typing = state.anvil_typing();
+    let slot_key = |action: keybinds::Action| {
+        !elsewhere
+            && !(anvil_typing && !matches!(binds.bound(action), keybinds::Bound::Mouse(_)))
+            && binds.just(action, &keys, &buttons)
+    };
+    input.drop_key = slot_key(keybinds::Action::Drop);
+    input.swap_key = slot_key(keybinds::Action::SwapOffhand);
     input.pressed_key = if elsewhere {
         None
     } else {
@@ -522,6 +497,14 @@ pub(crate) fn collect_input(
     input.select_all = shortcut && keys.just_pressed(KeyCode::KeyA);
     input.profile_down = shortcut && keys.just_pressed(KeyCode::BracketLeft);
     input.profile_up = shortcut && keys.just_pressed(KeyCode::BracketRight);
+    #[cfg(feature = "hud_editor")]
+    {
+        input.undo = shortcut && keys.just_pressed(KeyCode::KeyZ);
+        let bare = !elsewhere && !input.ctrl && !input.alt;
+        input.hud_hide = bare && keys.just_pressed(KeyCode::KeyH);
+        input.hud_remove = bare && keys.just_pressed(KeyCode::Delete);
+        input.hud_reset = bare && keys.just_pressed(KeyCode::KeyR);
+    }
 
     input.double_click = false;
     input.triple_click = false;
@@ -534,38 +517,78 @@ pub(crate) fn collect_input(
         input.triple_click = *click_run == 3;
     }
     for (i, action) in keybinds::HOTBAR.into_iter().enumerate() {
-        input.hotbar_keys[i] = !elsewhere && binds.just(action, &keys, &buttons);
+        input.hotbar_keys[i] = slot_key(action);
     }
 
     for ev in key_events.read() {
         if !ev.state.is_pressed() || elsewhere {
             continue;
         }
+        match ev.key_code {
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                input.enter = true;
+                input.select = true;
+                input.edits.push(EditKey::Enter);
+                continue;
+            }
+            KeyCode::Tab => {
+                input.tab = true;
+                continue;
+            }
+            _ => {}
+        }
         match &ev.logical_key {
-            Key::Backspace => input.backspace = true,
-            Key::Delete => input.delete = true,
-            Key::ArrowLeft => input.left_arrow = true,
-            Key::ArrowRight => input.right_arrow = true,
-            Key::ArrowUp => input.up_arrow = true,
-            Key::ArrowDown => input.down_arrow = true,
-            Key::Home => input.home = true,
-            Key::End => input.end = true,
+            Key::Backspace => {
+                input.backspace = true;
+                input.edits.push(EditKey::Backspace);
+            }
+            Key::Delete => {
+                input.delete = true;
+                input.edits.push(EditKey::Delete);
+            }
+            Key::ArrowLeft => {
+                input.left_arrow = true;
+                input.edits.push(EditKey::Left);
+            }
+            Key::ArrowRight => {
+                input.right_arrow = true;
+                input.edits.push(EditKey::Right);
+            }
+            Key::ArrowUp => {
+                input.up_arrow = true;
+                input.edits.push(EditKey::Up);
+            }
+            Key::ArrowDown => {
+                input.down_arrow = true;
+                input.edits.push(EditKey::Down);
+            }
+            Key::Home => {
+                input.home = true;
+                input.edits.push(EditKey::Home);
+            }
+            Key::End => {
+                input.end = true;
+                input.edits.push(EditKey::End);
+            }
             Key::PageUp => input.page_up = true,
             Key::PageDown => input.page_down = true,
             Key::Enter => {
                 input.enter = true;
                 input.select = true;
+                input.edits.push(EditKey::Enter);
             }
             Key::Tab => input.tab = true,
             Key::Character(s) => {
                 for c in s.chars() {
                     if !c.is_control() {
                         input.typed.push(c);
+                        input.edits.push(EditKey::Char(c));
                     }
                 }
             }
             Key::Space => {
                 input.typed.push(' ');
+                input.edits.push(EditKey::Char(' '));
                 input.select = true;
             }
             #[cfg(target_os = "android")]
@@ -598,6 +621,29 @@ pub(crate) fn collect_input(
     if state.screen != Screen::Chat && crate::platform::keyboard::take_enter() {
         input.enter = true;
         input.select = true;
+        input.edits.push(EditKey::Enter);
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        if !crate::platform::keyboard::has_focus() {
+            *keyboard_seen = false;
+        } else if crate::platform::keyboard::inset_px() > 0.0 {
+            *keyboard_seen = true;
+        } else if std::mem::take(&mut *keyboard_seen) {
+            crate::log_info!("input", "soft keyboard hid itself: dismissing the field");
+            input.defocus = true;
+        }
+    }
+
+    crate::platform::keyboard::resolve_taps();
+
+    #[cfg(target_os = "android")]
+    if input.enter && state.screen.is_menu() && crate::platform::keyboard::has_focus() {
+        crate::log_info!("input", "enter key: dismissing the keyboard");
+        input.enter = false;
+        input.select = false;
+        input.defocus = true;
     }
 
     if elsewhere || state.screen.is_menu() {
@@ -607,6 +653,12 @@ pub(crate) fn collect_input(
     let nav = crate::platform::keyboard::take_nav();
     input.up_arrow |= nav.up;
     input.down_arrow |= nav.down;
+    if nav.up {
+        input.edits.push(EditKey::Up);
+    }
+    if nav.down {
+        input.edits.push(EditKey::Down);
+    }
     input.page_up |= nav.page_up;
     input.page_down |= nav.page_down;
 
@@ -623,6 +675,9 @@ pub(crate) fn collect_input(
         let mut letters = name.chars();
         if let (Some(letter), None) = (letters.next(), letters.next()) {
             input.typed.retain(|c| !c.eq_ignore_ascii_case(&letter));
+            input
+                .edits
+                .retain(|e| !matches!(e, EditKey::Char(c) if c.eq_ignore_ascii_case(&letter)));
         }
     }
 }
@@ -632,8 +687,7 @@ pub(crate) fn draw_gui(
     shared: Res<GuiShared>,
     input: Res<GuiInput>,
     mut state: ResMut<GuiState>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut cameras: Query<&mut Projection, With<GuiCamera>>,
+    primary: Query<Entity, With<PrimaryWindow>>,
     time: Res<Time>,
     frames: Res<GuiFrames>,
     mut scratch: Local<crate::gui::painter::PainterBuffers>,
@@ -642,18 +696,10 @@ pub(crate) fn draw_gui(
     #[cfg(feature = "budget")]
     let _t = crate::diag::budget::timed(crate::diag::budget::Slot::Gui);
     let Some(assets) = assets else { return };
+    let Ok(window) = primary.single() else { return };
     let (vw, vh) = (input.size.x, input.size.y);
     if vw <= 0.0 || vh <= 0.0 {
         return;
-    }
-
-    if let Ok(mut proj) = cameras.single_mut()
-        && let Projection::Orthographic(ortho) = &mut *proj
-    {
-        ortho.scaling_mode = ScalingMode::Fixed {
-            width: vw,
-            height: vh,
-        };
     }
 
     let frame = (time.elapsed_secs() * 20.0) as u32;
@@ -670,34 +716,10 @@ pub(crate) fn draw_gui(
         #[cfg(feature = "skins")]
         &mut faces,
     );
-    let mut bufs = painter.into_buffers();
-
-    if mesh_path() {
-        let Some(mesh) = meshes.get_mut(&assets.mesh) else {
-            return;
-        };
-        for p in &mut bufs.positions {
-            *p = [p[0] - vw / 2.0, vh / 2.0 - p[1], p[2]];
-        }
-        let old = crate::gui::painter::PainterBuffers {
-            positions: f32x3(mesh.remove_attribute(Mesh::ATTRIBUTE_POSITION)),
-            uvs: f32x2(mesh.remove_attribute(Mesh::ATTRIBUTE_UV_0)),
-            colors: f32x4(mesh.remove_attribute(Mesh::ATTRIBUTE_COLOR)),
-            indices: match mesh.remove_indices() {
-                Some(Indices::U32(v)) => v,
-                _ => Vec::new(),
-            },
-        };
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, bufs.positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, bufs.uvs);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, bufs.colors);
-        mesh.insert_indices(Indices::U32(bufs.indices));
-        *scratch = old;
-        return;
-    }
+    let bufs = painter.into_buffers();
 
     frames.push(
-        VIEW_HUD,
+        window,
         &bufs.positions,
         &bufs.uvs,
         &bufs.colors,
@@ -756,23 +778,45 @@ fn draw_geometry_probe(
     });
 }
 
-pub(crate) fn f32x3(values: Option<VertexAttributeValues>) -> Vec<[f32; 3]> {
-    match values {
-        Some(VertexAttributeValues::Float32x3(v)) => v,
-        _ => Vec::new(),
-    }
-}
+#[cfg(target_os = "android")]
+#[allow(
+    dead_code,
+    reason = "diagnostic, kept compiled while its call site is commented out"
+)]
+fn draw_keyboard_probe(p: &mut Painter, input: &GuiInput, vw: f32, vh: f32) {
+    const BAR: f32 = 3.0;
+    const PAD: f32 = 4.0;
+    const RED: u32 = 0xFF_FF0000;
 
-pub(crate) fn f32x2(values: Option<VertexAttributeValues>) -> Vec<[f32; 2]> {
-    match values {
-        Some(VertexAttributeValues::Float32x2(v)) => v,
-        _ => Vec::new(),
+    let px = crate::platform::keyboard::inset_px();
+    let wanted = crate::platform::keyboard::has_focus();
+    if px <= 0.0 && !wanted {
+        return;
     }
-}
+    let gui = if input.scale > 0.0 {
+        px / input.scale
+    } else {
+        0.0
+    };
 
-pub(crate) fn f32x4(values: Option<VertexAttributeValues>) -> Vec<[f32; 4]> {
-    match values {
-        Some(VertexAttributeValues::Float32x4(v)) => v,
-        _ => Vec::new(),
+    if gui > 0.0 {
+        let top = (vh - gui).max(BAR);
+        p.fill(0.0, top - BAR, vw, BAR, RED);
+    }
+
+    let lines = [
+        format!("ime {px:.0} px"),
+        format!("gui {gui:.1} of {vh:.0}"),
+        format!("keyboard {}", if wanted { "wanted" } else { "not wanted" }),
+    ];
+    let w = lines
+        .iter()
+        .map(|l| p.atlas.font.width_str(l))
+        .fold(0.0f32, f32::max);
+    let side = (w + PAD * 2.0).max(lines.len() as f32 * 10.0 + PAD * 2.0);
+    p.fill(PAD, PAD, side, side, 0xC0_800000);
+    p.outline(PAD, PAD, side, side, RED);
+    for (i, line) in lines.iter().enumerate() {
+        p.text_plain(line, PAD * 2.0, PAD * 2.0 + i as f32 * 10.0, 0xFFFFFF, true);
     }
 }

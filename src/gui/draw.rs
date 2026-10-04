@@ -1,35 +1,32 @@
-use bevy::core_pipeline::core_3d::Transparent3d;
-use bevy::ecs::system::SystemParamItem;
-use bevy::ecs::system::lifetimeless::SRes;
-use bevy::mesh::{
-    MeshVertexBufferLayout, MeshVertexBufferLayoutRef, MeshVertexBufferLayouts, VertexBufferLayout,
-};
-use bevy::pbr::{
-    MeshPipeline, MeshPipelineKey, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup,
-    ViewKeyCache,
-};
+use bevy::asset::embedded_asset;
+use bevy::camera::{ClearColor, NormalizedRenderTarget};
+use bevy::color::LinearRgba;
+use bevy::mesh::VertexBufferLayout;
 use bevy::prelude::*;
+use bevy::render::camera::ExtractedCamera;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_phase::{
-    AddRenderCommand, DrawFunctions, PhaseItemExtraIndex, RenderCommand, RenderCommandResult,
-    SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
+use bevy::render::render_graph::{
+    Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
 };
 use bevy::render::render_resource::binding_types::{sampler, texture_2d};
 use bevy::render::render_resource::{
-    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, IndexFormat,
-    PipelineCache, PrimitiveTopology, RenderPipelineDescriptor, SamplerBindingType, ShaderStages,
-    SpecializedRenderPipeline, SpecializedRenderPipelines, TextureSampleType, TextureViewId,
-    VertexAttribute, VertexFormat, VertexStepMode,
+    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendState,
+    CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, IndexFormat,
+    PipelineCache, RenderPassDescriptor, RenderPipelineDescriptor, SamplerBindingType,
+    ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat,
+    TextureSampleType, TextureViewId, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
 };
-use bevy::render::renderer::RenderDevice;
-use bevy::render::texture::GpuImage;
-use bevy::render::view::ExtractedView;
+use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::texture::{GpuImage, OutputColorAttachment};
+use bevy::render::view::{ExtractedWindows, ViewTargetAttachments};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
-use bevy::shader::{Shader, ShaderDefVal};
+use bevy::shader::Shader;
+use bevy::window::WindowRef;
 
-use super::pool::{GUI_VERTEX_STRIDE, GuiPool, GuiTextures, GuiView, item_entity};
+use super::pool::{GUI_VERTEX_STRIDE, GuiPool, GuiTextures};
+use crate::renderer::ssaa::SceneImage;
 
-const GUI_GROUP: usize = 2;
+pub const UNIHEX_UV_BIAS: f32 = 2.0;
 
 fn gui_vertex_layout() -> VertexBufferLayout {
     VertexBufferLayout {
@@ -37,18 +34,18 @@ fn gui_vertex_layout() -> VertexBufferLayout {
         step_mode: VertexStepMode::Vertex,
         attributes: vec![
             VertexAttribute {
-                format: VertexFormat::Float32x3,
+                format: VertexFormat::Float32x2,
                 offset: 0,
                 shader_location: 0,
             },
             VertexAttribute {
                 format: VertexFormat::Float32x2,
-                offset: 12,
+                offset: 8,
                 shader_location: 1,
             },
             VertexAttribute {
                 format: VertexFormat::Float32x4,
-                offset: 20,
+                offset: 16,
                 shader_location: 2,
             },
         ],
@@ -61,20 +58,29 @@ pub struct GuiBindGroup {
     key: Option<(TextureViewId, TextureViewId)>,
 }
 
+#[derive(Resource, Default)]
+struct SceneBlitBindGroup(Option<(TextureViewId, BindGroup)>);
+
 #[derive(Resource)]
 pub struct GuiPipeline {
-    mesh_pipeline: MeshPipeline,
-    shader: Handle<Shader>,
-    vertex_layout_ref: MeshVertexBufferLayoutRef,
-    layout: BindGroupLayoutDescriptor,
+    shaders: GuiShaders,
+    gui_layout: BindGroupLayoutDescriptor,
+    blit_layout: BindGroupLayoutDescriptor,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GuiPipelineKind {
+    Gui,
+    Blit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GuiPipelineKey {
-    pub view: MeshPipelineKey,
+    pub kind: GuiPipelineKind,
+    pub format: TextureFormat,
 }
 
-fn gui_layout() -> BindGroupLayoutDescriptor {
+fn two_texture_layout() -> BindGroupLayoutDescriptor {
     let entries = BindGroupLayoutEntries::sequential(
         ShaderStages::FRAGMENT,
         (
@@ -87,111 +93,77 @@ fn gui_layout() -> BindGroupLayoutDescriptor {
     BindGroupLayoutDescriptor::new("gui", &entries)
 }
 
-impl FromWorld for GuiPipeline {
-    fn from_world(world: &mut World) -> Self {
-        let shader = world.resource::<GuiShader>().0.clone();
-        let mut layouts = MeshVertexBufferLayouts::default();
-        let vertex_layout_ref = layouts.insert(MeshVertexBufferLayout::new(
-            vec![Mesh::ATTRIBUTE_POSITION.id],
-            VertexBufferLayout {
-                array_stride: 12,
-                step_mode: VertexStepMode::Vertex,
-                attributes: vec![VertexAttribute {
-                    format: VertexFormat::Float32x3,
-                    offset: 0,
-                    shader_location: 0,
-                }],
-            },
-        ));
-        Self {
-            mesh_pipeline: world.resource::<MeshPipeline>().clone(),
-            shader,
-            vertex_layout_ref,
-            layout: gui_layout(),
-        }
-    }
+fn blit_layout() -> BindGroupLayoutDescriptor {
+    let entries = BindGroupLayoutEntries::sequential(
+        ShaderStages::FRAGMENT,
+        (
+            texture_2d(TextureSampleType::Float { filterable: true }),
+            sampler(SamplerBindingType::Filtering),
+        ),
+    );
+    BindGroupLayoutDescriptor::new("gui_scene_blit", &entries)
 }
 
 impl SpecializedRenderPipeline for GuiPipeline {
     type Key = GuiPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
-        let view_key = key.view
-            | MeshPipelineKey::from_primitive_topology(PrimitiveTopology::TriangleList)
-            | MeshPipelineKey::BLEND_ALPHA;
-        let mut descriptor =
-            <MeshPipeline as bevy::render::render_resource::SpecializedMeshPipeline>::specialize(
-                &self.mesh_pipeline,
-                view_key,
-                &self.vertex_layout_ref,
-            )
-            .expect("gui vertex layout is missing ATTRIBUTE_POSITION");
-
-        let group = ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), GUI_GROUP as u32);
-        descriptor.label = Some("gui".into());
-        descriptor.vertex.shader = self.shader.clone();
-        descriptor.vertex.buffers = vec![gui_vertex_layout()];
-        descriptor.vertex.shader_defs.push(group.clone());
-        if let Some(fragment) = descriptor.fragment.as_mut() {
-            fragment.shader = self.shader.clone();
-            fragment.shader_defs.push(group);
+        let (label, shader, layout, vertex_entry, fragment_entry, buffers, blend) = match key.kind {
+            GuiPipelineKind::Gui => (
+                "gui",
+                &self.shaders.gui,
+                self.gui_layout.clone(),
+                "vertex",
+                "fragment",
+                vec![gui_vertex_layout()],
+                Some(BlendState::ALPHA_BLENDING),
+            ),
+            GuiPipelineKind::Blit => (
+                "gui_scene_blit",
+                &self.shaders.blit,
+                self.blit_layout.clone(),
+                "blit_vertex",
+                "blit_fragment",
+                Vec::new(),
+                None,
+            ),
+        };
+        RenderPipelineDescriptor {
+            label: Some(label.into()),
+            layout: vec![layout],
+            vertex: VertexState {
+                shader: shader.clone(),
+                shader_defs: Vec::new(),
+                entry_point: Some(vertex_entry.into()),
+                buffers,
+            },
+            fragment: Some(FragmentState {
+                shader: shader.clone(),
+                shader_defs: Vec::new(),
+                entry_point: Some(fragment_entry.into()),
+                targets: vec![Some(ColorTargetState {
+                    format: key.format,
+                    blend,
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            ..default()
         }
-
-        descriptor.layout.truncate(GUI_GROUP);
-        descriptor.layout.push(self.layout.clone());
-        descriptor.primitive.cull_mode = None;
-        descriptor
     }
 }
 
-pub struct DrawGuiRange;
-
-impl RenderCommand<Transparent3d> for DrawGuiRange {
-    type Param = (SRes<GuiPool>, SRes<GuiBindGroup>);
-    type ViewQuery = ();
-    type ItemQuery = ();
-
-    fn render<'w>(
-        item: &Transparent3d,
-        _view: (),
-        _entity: Option<()>,
-        (pool, bind_group): SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        let pool = pool.into_inner();
-        let (Some(vertices), Some(indices)) = (&pool.vertices, &pool.indices) else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(group) = bind_group.into_inner().group.as_ref() else {
-            return RenderCommandResult::Skip;
-        };
-        let PhaseItemExtraIndex::DynamicOffset(index) = item.extra_index else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(range) = pool.ranges.get(index as usize) else {
-            return RenderCommandResult::Skip;
-        };
-
-        pass.set_bind_group(GUI_GROUP, group, &[]);
-        pass.set_vertex_buffer(0, vertices.slice(..));
-        pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
-        pass.draw_indexed(
-            range.first_index..range.first_index + range.index_count,
-            range.base_vertex,
-            0..1,
-        );
-        RenderCommandResult::Success
-    }
+struct WindowPass {
+    window: Entity,
+    target: NormalizedRenderTarget,
+    clear: LinearRgba,
+    blit: Option<CachedRenderPipelineId>,
+    gui: Option<CachedRenderPipelineId>,
 }
 
-pub type DrawGui = (
-    SetItemPipeline,
-    SetMeshViewBindGroup<0>,
-    SetMeshViewBindingArrayBindGroup<1>,
-    DrawGuiRange,
-);
+#[derive(Resource, Default)]
+struct GuiPlan(Vec<WindowPass>);
 
-pub fn prepare_gui_bind_group(
+fn prepare_gui_bind_group(
     device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<GuiPipeline>,
@@ -210,7 +182,7 @@ pub fn prepare_gui_bind_group(
         return;
     }
 
-    let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
+    let layout = pipeline_cache.get_bind_group_layout(&pipeline.gui_layout);
     bind_group.group = Some(device.create_bind_group(
         "gui",
         &layout,
@@ -224,80 +196,250 @@ pub fn prepare_gui_bind_group(
     bind_group.key = Some(key);
 }
 
-pub fn queue_gui(
+#[allow(clippy::too_many_arguments, reason = "one system, flat arguments")]
+fn plan_gui_passes(
+    mut plan: ResMut<GuiPlan>,
     pool: Res<GuiPool>,
-    gui_pipeline: Res<GuiPipeline>,
+    windows: Res<ExtractedWindows>,
+    cameras: Query<&ExtractedCamera>,
+    scene: Option<Res<SceneImage>>,
+    images: Res<RenderAssets<GpuImage>>,
+    clear_color: Res<ClearColor>,
+    mut attachments: ResMut<ViewTargetAttachments>,
+    device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
+    gui_pipeline: Res<GuiPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<GuiPipeline>>,
-    view_key_cache: Res<ViewKeyCache>,
-    draw_functions: Res<DrawFunctions<Transparent3d>>,
-    mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
-    views: Query<(&ExtractedView, &GuiView)>,
+    mut blit_group: ResMut<SceneBlitBindGroup>,
 ) {
-    if pool.ranges.is_empty() {
-        return;
-    }
-    let draw_function = draw_functions.read().id::<DrawGui>();
+    plan.0.clear();
 
-    for (view, gui_view) in views.iter() {
-        let Some(&view_key) = view_key_cache.get(&view.retained_view_entity) else {
+    let scene_image = scene
+        .as_ref()
+        .and_then(|s| s.0.as_ref())
+        .filter(|handle| {
+            cameras.iter().any(|camera| {
+                matches!(&camera.target, Some(NormalizedRenderTarget::Image(t)) if t.handle == **handle)
+            })
+        })
+        .and_then(|handle| images.get(handle));
+    if let Some(image) = scene_image {
+        let id = image.texture_view.id();
+        if blit_group
+            .0
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != id)
+        {
+            let layout = pipeline_cache.get_bind_group_layout(&gui_pipeline.blit_layout);
+            let group = device.create_bind_group(
+                "gui_scene_blit",
+                &layout,
+                &BindGroupEntries::sequential((&image.texture_view, &image.sampler)),
+            );
+            blit_group.0 = Some((id, group));
+        }
+    }
+
+    for (&window, extracted) in windows.iter() {
+        let primary = windows.primary == Some(window);
+        let wants_blit = primary && scene_image.is_some();
+        let has_ranges = pool
+            .ranges
+            .iter()
+            .any(|r| r.window == window && r.index_count > 0);
+        if !has_ranges && !wants_blit {
+            continue;
+        }
+        let (Some(view), Some(view_format)) = (
+            extracted.swap_chain_texture_view.as_ref(),
+            extracted.swap_chain_texture_view_format,
+        ) else {
             continue;
         };
-        let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
+
+        let Some(target) = WindowRef::Entity(window)
+            .normalize(None)
+            .map(NormalizedRenderTarget::Window)
+        else {
             continue;
         };
-        for (index, range) in pool.ranges.iter().enumerate() {
-            if range.view != gui_view.0 || range.index_count == 0 {
-                continue;
+        let format = attachments
+            .entry(target.clone())
+            .or_insert_with(|| OutputColorAttachment::new(view.clone(), view_format))
+            .view_format;
+
+        let mut specialize = |kind| {
+            let id = pipelines.specialize(
+                &pipeline_cache,
+                &gui_pipeline,
+                GuiPipelineKey { kind, format },
+            );
+            pipeline_cache.get_render_pipeline(id).map(|_| id)
+        };
+        let blit = if wants_blit {
+            match specialize(GuiPipelineKind::Blit) {
+                Some(id) => Some(id),
+                None => continue,
             }
-            phase.add(Transparent3d {
-                distance: f32::MIN,
-                pipeline: pipelines.specialize(
-                    &pipeline_cache,
-                    &gui_pipeline,
-                    GuiPipelineKey { view: view_key },
-                ),
-                entity: item_entity(index as u32),
-                draw_function,
-                batch_range: 0..1,
-                extra_index: PhaseItemExtraIndex::DynamicOffset(index as u32),
-                indexed: true,
+        } else {
+            None
+        };
+        let gui = if !has_ranges {
+            None
+        } else {
+            match specialize(GuiPipelineKind::Gui) {
+                Some(id) => Some(id),
+                None => continue,
+            }
+        };
+
+        plan.0.push(WindowPass {
+            window,
+            target,
+            clear: if primary {
+                clear_color.0.to_linear()
+            } else {
+                LinearRgba::BLACK
+            },
+            blit,
+            gui,
+        });
+    }
+}
+
+#[derive(RenderLabel, Debug, Hash, PartialEq, Eq, Clone)]
+struct GuiLabel;
+
+struct GuiNode;
+
+impl Node for GuiNode {
+    fn run<'w>(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        let plan = world.resource::<GuiPlan>();
+        if plan.0.is_empty() {
+            return Ok(());
+        }
+        let attachments = world.resource::<ViewTargetAttachments>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let pool = world.resource::<GuiPool>();
+        let gui_group = world.resource::<GuiBindGroup>().group.as_ref();
+        let blit_group = world
+            .resource::<SceneBlitBindGroup>()
+            .0
+            .as_ref()
+            .map(|(_, group)| group);
+
+        for pass in &plan.0 {
+            let Some(attachment) = attachments.get(&pass.target) else {
+                continue;
+            };
+            let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                label: Some("gui"),
+                color_attachments: &[Some(attachment.get_attachment(Some(pass.clear)))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
+
+            if let (Some(id), Some(group)) = (pass.blit, blit_group)
+                && let Some(pipeline) = pipeline_cache.get_render_pipeline(id)
+            {
+                render_pass.set_render_pipeline(pipeline);
+                render_pass.set_bind_group(0, group, &[]);
+                render_pass.draw(0..3, 0..1);
+            }
+
+            if let (Some(id), Some(group), Some(vertices), Some(indices)) =
+                (pass.gui, gui_group, &pool.vertices, &pool.indices)
+                && let Some(pipeline) = pipeline_cache.get_render_pipeline(id)
+            {
+                render_pass.set_render_pipeline(pipeline);
+                render_pass.set_bind_group(0, group, &[]);
+                render_pass.set_vertex_buffer(0, vertices.slice(..));
+                render_pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+                for range in &pool.ranges {
+                    if range.window != pass.window || range.index_count == 0 {
+                        continue;
+                    }
+                    render_pass.draw_indexed(
+                        range.first_index..range.first_index + range.index_count,
+                        range.base_vertex,
+                        0..1,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn present_gui_windows(plan: Res<GuiPlan>, mut windows: ResMut<ExtractedWindows>) {
+    for pass in &plan.0 {
+        if let Some(window) = windows.get_mut(&pass.window) {
+            window.present();
         }
     }
 }
 
 #[derive(Resource, Clone)]
-pub struct GuiShader(pub Handle<Shader>);
+pub struct GuiShaders {
+    pub gui: Handle<Shader>,
+    pub blit: Handle<Shader>,
+}
 
-fn init_gui_pipeline(world: &mut World) {
-    let pipeline = GuiPipeline::from_world(world);
-    world.insert_resource(pipeline);
+fn init_gui_pipeline(mut commands: Commands, shaders: Res<GuiShaders>) {
+    commands.insert_resource(GuiPipeline {
+        shaders: shaders.clone(),
+        gui_layout: two_texture_layout(),
+        blit_layout: blit_layout(),
+    });
 }
 
 pub fn build(app: &mut App) {
+    embedded_asset!(app, "gui.wgsl");
+    embedded_asset!(app, "scene_blit.wgsl");
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
     render_app
         .init_resource::<GuiPool>()
         .init_resource::<GuiBindGroup>()
+        .init_resource::<SceneBlitBindGroup>()
+        .init_resource::<GuiPlan>()
         .init_resource::<SpecializedRenderPipelines<GuiPipeline>>()
-        .add_render_command::<Transparent3d, DrawGui>()
         .add_systems(RenderStartup, init_gui_pipeline)
         .add_systems(bevy::render::ExtractSchedule, crate::gui::pool::extract_gui)
         .add_systems(
             Render,
             (
+                plan_gui_passes
+                    .in_set(RenderSystems::ManageViews)
+                    .after(bevy::render::view::prepare_view_targets),
                 prepare_gui_bind_group.in_set(RenderSystems::PrepareBindGroups),
-                queue_gui.in_set(RenderSystems::Queue),
+                present_gui_windows
+                    .in_set(RenderSystems::Render)
+                    .after(bevy::render::renderer::render_system),
             ),
         );
+
+    let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
+    graph.add_node(GuiLabel, GuiNode);
+    graph.add_node_edge(bevy::render::graph::CameraDriverLabel, GuiLabel);
 }
 
-pub fn finish(app: &mut App, shader: Handle<Shader>) {
+pub fn finish(app: &mut App) {
+    let crate_name = module_path!().split(':').next().unwrap_or("torch_client");
+    let server = app.world().resource::<AssetServer>();
+    let shaders = GuiShaders {
+        gui: server.load(format!("embedded://{crate_name}/gui/gui.wgsl")),
+        blit: server.load(format!("embedded://{crate_name}/gui/scene_blit.wgsl")),
+    };
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
-    render_app.insert_resource(GuiShader(shader));
+    render_app.insert_resource(shaders);
 }

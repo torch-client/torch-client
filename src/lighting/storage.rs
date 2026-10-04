@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use super::{FastMap, FastSet};
 
 use super::data_layer::DataLayer;
 use super::{ColumnPos, SectionPos};
@@ -42,26 +42,26 @@ pub enum Layer {
 
 pub struct LightStorage {
     layer: Layer,
-    section_states: HashMap<SectionPos, SectionState>,
-    sections: HashMap<SectionPos, DataLayer>,
-    columns_with_sources: HashSet<ColumnPos>,
-    affected: HashSet<SectionPos>,
-    top_sections: HashMap<ColumnPos, i32>,
+    section_states: FastMap<SectionPos, SectionState>,
+    sections: FastMap<SectionPos, DataLayer>,
+    columns_with_sources: FastSet<ColumnPos>,
+    affected: FastSet<SectionPos>,
+    top_sections: FastMap<ColumnPos, i32>,
     current_lowest_y: i32,
-    queued: HashMap<SectionPos, DataLayer>,
+    queued: FastMap<SectionPos, DataLayer>,
 }
 
 impl LightStorage {
     pub fn new(layer: Layer) -> Self {
         Self {
             layer,
-            section_states: HashMap::new(),
-            sections: HashMap::new(),
-            columns_with_sources: HashSet::new(),
-            affected: HashSet::new(),
-            top_sections: HashMap::new(),
+            section_states: FastMap::default(),
+            sections: FastMap::default(),
+            columns_with_sources: FastSet::default(),
+            affected: FastSet::default(),
+            top_sections: FastMap::default(),
             current_lowest_y: i32::MAX,
-            queued: HashMap::new(),
+            queued: FastMap::default(),
         }
     }
 
@@ -106,7 +106,7 @@ impl LightStorage {
     }
 
     pub fn bytes(&self) -> (u64, usize) {
-        let layers: u64 = self.sections.values().map(|d| d.bytes()).sum();
+        let layers: u64 = self.sections.values().map(|d| d.unshared_bytes()).sum();
         let states = (self.section_states.len()
             * (std::mem::size_of::<SectionPos>() + std::mem::size_of::<SectionState>()))
             as u64;
@@ -168,7 +168,7 @@ impl LightStorage {
         }
     }
 
-    pub fn take_affected(&mut self) -> HashSet<SectionPos> {
+    pub fn take_affected(&mut self) -> FastSet<SectionPos> {
         std::mem::take(&mut self.affected)
     }
 
@@ -246,9 +246,9 @@ impl LightStorage {
         self.mark_section_and_neighbors_affected(sec);
     }
 
-    fn create_data_layer(&self, sec: SectionPos) -> DataLayer {
-        if let Some(queued) = self.queued.get(&sec) {
-            return queued.clone();
+    fn create_data_layer(&mut self, sec: SectionPos) -> DataLayer {
+        if let Some(queued) = self.queued.remove(&sec) {
+            return queued;
         }
         if self.layer == Layer::Block {
             return DataLayer::empty();

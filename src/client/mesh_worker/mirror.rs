@@ -28,6 +28,8 @@ struct Level {
 
 const COMPACT_INTERVAL: u32 = 256;
 
+const POST_SECTIONS: usize = 64;
+
 struct Mirror {
     shared: Arc<SharedMutex>,
     queue: Arc<JobQueue>,
@@ -39,6 +41,8 @@ struct Mirror {
     dirty: Vec<SectionPos>,
     added: Vec<ColumnPos>,
     removed: Vec<ColumnPos>,
+    page_backlog: usize,
+    posted: usize,
 }
 
 thread_local! {
@@ -61,6 +65,7 @@ fn post(bytes: Vec<u8>) {
 
 pub fn start(assets: Vec<u8>) {
     console_error_panic_hook::set_once();
+    crate::diag::panic_report::install_alloc_error_hook();
     if let Err(e) = crate::load_assets(assets) {
         post(msg::failed(&format!(
             "the assets could not be unpacked: {e}"
@@ -99,6 +104,8 @@ pub fn start(assets: Vec<u8>) {
             dirty: Vec::new(),
             added: Vec::new(),
             removed: Vec::new(),
+            page_backlog: 0,
+            posted: 0,
         });
     });
 
@@ -122,7 +129,14 @@ fn on_message(event: web_sys::MessageEvent) {
         return;
     };
     MIRROR.with(|slot| {
-        if let Some(mirror) = slot.borrow_mut().as_mut() {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            scope().set_onmessage(None);
+            post(msg::failed(
+                "an earlier message panicked; the mirror is unusable",
+            ));
+            return;
+        };
+        if let Some(mirror) = slot.as_mut() {
             mirror.handle(message);
         }
     });
@@ -190,15 +204,20 @@ impl Mirror {
                     .set_block_state(BlockPos { x, y, z }, state);
             }
             ToWorker::Unload { cx, cz } => self.unload(cx, cz),
-            ToWorker::Backlog(sections) => self.queue.set_backlog(sections as usize),
+            ToWorker::Backlog(sections) => {
+                self.page_backlog = sections as usize;
+                self.posted = 0;
+            }
             ToWorker::ResetLight => {
                 self.queue.reset();
+                self.posted = 0;
                 self.meshed.clear();
                 self.clear_light_delta();
                 self.batch.push(LightJob::Reset);
             }
             ToWorker::ResetLevel => {
                 self.queue.reset();
+                self.posted = 0;
                 self.meshed.clear();
                 self.level = None;
                 self.clear_light_delta();
@@ -241,6 +260,9 @@ impl Mirror {
             return;
         };
         let mut light = None;
+        if packet.is_empty() && !level.resident.contains_key(&(cx, cz)) {
+            log_error!("mesh", "column {cx},{cz} arrived with no blocks to mesh");
+        }
         if !packet.is_empty() {
             let Ok(p) = ClientboundLevelChunkWithLight::azalea_read(&mut Cursor::new(packet))
             else {
@@ -332,7 +354,7 @@ impl Mirror {
                             continue;
                         }
                         if meshed.contains(&(sec.x, sec.z)) {
-                            queue.push(world.clone(), sec.x, sec.z, JobScope::Section(sec.y));
+                            queue.push_relight(world.clone(), sec.x, sec.z, sec.y);
                         }
                     }
                 }
@@ -359,7 +381,13 @@ impl Mirror {
     }
 
     fn mesh(&mut self) {
-        crate::client::worker::drain_all(&self.queue, &self.shared, &mut self.scratch);
+        self.queue.set_backlog(self.page_backlog + self.posted);
+        crate::client::worker::drain_all(
+            &self.queue,
+            &self.shared,
+            &mut self.scratch,
+            POST_SECTIONS,
+        );
         let (chunks, edits) = {
             let mut s = self.shared.lock().unwrap();
             (
@@ -370,6 +398,7 @@ impl Mirror {
         if chunks.is_empty() && edits.is_empty() {
             return;
         }
+        self.posted += chunks.len() + edits.len();
         post(msg::sections(&chunks, &edits));
     }
 }

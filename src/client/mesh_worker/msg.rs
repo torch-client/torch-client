@@ -336,6 +336,10 @@ fn read_mesh_buf(r: &mut Reader) -> Option<MeshBuf> {
         cutout_idx,
         min,
         max,
+        #[cfg(feature = "shader_support")]
+        pack: Vec::new(),
+        #[cfg(feature = "shader_support")]
+        pack_block: None,
     })
 }
 
@@ -408,7 +412,7 @@ fn layer(w: &mut Writer, l: &DataLayer) {
 
 fn read_layer(r: &mut Reader) -> Option<DataLayer> {
     if r.bool()? {
-        let bytes: Box<[u8; LAYER]> = r.take(LAYER)?.to_vec().into_boxed_slice().try_into().ok()?;
+        let bytes: &[u8; LAYER] = r.take(LAYER)?.try_into().ok()?;
         Some(DataLayer::from_bytes(bytes))
     } else {
         Some(DataLayer::filled(r.u8()?))

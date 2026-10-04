@@ -4,16 +4,24 @@ use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 pub(crate) use naga::ShaderStage;
 
-pub(crate) fn to_wgsl(source: &str, stage: ShaderStage) -> Result<String, String> {
+pub(crate) fn to_wgsl(
+    source: &str,
+    stage: ShaderStage,
+    defines: &[(&str, &str)],
+) -> Result<String, String> {
+    let mut options = glsl::Options::from(stage);
+    options.defines.extend(
+        defines
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+    );
     let mut frontend = glsl::Frontend::default();
-    let module = frontend
-        .parse(&glsl::Options::from(stage), source)
-        .map_err(|errors| {
-            errors.errors.first().map_or_else(
-                || "the shader could not be parsed".to_owned(),
-                |e| e.to_string(),
-            )
-        })?;
+    let module = frontend.parse(&options, source).map_err(|errors| {
+        errors.errors.first().map_or_else(
+            || "the shader could not be parsed".to_owned(),
+            |e| e.to_string(),
+        )
+    })?;
 
     let info = Validator::new(ValidationFlags::all(), Capabilities::all())
         .validate(&module)
@@ -91,7 +99,7 @@ mod tests {
 
         let mut any = false;
         for (name, source) in &cases {
-            match to_wgsl(source, ShaderStage::Fragment) {
+            match to_wgsl(source, ShaderStage::Fragment, &[]) {
                 Ok(wgsl) => {
                     any = true;
                     println!("{name}: ok");
@@ -106,13 +114,54 @@ mod tests {
     #[test]
     fn the_version_a_pack_ships_is_refused() {
         let glsl = "#version 130\nvoid main() {}\n";
-        let error = to_wgsl(glsl, ShaderStage::Fragment).unwrap_err();
+        let error = to_wgsl(glsl, ShaderStage::Fragment, &[]).unwrap_err();
         assert!(error.to_lowercase().contains("version"), "{error}");
     }
 
     #[test]
     fn a_compatibility_profile_builtin_is_refused() {
         let glsl = "#version 450 core\nvoid main() { gl_FragData[0] = vec4(1.0); }\n";
-        assert!(to_wgsl(glsl, ShaderStage::Fragment).is_err());
+        assert!(to_wgsl(glsl, ShaderStage::Fragment, &[]).is_err());
+    }
+
+    #[test]
+    fn the_terrain_prelude_forms_are_accepted() {
+        let cases = [
+            (
+                "an integer vertex input",
+                "#version 450\nlayout(location = 0) in ivec4 p;\nvoid main() { gl_Position = vec4(p) / 256.0; }\n",
+            ),
+            (
+                "a storage block indexed by gl_InstanceIndex",
+                "#version 450\nlayout(std430, set = 2, binding = 5) readonly buffer Slots { ivec4 words[]; };\n\
+                 void main() { gl_Position = vec4(words[gl_InstanceIndex * 4 + 2]); }\n",
+            ),
+            (
+                "texelFetch from an integer texture",
+                "#version 450\nlayout(set = 2, binding = 5) uniform itexture2D origins;\n\
+                 void main() { gl_Position = vec4(texelFetch(origins, ivec2(1, 2), 0)); }\n",
+            ),
+        ];
+        for (name, source) in cases {
+            let wgsl =
+                to_wgsl(source, ShaderStage::Vertex, &[]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(wgsl.contains("@vertex"), "{name}\n{wgsl}");
+        }
+    }
+
+    #[test]
+    fn a_define_reaches_the_preprocessor() {
+        let glsl = "#version 450\nlayout(location = 0) out vec4 c;\nvoid main() {\n#ifdef CUT\n    discard;\n#endif\n    c = vec4(CUT_VALUE);\n}\n";
+        let wgsl = to_wgsl(
+            glsl,
+            ShaderStage::Fragment,
+            &[("CUT", "1"), ("CUT_VALUE", "0.5")],
+        )
+        .expect("should compile");
+        assert!(wgsl.contains("discard"), "{wgsl}");
+        assert!(
+            to_wgsl(glsl, ShaderStage::Fragment, &[("CUT_VALUE", "0.5")])
+                .is_ok_and(|w| !w.contains("discard"))
+        );
     }
 }

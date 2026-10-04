@@ -42,6 +42,34 @@ pub(crate) fn install_panic_hook() {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub(crate) fn install_alloc_error_hook() {
+    std::alloc::set_alloc_error_hook(|layout| {
+        struct Line {
+            buf: [u8; 96],
+            len: usize,
+        }
+        impl std::fmt::Write for Line {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                let n = s.len().min(self.buf.len() - self.len);
+                self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+                self.len += n;
+                Ok(())
+            }
+        }
+        let mut line = Line {
+            buf: [0; 96],
+            len: 0,
+        };
+        let _ = std::fmt::Write::write_fmt(
+            &mut line,
+            format_args!("memory allocation of {} bytes failed", layout.size()),
+        );
+        let text = std::str::from_utf8(&line.buf[..line.len]).unwrap_or("memory allocation failed");
+        web_sys::console::error_1(&js_sys::Error::new(text).into());
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
 fn print_js_stack() {
     const NOISE: [&str; 8] = [
         "panic_report",

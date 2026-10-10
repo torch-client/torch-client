@@ -22,7 +22,7 @@
         android:icon="@mipmap/ic_launcher"
         android:enableOnBackInvokedCallback="false"
         android:allowNativeHeapPointerTagging="false"
-        android:extractNativeLibs="false"
+        android:extractNativeLibs="true"
         android:hardwareAccelerated="true">
 
         <activity

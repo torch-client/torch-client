@@ -91,9 +91,6 @@ if [ -n "${MC_ENV:-}" ]; then
   tr ' ' '\n' <<< "$MC_ENV" | grep -v '^$' > "$STAGE/assets/env.txt"
 fi
 
-# The connection service, the APK's one Java class. `--release 11` compiles
-# against the JDK's own view of `java.*`, and android.jar supplies `android.*`;
-# d8 then desugars the lambdas for the minimum API and writes classes.dex.
 echo "==> javac + d8"
 mkdir -p "$STAGE/classes"
 javac -nowarn --release 11 \
@@ -109,9 +106,6 @@ javac -nowarn --release 11 \
 echo "==> aapt2 compile"
 "$BUILD_TOOLS/aapt2" compile --dir android/res -o "$STAGE/res.zip"
 
-# `--debug-mode` marks the APK debuggable, which is what lets
-# `adb shell run-as` reach the app's files. Only the debug-signed sideload
-# build gets it; F-Droid will not publish a debuggable APK.
 link_args=()
 if [ "${UNSIGNED:-0}" != 1 ]; then
   link_args+=(--debug-mode)
@@ -127,21 +121,13 @@ echo "==> aapt2 link"
   --target-sdk-version "$TARGET_SDK" \
   ${link_args[@]+"${link_args[@]}"}
 
-# Stored, not deflated, and both entries need it for different reasons. The
-# manifest says `extractNativeLibs="false"`, so the loader maps the .so
-# straight out of the APK and a compressed one cannot be mapped at all. The
-# archive is read with `AAsset_getBuffer`, which maps an uncompressed entry and
-# copies a compressed one; 12 MB is worth not copying at startup. The cost is
-# an APK that is larger than it has to be, which `strip`/LTO in the `android`
-# profile is the lever on.
 echo "==> zip"
-( cd "$STAGE" && zip -q -0 -X -r base.apk classes.dex "lib/$ABI" assets )
+( cd "$STAGE" && zip -q -0 -X -r base.apk classes.dex assets )
+( cd "$STAGE" && zip -q -9 -X -r base.apk "lib/$ABI" )
 
 echo "==> zipalign"
-# -P 16: 16 KB page alignment for the libraries, matching max-page-size above.
 "$BUILD_TOOLS/zipalign" -P 16 -f 4 "$STAGE/base.apk" "$STAGE/aligned.apk"
 
-# F-Droid signs with its own key, so its build stops here.
 if [ "${UNSIGNED:-0}" = 1 ]; then
   cp "$STAGE/aligned.apk" dist/torch-client-unsigned.apk
   echo
@@ -150,10 +136,6 @@ if [ "${UNSIGNED:-0}" = 1 ]; then
 fi
 
 echo "==> apksigner"
-# The debug key Android Studio generates on first run, with the passwords the
-# tooling has always used for it. It is a sideload key and nothing more: an APK
-# signed with it cannot be published, and every machine's is different, so
-# reinstalling over a build from elsewhere means uninstalling first.
 KEYSTORE="${ANDROID_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
 [ -f "$KEYSTORE" ] || {
   echo "no debug keystore at $KEYSTORE; run any Android Studio build once, or" >&2

@@ -158,7 +158,9 @@ pub fn send_position(
                     }
                     .into_variant(),
                 )
-            } else if physics.last_on_ground() != physics.on_ground() {
+            } else if physics.last_on_ground() != physics.on_ground()
+                || physics_state.last_horizontal_collision != physics.horizontal_collision
+            {
                 Some(ServerboundMovePlayerStatusOnly { flags }.into_variant())
             } else {
                 None
@@ -175,6 +177,7 @@ pub fn send_position(
 
             let on_ground = physics.on_ground();
             physics.set_last_on_ground(on_ground);
+            physics_state.last_horizontal_collision = physics.horizontal_collision;
 
             packet
         };
@@ -289,6 +292,8 @@ pub fn local_player_ai_step(
             &Position,
             Option<&Hunger>,
             Option<&LastSentInput>,
+            Option<&ItemInUse>,
+            Option<&metadata::FallFlying>,
             &mut Physics,
             &mut Sprinting,
             &mut Crouching,
@@ -309,6 +314,8 @@ pub fn local_player_ai_step(
         position,
         hunger,
         last_sent_input,
+        item_in_use,
+        fall_flying,
         mut physics,
         mut sprinting,
         mut crouching,
@@ -354,10 +361,10 @@ pub fn local_player_ai_step(
                 &world,
             );
         let is_in_shallow_water = is_in_water && !is_underwater;
-        let is_fall_flying = false;
+        let is_fall_flying = fall_flying.is_some_and(|f| **f);
         let is_passenger = false;
         let vehicle_can_sprint = false;
-        let using_item = false;
+        let slow_due_to_using_item = item_in_use.is_some_and(|u| !u.can_sprint);
         let has_blindness = false;
 
         let has_forward_impulse = has_forward_impulse(physics_state);
@@ -375,7 +382,7 @@ pub fn local_player_ai_step(
         let can_start_sprinting = !**sprinting
             && has_forward_impulse
             && is_sprinting_possible(abilities.flying)
-            && !using_item
+            && !slow_due_to_using_item
             && (!is_fall_flying || is_underwater)
             && (!is_moving_slowly(&crouching) || is_underwater);
         if trying_to_sprint && can_start_sprinting {
@@ -401,7 +408,7 @@ pub fn local_player_ai_step(
 
         let move_vector = modify_input(
             physics_state.move_vector,
-            false,
+            item_in_use.map(|u| u.speed_multiplier),
             false,
             **crouching,
             &attributes,
@@ -415,9 +422,18 @@ fn is_moving_slowly(crouching: &Crouching) -> bool {
     **crouching
 }
 
+#[derive(Clone, Component, Copy, Debug, Default)]
+pub struct ServerSetLook;
+
+#[derive(Clone, Component, Copy, Debug, PartialEq)]
+pub struct ItemInUse {
+    pub speed_multiplier: f32,
+    pub can_sprint: bool,
+}
+
 fn modify_input(
     mut move_vector: Vec2,
-    is_using_item: bool,
+    item_use_speed: Option<f32>,
     is_passenger: bool,
     moving_slowly: bool,
     attributes: &Attributes,
@@ -427,8 +443,10 @@ fn modify_input(
     }
 
     move_vector *= 0.98;
-    if is_using_item && !is_passenger {
-        move_vector *= 0.2;
+    if let Some(speed) = item_use_speed
+        && !is_passenger
+    {
+        move_vector *= speed;
     }
 
     if moving_slowly {
@@ -492,7 +510,7 @@ pub fn handle_sprint(
     }
 }
 
-fn set_sprinting(
+pub(crate) fn set_sprinting(
     sprinting: bool,
     currently_sprinting: &mut Sprinting,
     attributes: &mut Attributes,
@@ -527,8 +545,23 @@ pub enum KnockbackData {
     Add(Vec3),
 }
 
-pub fn handle_knockback(knockback: On<KnockbackEvent>, mut query: Query<&mut Physics>) {
-    if let Ok(mut physics) = query.get_mut(knockback.entity) {
+static KNOCKBACK_FILTER: std::sync::OnceLock<fn(&KnockbackData) -> bool> =
+    std::sync::OnceLock::new();
+
+pub fn set_knockback_filter(
+    filter: fn(&KnockbackData) -> bool,
+) -> Result<(), fn(&KnockbackData) -> bool> {
+    KNOCKBACK_FILTER.set(filter)
+}
+
+pub fn handle_knockback(
+    knockback: On<KnockbackEvent>,
+    mut query: Query<(&mut Physics, Has<LocalEntity>)>,
+) {
+    if let Ok((mut physics, local)) = query.get_mut(knockback.entity) {
+        if local && KNOCKBACK_FILTER.get().is_some_and(|f| !f(&knockback.data)) {
+            return;
+        }
         match knockback.data {
             KnockbackData::Set(velocity) => {
                 physics.velocity = velocity;
@@ -550,12 +583,22 @@ pub fn update_pose(
         &WorldHolder,
         &Position,
         &metadata::Swimming,
+        Option<&metadata::FallFlying>,
     )>,
     aabb_query: AabbQuery,
     collidable_entity_query: CollidableEntityQuery,
 ) {
-    for (entity, mut pose, physics, physics_state, &game_mode, world_holder, position, swimming) in
-        query.iter_mut()
+    for (
+        entity,
+        mut pose,
+        physics,
+        physics_state,
+        &game_mode,
+        world_holder,
+        position,
+        swimming,
+        fall_flying,
+    ) in query.iter_mut()
     {
         let world = world_holder.shared.read();
         let world = &*world;
@@ -574,6 +617,8 @@ pub fn update_pose(
 
         let desired_pose = if **swimming {
             Pose::Swimming
+        } else if fall_flying.is_some_and(|f| **f) {
+            Pose::FallFlying
         } else if physics_state.trying_to_crouch {
             Pose::Crouching
         } else {

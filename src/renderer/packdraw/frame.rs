@@ -4,7 +4,8 @@ use bevy::prelude::*;
 use bevy::render::Extract;
 use bevy::render::render_phase::{ViewBinnedRenderPhases, ViewSortedRenderPhases};
 use bevy::render::render_resource::{
-    BindGroupLayout, Buffer, RenderPipeline, TextureFormat, TextureView, TextureViewId,
+    BindGroupLayout, BindGroupLayoutDescriptor, Buffer, RenderPipeline, TextureFormat, TextureView,
+    TextureViewId,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::view::{ExtractedView, ViewTarget};
@@ -207,8 +208,15 @@ pub(crate) fn extract_pack(
 
 fn install(device: &RenderDevice, queue: &RenderQueue, installed: Arc<Installed>) -> Install {
     let usage = Usage::of(device, &installed);
+    let caster = installed.entities[EntityKind::ShadowCaster.index()];
     let layouts = (0..installed.programs.len())
         .map(|index| {
+            if !usage.shadow && (installed.shadow == Some(index) || caster == Some(index)) {
+                return make_layout(
+                    device,
+                    &BindGroupLayoutDescriptor::new(format!("{GPU_LABEL} shadow (off)"), &[]),
+                );
+            }
             make_layout(
                 device,
                 &program_layout(&installed, index, usage.shadow_filtered),
@@ -385,6 +393,7 @@ pub(crate) fn prepare_uniforms(
     render: Option<ResMut<PackRender>>,
     takeover: Option<Res<PackTakeover>>,
     mut pack_view: ResMut<PackCullView>,
+    origin: Res<crate::renderer::RenderOrigin>,
 ) {
     pack_view.0 = None;
     let Some(mut render) = render else { return };
@@ -401,6 +410,7 @@ pub(crate) fn prepare_uniforms(
     let installed = &install.installed;
     let values = FrameValues::of(
         view,
+        *origin,
         time.elapsed_secs_wrapped(),
         time.delta_secs(),
         frames.0,

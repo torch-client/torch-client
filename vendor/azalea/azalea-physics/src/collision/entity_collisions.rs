@@ -1,13 +1,13 @@
 use azalea_core::aabb::Aabb;
 use azalea_entity::{
     Physics,
-    metadata::{AbstractBoat, Shulker},
+    metadata::{AbstractBoat, AbstractLiving, AbstractVehicle, ArmorStand, Bat, Shulker},
 };
 use azalea_world::World;
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    query::{Changed, Or, With},
+    query::{Changed, Or, With, Without},
     system::{Commands, Query},
 };
 use tracing::error;
@@ -16,6 +16,25 @@ use super::VoxelShape;
 
 pub type CollidableEntityQuery<'world, 'state> = Query<'world, 'state, (), CollidableEntityFilter>;
 pub type CollidableEntityFilter = Or<(With<AbstractBoat>, With<Shulker>)>;
+
+pub type VehicleCollidableFilter = (
+    Or<(With<AbstractLiving>, With<AbstractVehicle>, With<Shulker>)>,
+    Without<ArmorStand>,
+    Without<Bat>,
+);
+pub type VehicleCollidableQuery<'world, 'state> =
+    Query<'world, 'state, (), VehicleCollidableFilter>;
+
+pub struct VehicleCollisions<'a, 'world, 'state> {
+    pub query: &'a VehicleCollidableQuery<'world, 'state>,
+    pub passengers: &'a [Entity],
+}
+
+impl VehicleCollisions<'_, '_, '_> {
+    pub fn collides_with(&self, entity: Entity) -> bool {
+        self.query.get(entity).is_ok() && !self.passengers.contains(&entity)
+    }
+}
 
 #[derive(Component)]
 pub struct LastBoundingBox(pub Aabb);
@@ -44,17 +63,27 @@ pub fn get_entity_collisions(
     aabb_query: &AabbQuery,
     collidable_entity_query: &CollidableEntityQuery,
 ) -> Vec<VoxelShape> {
+    get_entity_collisions_matching(world, aabb, source_entity, aabb_query, &|entity| {
+        collidable_entity_query.get(entity).is_ok()
+    })
+}
+
+pub fn get_entity_collisions_matching(
+    world: &World,
+    aabb: &Aabb,
+    source_entity: Option<Entity>,
+    aabb_query: &AabbQuery,
+    predicate: &dyn Fn(Entity) -> bool,
+) -> Vec<VoxelShape> {
     if aabb.size() < 1.0E-7 {
         return vec![];
     }
-
-    let collision_predicate = |entity| collidable_entity_query.get(entity).is_ok();
 
     let collidable_entities = get_entities(
         world,
         source_entity,
         &aabb.inflate_all(1.0E-7),
-        &collision_predicate,
+        predicate,
         aabb_query,
     );
 

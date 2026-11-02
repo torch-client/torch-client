@@ -35,11 +35,14 @@ impl Intent {
 }
 
 pub(crate) fn publish(mut intent: ResMut<Intent>, shared: Res<Shared>) {
+    #[cfg(lua_mods)]
+    crate::modules::script::note_input(intent.move_flags, intent.attack_held, intent.use_held);
     let mut s = shared.0.lock().unwrap();
-    s.move_flags = intent.move_flags;
+    s.move_keys = intent.move_flags;
     if crate::modules::hooks::shapes_movement() {
-        s.move_flags = crate::modules::hooks::move_flags(&s, s.move_flags);
+        s.move_keys = crate::modules::hooks::move_flags(&s, s.move_keys);
     }
+    s.move_flags = crate::modules::hooks::script_flags(s.move_keys);
     s.session.attack_held = intent.attack_held;
     s.session.use_held = intent.use_held;
     s.session.attack_clicked |= intent.attack_clicked;
@@ -62,6 +65,7 @@ pub(crate) fn release_on_suspend(
     {
         let mut s = shared.0.lock().unwrap();
         s.move_flags = 0;
+        s.move_keys = 0;
         s.session.attack_held = false;
         s.session.use_held = false;
     }

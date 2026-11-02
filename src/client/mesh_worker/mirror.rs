@@ -237,6 +237,27 @@ impl Mirror {
                 s.session.pending_chunks.clear();
                 s.session.pending_edits.clear();
             }
+            #[cfg(feature = "shader_support")]
+            ToWorker::PackIds(bytes) => {
+                let ids = crate::renderer::packvertex::BlockIds::decode(&bytes).map(Arc::new);
+                crate::renderer::packvertex::set_current(ids);
+            }
+            #[cfg(resource_packs)]
+            ToWorker::Packs(layers) => {
+                let started = crate::platform::time::Instant::now();
+                crate::platform::assets::archive::set_selected(layers);
+                crate::bake_block_lookups();
+                log_info!(
+                    "mesh",
+                    "worker baked the block atlas again for the packs in {:.0} ms",
+                    started.elapsed().as_secs_f32() * 1000.0
+                );
+                if let Some(world) = self.level.as_ref().map(|l| l.world.clone()) {
+                    for &(cx, cz) in &self.meshed {
+                        self.queue.push(world.clone(), cx, cz, JobScope::Column);
+                    }
+                }
+            }
         }
     }
 

@@ -223,6 +223,7 @@ impl<'a> Ctx<'a> {
             .map(|s| {
                 let mut out = crate::play::inventory_bridge::slot_stack(s, self.registries, false);
                 out.cooldown = 0;
+                out.raw = None;
                 out
             })
             .filter(|s| !s.is_empty())

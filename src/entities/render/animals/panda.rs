@@ -4,27 +4,23 @@ use bevy::prelude::{Quat, Transform};
 use crate::entities::TexturePath;
 use crate::entities::models::animals::panda;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 use crate::entities::{RenderSpec, RootPose, default_root};
 use crate::util::mth::lerp;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Panda,
-        RenderSpec::new("panda", panda::layer, texture, panda::setup_anim)
-            .with_root(root)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Panda,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Panda],
+        RenderSpec::new("panda", panda::layer, texture, panda::setup_anim).with_root(root),
         RenderSpec::new(
             "panda_baby",
             panda::baby_layer,
             texture,
             panda::baby_setup_anim,
         )
-        .with_root(root)
-        .with_visible(|st| st.extras.is_baby),
+        .with_root(root),
     );
 }
 

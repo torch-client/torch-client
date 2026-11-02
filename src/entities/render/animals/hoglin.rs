@@ -4,34 +4,29 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::hoglin;
 use crate::entities::registry::Registry;
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 use crate::entities::state::EntityState;
 
 const KINDS: [EntityKind; 2] = [EntityKind::Hoglin, EntityKind::Zoglin];
 
 pub fn register(registry: &mut Registry) {
-    registry.add_many(
+    add_adult_and_baby(
+        registry,
         &KINDS,
-        RenderSpec::new("hoglin", hoglin::layer, texture, hoglin::setup_anim)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add_many(
-        &KINDS,
+        RenderSpec::new("hoglin", hoglin::layer, texture, hoglin::setup_anim),
         RenderSpec::new(
             "hoglin_baby",
             hoglin::baby_layer,
             texture,
             hoglin::baby_setup_anim,
-        )
-        .with_visible(|st| st.extras.is_baby),
+        ),
     );
 }
 
 fn texture(st: &EntityState) -> TexturePath {
-    match (st.kind == EntityKind::Zoglin, st.extras.is_baby) {
-        (true, true) => "entity/hoglin/zoglin_baby",
-        (true, false) => "entity/hoglin/zoglin",
-        (false, true) => "entity/hoglin/hoglin_baby",
-        (false, false) => "entity/hoglin/hoglin",
+    if st.kind == EntityKind::Zoglin {
+        aged_texture(st, "entity/hoglin/zoglin", "entity/hoglin/zoglin_baby")
+    } else {
+        aged_texture(st, "entity/hoglin/hoglin", "entity/hoglin/hoglin_baby")
     }
-    .into()
 }

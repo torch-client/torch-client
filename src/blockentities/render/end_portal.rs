@@ -13,6 +13,7 @@ use bevy::shader::ShaderRef;
 use crate::blockentities::feed::BlockEntityInfo;
 use crate::entities::quads::quad_indices;
 use crate::items::model::face_positions;
+use crate::renderer::RenderOrigin;
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct EndPortalMaterial {
@@ -113,6 +114,9 @@ impl Cube {
     }
 }
 
+#[derive(Component)]
+struct EndPortalNode;
+
 #[derive(Default)]
 struct Batch {
     blocks: Vec<[i32; 3]>,
@@ -148,7 +152,10 @@ fn sync_portals(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<EndPortalMaterial>>,
+    origin: Res<RenderOrigin>,
+    mut nodes: Query<&mut Transform, With<EndPortalNode>>,
 ) {
+    let origin = *origin;
     let snapshot =
         (view.block_entities_version != portals.version).then(|| view.block_entities.clone());
     portals.version = view.block_entities_version;
@@ -161,7 +168,7 @@ fn sync_portals(
         if let Some(snapshot) = &snapshot
             && batch.collect(cube, snapshot)
         {
-            batch.rebuild(cube, &mut commands, &mut meshes, || {
+            batch.rebuild(cube, &mut commands, &mut meshes, origin, || {
                 let (sky, portal) = textures
                     .get_or_insert_with(|| {
                         Some((
@@ -181,6 +188,15 @@ fn sync_portals(
             && let Some(material) = materials.get_mut(handle)
         {
             material.params.x = game_time;
+        }
+        if let Some(node) = batch.node
+            && let Some(&first) = batch.blocks.first()
+            && let Ok(mut transform) = nodes.get_mut(node)
+        {
+            let want = origin.block_to_render(first);
+            if transform.translation != want {
+                transform.translation = want;
+            }
         }
     }
 }
@@ -207,9 +223,10 @@ impl Batch {
         cube: &Cube,
         commands: &mut Commands,
         meshes: &mut Assets<Mesh>,
+        origin: RenderOrigin,
         material: impl FnOnce() -> Option<Handle<EndPortalMaterial>>,
     ) {
-        let Some(&origin) = self.blocks.first() else {
+        let Some(&first) = self.blocks.first() else {
             if let Some(node) = self.node.take() {
                 commands.entity(node).despawn();
             }
@@ -222,7 +239,7 @@ impl Batch {
             return;
         };
         let mesh = Mesh3d(meshes.add(cube.mesh(&self.blocks)));
-        let transform = Transform::from_xyz(origin[0] as f32, origin[1] as f32, origin[2] as f32);
+        let transform = Transform::from_translation(origin.block_to_render(first));
         match self.node {
             Some(node) => {
                 commands.entity(node).try_insert((mesh, transform));
@@ -234,6 +251,7 @@ impl Batch {
                             mesh,
                             MeshMaterial3d(material),
                             transform,
+                            EndPortalNode,
                             Visibility::default(),
                             Name::new(cube.name),
                         ))

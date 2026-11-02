@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use bevy_ecs::prelude::*;
 
 use crate::pathfinder::{
-    astar::PathfinderTimeout,
+    astar::{PathfinderTimeout, YieldFn},
     goals::Goal,
     moves::{self, SuccessorsFn},
 };
@@ -14,6 +14,7 @@ pub struct GotoEvent {
     pub entity: Entity,
     pub goal: Arc<dyn Goal>,
     pub opts: PathfinderOpts,
+    pub(crate) continuation: bool,
 }
 
 impl GotoEvent {
@@ -22,6 +23,7 @@ impl GotoEvent {
             entity,
             goal: Arc::new(goal),
             opts,
+            continuation: false,
         }
     }
 }
@@ -34,6 +36,7 @@ pub struct PathfinderOpts {
     pub(crate) retry_on_no_path: bool,
     pub(crate) min_timeout: PathfinderTimeout,
     pub(crate) max_timeout: PathfinderTimeout,
+    pub(crate) yield_fn: Option<YieldFn>,
 }
 
 impl PathfinderOpts {
@@ -44,7 +47,12 @@ impl PathfinderOpts {
             retry_on_no_path: true,
             min_timeout: PathfinderTimeout::Time(Duration::from_secs(1)),
             max_timeout: PathfinderTimeout::Time(Duration::from_secs(5)),
+            yield_fn: None,
         }
+    }
+    pub fn yield_fn(mut self, yield_fn: YieldFn) -> Self {
+        self.yield_fn = Some(yield_fn);
+        self
     }
     pub fn successors_fn(mut self, successors_fn: SuccessorsFn) -> Self {
         self.successors_fn = successors_fn;

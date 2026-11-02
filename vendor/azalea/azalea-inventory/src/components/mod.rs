@@ -1,4 +1,5 @@
 mod profile;
+mod typed;
 
 use core::f64;
 use std::{
@@ -9,7 +10,7 @@ use std::{
     mem::ManuallyDrop,
 };
 
-use azalea_buf::{AzBuf, BufReadError};
+use azalea_buf::{AzBuf, AzBufVar, BufReadError};
 use azalea_chat::FormattedText;
 use azalea_core::{
     attribute_modifier_operation::AttributeModifierOperation,
@@ -30,6 +31,7 @@ use azalea_registry::{
     identifier::Identifier,
 };
 pub use profile::*;
+pub use typed::*;
 use serde::{Serialize, Serializer, ser::SerializeMap};
 use simdnbt::owned::{Nbt, NbtCompound};
 use tracing::trace;
@@ -87,6 +89,15 @@ macro_rules! define_data_components {
             ) -> Result<(), S::Error> {
                 match kind {
                     $( DataComponentKind::$x => { unsafe { serializer.serialize_entry(&kind, &*self.$x) } }, )*
+                }
+            }
+            pub unsafe fn serialize_as<S: Serializer>(
+                &self,
+                serializer: S,
+                kind: DataComponentKind,
+            ) -> Result<S::Ok, S::Error> {
+                match kind {
+                    $( DataComponentKind::$x => { unsafe { (&*self.$x).serialize(serializer) } }, )*
                 }
             }
             pub unsafe fn drop_as(&mut self, kind: DataComponentKind) {
@@ -363,6 +374,8 @@ pub struct BlockPredicate {
     pub properties: Option<Vec<BlockStatePropertyMatcher>>,
     #[serde(skip_serializing_if = "is_default")]
     pub nbt: Option<NbtCompound>,
+    #[serde(skip)]
+    pub components: DataComponentMatchers,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -397,6 +410,7 @@ pub enum EquipmentSlotGroup {
     Head,
     Armor,
     Body,
+    Saddle,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -463,7 +477,10 @@ pub struct EnchantmentGlintOverride {
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
-pub struct IntangibleProjectile;
+#[serde(transparent)]
+pub struct IntangibleProjectile {
+    pub nbt: NbtCompound,
+}
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct MobEffectDetails {
@@ -621,17 +638,60 @@ pub enum MapPostProcessing {
     Scale,
 }
 
-#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+fn read_templates(buf: &mut Cursor<&[u8]>, optional: bool) -> Result<Vec<ItemStack>, BufReadError> {
+    let len = u32::azalea_read_var(buf)? as usize;
+    let mut items = Vec::with_capacity(len.min(256));
+    for _ in 0..len {
+        items.push(if optional && !bool::azalea_read(buf)? {
+            ItemStack::Empty
+        } else {
+            ItemStack::read_template(buf)?
+        });
+    }
+    Ok(items)
+}
+
+fn write_templates(items: &[ItemStack], buf: &mut impl io::Write, optional: bool) -> io::Result<()> {
+    (items.len() as u32).azalea_write_var(buf)?;
+    for item in items {
+        if optional {
+            let present = item.is_present();
+            present.azalea_write(buf)?;
+            if !present {
+                continue;
+            }
+        }
+        item.write_template(buf)?;
+    }
+    Ok(())
+}
+
+macro_rules! template_list {
+    ($ty:ident, $optional:literal) => {
+        impl AzBuf for $ty {
+            fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+                Ok(Self { items: read_templates(buf, $optional)? })
+            }
+            fn azalea_write(&self, buf: &mut impl io::Write) -> io::Result<()> {
+                write_templates(&self.items, buf, $optional)
+            }
+        }
+    };
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ChargedProjectiles {
     pub items: Vec<ItemStack>,
 }
+template_list!(ChargedProjectiles, false);
 
-#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct BundleContents {
     pub items: Vec<ItemStack>,
 }
+template_list!(BundleContents, false);
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct PotionContents {
@@ -697,8 +757,15 @@ pub struct WrittenBookContent {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct Trim {
-    pub material: TrimMaterial,
-    pub pattern: TrimPattern,
+    pub material: Holder<TrimMaterial, DirectTrimMaterial>,
+    pub pattern: Holder<TrimPattern, DirectTrimPattern>,
+}
+
+#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+pub struct DirectTrimPattern {
+    pub asset_id: Identifier,
+    pub description: FormattedText,
+    pub decal: bool,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -724,7 +791,7 @@ pub struct BucketEntityData {
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct BlockEntityData {
     #[serde(rename = "id")]
-    pub kind: EntityKind,
+    pub kind: azalea_registry::builtin::BlockEntityKind,
     #[serde(flatten)]
     pub data: NbtCompound,
 }
@@ -753,7 +820,7 @@ pub struct OminousBottleAmplifier {
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct Recipes {
-    pub recipes: Vec<Identifier>,
+    pub recipes: simdnbt::owned::NbtTag,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -868,11 +935,12 @@ pub struct PotDecorations {
     pub items: Vec<ItemKind>,
 }
 
-#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct Container {
     pub items: Vec<ItemStack>,
 }
+template_list!(Container, true);
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -882,6 +950,8 @@ pub struct BlockState {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct BeehiveOccupant {
+    #[serde(rename = "id")]
+    pub kind: EntityKind,
     #[serde(skip_serializing_if = "is_default")]
     pub entity_data: NbtCompound,
     #[var]
@@ -897,8 +967,9 @@ pub struct Bees {
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct Lock {
-    pub key: String,
+    pub predicate: NbtCompound,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -965,19 +1036,30 @@ pub enum ItemUseAnimation {
     None,
     Eat,
     Drink,
+    #[serde(rename = "block")]
     BlockKind,
     Bow,
-    Spear,
+    Trident,
     Crossbow,
     Spyglass,
     TootHorn,
     Brush,
+    Bundle,
+    Spear,
 }
 
-#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct UseRemainder {
     pub convert_into: ItemStack,
+}
+impl AzBuf for UseRemainder {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        Ok(Self { convert_into: ItemStack::read_template(buf)? })
+    }
+    fn azalea_write(&self, buf: &mut impl io::Write) -> io::Result<()> {
+        self.convert_into.write_template(buf)
+    }
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -1023,11 +1105,11 @@ pub struct DamageResistant {
     pub types: HolderSet<DamageKind, Identifier>,
 }
 
-#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Equippable {
     pub slot: EquipmentSlot,
     #[serde(skip_serializing_if = "is_default_equip_sound")]
-    pub equip_sound: SoundEvent,
+    pub equip_sound: azalea_registry::Holder<SoundEvent, CustomSound>,
     #[serde(skip_serializing_if = "is_default")]
     pub asset_id: Option<Identifier>,
     #[serde(skip_serializing_if = "is_default")]
@@ -1045,20 +1127,60 @@ pub struct Equippable {
     #[serde(skip_serializing_if = "is_default")]
     pub can_be_sheared: bool,
     #[serde(skip_serializing_if = "is_default_shearing_sound")]
-    pub shearing_sound: SoundEvent,
+    pub shearing_sound: azalea_registry::Holder<SoundEvent, CustomSound>,
 }
-fn is_default_equip_sound(sound: &SoundEvent) -> bool {
-    matches!(sound, SoundEvent::ItemArmorEquipGeneric)
+fn is_default_equip_sound(sound: &azalea_registry::Holder<SoundEvent, CustomSound>) -> bool {
+    matches!(
+        sound,
+        azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipGeneric)
+    )
 }
-fn is_default_shearing_sound(sound: &SoundEvent) -> bool {
-    matches!(sound, SoundEvent::ItemShearsSnip)
+fn is_default_shearing_sound(sound: &azalea_registry::Holder<SoundEvent, CustomSound>) -> bool {
+    matches!(
+        sound,
+        azalea_registry::Holder::Reference(SoundEvent::ItemShearsSnip)
+    )
+}
+
+impl AzBuf for Equippable {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        let slot_id = u32::azalea_read_var(buf)?;
+        let slot = EquipmentSlot::from_id(slot_id)
+            .ok_or(BufReadError::UnexpectedEnumVariant { id: slot_id as i32 })?;
+        Ok(Self {
+            slot,
+            equip_sound: AzBuf::azalea_read(buf)?,
+            asset_id: AzBuf::azalea_read(buf)?,
+            camera_overlay: AzBuf::azalea_read(buf)?,
+            allowed_entities: AzBuf::azalea_read(buf)?,
+            dispensable: AzBuf::azalea_read(buf)?,
+            swappable: AzBuf::azalea_read(buf)?,
+            damage_on_hurt: AzBuf::azalea_read(buf)?,
+            equip_on_interact: AzBuf::azalea_read(buf)?,
+            can_be_sheared: AzBuf::azalea_read(buf)?,
+            shearing_sound: AzBuf::azalea_read(buf)?,
+        })
+    }
+    fn azalea_write(&self, buf: &mut impl io::Write) -> io::Result<()> {
+        self.slot.id().azalea_write_var(buf)?;
+        self.equip_sound.azalea_write(buf)?;
+        self.asset_id.azalea_write(buf)?;
+        self.camera_overlay.azalea_write(buf)?;
+        self.allowed_entities.azalea_write(buf)?;
+        self.dispensable.azalea_write(buf)?;
+        self.swappable.azalea_write(buf)?;
+        self.damage_on_hurt.azalea_write(buf)?;
+        self.equip_on_interact.azalea_write(buf)?;
+        self.can_be_sheared.azalea_write(buf)?;
+        self.shearing_sound.azalea_write(buf)
+    }
 }
 
 impl Equippable {
     pub const fn new() -> Self {
         Self {
             slot: EquipmentSlot::Body,
-            equip_sound: SoundEvent::ItemArmorEquipGeneric,
+            equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipGeneric),
             asset_id: None,
             camera_overlay: None,
             allowed_entities: None,
@@ -1067,7 +1189,7 @@ impl Equippable {
             damage_on_hurt: true,
             equip_on_interact: false,
             can_be_sheared: false,
-            shearing_sound: SoundEvent::ItemShearsSnip,
+            shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemShearsSnip),
         }
     }
 }
@@ -1104,6 +1226,33 @@ impl EquipmentSlot {
             _ => return None,
         };
         Some(value)
+    }
+    #[must_use]
+    pub fn from_id(id: u32) -> Option<Self> {
+        let value = match id {
+            0 => Self::Mainhand,
+            1 => Self::Feet,
+            2 => Self::Legs,
+            3 => Self::Chest,
+            4 => Self::Head,
+            5 => Self::Offhand,
+            6 => Self::Body,
+            7 => Self::Saddle,
+            _ => return None,
+        };
+        Some(value)
+    }
+    pub fn id(self) -> u32 {
+        match self {
+            Self::Mainhand => 0,
+            Self::Feet => 1,
+            Self::Legs => 2,
+            Self::Chest => 3,
+            Self::Head => 4,
+            Self::Offhand => 5,
+            Self::Body => 6,
+            Self::Saddle => 7,
+        }
     }
     pub fn values() -> [Self; 8] {
         [

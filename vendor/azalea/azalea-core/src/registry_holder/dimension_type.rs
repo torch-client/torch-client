@@ -70,13 +70,50 @@ pub struct DimensionKindElement {
 }
 
 #[cfg(not(feature = "strict_registry"))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct DimensionKindElement {
     pub height: u32,
     pub min_y: i32,
     pub ultrawarm: Option<bool>,
     #[simdnbt(flatten)]
     pub _extra: HashMap<String, NbtTag>,
+}
+
+#[cfg(not(feature = "strict_registry"))]
+impl Deserialize for DimensionKindElement {
+    fn from_compound(
+        nbt: simdnbt::borrow::NbtCompound,
+    ) -> Result<Self, simdnbt::DeserializeError> {
+        fn whole(tag: simdnbt::borrow::NbtTag) -> Option<i64> {
+            tag.byte()
+                .map(i64::from)
+                .or_else(|| tag.short().map(i64::from))
+                .or_else(|| tag.int().map(i64::from))
+                .or_else(|| tag.long())
+        }
+        let field = |name: &str| -> Result<i64, simdnbt::DeserializeError> {
+            let tag = nbt.get(name).ok_or(simdnbt::DeserializeError::MissingField)?;
+            whole(tag).ok_or_else(|| {
+                simdnbt::DeserializeError::MismatchedFieldType(format!(
+                    "DimensionKindElement::{name}"
+                ))
+            })
+        };
+        let height = field("height")? as u32;
+        let min_y = field("min_y")? as i32;
+        let ultrawarm = nbt.byte("ultrawarm").map(|b| b != 0);
+        let _extra = nbt
+            .iter()
+            .filter(|(k, _)| !matches!(&*k.to_str(), "height" | "min_y" | "ultrawarm"))
+            .map(|(k, v)| (k.to_str().into_owned(), v.to_owned()))
+            .collect();
+        Ok(Self {
+            height,
+            min_y,
+            ultrawarm,
+            _extra,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -114,8 +114,6 @@ pub struct ChatState {
     next_id: u64,
     just_opened: bool,
     warning: Option<(String, u32)>,
-    enforces_secure_chat: bool,
-    signing: bool,
     tag_tooltip: Option<(u64, Vec<Vec<Span>>)>,
     link_prompt: Option<String>,
     #[cfg(feature = "mobile_ui")]
@@ -148,8 +146,6 @@ impl Default for ChatState {
             next_id: 0,
             just_opened: false,
             warning: None,
-            enforces_secure_chat: false,
-            signing: false,
             tag_tooltip: None,
             link_prompt: None,
             #[cfg(feature = "mobile_ui")]
@@ -196,6 +192,10 @@ impl ChatState {
         self.field.suggest = suggestions::State::default();
     }
 
+    pub fn has_draft(&self) -> bool {
+        !self.field.input.text.is_empty()
+    }
+
     pub fn hide_suggestions(&mut self) -> bool {
         self.field.hide()
     }
@@ -230,7 +230,7 @@ impl ChatState {
     fn add_recent(&mut self, msg: &str) {
         crate::gui::command_history::push_capped(&mut self.history, msg, MAX_HISTORY);
         self.history_pos = self.history.len();
-        if msg.starts_with('/') {
+        if msg.starts_with('/') || crate::modules::commands::is_client_line(msg) {
             crate::gui::command_history::record(msg);
         }
     }
@@ -603,15 +603,11 @@ pub fn draw(
     visible: bool,
     incoming: Vec<ChatEntry>,
     error: Option<String>,
-    enforces_secure_chat: bool,
-    signing: bool,
     advanced_tooltips: bool,
     shared: &Arc<SharedMutex>,
 ) {
     let tick = p.frame;
     chat.field.input.focused = focused;
-    chat.enforces_secure_chat |= enforces_secure_chat;
-    chat.signing = signing;
 
     let width = chat_width(ctx.vw);
     let fonts = crate::renderer::reload::generation();
@@ -1126,19 +1122,14 @@ fn draw_input(p: &mut Painter, chat: &mut ChatState, ctx: &ScreenCtx) {
     p.fill(2.0, chat_base(ctx) - 14.0, ctx.vw - 4.0, 12.0, INPUT_BG);
     draw_input_line(p, chat, ctx, tick);
 
-    let warning = if chat.enforces_secure_chat && !chat.signing {
-        Some(
-            "This server enforces signed chat and signing is off, so it will reject \
-             everything you type here. Options -> Game -> Chat turns it on."
-                .to_string(),
-        )
-    } else {
-        chat.warning
-            .as_ref()
-            .filter(|(_, at)| tick.saturating_sub(*at) < WARNING_TICKS)
-            .map(|(t, _)| t.clone())
+    let Some(text) = chat
+        .warning
+        .as_ref()
+        .filter(|(_, at)| tick.saturating_sub(*at) < WARNING_TICKS)
+        .map(|(t, _)| t.clone())
+    else {
+        return;
     };
-    let Some(text) = warning else { return };
 
     let font = &p.atlas.font;
     let max = (ctx.vw - 8.0).max(64.0);

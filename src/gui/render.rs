@@ -139,6 +139,8 @@ impl Plugin for GuiPlugin {
             bevy::render::extract_resource::ExtractResourcePlugin::<GuiTextures>::default(),
         );
         crate::gui::draw::build(app);
+        #[cfg(lua_mods)]
+        crate::gui::mod_images::build(app);
         app.insert_resource(GuiShared(self.shared.clone()))
             .insert_resource(PendingGuiAtlas(self.atlas.clone()))
             .insert_resource(StartScreen(self.startup.screen))
@@ -163,11 +165,17 @@ impl Plugin for GuiPlugin {
                 Update,
                 (collect_input, draw_gui, upload_banner_icons).chain(),
             );
-        #[cfg(resource_packs)]
+        #[cfg(any(resource_packs, feature = "shader_support"))]
+        app.add_systems(Update, crate::gui::packdrop::collect_drops.before(draw_gui));
+        #[cfg(lua_mods)]
         app.add_systems(
             Update,
-            crate::gui::resourcepacks::collect_drops.before(draw_gui),
+            crate::gui::clickgui::mods::collect_drops.before(draw_gui),
         );
+        #[cfg(lua_mods)]
+        app.add_systems(Update, crate::gui::lua_list::collect_drops.before(draw_gui));
+        #[cfg(all(eagler_skins, not(target_arch = "wasm32")))]
+        app.add_systems(Update, crate::gui::skinpick::collect_drops.before(draw_gui));
 
         if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
             render_app
@@ -182,6 +190,13 @@ impl Plugin for GuiPlugin {
                         .in_set(bevy::render::RenderSystems::PrepareResources),
                 );
         }
+
+        app.add_systems(
+            Update,
+            crate::gui::puppet::update
+                .after(crate::renderer::FrameViewSystems)
+                .before(draw_gui),
+        );
 
         #[cfg(feature = "skins")]
         app.init_resource::<crate::gui::player_faces::PlayerFaces>()
@@ -730,7 +745,7 @@ pub(crate) fn collect_input(
         input.shift |= shift;
     }
 
-    if state.screen != Screen::Chat && crate::platform::keyboard::take_enter() {
+    if !state.screen.chat_open() && crate::platform::keyboard::take_enter() {
         input.enter = true;
         input.select = true;
         input.edits.push(EditKey::Enter);
@@ -751,14 +766,14 @@ pub(crate) fn collect_input(
     crate::platform::keyboard::resolve_taps();
 
     #[cfg(target_os = "android")]
-    if input.enter && state.screen.is_menu() && crate::platform::keyboard::has_focus() {
+    if input.enter && state.screen_is_menu() && crate::platform::keyboard::has_focus() {
         crate::log_info!("input", "enter key: dismissing the keyboard");
         input.enter = false;
         input.select = false;
         input.defocus = true;
     }
 
-    if elsewhere || state.screen.is_menu() {
+    if elsewhere || state.screen_is_menu() {
         input.escape |= crate::platform::keyboard::take_escape();
     }
 
@@ -805,8 +820,7 @@ pub(crate) fn draw_gui(
     mut scratch: Local<crate::gui::painter::PainterBuffers>,
     #[cfg(feature = "skins")] mut faces: ResMut<crate::gui::player_faces::PlayerFaces>,
     view: Option<Res<crate::renderer::FrameView>>,
-    third_person: Option<Res<crate::renderer::input::ThirdPersonState>>,
-    freecam: Option<Res<crate::renderer::input::FreecamState>>,
+    camera_view: Option<Res<crate::renderer::input::CameraView>>,
 ) {
     #[cfg(feature = "budget")]
     let _t = crate::diag::budget::timed(crate::diag::budget::Slot::Gui);
@@ -823,8 +837,7 @@ pub(crate) fn draw_gui(
 
     state.screen_effects = match view {
         Some(view) => {
-            let detached =
-                third_person.is_some_and(|t| t.active) || freecam.is_some_and(|f| f.active);
+            let detached = camera_view.is_some_and(|c| c.detached());
             crate::gui::screen_effects::ScreenEffects::read(
                 &view,
                 detached,
@@ -852,10 +865,34 @@ pub(crate) fn draw_gui(
         &bufs.uvs,
         &bufs.colors,
         &bufs.indices,
+        &bufs.textures,
         vw,
         vh,
     );
+    frames.set_glint(glint_uniform(
+        &assets.atlas,
+        time.elapsed_secs_f64(),
+        input.device_scale,
+    ));
     *scratch = bufs;
+}
+
+fn glint_uniform(
+    atlas: &crate::gui::atlas::GuiAtlas,
+    secs: f64,
+    device_scale: f32,
+) -> crate::gui::pool::GlintUniform {
+    use crate::items::glint;
+
+    let Some(region) = atlas.glint_uv() else {
+        return Default::default();
+    };
+    let [u, v] = glint::offset(secs);
+    let per_pixel = glint::ITEM_SPAN / (crate::gui::painter::ITEM_SIZE * device_scale.max(1e-3));
+    crate::gui::pool::GlintUniform {
+        region,
+        params: [u, v, per_pixel, glint::STRENGTH],
+    }
 }
 
 #[allow(

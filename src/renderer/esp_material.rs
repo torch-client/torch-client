@@ -19,14 +19,30 @@ pub struct EspParams {
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
+#[bind_group_data(EspKey)]
 pub struct EspMaterial {
     #[uniform(0)]
     pub params: EspParams,
+    pub through: bool,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct EspKey {
+    through: bool,
+}
+
+impl From<&EspMaterial> for EspKey {
+    fn from(material: &EspMaterial) -> Self {
+        EspKey {
+            through: material.through,
+        }
+    }
 }
 
 impl Default for EspMaterial {
     fn default() -> Self {
         EspMaterial {
+            through: true,
             params: EspParams {
                 line: Vec4::new(1.2, 0.0, 0.0, 0.0),
             },
@@ -59,7 +75,7 @@ impl Material for EspMaterial {
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        _key: bevy::pbr::MaterialPipelineKey<Self>,
+        key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         let vertex_layout = layout.0.get_layout(&[
             Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
@@ -68,7 +84,9 @@ impl Material for EspMaterial {
         ])?;
         descriptor.vertex.buffers = vec![vertex_layout];
         descriptor.primitive.cull_mode = None;
-        if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
+        if !key.bind_group_data.through {
+            descriptor.vertex.shader_defs.push("DEPTH_TESTED".into());
+        } else if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
             depth_stencil.depth_compare =
                 bevy::render::render_resource::CompareFunction::GreaterEqual;
         }

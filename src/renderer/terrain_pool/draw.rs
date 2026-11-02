@@ -154,7 +154,42 @@ impl TerrainItem for Shadow {
 #[derive(Resource)]
 pub struct TerrainParamsBuffer(pub Buffer);
 
-const PARAMS_SIZE: u64 = 48;
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ParamsUniform {
+    misc: [f32; 4],
+    fog_color: [f32; 4],
+    fog_ramps: [f32; 4],
+    origin: [i32; 4],
+    wave_phase: [f32; 4],
+    wind_plant_phase: [f32; 4],
+    wind_leaf_phase: [f32; 4],
+}
+
+const PARAMS_SIZE: u64 = size_of::<ParamsUniform>() as u64;
+
+const _: () = assert!(std::mem::offset_of!(ParamsUniform, origin) == 48);
+
+const WIND_FREQ_PLANT: f64 = 0.42;
+const WIND_FREQ_LEAF: f64 = 0.05;
+
+fn noise_phases(origin: IVec3) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    let (x, z) = (f64::from(origin.x), f64::from(origin.z));
+    let turn = |kx: f64, kz: f64| (kx * x + kz * z).rem_euclid(std::f64::consts::TAU) as f32;
+    let wind = |f: f64| {
+        [
+            turn(f, f),
+            turn(1.7 * f, -1.1 * f),
+            turn(-0.4 * f, 0.9 * f),
+            0.0,
+        ]
+    };
+    (
+        [turn(0.55, 0.0), turn(0.0, 0.42), turn(0.29, 0.29), 0.0],
+        wind(WIND_FREQ_PLANT),
+        wind(WIND_FREQ_LEAF),
+    )
+}
 
 #[derive(Resource, Default)]
 pub struct TerrainBindGroup {
@@ -803,24 +838,22 @@ pub fn prepare_params(
     queue: Res<RenderQueue>,
     buffer: Res<TerrainParamsBuffer>,
     params: Option<Res<TerrainParams>>,
+    origin: Res<crate::renderer::RenderOrigin>,
     fog: Query<&DistanceFog, With<TerrainView>>,
 ) {
     let params = params.as_deref().copied().unwrap_or_default();
+    let origin = origin.block();
     let (color, ramps) = fog.iter().next().map(fog_values).unwrap_or_default();
-    let values: [f32; 12] = [
-        params.cutoff,
-        params.mip_bias,
-        params.shadow_mip,
-        0.0,
-        color[0],
-        color[1],
-        color[2],
-        color[3],
-        ramps[0],
-        ramps[1],
-        ramps[2],
-        ramps[3],
-    ];
+    let (wave_phase, wind_plant_phase, wind_leaf_phase) = noise_phases(origin);
+    let values = ParamsUniform {
+        misc: [params.cutoff, params.mip_bias, params.shadow_mip, 0.0],
+        fog_color: color,
+        fog_ramps: ramps,
+        origin: origin.extend(0).to_array(),
+        wave_phase,
+        wind_plant_phase,
+        wind_leaf_phase,
+    };
     queue.write_buffer(&buffer.0, 0, bytemuck::bytes_of(&values));
 }
 
@@ -962,4 +995,85 @@ pub fn finish(app: &mut App) {
         mapped_at_creation: false,
     });
     render_app.insert_resource(TerrainParamsBuffer(buffer));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_params_declarations_match_the_uniform() {
+        let declaration = |source: &str| {
+            let start = source.find("struct TerrainParams {").expect("declared");
+            let end = start + source[start..].find('}').expect("closed");
+            source[start..=end].split_whitespace().collect::<String>()
+        };
+        let main = declaration(include_str!("../terrain.wgsl"));
+        assert_eq!(declaration(include_str!("../terrain_prepass.wgsl")), main);
+        assert_eq!(
+            main.matches("vec4<").count() * 16,
+            size_of::<ParamsUniform>()
+        );
+        assert!(main.contains("origin:vec4<i32>"));
+    }
+
+    #[test]
+    fn noise_phases_restore_the_absolute_argument() {
+        let origin = IVec3::new(29_999_984, 0, -1_234_560);
+        let (wave, plant, _) = noise_phases(origin);
+        let (rx, rz) = (3.25f64, -7.5f64);
+        let (ax, az) = (f64::from(origin.x) + rx, f64::from(origin.z) + rz);
+        let same = |relative: f64, phase: f32, absolute: f64| {
+            let d = (relative + f64::from(phase) - absolute).rem_euclid(std::f64::consts::TAU);
+            d.min(std::f64::consts::TAU - d) < 1e-5
+        };
+        assert!(same(0.55 * rx, wave[0], 0.55 * ax));
+        assert!(same(0.29 * (rx + rz), wave[2], 0.29 * (ax + az)));
+        assert!(same(
+            0.42 * (1.7 * rx - 1.1 * rz),
+            plant[1],
+            0.42 * (1.7 * ax - 1.1 * az)
+        ));
+    }
+
+    #[test]
+    fn the_shaders_use_the_coefficients_the_phases_assume() {
+        let main = include_str!("../terrain.wgsl");
+        let shadow = include_str!("../terrain_prepass.wgsl");
+        for term in [
+            "sin(xz.x * 0.55 + ph.x",
+            "sin(xz.y * 0.42 + ph.y",
+            "sin((xz.x + xz.y) * 0.29 + ph.z",
+            "cos(xz.x * 0.55 + ph.x",
+            "cos(xz.y * 0.42 + ph.y",
+            "cos((xz.x + xz.y) * 0.29 + ph.z",
+        ] {
+            assert!(main.contains(term), "terrain.wgsl lost `{term}`");
+        }
+        let freqs = [
+            format!("WIND_FREQ_PLANT: f32 = {WIND_FREQ_PLANT};"),
+            format!("WIND_FREQ_LEAF: f32 = {WIND_FREQ_LEAF};"),
+        ];
+        for source in [main, shadow] {
+            for term in [
+                "sin(p.x + p.z + phase.x",
+                "sin(p.x * 1.7 - p.z * 1.1 + phase.y",
+                "cos(p.z * 0.9 - p.x * 0.4 + phase.z",
+            ] {
+                assert!(source.contains(term), "a terrain shader lost `{term}`");
+            }
+            for freq in &freqs {
+                assert!(
+                    source.contains(freq.as_str()),
+                    "a terrain shader lost `{freq}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_world_origin_adds_no_phase() {
+        let (wave, plant, leaf) = noise_phases(IVec3::ZERO);
+        assert_eq!([wave, plant, leaf], [[0.0; 4]; 3]);
+    }
 }

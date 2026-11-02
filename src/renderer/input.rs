@@ -5,8 +5,8 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 use super::systems::{Shared, WorldCamera, enter_screen};
 use crate::gui::keybinds::Action;
 use crate::session::{
-    DropRequest, Gamemode, InvAction, MOVE_BACK, MOVE_DESCEND, MOVE_FORWARD, MOVE_JUMP, MOVE_LEFT,
-    MOVE_RIGHT, MOVE_SNEAK, MOVE_SPRINT,
+    DropRequest, GAME_MASTER_LEVEL, Gamemode, InvAction, MOVE_BACK, MOVE_DESCEND, MOVE_FORWARD,
+    MOVE_JUMP, MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK, MOVE_SPRINT,
 };
 
 #[derive(Resource, Default)]
@@ -23,13 +23,54 @@ impl CameraAngles {
 }
 
 #[derive(Resource, Default)]
-pub struct FreecamState {
-    pub active: bool,
+pub struct CameraView {
+    perspective: Perspective,
+    free: bool,
+    free_eye: bevy::math::DVec3,
 }
 
-#[derive(Resource, Default)]
-pub struct ThirdPersonState {
-    pub active: bool,
+impl CameraView {
+    pub fn free(&self) -> bool {
+        self.free
+    }
+
+    pub fn third_person(&self) -> bool {
+        self.perspective != Perspective::FirstPerson && !self.free
+    }
+
+    pub fn mirrored(&self) -> bool {
+        self.perspective == Perspective::ThirdPersonFront
+    }
+
+    pub fn detached(&self) -> bool {
+        self.perspective != Perspective::FirstPerson || self.free
+    }
+
+    pub fn first_person(&self) -> bool {
+        !self.detached()
+    }
+
+    pub fn free_eye(&self) -> bevy::math::DVec3 {
+        self.free_eye
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Perspective {
+    #[default]
+    FirstPerson,
+    ThirdPersonBack,
+    ThirdPersonFront,
+}
+
+impl Perspective {
+    fn cycle(self) -> Self {
+        match self {
+            Self::FirstPerson => Self::ThirdPersonBack,
+            Self::ThirdPersonBack => Self::ThirdPersonFront,
+            Self::ThirdPersonFront => Self::FirstPerson,
+        }
+    }
 }
 
 pub(crate) fn run_exit_tasks() {
@@ -46,6 +87,9 @@ pub(super) fn run_exit_tasks_on_exit(mut exit: bevy::ecs::message::MessageReader
 
 #[inline]
 fn save_on_session_end() {
+    #[cfg(lua_mods)]
+    crate::modules::script::leave();
+    crate::modules::pathfinder::reset();
     crate::modules::save();
     crate::gui::command_history::save();
 }
@@ -122,7 +166,10 @@ pub(super) fn apply_gui_nav(
         let death_opening = dead
             && (state.screen == Screen::None
                 || state.screen.is_modal()
-                || state.screen == Screen::Advancements)
+                || matches!(
+                    state.screen,
+                    Screen::Advancements | Screen::Statistics | Screen::GameModeSwitcher
+                ))
             && s.session.show_death_screen;
         NavPoll {
             ended,
@@ -258,7 +305,7 @@ pub(super) fn apply_gui_nav(
     }
     if state.nav.is_none() {
         if poll.reconfiguring
-            && !state.screen.is_menu()
+            && !state.screen_is_menu()
             && !matches!(
                 state.screen,
                 Screen::Reconfiguring
@@ -282,11 +329,20 @@ pub(super) fn apply_gui_nav(
         } else if !dead && state.screen == Screen::Death {
             state.nav = Some(Screen::None);
         } else if sleeping && state.screen == Screen::None {
+            state.chat.open("");
             state.nav = Some(Screen::Sleep);
         } else if !sleeping && state.screen == Screen::Sleep {
-            state.nav = Some(Screen::None);
+            if state.chat.has_draft() {
+                state.nav = Some(Screen::Chat);
+            } else {
+                state.chat.close();
+                state.nav = Some(Screen::None);
+            }
         }
     }
+
+    #[cfg(lua_mods)]
+    crate::gui::lua_list::poll(&mut state);
 
     let Some(next) = state.nav.take() else { return };
     if next == state.screen {
@@ -327,17 +383,13 @@ pub(super) fn mouse_look(
     motion: Res<AccumulatedMouseMotion>,
     #[cfg_attr(feature = "mobile_ui", allow(unused_mut))] mut angles: ResMut<CameraAngles>,
     shared: Res<Shared>,
-    freecam: Res<FreecamState>,
-    #[cfg_attr(feature = "mobile_ui", allow(unused_mut))] mut camera: Query<
-        &mut Transform,
-        With<WorldCamera>,
-    >,
+    camera: Res<CameraView>,
     state: Res<crate::gui::GuiState>,
     time: Res<Time>,
 ) {
     #[cfg(feature = "mobile_ui")]
     {
-        let _ = (motion, angles, shared, freecam, camera, state, time);
+        let _ = (motion, angles, shared, camera, state, time);
         return;
     }
     #[cfg(not(feature = "mobile_ui"))]
@@ -354,9 +406,8 @@ pub(super) fn mouse_look(
             hand.x,
             hand.y,
             &mut angles,
-            &mut camera,
             &shared,
-            freecam.active,
+            camera.free(),
             time.delta_secs(),
         );
     }
@@ -364,11 +415,69 @@ pub(super) fn mouse_look(
 
 pub(crate) const LOOK_SCALE: f32 = 0.15;
 
+pub(super) fn apply_server_look(
+    mut angles: ResMut<CameraAngles>,
+    shared: Res<Shared>,
+    camera: Res<CameraView>,
+) {
+    let Some((yaw, pitch)) = shared.0.lock().unwrap().pending_look.take() else {
+        return;
+    };
+    if camera.free() {
+        return;
+    }
+    angles.yaw = yaw;
+    angles.pitch = pitch.clamp(-89., 89.);
+}
+
+#[derive(Resource, Default)]
+pub(super) struct VehicleTurnSpread {
+    seq: Option<u32>,
+    turn: f32,
+    applied: f32,
+}
+
+pub(super) fn apply_vehicle_look(
+    mut angles: ResMut<CameraAngles>,
+    mut spread: ResMut<VehicleTurnSpread>,
+    shared: Res<Shared>,
+    camera: Res<CameraView>,
+) {
+    let mut s = shared.0.lock().unwrap();
+    let Some(look) = s.session.vehicle_look else {
+        *spread = VehicleTurnSpread::default();
+        return;
+    };
+    if camera.free() {
+        return;
+    }
+    if spread.seq != Some(look.seq) {
+        angles.yaw += spread.turn - spread.applied;
+        *spread = VehicleTurnSpread {
+            seq: Some(look.seq),
+            turn: look.turn,
+            applied: 0.0,
+        };
+    }
+    let partial = super::systems::partial_ticks(&s);
+    let target = look.turn * partial;
+    angles.yaw += target - spread.applied;
+    spread.applied = target;
+    clamp_to_hull(&mut angles, look, partial);
+    s.camera_yaw = angles.yaw;
+}
+
+fn clamp_to_hull(angles: &mut CameraAngles, look: crate::session::VehicleLook, partial: f32) {
+    let hull = look.boat_yaw - look.turn * (1.0 - partial);
+    let delta = crate::util::mth::wrap_degrees(angles.yaw - hull);
+    let limit = crate::play::riding::RIDER_YAW_LIMIT;
+    angles.yaw += delta.clamp(-limit, limit) - delta;
+}
+
 pub(crate) fn apply_look(
     dx: f32,
     dy: f32,
     angles: &mut CameraAngles,
-    camera: &mut Query<&mut Transform, With<WorldCamera>>,
     shared: &Shared,
     freecam_active: bool,
     dt: f32,
@@ -382,13 +491,13 @@ pub(crate) fn apply_look(
 
     angles.yaw -= dx;
     angles.pitch = (angles.pitch - dy).clamp(-89., 89.);
-    if let Ok(mut t) = camera.single_mut() {
-        t.rotation = angles.rotation();
-    }
     if freecam_active {
         return;
     }
     let mut s = shared.0.lock().unwrap();
+    if let Some(look) = s.session.vehicle_look {
+        clamp_to_hull(angles, look, super::systems::partial_ticks(&s));
+    }
     s.camera_yaw = angles.yaw;
     s.camera_pitch = angles.pitch;
 }
@@ -396,7 +505,7 @@ pub(crate) fn apply_look(
 pub(crate) fn bot_movement_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    freecam: Res<FreecamState>,
+    camera: Res<CameraView>,
     time: Res<Time>,
     shared: Res<Shared>,
     state: Res<crate::gui::GuiState>,
@@ -404,9 +513,12 @@ pub(crate) fn bot_movement_input(
     mut last_forward_tap: Local<Option<f32>>,
     mut sprint_latch: Local<bool>,
 ) {
-    if freecam.active || state.screen.is_open() || crate::gui::keyboard_elsewhere() {
+    let toggle_mode = state.options.toggle_sprint;
+    if camera.free() || state.screen.is_open() || crate::gui::keyboard_elsewhere() {
         *last_forward_tap = None;
-        *sprint_latch = false;
+        if !toggle_mode {
+            *sprint_latch = false;
+        }
         return;
     }
     let binds = &state.keybinds;
@@ -427,17 +539,23 @@ pub(crate) fn bot_movement_input(
     let now = time.elapsed_secs();
     if binds.just(Action::Forward, &keys, &buttons) {
         if last_forward_tap.is_some_and(|t| now - t <= FLY_DOUBLE_TAP_SECS) {
-            *sprint_latch = true;
+            *sprint_latch = !toggle_mode || !*sprint_latch;
             *last_forward_tap = None;
         } else {
             *last_forward_tap = Some(now);
         }
     }
-    if !fwd || shift {
-        *sprint_latch = false;
-    }
-
-    let sprint = sprint_key || *sprint_latch;
+    let sprint = if toggle_mode {
+        if binds.just(Action::Sprint, &keys, &buttons) {
+            *sprint_latch = !*sprint_latch;
+        }
+        *sprint_latch && !shift
+    } else {
+        if !fwd || shift {
+            *sprint_latch = false;
+        }
+        sprint_key || *sprint_latch
+    };
     let descend = flying && shift;
 
     intent.walk(
@@ -457,14 +575,14 @@ pub(super) const FLY_DOUBLE_TAP_SECS: f32 = 7.0 / 20.0;
 pub(super) fn flight_toggle_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    freecam: Res<FreecamState>,
+    camera: Res<CameraView>,
     time: Res<Time>,
     shared: Res<Shared>,
     mut last_tap: Local<Option<f32>>,
     state: Res<crate::gui::GuiState>,
 ) {
     if !state.keybinds.just(Action::Jump, &keys, &buttons)
-        || freecam.active
+        || camera.free()
         || state.screen.is_open()
     {
         return;
@@ -614,10 +732,24 @@ pub(super) fn poll_module_binds(
     use crate::gui::keybinds::Bound;
     use crate::modules::store;
 
+    #[cfg(lua_mods)]
+    crate::modules::script::poll_keys(&keys, &buttons, state.screen.is_open());
     if state.screen.is_open() {
         return;
     }
-    for id in crate::modules::registry::Id::ALL {
+    #[cfg(lua_mods)]
+    if crate::modules::script::wants_keys() {
+        let pressed = (keys.get_just_pressed().map(|&k| Bound::Key(k)))
+            .chain(buttons.get_just_pressed().map(|&b| Bound::Mouse(b)));
+        for bound in pressed {
+            let key = bound.serialized_name();
+            if key != Bound::Unbound.serialized_name() {
+                crate::modules::script::key_down(key, bound.display_name());
+            }
+        }
+    }
+    for m in crate::modules::registry::modules() {
+        let id = m.id;
         let pressed = match store().bind(id) {
             Bound::Unbound => false,
             Bound::Key(code) => keys.just_pressed(code),
@@ -632,7 +764,7 @@ pub(super) fn poll_module_binds(
 pub(super) fn toggle_third_person(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    mut third_person: ResMut<ThirdPersonState>,
+    mut camera: ResMut<CameraView>,
     state: Res<crate::gui::GuiState>,
 ) {
     if state.screen.is_open() {
@@ -642,83 +774,78 @@ pub(super) fn toggle_third_person(
         .keybinds
         .just(Action::TogglePerspective, &keys, &buttons)
     {
-        third_person.active = !third_person.active;
+        camera.perspective = camera.perspective.cycle();
     }
 }
 
 pub(super) fn toggle_freecam(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    mut freecam: ResMut<FreecamState>,
+    mut view: ResMut<CameraView>,
     mut angles: ResMut<CameraAngles>,
     shared: Res<Shared>,
-    mut camera: Query<&mut Transform, With<WorldCamera>>,
+    camera: Query<&Transform, With<WorldCamera>>,
+    origin: Res<super::RenderOrigin>,
     state: Res<crate::gui::GuiState>,
 ) {
-    if state.screen.is_open() {
-        return;
-    }
-    if state.keybinds.just(Action::Freecam, &keys, &buttons) {
+    if !state.screen.is_open() && state.keybinds.just(Action::Freecam, &keys, &buttons) {
         crate::modules::freecam::toggle();
     }
     let want = crate::modules::freecam::active();
-
-    if want != freecam.active {
-        freecam.active = want;
-        if !freecam.active {
-            let s = shared.0.lock().unwrap();
-            angles.yaw = s.camera_yaw;
-            angles.pitch = s.camera_pitch;
-            drop(s);
-            if let Ok(mut t) = camera.single_mut() {
-                t.rotation = angles.rotation();
-            }
+    if want == view.free {
+        return;
+    }
+    view.free = want;
+    if want {
+        if let Ok(t) = camera.single() {
+            view.free_eye = origin.to_world(t.translation);
         }
+    } else {
+        let s = shared.0.lock().unwrap();
+        angles.yaw = s.camera_yaw;
+        angles.pitch = s.camera_pitch;
     }
 }
 
 pub(super) fn freecam_movement(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    freecam: Res<FreecamState>,
+    mut view: ResMut<CameraView>,
     angles: Res<CameraAngles>,
-    mut camera: Query<&mut Transform, With<WorldCamera>>,
     time: Res<Time>,
     state: Res<crate::gui::GuiState>,
 ) {
-    if !freecam.active || state.screen.is_open() {
+    if !view.free || state.screen.is_open() {
         return;
     }
-    let Ok(mut transform) = camera.single_mut() else {
-        return;
-    };
-
     let binds = &state.keybinds;
     let down = |action| binds.down(action, &keys, &buttons);
     let speed = crate::modules::freecam::speed(down(Action::Sprint));
     let dt = time.delta_secs();
+    let eye = &mut view.free_eye;
+    let step = |dir: Vec3| (dir * speed * dt).as_dvec3();
 
     let yaw_rad = angles.yaw.to_radians();
     let forward = Vec3::new(-yaw_rad.sin(), 0.0, -yaw_rad.cos());
     let right = Vec3::new(yaw_rad.cos(), 0.0, -yaw_rad.sin());
 
     if down(Action::Forward) {
-        transform.translation += forward * speed * dt;
+        *eye += step(forward);
     }
     if down(Action::Back) {
-        transform.translation -= forward * speed * dt;
+        *eye -= step(forward);
     }
     if down(Action::Right) {
-        transform.translation += right * speed * dt;
+        *eye += step(right);
     }
     if down(Action::Left) {
-        transform.translation -= right * speed * dt;
+        *eye -= step(right);
     }
     if down(Action::Jump) {
-        transform.translation.y += speed * dt;
+        *eye += step(Vec3::Y);
     }
     if down(Action::Sneak) {
-        transform.translation.y -= speed * dt;
+        *eye -= step(Vec3::Y);
     }
 }
 
@@ -895,6 +1022,10 @@ pub(super) fn handle_hotbar_scroll(
     if dx == 0.0 && dy == 0.0 {
         return;
     }
+    #[cfg(lua_mods)]
+    if crate::modules::script::scroll(if dy == 0.0 { -dx as f32 } else { dy as f32 }) {
+        return;
+    }
     let mut s = shared.0.lock().unwrap();
     if s.session.gamemode == Gamemode::Spectator {
         return;
@@ -928,6 +1059,10 @@ pub(super) fn handle_spectator_fly_speed_scroll(
     if dy == 0.0 {
         return;
     }
+    #[cfg(lua_mods)]
+    if crate::modules::script::scroll_claimed() {
+        return;
+    }
     let mut s = shared.0.lock().unwrap();
     if s.session.gamemode != Gamemode::Spectator {
         return;
@@ -946,6 +1081,21 @@ pub(super) fn handle_spectator_fly_speed_scroll(
     }
 }
 
+fn send_typed(shared: &Shared, line: String) {
+    let Some(line) = crate::modules::commands::intercept(&shared.0, line) else {
+        return;
+    };
+    #[cfg(target_arch = "wasm32")]
+    crate::client::chat_trace::queued(&line);
+    #[cfg(lua_mods)]
+    {
+        let _ = shared;
+        crate::modules::script::typed(line);
+    }
+    #[cfg(not(lua_mods))]
+    shared.0.lock().unwrap().session.outgoing_chat.push(line);
+}
+
 pub(super) fn toggle_screen(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -960,7 +1110,7 @@ pub(super) fn toggle_screen(
         return;
     }
 
-    let field_escape = !state.screen.is_menu() && crate::platform::keyboard::take_escape();
+    let field_escape = !state.screen_is_menu() && crate::platform::keyboard::take_escape();
 
     let guard = std::mem::take(&mut state.keybinds.escape_guard);
     if state.keybinds.capturing.is_some() || (guard && keys.just_pressed(KeyCode::Escape)) {
@@ -971,6 +1121,8 @@ pub(super) fn toggle_screen(
     {
         let click_gui = state.keybinds.just(Action::ClickGui, &keys, &buttons);
         if state.screen == Screen::ClickGui {
+            #[cfg(lua_mods)]
+            let click_gui = click_gui && !state.clickgui.typing();
             let escape =
                 (keys.just_pressed(KeyCode::Escape) || field_escape) && !state.clickgui.escape();
             if click_gui || escape {
@@ -979,7 +1131,7 @@ pub(super) fn toggle_screen(
             }
             return;
         }
-        if click_gui && (state.screen == Screen::None || state.screen.is_menu()) {
+        if click_gui && (state.screen == Screen::None || state.screen_is_menu()) {
             state.clickgui_parent = state.screen;
             enter_screen(Screen::ClickGui, &mut state, &shared, &mut windows);
             return;
@@ -998,9 +1150,9 @@ pub(super) fn toggle_screen(
             }
             return;
         }
-        if hud_key && (state.screen == Screen::None || state.screen.is_menu()) {
+        if hud_key && (state.screen == Screen::None || state.screen_is_menu()) {
             state.hud_state.parent = state.screen;
-            state.hud_state.over_menu = state.screen.is_menu();
+            state.hud_state.over_menu = state.screen_is_menu();
             enter_screen(Screen::HudEditor, &mut state, &shared, &mut windows);
             return;
         }
@@ -1009,7 +1161,7 @@ pub(super) fn toggle_screen(
     let creative_search_focused =
         state.screen == Screen::Creative && state.creative.search_focused();
     let toggle_key = state.keybinds.just(Action::Inventory, &keys, &buttons)
-        && state.screen != Screen::Chat
+        && !state.screen.chat_open()
         && state.screen != Screen::SignEdit
         && state.screen != Screen::CommandBlock
         && !matches!(
@@ -1024,21 +1176,22 @@ pub(super) fn toggle_screen(
     let pause_key = state.keybinds.just(Action::Pause, &keys, &buttons);
     #[cfg(not(target_arch = "wasm32"))]
     let pause_key = false;
-    let enter_from_field = state.screen == Screen::Chat && crate::platform::keyboard::take_enter();
-    let submit_key = state.screen == Screen::Chat
+    let enter_from_field = state.screen.chat_open() && crate::platform::keyboard::take_enter();
+    let submit_key = state.screen.chat_open()
         && (keys.just_pressed(KeyCode::Enter)
             || keys.just_pressed(KeyCode::NumpadEnter)
             || enter_from_field);
 
-    if state.screen.is_menu() {
+    if state.screen_is_menu() {
         return;
     }
 
     let next = if state.screen == Screen::Pause || state.screen.is_options() {
         if close_key || (pause_key && state.screen == Screen::Pause) {
             #[cfg(feature = "shader_support")]
-            let stepped_within =
-                state.screen == Screen::ShaderOptions && state.shaderpacks.pop_screen();
+            let stepped_within = (state.screen == Screen::ShaderOptions
+                && state.shaderpacks.pop_screen())
+                || (state.screen == Screen::ShaderPacks && state.shaderpacks.cancel_prompt());
             #[cfg(not(feature = "shader_support"))]
             let stepped_within = false;
             #[cfg(resource_packs)]
@@ -1074,8 +1227,7 @@ pub(super) fn toggle_screen(
             None
         } else if close_key || submit_key {
             if submit_key && let Some(line) = state.chat.submit() {
-                let mut locked = shared.0.lock().unwrap();
-                locked.session.outgoing_chat.push(line);
+                send_typed(&shared, line);
             }
             if submit_key && crate::gui::chat::texting() {
                 None
@@ -1107,7 +1259,13 @@ pub(super) fn toggle_screen(
             None
         }
     } else if state.screen == Screen::Sleep {
-        if close_key {
+        let taken = ((close_key || submit_key) && state.chat.dismiss_link_prompt())
+            || (close_key && state.chat.hide_suggestions());
+        if !taken && submit_key {
+            if let Some(line) = state.chat.submit() {
+                send_typed(&shared, line);
+            }
+        } else if !taken && close_key {
             shared.0.lock().unwrap().leave_bed_requested = true;
         }
         None
@@ -1117,6 +1275,25 @@ pub(super) fn toggle_screen(
     ) {
         None
     } else if state.screen == Screen::Death {
+        None
+    } else if state.screen == Screen::GameModeSwitcher {
+        if state.keybinds.just(Action::SwitchGameMode, &keys, &buttons) {
+            state.gamemode_switcher.select_next();
+        }
+        if state
+            .keybinds
+            .released(Action::DebugModifier, &keys, &buttons)
+        {
+            switch_gamemode(state.gamemode_switcher.hovered(), &shared);
+            Some(Screen::None)
+        } else if close_key {
+            Some(Screen::None)
+        } else {
+            None
+        }
+    } else if state.screen == Screen::Statistics {
+        close_key.then_some(Screen::Pause)
+    } else if state.screen == Screen::Credits {
         None
     } else if state.screen == Screen::Advancements {
         if close_key {
@@ -1144,7 +1321,11 @@ pub(super) fn toggle_screen(
     } else if state.keybinds.down(Action::DebugModifier, &keys, &buttons)
         && !(close_key || pause_key)
     {
-        None
+        if state.keybinds.just(Action::SwitchGameMode, &keys, &buttons) {
+            open_gamemode_switcher(&mut state, &shared)
+        } else {
+            None
+        }
     } else if toggle_key {
         let creative = shared.0.lock().unwrap().session.gamemode == Gamemode::Creative;
         if creative {
@@ -1163,6 +1344,14 @@ pub(super) fn toggle_screen(
         Some(Screen::Chat)
     } else if state.keybinds.just(Action::Command, &keys, &buttons) {
         state.chat.open("/");
+        Some(Screen::Chat)
+    } else if let Some((_, prefix)) = keys
+        .get_just_pressed()
+        .next()
+        .and_then(|_| crate::modules::commands::open_key())
+        .filter(|(key, _)| keys.just_pressed(*key))
+    {
+        state.chat.open(&prefix);
         Some(Screen::Chat)
     } else if close_key || pause_key {
         Some(Screen::Pause)
@@ -1198,6 +1387,73 @@ fn debug_combo(
         && state.keybinds.just(action, keys, buttons)
 }
 
+fn debug_feedback(session: &mut crate::session::SessionState, key: &str) {
+    use crate::text::{Span, Style};
+    let prefix = Style {
+        bold: true,
+        ..Style::colored(0xFFFF55)
+    };
+    let spans = vec![
+        Span {
+            text: format!("{} ", crate::gui::tooltip::translate("debug.prefix", &[])),
+            style: prefix,
+        },
+        Span::colored(crate::gui::tooltip::translate(key, &[]), 0xFF_FFFF),
+    ];
+    session.chat_incoming.push(crate::session::ChatEntry {
+        spans,
+        events: None,
+        tag: crate::session::ChatTag::System,
+        original: None,
+    });
+}
+
+fn open_gamemode_switcher(
+    state: &mut crate::gui::GuiState,
+    shared: &Shared,
+) -> Option<crate::gui::Screen> {
+    let mut s = shared.0.lock().unwrap();
+    if !s.in_world {
+        return None;
+    }
+    if s.session.op_level < GAME_MASTER_LEVEL {
+        debug_feedback(&mut s.session, "debug.gamemodes.error");
+        return None;
+    }
+    state
+        .gamemode_switcher
+        .open(s.session.gamemode, s.session.previous_gamemode);
+    Some(crate::gui::Screen::GameModeSwitcher)
+}
+
+fn switch_gamemode(to: Gamemode, shared: &Shared) {
+    let mut s = shared.0.lock().unwrap();
+    if s.in_world && to != s.session.gamemode && s.session.op_level >= GAME_MASTER_LEVEL {
+        s.session.gamemode_request = Some(to);
+    }
+}
+
+pub(super) fn debug_spectate(
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    state: Res<crate::gui::GuiState>,
+    shared: Res<Shared>,
+) {
+    if !debug_combo(Action::DebugSpectate, &keys, &buttons, &state) {
+        return;
+    }
+    let mut s = shared.0.lock().unwrap();
+    if !s.in_world || s.session.op_level < GAME_MASTER_LEVEL {
+        debug_feedback(&mut s.session, "debug.creative_spectator.error");
+        return;
+    }
+    s.session.gamemode_request = Some(if s.session.gamemode != Gamemode::Spectator {
+        Gamemode::Spectator
+    } else {
+        s.session.previous_gamemode.unwrap_or(Gamemode::Creative)
+    });
+}
+
 pub(super) fn toggle_advanced_tooltips(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -1227,37 +1483,14 @@ pub(super) fn reload_resource_packs(
     state: Res<crate::gui::GuiState>,
     shared: Res<Shared>,
 ) {
-    use crate::text::{Span, Style};
     if !debug_combo(Action::ReloadResourcePacks, &keys, &buttons, &state) {
         return;
     }
     crate::renderer::reload::request();
-    let prefix = Style {
-        bold: true,
-        ..Style::colored(0xFFFF55)
-    };
-    let spans = vec![
-        Span {
-            text: format!("{} ", crate::gui::tooltip::translate("debug.prefix", &[])),
-            style: prefix,
-        },
-        Span::colored(
-            crate::gui::tooltip::translate("debug.reload_resourcepacks.message", &[]),
-            0xFF_FFFF,
-        ),
-    ];
-    shared
-        .0
-        .lock()
-        .unwrap()
-        .session
-        .chat_incoming
-        .push(crate::session::ChatEntry {
-            spans,
-            events: None,
-            tag: crate::session::ChatTag::System,
-            original: None,
-        });
+    debug_feedback(
+        &mut shared.0.lock().unwrap().session,
+        "debug.reload_resourcepacks.message",
+    );
 }
 
 pub(super) fn reload_all_chunks(

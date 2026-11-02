@@ -89,6 +89,7 @@ pub fn stack(tag: &NbtCompound) -> HeldItem {
             .and_then(|c| c.list("minecraft:charged_projectiles"))
             .and_then(|list| list.compounds())
             .is_some_and(|projectiles| !projectiles.is_empty()),
+        glint: crate::items::glint::codec_foil(def.id, components),
         ..HeldItem::default()
     }
 }

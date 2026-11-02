@@ -50,24 +50,20 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn varint(&mut self) -> Option<i32> {
-        let mut value: u32 = 0;
-        for i in 0..MAX_VARINT_BYTES {
-            let byte = self.u8()?;
-            value |= u32::from(byte & 0x7F) << (7 * i);
-            if byte & 0x80 == 0 {
-                return Some(value as i32);
-            }
-        }
-        None
+        Some(self.var(MAX_VARINT_BYTES)? as u32 as i32)
     }
 
     pub(crate) fn varlong(&mut self) -> Option<i64> {
+        Some(self.var(MAX_VARLONG_BYTES)? as i64)
+    }
+
+    fn var(&mut self, max: usize) -> Option<u64> {
         let mut value: u64 = 0;
-        for i in 0..MAX_VARLONG_BYTES {
+        for i in 0..max {
             let byte = self.u8()?;
             value |= u64::from(byte & 0x7F) << (7 * i);
             if byte & 0x80 == 0 {
-                return Some(value as i64);
+                return Some(value);
             }
         }
         None
@@ -79,20 +75,14 @@ impl<'a> Reader<'a> {
 }
 
 pub(crate) fn write_varint(out: &mut Vec<u8>, value: i32) {
-    let mut value = value as u32;
-    loop {
-        let byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if value == 0 {
-            out.push(byte);
-            return;
-        }
-        out.push(byte | 0x80);
-    }
+    write_var(out, value as u32 as u64);
 }
 
 pub(crate) fn write_varlong(out: &mut Vec<u8>, value: i64) {
-    let mut value = value as u64;
+    write_var(out, value as u64);
+}
+
+fn write_var(out: &mut Vec<u8>, mut value: u64) {
     loop {
         let byte = (value & 0x7F) as u8;
         value >>= 7;

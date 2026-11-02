@@ -58,6 +58,51 @@ impl BlockCache {
         let blocks = self.blocks.as_deref().expect("use_registry runs first");
         self.states[id].get_or_insert_with(|| block_visual_in(state, blocks))
     }
+
+    #[inline]
+    fn resolved(&self, state: BlockState) -> &RenderedBlock {
+        self.states[state.id() as usize]
+            .as_ref()
+            .expect("resolved after get")
+    }
+}
+
+const SECTION_CELLS: usize = 4096;
+
+#[inline]
+fn cell_index(lx: u8, ly: u8, lz: u8) -> usize {
+    (ly as usize) << 8 | (lz as usize) << 4 | lx as usize
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Decoded {
+    Missing,
+    Empty,
+    Blocks,
+}
+
+fn decode_sections(
+    chunk: &Chunk,
+    sec_lo: i32,
+    sec_hi: i32,
+    states: &mut Vec<BlockState>,
+    kinds: &mut Vec<Decoded>,
+) {
+    let count = (sec_hi - sec_lo) as usize;
+    states.resize(count * SECTION_CELLS, BlockState::AIR);
+    kinds.clear();
+    for (i, si) in (sec_lo..sec_hi).enumerate() {
+        kinds.push(match chunk.sections.get(si as usize) {
+            None => Decoded::Missing,
+            Some(section) if section.block_count == 0 => Decoded::Empty,
+            Some(section) => {
+                section
+                    .states
+                    .unpack_into(&mut states[i * SECTION_CELLS..(i + 1) * SECTION_CELLS]);
+                Decoded::Blocks
+            }
+        });
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -442,6 +487,7 @@ pub fn spawn_chunk_workers(shared: Arc<SharedMutex>) -> Arc<JobQueue> {
 pub struct Scratch {
     cache: BlockCache,
     occ: Occupancy,
+    states: Vec<BlockState>,
 }
 
 impl Scratch {
@@ -449,6 +495,7 @@ impl Scratch {
         Self {
             cache: BlockCache::new(),
             occ: Occupancy::new(0, 0, 0, 1),
+            states: Vec::new(),
         }
     }
 }
@@ -476,6 +523,7 @@ fn run_job(
             shared,
             &mut scratch.cache,
             &mut scratch.occ,
+            &mut scratch.states,
             deadline,
         )
     }));
@@ -571,6 +619,7 @@ fn process_job(
     shared: &Arc<SharedMutex>,
     cache: &mut BlockCache,
     occ: &mut Occupancy,
+    states: &mut Vec<BlockState>,
     deadline: Option<Instant>,
 ) -> Option<Job> {
     crate::prof_span!("mesh:process_job");
@@ -644,8 +693,10 @@ fn process_job(
     let win_count = (sec_hi - sec_lo) * 16 + 2;
     occ.reset(x_base, z_base, win_y0, win_count);
 
+    let mut kinds: Vec<Decoded> = Vec::with_capacity((sec_hi - sec_lo) as usize);
     {
         let chunk = chunk_arc.read();
+        decode_sections(&chunk, sec_lo, sec_hi, states, &mut kinds);
         fill_occupancy(
             occ,
             &chunk,
@@ -656,6 +707,7 @@ fn process_job(
             (0, 16),
             cache,
             &biomes,
+            Some((states.as_slice(), sec_lo)),
         );
     }
     if crate::renderer::lighting_enabled() {
@@ -687,17 +739,17 @@ fn process_job(
             lz,
             cache,
             &biomes,
+            None,
         );
     }
 
     let tiles = cache.sprites().mesh_tiles();
     let mut results: Vec<PendingSection> = Vec::with_capacity((sec_hi - sec_lo) as usize);
-    let mut blocks: Vec<(i32, i32, i32, RenderedBlock)> = Vec::with_capacity(4096);
+    let mut blocks: Vec<(i32, i32, i32, BlockState)> = Vec::with_capacity(4096);
     let mut stopped_at = sec_hi;
     let mut any_current = false;
     {
-        let chunk = chunk_arc.read();
-        for si in sec_lo..sec_hi {
+        for (i, si) in (sec_lo..sec_hi).enumerate() {
             if let Some(deadline) = deadline
                 && si > sec_lo
                 && Instant::now() >= deadline
@@ -710,21 +762,19 @@ fn process_job(
                 continue;
             }
             any_current = true;
-            let Some(section) = chunk.sections.get(si as usize) else {
+            let kind = kinds[i];
+            if kind == Decoded::Missing {
                 continue;
-            };
+            }
             blocks.clear();
-            if section.block_count != 0 {
+            if kind == Decoded::Blocks {
+                let decoded = &states[i * SECTION_CELLS..(i + 1) * SECTION_CELLS];
                 for ly in 0u8..16 {
                     let y = sec_y + ly as i32;
                     for lx in 0u8..16 {
                         let x = x_base + lx as i32;
                         for lz in 0u8..16 {
-                            let state = section.get_block_state(ChunkSectionBlockPos {
-                                x: lx,
-                                y: ly,
-                                z: lz,
-                            });
+                            let state = decoded[cell_index(lx, ly, lz)];
                             if state.is_air() {
                                 continue;
                             }
@@ -733,15 +783,29 @@ fn process_job(
                             if rb.is_solid && occ.enclosed(x, y, z) {
                                 continue;
                             }
-                            blocks.push((x, y, z, rb.clone()));
+                            blocks.push((x, y, z, state));
                         }
                     }
                 }
             }
-            let (opaque, water) = build_section_mesh(&blocks, x_base, sec_y, z_base, tiles, &occ);
-            let vis = crate::renderer::visgraph::resolve(|lx, ly, lz| {
-                occ.is_solid(x_base + lx as i32, sec_y + ly as i32, z_base + lz as i32)
-            });
+            let resolved: &BlockCache = cache;
+            let (opaque, water) = build_section_mesh(
+                blocks
+                    .iter()
+                    .map(|&(x, y, z, state)| (x, y, z, resolved.resolved(state))),
+                x_base,
+                sec_y,
+                z_base,
+                tiles,
+                &occ,
+            );
+            let vis = if kind == Decoded::Empty {
+                crate::renderer::visgraph::VisibilitySet::all()
+            } else {
+                crate::renderer::visgraph::resolve(|lx, ly, lz| {
+                    occ.is_solid(x_base + lx as i32, sec_y + ly as i32, z_base + lz as i32)
+                })
+            };
             results.push(PendingSection {
                 chunk_x: job.chunk_x,
                 chunk_z: job.chunk_z,
@@ -860,6 +924,7 @@ fn fill_occupancy(
     lz_range: (u8, u8),
     cache: &mut BlockCache,
     biomes: &[u8],
+    decoded: Option<(&[BlockState], i32)>,
 ) {
     use azalea_registry::DataRegistry;
     for (sec_idx, section) in chunk.sections.iter().enumerate() {
@@ -870,6 +935,10 @@ fn fill_occupancy(
         if !occ.covers_y(sec_y) && !occ.covers_y(sec_y + 15) {
             continue;
         }
+        let run = decoded.and_then(|(states, lo)| {
+            let i = usize::try_from(sec_idx as i32 - lo).ok()?;
+            states.get(i * SECTION_CELLS..(i + 1) * SECTION_CELLS)
+        });
         for ly in 0u8..16 {
             let y = sec_y + ly as i32;
             if !occ.covers_y(y) {
@@ -878,11 +947,14 @@ fn fill_occupancy(
             for lx in lx_range.0..lx_range.1 {
                 let x = ox + lx as i32;
                 for lz in lz_range.0..lz_range.1 {
-                    let state = section.get_block_state(ChunkSectionBlockPos {
-                        x: lx,
-                        y: ly,
-                        z: lz,
-                    });
+                    let state = match run {
+                        Some(run) => run[cell_index(lx, ly, lz)],
+                        None => section.get_block_state(ChunkSectionBlockPos {
+                            x: lx,
+                            y: ly,
+                            z: lz,
+                        }),
+                    };
                     if state.is_air() {
                         continue;
                     }

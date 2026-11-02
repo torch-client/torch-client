@@ -12,26 +12,7 @@
 #import bevy_core_pipeline::tonemapping::tone_mapping
 #endif
 
-fn vanilla_fog_ramp(distance: f32, start: f32, end: f32) -> f32 {
-    if distance <= start {
-        return 0.0;
-    } else if distance >= end {
-        return 1.0;
-    }
-    return (distance - start) / (end - start);
-}
-
-fn vanilla_fog(color: vec4<f32>, rel: vec3<f32>) -> vec4<f32> {
-    let spherical = length(rel);
-    let cylindrical = max(length(rel.xz), abs(rel.y));
-    let environmental = fog.directional_light_color.xy;
-    let value = max(
-        vanilla_fog_ramp(spherical, environmental.x, environmental.y),
-        vanilla_fog_ramp(cylindrical, fog.be.x, fog.be.y),
-    );
-    let mixed = mix(srgb_encode(color.rgb), srgb_encode(fog.base_color.rgb), value * fog.base_color.a);
-    return vec4(srgb_decode(mixed), color.a);
-}
+#import client::vanilla_fog::{vanilla_fog, srgb_encode, srgb_decode}
 
 const MINECRAFT_LIGHT_POWER: f32 = 0.6;
 const MINECRAFT_AMBIENT_LIGHT: f32 = 0.4;
@@ -49,6 +30,7 @@ struct Params {
     light_floor: vec4<f32>,
     light_block: vec4<f32>,
     light_sky: vec4<f32>,
+    glint: vec4<f32>,
     mode: u32,
 };
 
@@ -63,6 +45,12 @@ const GROUND_TINT: vec3<f32> = vec3(0.85, 0.80, 0.68);
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var entity_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var entity_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> params: Params;
+
+#ifdef ENTITY_GLINT
+#import client::glint::add_glint
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var glint_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(4) var glint_sampler: sampler;
+#endif
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -82,18 +70,6 @@ struct VertexOutput {
     @location(4) world_normal: vec3<f32>,
 #endif
 };
-
-fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
-    let low = c * 12.92;
-    let high = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
-    return select(high, low, c <= vec3(0.0031308));
-}
-
-fn srgb_decode(c: vec3<f32>) -> vec3<f32> {
-    let low = c / 12.92;
-    let high = pow((c + 0.055) / 1.055, vec3(2.4));
-    return select(high, low, c <= vec3(0.04045));
-}
 
 fn mix_light_separate(light: vec2<f32>) -> f32 {
     let clamped = max(vec2(0.0), light);
@@ -192,6 +168,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
         color = vec4(color.rgb * params.light.rgb, color.a);
 #endif
     }
+#ifdef ENTITY_GLINT
+    color = vec4(
+        add_glint(color.rgb, in.uv, params.glint.xy, params.glint.z, glint_texture, glint_sampler),
+        color.a,
+    );
+#endif
     if fog.mode != 0u {
         color = vanilla_fog(color, in.world_position.xyz - view.world_position);
     }

@@ -45,11 +45,21 @@ pub fn band_floor_def() -> ShaderDefVal {
 pub type HandMaterial = ExtendedMaterial<StandardMaterial, HandProjection>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
-pub struct HandProjection {}
+pub struct HandProjection {
+    #[uniform(100)]
+    pub glint: Vec4,
+    #[texture(101)]
+    #[sampler(102)]
+    pub glint_texture: Option<Handle<Image>>,
+}
 
 impl MaterialExtension for HandProjection {
     fn vertex_shader() -> ShaderRef {
         super::embedded_shader("renderer/hand_projection.wgsl")
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        super::embedded_shader("renderer/hand_glint.wgsl")
     }
 
     fn enable_prepass() -> bool {
@@ -72,6 +82,9 @@ impl MaterialExtension for HandProjection {
             bits("HAND_FOV_BITS", HAND_FOV_DEGREES.to_radians()),
             bits("HAND_BAND_BITS", HAND_DEPTH_BAND),
         ]);
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader_defs.extend(super::glint::shader_defs());
+        }
         Ok(())
     }
 }
@@ -82,11 +95,24 @@ fn hand_material(base: StandardMaterial) -> HandMaterial {
             fog_enabled: false,
             ..base
         },
-        extension: HandProjection {},
+        extension: HandProjection::default(),
     }
 }
 
-use crate::util::mth::ease::{in_out_expo, in_out_sine, out_back};
+pub(super) fn cutout_material(texture: Option<Handle<Image>>) -> HandMaterial {
+    hand_material(StandardMaterial {
+        base_color: Color::WHITE,
+        base_color_texture: texture,
+        unlit: true,
+        alpha_mode: AlphaMode::Mask(0.1),
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    })
+}
+
+use crate::items::kinetic::hit_feedback_amount;
+use crate::util::mth::ease::{in_out_back, in_out_expo, in_out_sine, out_back};
 use crate::util::mth::{DEG_TO_RAD, progress};
 
 const ITEM_POS_X: f32 = 0.56;
@@ -250,32 +276,32 @@ pub fn which_hands_to_render(s: &AnimSample) -> HandRenderSelection {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Chain {
+pub(super) struct Chain {
     mats: [Mat4; 2],
     active: usize,
 }
 
 impl Chain {
-    fn new() -> Chain {
+    pub(super) fn new() -> Chain {
         Chain {
             mats: [Mat4::IDENTITY; 2],
             active: 0,
         }
     }
 
-    fn translate(&mut self, x: f32, y: f32, z: f32) {
+    pub(super) fn translate(&mut self, x: f32, y: f32, z: f32) {
         self.mats[self.active] *= Mat4::from_translation(Vec3::new(x, y, z));
     }
 
-    fn rot_x(&mut self, deg: f32) {
+    pub(super) fn rot_x(&mut self, deg: f32) {
         self.mats[self.active] *= Mat4::from_rotation_x(deg * DEG_TO_RAD);
     }
 
-    fn rot_y(&mut self, deg: f32) {
+    pub(super) fn rot_y(&mut self, deg: f32) {
         self.mats[self.active] *= Mat4::from_rotation_y(deg * DEG_TO_RAD);
     }
 
-    fn rot_z(&mut self, deg: f32) {
+    pub(super) fn rot_z(&mut self, deg: f32) {
         self.mats[self.active] *= Mat4::from_rotation_z(deg * DEG_TO_RAD);
     }
 
@@ -283,12 +309,16 @@ impl Chain {
         self.mats[self.active] *= Mat4::from_quat(q);
     }
 
-    fn scale(&mut self, x: f32, y: f32, z: f32) {
+    fn rotate_around(&mut self, q: Quat, pivot: Vec3) {
+        self.mats[self.active] *= crate::entities::rotate_around(q, pivot).to_matrix();
+    }
+
+    pub(super) fn scale(&mut self, x: f32, y: f32, z: f32) {
         self.mats[self.active] *= Mat4::from_scale(Vec3::new(x, y, z));
         self.active = 1;
     }
 
-    fn transforms(&self) -> (Transform, Transform) {
+    pub(super) fn transforms(&self) -> (Transform, Transform) {
         (
             Transform::from_matrix(self.mats[0]),
             Transform::from_matrix(self.mats[1]),
@@ -389,6 +419,31 @@ fn spear_attack_transform(c: &mut Chain, invert: f32, attack: f32) {
     c.translate(0.0, 0.0, -0.25 * (ending_amount - middle_amount));
 }
 
+fn spear_use_transform(c: &mut Chain, f: &HandFrame) {
+    let Some(kinetic) = f.item.kinetic else {
+        return;
+    };
+    let p = kinetic.use_params(f.time_held());
+    let invert = f.invert();
+    c.translate(
+        invert * (p.raise * 0.15 + p.raise_end * -0.05 + p.sway * -0.1 + p.sway_slow * 0.005),
+        p.raise * -0.075 + p.raise_middle * 0.075 + p.sway_fast * 0.01,
+        p.raise_start * 0.05 + p.raise_end * -0.05 + p.sway_slow * 0.005,
+    );
+    let pitch =
+        -65.0 * in_out_back(p.raise) - 35.0 * p.lower + 100.0 * p.raise_back - 0.5 * p.sway_fast;
+    c.rotate_around(
+        Quat::from_rotation_x(pitch * DEG_TO_RAD),
+        Vec3::new(0.0, 0.1, 0.0),
+    );
+    let yaw = invert * (-90.0 * progress(p.raise, 0.5, 0.55) + 90.0 * p.sway + 2.0 * p.sway_slow);
+    c.rotate_around(
+        Quat::from_rotation_y(-yaw * DEG_TO_RAD),
+        Vec3::new(invert * 0.15, 0.0, 0.0),
+    );
+    c.translate(0.0, -hit_feedback_amount(f.ticks_since_kinetic_hit), 0.0);
+}
+
 #[derive(Clone, Debug)]
 pub struct HandFrame {
     pub hand: Hand,
@@ -398,6 +453,7 @@ pub struct HandFrame {
     pub inverse_arm_height: f32,
     pub using: bool,
     pub ticks_using: f32,
+    pub ticks_since_kinetic_hit: f32,
     pub spin_attack: bool,
     pub view_lag_x: f32,
     pub view_lag_y: f32,
@@ -528,6 +584,7 @@ fn arm_with_item(f: &HandFrame) -> Chain {
             ),
             UseAnimation::Spear => {
                 c.translate(invert * ITEM_POS_X, ITEM_POS_Y, ITEM_POS_Z);
+                spear_use_transform(&mut c, f);
             }
             UseAnimation::None
             | UseAnimation::Crossbow
@@ -559,7 +616,7 @@ fn apply_view_lag(c: &mut Chain, f: &HandFrame) {
     c.rot_y(f.view_lag_y);
 }
 
-fn apply_display_transform(c: &mut Chain, t: &ItemTransform, left_hand: bool) {
+pub(super) fn apply_display_transform(c: &mut Chain, t: &ItemTransform, left_hand: bool) {
     let (tx, ry, rz) = if left_hand {
         (-t.translation[0], -t.rotation[1], -t.rotation[2])
     } else {
@@ -803,12 +860,12 @@ const ARM_COLOR: Option<[f32; 4]> = if cfg!(feature = "shader_support") {
     None
 };
 
-fn arm_box_mesh(tex: [f32; 2], origin: [f32; 3], grow: f32) -> Mesh {
+fn arm_box_mesh(tex: [f32; 2], origin: [f32; 3], size: [f32; 3], grow: f32) -> Mesh {
     super::skin::box_mesh(
         super::skin::SKIN_SHEET,
         tex,
         origin,
-        ARM_SIZE,
+        size,
         grow,
         super::skin::MODEL_TO_BLOCKS,
         ARM_COLOR,
@@ -825,19 +882,6 @@ fn slim_origin(left: bool, wide: [f32; 3]) -> [f32; 3] {
     } else {
         [wide[0] + 1.0, wide[1], wide[2]]
     }
-}
-
-#[cfg(feature = "skins")]
-fn slim_arm_box_mesh(tex: [f32; 2], origin: [f32; 3], grow: f32) -> Mesh {
-    super::skin::box_mesh(
-        super::skin::SKIN_SHEET,
-        tex,
-        origin,
-        SLIM_ARM_SIZE,
-        grow,
-        super::skin::MODEL_TO_BLOCKS,
-        ARM_COLOR,
-    )
 }
 
 fn map_quad(min: f32, max: f32, z: f32) -> Mesh {
@@ -1006,11 +1050,14 @@ impl Plugin for HandPlugin {
     fn build(&self, app: &mut App) {
         use crate::renderer::AppState;
         embedded_asset!(app, "hand_projection.wgsl");
+        embedded_asset!(app, "hand_glint.wgsl");
         app.add_plugins(MaterialPlugin::<HandMaterial>::default());
         crate::renderer::reload::touch_on_reload::<HandMaterial>(app);
         app.add_systems(
             Update,
-            setup_hand.run_if(resource_added::<crate::renderer::systems::AssetsReady>),
+            setup_hand
+                .after(super::glint::GlintLoad)
+                .run_if(resource_added::<crate::renderer::systems::AssetsReady>),
         )
         .add_systems(
             Update,
@@ -1114,22 +1161,13 @@ fn setup_hand(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<HandMaterial>>,
+    glint: Option<Res<super::glint::GlintTexture>>,
 ) {
     let Some(skin) = super::skin::load_default_skin(&mut images, "first-person hand") else {
         return;
     };
 
-    let mut cutout = |texture: Option<Handle<Image>>| {
-        materials.add(hand_material(StandardMaterial {
-            base_color: Color::WHITE,
-            base_color_texture: texture,
-            unlit: true,
-            alpha_mode: AlphaMode::Mask(0.1),
-            double_sided: true,
-            cull_mode: None,
-            ..default()
-        }))
-    };
+    let mut cutout = |texture: Option<Handle<Image>>| materials.add(cutout_material(texture));
     let base = cutout(Some(skin.clone()));
     let overlay = cutout(Some(skin));
     let paper = |images: &mut Assets<Image>, name: &str| {
@@ -1137,22 +1175,31 @@ fn setup_hand(
     };
 
     let assets = HandAssets {
-        arm: [RIGHT_ARM, LEFT_ARM].map(|def| meshes.add(arm_box_mesh(def.tex, def.origin, 0.0))),
-        sleeve: [RIGHT_ARM, LEFT_ARM]
-            .map(|def| meshes.add(arm_box_mesh(def.sleeve_tex, def.origin, OVERLAY_SCALE))),
+        arm: [RIGHT_ARM, LEFT_ARM]
+            .map(|def| meshes.add(arm_box_mesh(def.tex, def.origin, ARM_SIZE, 0.0))),
+        sleeve: [RIGHT_ARM, LEFT_ARM].map(|def| {
+            meshes.add(arm_box_mesh(
+                def.sleeve_tex,
+                def.origin,
+                ARM_SIZE,
+                OVERLAY_SCALE,
+            ))
+        }),
         #[cfg(feature = "skins")]
         slim_arm: [(false, RIGHT_ARM), (true, LEFT_ARM)].map(|(left, def)| {
-            meshes.add(slim_arm_box_mesh(
+            meshes.add(arm_box_mesh(
                 def.tex,
                 slim_origin(left, def.origin),
+                SLIM_ARM_SIZE,
                 0.0,
             ))
         }),
         #[cfg(feature = "skins")]
         slim_sleeve: [(false, RIGHT_ARM), (true, LEFT_ARM)].map(|(left, def)| {
-            meshes.add(slim_arm_box_mesh(
+            meshes.add(arm_box_mesh(
                 def.sleeve_tex,
                 slim_origin(left, def.origin),
+                SLIM_ARM_SIZE,
                 OVERLAY_SCALE,
             ))
         }),
@@ -1166,6 +1213,12 @@ fn setup_hand(
         base,
         overlay,
     };
+    let glint_texture = glint.map(|g| g.0.clone());
+    for handle in &assets.item {
+        if let Some(material) = materials.get_mut(handle) {
+            material.extension.glint_texture = glint_texture.clone();
+        }
+    }
     let paper_mesh = meshes.add(map_background_mesh());
     let picture_mesh = meshes.add(map_picture_mesh());
 
@@ -1322,7 +1375,7 @@ fn setup_hand(
 
 fn light_hand(
     lightmap: &crate::renderer::systems::LightmapState,
-    eye: [f32; 3],
+    eye: [f64; 3],
     #[cfg(feature = "builtin_shaders")] daylight: Option<&crate::renderer::terrain::Daylight>,
     assets: &HandAssets,
     materials: &mut Assets<HandMaterial>,
@@ -1369,8 +1422,7 @@ fn light_hand(
 fn sync_hands(
     frame_view: Res<crate::renderer::frame_view::FrameView>,
     view: (
-        Res<crate::renderer::input::FreecamState>,
-        Res<crate::renderer::input::ThirdPersonState>,
+        Res<crate::renderer::input::CameraView>,
         Res<crate::gui::GuiState>,
     ),
     rig: Option<ResMut<HandRig>>,
@@ -1389,7 +1441,7 @@ fn sync_hands(
         (With<HandMapNode>, Without<HandItemNode>),
     >,
 ) {
-    let (freecam, third_person, gui) = view;
+    let (camera_view, gui) = view;
     crate::prof_span!("render:sync_hands");
     #[cfg(feature = "budget")]
     let _t = crate::diag::budget::timed(crate::diag::budget::Slot::Hand);
@@ -1402,8 +1454,7 @@ fn sync_hands(
     let item_used = frame_view.item_used;
     let live_pitch = -frame_view.camera_pitch;
     let live_yaw = wrap_degrees(-frame_view.camera_yaw - 180.0);
-    let feet = frame_view.player_pos;
-    let eye = [feet[0], feet[1] + frame_view.eye_height, feet[2]];
+    let eye = frame_view.tick_eye();
 
     if let Some(hand_assets) = hand_assets.as_deref() {
         #[cfg(feature = "builtin_shaders")]
@@ -1431,17 +1482,18 @@ fn sync_hands(
             .id,
         ) == UseAnimation::Spyglass;
     let view_yaw = wrap_degrees(sample.body_yaw + sample.head_yaw);
-    advance_ticked_state(&mut rig, sample, slot, view_yaw, item_used);
+    advance_ticked_state(
+        &mut rig,
+        sample,
+        slot,
+        view_yaw,
+        item_used,
+        frame_view.hands_busy,
+    );
     let view_lag_x = rig.x_bob.lag(live_pitch, partial);
     let view_lag_y = rig.y_bob.lag(live_yaw, partial);
 
-    if freecam.active
-        || third_person.active
-        || spectator
-        || scoping
-        || sample.sleeping
-        || gui.hide_gui
-    {
+    if camera_view.detached() || spectator || scoping || sample.sleeping || gui.hide_gui {
         for hand in [Hand::Main, Hand::Off] {
             hide(&mut nodes, &rig.hands[hand.index()].nodes);
         }
@@ -1449,6 +1501,7 @@ fn sync_hands(
     }
 
     let selection = which_hands_to_render(sample);
+    let arm_shown = !frame_view.local_body.invisible;
     let map_in_both_hands = rig.hands[Hand::Main.index()].shown.map_id.is_some()
         && rig.hands[Hand::Off.index()].shown.is_empty();
     for hand in [Hand::Off, Hand::Main] {
@@ -1470,9 +1523,11 @@ fn sync_hands(
             } else {
                 0.0
             },
-            inverse_arm_height: rig.hands[index].ramp.inverse_arm_height(partial),
+            inverse_arm_height: item_assets.swap_animation_scale(rig.hands[index].shown.id)
+                * rig.hands[index].ramp.inverse_arm_height(partial),
             using: sample.using_item && sample.using_offhand == (hand == Hand::Off),
-            ticks_using: sample.ticks_using_item,
+            ticks_using: sample.ticks_using_item - 1.0,
+            ticks_since_kinetic_hit: sample.ticks_since_kinetic_hit,
             spin_attack: sample.spin_attack,
             view_lag_x,
             view_lag_y,
@@ -1484,7 +1539,12 @@ fn sync_hands(
             if hand == Hand::Main {
                 let chain = player_arm(&frame);
                 let (arm_transform, _) = chain.transforms();
-                write(&mut nodes, rig.hands[index].nodes.arm, arm_transform, true);
+                write(
+                    &mut nodes,
+                    rig.hands[index].nodes.arm,
+                    arm_transform,
+                    arm_shown,
+                );
             } else {
                 set_visible(&mut nodes, rig.hands[index].nodes.arm, false);
             }
@@ -1504,13 +1564,13 @@ fn sync_hands(
                         &mut nodes,
                         rig.hands[arm.index()].nodes.arm,
                         transform,
-                        true,
+                        arm_shown,
                     );
                 }
                 two_handed_map(&base, frame.attack)
             } else {
                 let (arm_transform, _) = one_handed_map_arm(&frame).transforms();
-                write(&mut nodes, arm_node, arm_transform, true);
+                write(&mut nodes, arm_node, arm_transform, arm_shown);
                 one_handed_map(&frame)
             };
             let (pose_transform, map_transform) = chain.transforms();
@@ -1578,6 +1638,19 @@ fn sync_hands(
                 display
             }
         };
+        if let Some(assets) = hand_assets.as_deref() {
+            let handle = &assets.item[index];
+            let stale = hand_materials.get(handle).and_then(|m| {
+                let glint = frame.item.glint && m.extension.glint_texture.is_some();
+                let want = super::glint::scale(glint, m.base.base_color_texture.as_ref(), &images);
+                (m.extension.glint != want).then_some(want)
+            });
+            if let Some(want) = stale
+                && let Some(material) = hand_materials.get_mut(handle)
+            {
+                material.extension.glint = want;
+            }
+        }
         let Some(display) = display else {
             set_visible(&mut nodes, state.nodes.pose, false);
             continue;
@@ -1667,6 +1740,7 @@ fn advance_ticked_state(
     slot: u8,
     view_yaw: f32,
     item_used: [u32; 2],
+    hands_busy: bool,
 ) {
     let tick = sample.age_ticks.floor();
     let steps = match rig.last_tick {
@@ -1706,7 +1780,7 @@ fn advance_ticked_state(
             if !changed {
                 state.shown = next.clone();
             }
-            let target = if changed { 0.0 } else { 1.0 };
+            let target = if hands_busy || changed { 0.0 } else { 1.0 };
             state.ramp.advance(target);
             if state.ramp.hidden_enough() {
                 state.shown = next.clone();
@@ -1775,6 +1849,7 @@ mod tests {
             inverse_arm_height: 0.0,
             using: false,
             ticks_using: 0.0,
+            ticks_since_kinetic_hit: 0.0,
             spin_attack: false,
             view_lag_x: 0.0,
             view_lag_y: 0.0,
@@ -2080,6 +2155,27 @@ mod tests {
     }
 
     #[test]
+    fn hand_spear_charge_raises_the_spear() {
+        let mut f = frame(Hand::Main, "iron_spear", 0.0);
+        f.item.kinetic = Some(crate::items::kinetic::Kinetic {
+            delay_ticks: 12,
+            dismount_ticks: 50,
+            knockback_ticks: 135,
+            damage_ticks: 225,
+            forward_movement: 0.38,
+            ..Default::default()
+        });
+        f.using = true;
+        let rest = Vec3::new(ITEM_POS_X, ITEM_POS_Y, ITEM_POS_Z);
+        f.ticks_using = 0.0;
+        let start = item_origin(&arm_with_item(&f));
+        assert!((start - rest).length() < 1e-6, "{start}");
+        f.ticks_using = 12.0;
+        let raised = item_origin(&arm_with_item(&f));
+        assert!((raised - rest).length() > 0.05, "{raised}");
+    }
+
+    #[test]
     fn hand_spear_attack_thrusts_and_returns() {
         for attack in [0.0_f32, 1.0] {
             let origin = item_origin(&arm_with_item(&frame(Hand::Main, "iron_spear", attack)));
@@ -2208,7 +2304,7 @@ mod tests {
             ..Default::default()
         };
 
-        advance_ticked_state(&mut rig, &sample, 0, 0.0, [1, 0]);
+        advance_ticked_state(&mut rig, &sample, 0, 0.0, [1, 0], false);
         assert_eq!(rig.hands[0].ramp.height, 0.0);
         assert_eq!(
             rig.hands[0].ramp.old, 1.0,
@@ -2223,7 +2319,7 @@ mod tests {
             age_ticks: 2.0,
             ..Default::default()
         };
-        advance_ticked_state(&mut rig, &sample, 0, 0.0, [1, 0]);
+        advance_ticked_state(&mut rig, &sample, 0, 0.0, [1, 0], false);
         assert!(
             rig.hands[0].ramp.height > 0.0,
             "the ramp must climb back out of view"
@@ -2377,7 +2473,7 @@ mod tests {
 
     #[test]
     fn hand_band_sits_in_front_of_the_world() {
-        let world_near = PerspectiveProjection::default().near;
+        let world_near = crate::renderer::systems::WORLD_NEAR;
         let floor = 1.0 - HAND_DEPTH_BAND;
         let reach = world_near / floor - world_near;
         assert!(reach < 0.002, "{reach}");

@@ -63,6 +63,14 @@ mod seam {
     }
 
     pub(crate) fn sync_options(_lighting: bool, _smooth: bool) {}
+
+    #[cfg(resource_packs)]
+    pub(crate) fn forward_packs() -> bool {
+        false
+    }
+
+    #[cfg(feature = "shader_support")]
+    pub(crate) fn forward_pack_ids(_ids: Option<&crate::renderer::packvertex::BlockIds>) {}
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -89,6 +97,9 @@ mod seam {
         static RECEIVED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         static BLOCKS: RefCell<(Vec<(i32, i32, i32, u32)>, HashMap<(i32, i32, i32), usize>)> =
             RefCell::new((Vec::new(), HashMap::new()));
+        #[cfg(resource_packs)]
+        static SENT_PACKS: RefCell<Vec<std::sync::Arc<crate::platform::assets::archive::OwnedLayer>>> =
+            const { RefCell::new(Vec::new()) };
     }
 
     pub(crate) fn offer_chunk_packet(p: &ChunkPacket) -> bool {
@@ -306,6 +317,38 @@ mod seam {
             return;
         }
         send(&ToWorker::Options { lighting, smooth });
+    }
+
+    #[cfg(resource_packs)]
+    pub(crate) fn forward_packs() -> bool {
+        if !active() {
+            return false;
+        }
+        let layers = crate::platform::assets::archive::mounted();
+        SENT_PACKS.with(|sent| {
+            let mut sent = sent.borrow_mut();
+            let same = sent.len() == layers.len()
+                && sent
+                    .iter()
+                    .zip(&layers)
+                    .all(|(a, b)| std::sync::Arc::ptr_eq(a, b));
+            if same {
+                return;
+            }
+            send(&ToWorker::Packs(layers.clone()));
+            *sent = layers;
+        });
+        true
+    }
+
+    #[cfg(feature = "shader_support")]
+    pub(crate) fn forward_pack_ids(ids: Option<&crate::renderer::packvertex::BlockIds>) {
+        if !active() {
+            return;
+        }
+        send(&ToWorker::PackIds(
+            ids.map(|ids| ids.encode()).unwrap_or_default(),
+        ));
     }
 }
 

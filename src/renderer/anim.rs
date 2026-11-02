@@ -119,7 +119,11 @@ pub fn use_animation(id: &str) -> UseAnimation {
     }
 }
 
-pub type Armor = [Option<&'static str>; 4];
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Armor {
+    pub items: [Option<&'static str>; 4],
+    pub foil: [bool; 4],
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HeldItem {
@@ -129,6 +133,29 @@ pub struct HeldItem {
     pub tint: Option<u32>,
     pub map_id: Option<i32>,
     pub layers: Option<Box<[crate::blockentities::banner::BannerLayer]>>,
+    pub glint: bool,
+    pub death_protection: bool,
+    pub kinetic: Option<crate::items::kinetic::Kinetic>,
+    pub swing_ticks: u8,
+}
+
+impl AnimSample {
+    pub fn charging(&self) -> [Option<crate::items::kinetic::Kinetic>; 2] {
+        if !self.using_item {
+            return [None; 2];
+        }
+        let item = if self.using_offhand {
+            &self.off_hand
+        } else {
+            &self.main_hand
+        };
+        let left = self.using_offhand != self.main_arm_left;
+        if left {
+            [None, item.kinetic]
+        } else {
+            [item.kinetic, None]
+        }
+    }
 }
 
 impl HeldItem {
@@ -227,11 +254,14 @@ pub struct AnimSample {
     )]
     pub sprinting: bool,
     pub fall_flying: bool,
+    pub fall_flying_scale: f32,
+    pub flying_y_rot: Option<f32>,
+    pub speed_value: f32,
     pub visually_swimming: bool,
     pub spin_attack: bool,
     pub passenger: bool,
     pub sleeping: bool,
-    pub bed_orientation: Option<crate::direction::Direction>,
+    pub bed_orientation: Option<crate::blocks::direction::Direction>,
     pub using_item: bool,
     pub main_arm_left: bool,
     pub ticks_using_item: f32,
@@ -241,6 +271,7 @@ pub struct AnimSample {
     pub off_hand: HeldItem,
     pub armor: Armor,
     pub using_offhand: bool,
+    pub ticks_since_kinetic_hit: f32,
     #[cfg(feature = "skins")]
     pub cape: [f32; 3],
     pub elytra: [f32; 3],
@@ -258,7 +289,7 @@ pub struct AnimInput {
     pub visually_swimming: bool,
     pub spin_attack: bool,
     pub sleeping: bool,
-    pub bed_orientation: Option<crate::direction::Direction>,
+    pub bed_orientation: Option<crate::blocks::direction::Direction>,
     pub using_item: bool,
     pub using_offhand: bool,
     pub passenger: bool,
@@ -278,7 +309,7 @@ pub struct HumanoidAnim {
     swim: SwimAmount,
     ticks: u32,
     use_ticks: u32,
-    use_ticks_old: u32,
+    kinetic_hit_at: Option<u32>,
 
     #[cfg(feature = "skins")]
     cloak: [f64; 3],
@@ -292,8 +323,9 @@ pub struct HumanoidAnim {
     walk_dist: f32,
     #[cfg(feature = "skins")]
     walk_dist_old: f32,
-    #[cfg(feature = "skins")]
     fall_fly_ticks: u32,
+    step: [f64; 3],
+    step_old: [f64; 3],
     elytra: [f32; 3],
     elytra_old: [f32; 3],
 
@@ -304,6 +336,10 @@ pub struct HumanoidAnim {
 impl HumanoidAnim {
     pub fn use_ticks(&self) -> u32 {
         self.use_ticks
+    }
+
+    pub fn held(&self) -> [&HeldItem; 2] {
+        [&self.flags.main_hand, &self.flags.off_hand]
     }
 
     pub fn tick(&mut self, input: AnimInput) {
@@ -338,6 +374,12 @@ impl HumanoidAnim {
         self.core.step_interpolation();
 
         let alive = self.flags.health > 0.0;
+        let swing_item = if self.core.swing_left() == self.flags.main_arm_left {
+            &self.flags.main_hand
+        } else {
+            &self.flags.off_hand
+        };
+        self.core.set_swing_duration(swing_item.swing_ticks);
         self.core.tick_counters(!alive);
         self.swim.tick(self.flags.visually_swimming);
 
@@ -373,12 +415,15 @@ impl HumanoidAnim {
                 self.bob_old = self.bob;
                 self.bob += (target - self.bob) * 0.4;
             }
-            self.fall_fly_ticks = if self.flags.fall_flying {
-                self.fall_fly_ticks.saturating_add(1)
-            } else {
-                0
-            };
         }
+
+        self.fall_fly_ticks = if self.flags.fall_flying {
+            self.fall_fly_ticks.saturating_add(1)
+        } else {
+            0
+        };
+        self.step_old = self.step;
+        self.step = step;
 
         self.elytra_old = self.elytra;
         crate::entities::models::humanoid::elytra::tick_angles(
@@ -388,7 +433,6 @@ impl HumanoidAnim {
             step,
         );
 
-        self.use_ticks_old = self.use_ticks;
         self.use_ticks = if self.flags.using_item {
             self.use_ticks + 1
         } else {
@@ -415,6 +459,24 @@ impl HumanoidAnim {
         self.core.swing(left_arm);
     }
 
+    pub fn kinetic_hit(&mut self) -> Option<azalea_registry::builtin::SoundEvent> {
+        if self.kinetic_hit_at.is_some_and(|at| {
+            self.ticks.wrapping_sub(at) <= crate::items::kinetic::HIT_FEEDBACK_TICKS
+        }) {
+            return None;
+        }
+        self.kinetic_hit_at = Some(self.ticks);
+        if !self.flags.using_item {
+            return None;
+        }
+        let item = if self.flags.using_offhand {
+            &self.flags.off_hand
+        } else {
+            &self.flags.main_hand
+        };
+        item.kinetic.and_then(|k| k.hit_sound)
+    }
+
     pub fn hurt(&mut self) {
         self.core.hurt();
     }
@@ -423,7 +485,7 @@ impl HumanoidAnim {
         self.core.damage();
     }
 
-    pub fn position(&self, partial: f32) -> [f32; 3] {
+    pub fn position(&self, partial: f32) -> [f64; 3] {
         self.core.position(partial.clamp(0.0, 1.0))
     }
 
@@ -454,8 +516,7 @@ impl HumanoidAnim {
         let body_yaw = rot_lerp(t, c.body_rot_old, c.body_rot) * DEG_TO_RAD;
         let (forward_x, forward_z) = (body_yaw.sin() as f64, -body_yaw.cos() as f64);
 
-        let fly = self.fall_fly_ticks as f32 + t;
-        let fly_scale = (fly * fly / 100.0).clamp(0.0, 1.0);
+        let fly_scale = self.fall_flying_scale(t);
 
         let mut flap = ((dy * 10.0) as f32).clamp(-6.0, 32.0);
         let lean = ((dx * forward_x + dz * forward_z) as f32 * 100.0 * (1.0 - fly_scale))
@@ -466,6 +527,49 @@ impl HumanoidAnim {
         let bob = self.bob_old + (self.bob - self.bob_old) * t;
         flap += (walk * 6.0).sin() * 32.0 * bob;
         [flap, lean, lean2]
+    }
+
+    fn fall_flying_scale(&self, t: f32) -> f32 {
+        let fly = self.fall_fly_ticks as f32 + t;
+        (fly * fly / 100.0).clamp(0.0, 1.0)
+    }
+
+    fn flying_y_rot(&self, t: f32) -> Option<f32> {
+        const MIN_HORIZONTAL_SQR: f64 = 9.999_999_747_378_752e-6;
+
+        let c = &self.core;
+        let (yaw, pitch) = if self.flags.interpolated {
+            (
+                rot_lerp(t, c.head_rot_old, c.head_rot),
+                crate::util::mth::lerp(t, c.x_rot_old, c.x_rot),
+            )
+        } else {
+            (c.head_rot, c.x_rot)
+        };
+        let look = azalea::entity::view_vector(azalea::entity::LookDirection::new(yaw, pitch));
+        let movement: [f64; 3] =
+            std::array::from_fn(|i| crate::util::mth::lerp_f64(t, self.step_old[i], self.step[i]));
+
+        let move_sqr = movement[0] * movement[0] + movement[2] * movement[2];
+        let look_sqr = look.x * look.x + look.z * look.z;
+        if move_sqr <= MIN_HORIZONTAL_SQR || look_sqr <= MIN_HORIZONTAL_SQR {
+            return None;
+        }
+        let (move_len, look_len) = (move_sqr.sqrt(), look_sqr.sqrt());
+        let dot = (movement[0] / move_len) * (look.x / look_len)
+            + (movement[2] / move_len) * (look.z / look_len);
+        let sign = movement[0] * look.z - movement[2] * look.x;
+        let sign = if sign == 0.0 { 0.0 } else { sign.signum() };
+        Some((sign * dot.abs().min(1.0).acos()) as f32)
+    }
+
+    fn speed_value(&self) -> f32 {
+        if !self.flags.fall_flying {
+            return 1.0;
+        }
+        let [x, y, z] = self.step;
+        let ratio = (x * x + y * y + z * z) as f32 / 0.2;
+        (ratio * ratio * ratio).max(1.0)
     }
 
     pub fn sample(&self, partial: f32) -> AnimSample {
@@ -505,6 +609,13 @@ impl HumanoidAnim {
             crouching: self.flags.crouching,
             sprinting: self.flags.sprinting,
             fall_flying: self.flags.fall_flying,
+            fall_flying_scale: self.fall_flying_scale(t),
+            flying_y_rot: if self.flags.fall_flying {
+                self.flying_y_rot(t)
+            } else {
+                None
+            },
+            speed_value: self.speed_value(),
             visually_swimming: self.flags.visually_swimming,
             spin_attack: self.flags.spin_attack,
             passenger: self.flags.passenger,
@@ -512,14 +623,20 @@ impl HumanoidAnim {
             bed_orientation: self.flags.bed_orientation,
             using_item: self.flags.using_item,
             main_arm_left: self.flags.main_arm_left,
-            ticks_using_item: self.use_ticks_old as f32
-                + (self.use_ticks as f32 - self.use_ticks_old as f32) * t,
+            ticks_using_item: if self.flags.using_item {
+                self.use_ticks as f32 + t
+            } else {
+                0.0
+            },
             right_arm_pose: right,
             left_arm_pose: left,
             main_hand: self.flags.main_hand.clone(),
             off_hand: self.flags.off_hand.clone(),
             armor: self.flags.armor,
             using_offhand: self.flags.using_offhand,
+            ticks_since_kinetic_hit: self
+                .kinetic_hit_at
+                .map_or(0.0, |at| self.ticks.wrapping_sub(at) as f32 + t),
         }
     }
 }
@@ -810,7 +927,8 @@ mod tests {
         for _ in 0..5 {
             a.tick(i.clone());
         }
-        assert_eq!(a.sample(1.0).ticks_using_item, 5.0);
+        assert_eq!(a.sample(0.0).ticks_using_item, 5.0);
+        assert_eq!(a.sample(0.5).ticks_using_item, 5.5);
         i.using_item = false;
         a.tick(i);
         assert_eq!(a.sample(1.0).ticks_using_item, 0.0);

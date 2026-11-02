@@ -4,26 +4,16 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::aquatic::bee;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Bee,
-        RenderSpec::new("bee", bee::adult_layer, texture, bee::setup_anim).with_visible(is_adult),
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Bee],
+        RenderSpec::new("bee", bee::adult_layer, texture, bee::setup_anim),
+        RenderSpec::new("bee_baby", bee::baby_layer, texture, bee::setup_anim),
     );
-    registry.add(
-        EntityKind::Bee,
-        RenderSpec::new("bee_baby", bee::baby_layer, texture, bee::setup_anim)
-            .with_visible(is_baby),
-    );
-}
-
-fn is_adult(st: &EntityState) -> bool {
-    !st.extras.is_baby
-}
-
-fn is_baby(st: &EntityState) -> bool {
-    st.extras.is_baby
 }
 
 fn texture(st: &EntityState) -> TexturePath {

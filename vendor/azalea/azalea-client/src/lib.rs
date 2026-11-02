@@ -46,7 +46,7 @@ pub async fn sleep(duration: std::time::Duration) {
 pub async fn sleep(duration: std::time::Duration) {
     use wasm_bindgen::{JsCast, JsValue};
 
-    let ms = duration.as_millis().min(i32::MAX as u128) as f64;
+    let ms = duration.as_micros().div_ceil(1000).min(i32::MAX as u128) as f64;
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         let global = js_sys::global();
         match js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout")) {

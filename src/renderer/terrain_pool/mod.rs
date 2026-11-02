@@ -80,9 +80,15 @@ impl SlotMeta {
         (self.faces[k / 2] >> ((k % 2) * 16)) & 0xFFFF
     }
 
-    pub fn world_box(&self) -> ([f32; 3], [f32; 3]) {
-        let at = |local: [f32; 3]| [0, 1, 2].map(|a| self.origin[a] as f32 + local[a]);
-        (at(self.min), at(self.max))
+    pub fn render_box(&self, render_origin: IVec3) -> ([f32; 3], [f32; 3]) {
+        (
+            self.render_box_of(self.min, render_origin),
+            self.render_box_of(self.max, render_origin),
+        )
+    }
+
+    pub fn render_box_of(&self, local: [f32; 3], render_origin: IVec3) -> [f32; 3] {
+        [0, 1, 2].map(|a| (self.origin[a] - render_origin[a]) as f32 + local[a])
     }
 }
 

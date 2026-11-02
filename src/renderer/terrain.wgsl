@@ -40,6 +40,10 @@ struct TerrainParams {
     misc: vec4<f32>,
     fog_color: vec4<f32>,
     fog_ramps: vec4<f32>,
+    origin: vec4<i32>,
+    wave_phase: vec4<f32>,
+    wind_plant_phase: vec4<f32>,
+    wind_leaf_phase: vec4<f32>,
 }
 @group(2) @binding(4) var<uniform> params: TerrainParams;
 
@@ -54,9 +58,9 @@ fn section_origin(instance_index: u32, slot_lane: i32) -> vec3<f32> {
 #ifdef META_TEXTURE
     let slot = slot_lane & 0xFFFF;
     let texel = textureLoad(origins, vec2<i32>(slot % ORIGIN_ROW, slot / ORIGIN_ROW), 0);
-    return vec3<f32>(texel.xyz);
+    return vec3<f32>(texel.xyz - params.origin.xyz);
 #else
-    return vec3<f32>(metas[instance_index].origin);
+    return vec3<f32>(metas[instance_index].origin - params.origin.xyz);
 #endif
 }
 
@@ -137,15 +141,19 @@ const WIND_SPEED: f32 = 1.0;
 const WIND_FREQ_PLANT: f32 = 0.42;
 const WIND_FREQ_LEAF: f32 = 0.05;
 
-fn wind_offset(world_position: vec3<f32>, t: f32, freq: f32) -> vec3<f32> {
+fn wind_offset(world_position: vec3<f32>, t: f32, freq: f32, phase: vec3<f32>) -> vec3<f32> {
     let p = world_position * freq;
-    let sway = sin(p.x + p.z + t * 1.7) + 0.5 * sin(p.x * 1.7 - p.z * 1.1 + t * 2.6);
-    let lift = cos(p.z * 0.9 - p.x * 0.4 + t * 1.3);
+    let sway = sin(p.x + p.z + phase.x + t * 1.7) + 0.5 * sin(p.x * 1.7 - p.z * 1.1 + phase.y + t * 2.6);
+    let lift = cos(p.z * 0.9 - p.x * 0.4 + phase.z + t * 1.3);
     return vec3(sway, lift * 0.25, lift * 0.8);
 }
 
 fn wind_frequency(material: f32) -> f32 {
     return select(WIND_FREQ_PLANT, WIND_FREQ_LEAF, material == MATERIAL_LEAF);
+}
+
+fn wind_phase(material: f32) -> vec3<f32> {
+    return select(params.wind_plant_phase.xyz, params.wind_leaf_phase.xyz, material == MATERIAL_LEAF);
 }
 
 fn wind_weight(material: f32, anchor: f32) -> f32 {
@@ -159,16 +167,18 @@ fn wind_weight(material: f32, anchor: f32) -> f32 {
 }
 
 fn wave_height(xz: vec2<f32>, t: f32) -> f32 {
-    let a = sin(xz.x * 0.55 + t * 1.30) + sin(xz.y * 0.42 - t * 0.90);
-    let b = sin((xz.x + xz.y) * 0.29 + t * 0.65);
+    let ph = params.wave_phase.xyz;
+    let a = sin(xz.x * 0.55 + ph.x + t * 1.30) + sin(xz.y * 0.42 + ph.y - t * 0.90);
+    let b = sin((xz.x + xz.y) * 0.29 + ph.z + t * 0.65);
     return (a * 0.5 + b) * 0.028;
 }
 
 fn wave_surface_normal(xz: vec2<f32>, t: f32) -> vec3<f32> {
-    let dx = (cos(xz.x * 0.55 + t * 1.30) * 0.55 * 0.5
-        + cos((xz.x + xz.y) * 0.29 + t * 0.65) * 0.29) * 0.028;
-    let dz = (cos(xz.y * 0.42 - t * 0.90) * 0.42 * 0.5
-        + cos((xz.x + xz.y) * 0.29 + t * 0.65) * 0.29) * 0.028;
+    let ph = params.wave_phase.xyz;
+    let dx = (cos(xz.x * 0.55 + ph.x + t * 1.30) * 0.55 * 0.5
+        + cos((xz.x + xz.y) * 0.29 + ph.z + t * 0.65) * 0.29) * 0.028;
+    let dz = (cos(xz.y * 0.42 + ph.y - t * 0.90) * 0.42 * 0.5
+        + cos((xz.x + xz.y) * 0.29 + ph.z + t * 0.65) * 0.29) * 0.028;
     return normalize(vec3(-dx, 1.0, -dz));
 }
 #endif
@@ -198,6 +208,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
                 world_position.xyz,
                 globals.time * WIND_SPEED,
                 wind_frequency(material),
+                wind_phase(material),
             );
             world_position = vec4(
                 world_position.xyz + gust * weight,

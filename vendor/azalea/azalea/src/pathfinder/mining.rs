@@ -76,6 +76,11 @@ impl MiningCache {
         }
     }
 
+    #[inline]
+    pub fn can_mine(&self) -> bool {
+        self.inventory_menu.is_some()
+    }
+
     pub fn cost_for(&self, block: BlockState) -> f32 {
         let Some(inventory_menu) = &self.inventory_menu else {
             return f32::INFINITY;

@@ -87,10 +87,9 @@ pub(crate) fn sync_flames(
     mut commands: Commands,
     view: Res<crate::renderer::FrameView>,
     shared: Res<crate::renderer::systems::Shared>,
-    third_person: Res<crate::renderer::input::ThirdPersonState>,
-    freecam: Res<crate::renderer::input::FreecamState>,
+    camera_view: Res<crate::renderer::input::CameraView>,
     lightmap: Res<crate::renderer::systems::LightmapState>,
-    camera_q: Query<&GlobalTransform, With<crate::renderer::systems::WorldCamera>>,
+    origin: Res<crate::renderer::RenderOrigin>,
     mut flames: ResMut<FlameAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
@@ -105,11 +104,8 @@ pub(crate) fn sync_flames(
         meshes: flame_meshes_by_key,
         nodes,
     } = &mut *flames;
-    let camera = camera_q
-        .iter()
-        .next()
-        .map(|t| CameraView::new(t.rotation(), t.translation()))
-        .unwrap_or_default();
+    let origin = *origin;
+    let camera = CameraView::of(&view);
 
     let partial = view.partial;
     burning.clear();
@@ -125,19 +121,19 @@ pub(crate) fn sync_flames(
                 .map(|st| {
                     let (_, sky) = super::entity_levels(&light, &st);
                     Burning {
-                        pos: Vec3::from(st.pos) + Vec3::from(st.extras.render_offset),
+                        pos: origin.to_render_array(st.pos) + Vec3::from(st.extras.render_offset),
                         bounding_box: [st.bounding_box_width, st.bounding_box_height],
                         light: cell_light(lm, FIRE_BLOCK_LIGHT, sky),
                     }
                 }),
         );
     }
-    let player = |feet: [f32; 3],
+    let player = |feet: [f64; 3],
                   sample: &crate::renderer::anim::AnimSample,
                   body: &crate::session::PlayerBody| {
         let eye = crate::renderer::player_model::player_eye(feet, sample, body.scale);
         Burning {
-            pos: Vec3::from(feet),
+            pos: origin.to_render_array(feet),
             bounding_box: body.bounding_box,
             light: entity_light(&lightmap.current, eye, true),
         }
@@ -152,7 +148,7 @@ pub(crate) fn sync_flames(
                 .map(|p| player(p.anim.position(partial), &p.anim.sample(partial), &p.body)),
         );
     }
-    if view.local_body.on_fire && (third_person.active || freecam.active) {
+    if view.local_body.on_fire && camera_view.detached() {
         burning.push(player(view.player_lerp, &view.local, &view.local_body));
     }
     burning.retain(|b| flame_size(b.bounding_box).is_some());
@@ -340,7 +336,10 @@ mod tests {
 
     #[test]
     fn the_flame_turns_with_the_camera_yaw_only() {
-        let camera = CameraView::new(Quat::from_euler(EulerRot::YXZ, 0.7, -0.4, 0.0), Vec3::ZERO);
+        let camera = CameraView::of(&crate::renderer::FrameView {
+            camera_rotation: Quat::from_euler(EulerRot::YXZ, 0.7, -0.4, 0.0),
+            ..Default::default()
+        });
         let turned = camera.yaw_rotation();
         let (yaw, pitch, roll) = turned.to_euler(EulerRot::YXZ);
         assert!((yaw - 0.7).abs() < 1e-5, "{yaw}");

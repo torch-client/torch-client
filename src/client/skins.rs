@@ -121,6 +121,12 @@ pub(crate) fn remember(uuid: u128, refs: SkinRef) {
 }
 
 pub(crate) fn of(uuid: u128) -> SkinRef {
+    #[cfg(eagler_skins)]
+    if let Some(refs) =
+        crate::gui::skinpick::worn_by(uuid).or_else(|| crate::eagler::skins::worn_by(uuid))
+    {
+        return refs;
+    }
     profiles()
         .lock()
         .unwrap()
@@ -131,6 +137,8 @@ pub(crate) fn of(uuid: u128) -> SkinRef {
 
 pub(crate) fn reset() {
     profiles().lock().unwrap().clear();
+    #[cfg(eagler_skins)]
+    crate::eagler::skins::forget();
 }
 
 static REQUESTED: OnceLock<Mutex<std::collections::HashSet<Arc<str>>>> = OnceLock::new();
@@ -154,6 +162,11 @@ pub(crate) fn take_ready() -> Vec<(Arc<str>, Kind, RgbaImage)> {
         return Vec::new();
     }
     std::mem::take(&mut *ready)
+}
+
+#[cfg(eagler_skins)]
+pub(crate) fn provide(url: Arc<str>, image: RgbaImage) {
+    READY.lock().unwrap().push((url, Kind::Body, image));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -255,7 +268,7 @@ fn cache_path(url: &str) -> Option<std::path::PathBuf> {
     )
 }
 
-fn process_legacy_skin(mut image: RgbaImage, url: &str) -> Option<RgbaImage> {
+pub(crate) fn process_legacy_skin(mut image: RgbaImage, url: &str) -> Option<RgbaImage> {
     let (w, h) = image.dimensions();
     if w != SKIN_W || (h != LEGACY_SKIN_H && h != SKIN_H) {
         log_warn!("skins", "{url}: discarding {w}x{h} skin");

@@ -30,6 +30,12 @@ use crate::{
     get_block_pos_below_that_affects_movement, handle_relative_friction_and_calculate_movement,
 };
 
+static FULL_WATER_EFFICIENCY: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
+
+pub fn set_full_water_efficiency_hook(hook: fn() -> bool) -> Result<(), fn() -> bool> {
+    FULL_WATER_EFFICIENCY.set(hook)
+}
+
 #[allow(clippy::type_complexity)]
 pub fn travel(
     mut query: Query<
@@ -93,11 +99,13 @@ pub fn travel(
             source_entity: entity,
             aabb_query: &aabb_query,
             collidable_entity_query: &collidable_entity_query,
+            vehicle_collisions: None,
             physics_state,
             attributes,
             abilities,
             active_effects,
             powder_snow_walkable: wearing_leather_boots(inventory),
+            stands_on_lava: false,
             fall_flying: fall_flying.is_some_and(|flying| **flying),
             direction: *direction,
             sprinting,
@@ -122,7 +130,12 @@ fn wearing_leather_boots(inventory: Option<&Inventory>) -> bool {
 }
 
 pub fn travel_ctx(ctx: &mut MoveCtx) {
-    if ctx.physics.is_in_water() || ctx.physics.is_in_lava() {
+    let standing_on_fluid = ctx.stands_on_lava
+        && ctx
+            .world
+            .get_fluid_state(BlockPos::from(*ctx.position))
+            .is_some_and(|fluid| fluid.kind == FluidKind::Lava);
+    if (ctx.physics.is_in_water() || ctx.physics.is_in_lava()) && !standing_on_fluid {
         travel_in_fluid(ctx);
     } else if ctx.fall_flying {
         travel_fall_flying(ctx);
@@ -257,6 +270,9 @@ fn travel_in_fluid(ctx: &mut MoveCtx) {
             ctx.attributes.water_movement_efficiency.calculate() as f32;
         if !ctx.physics.on_ground() {
             water_efficiency_modifier *= 0.5;
+        }
+        if ctx.physics_state.is_some() && FULL_WATER_EFFICIENCY.get().is_some_and(|f| f()) {
+            water_efficiency_modifier = 1.0;
         }
 
         if water_efficiency_modifier > 0. {

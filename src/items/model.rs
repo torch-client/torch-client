@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::json::Json;
-use crate::direction::Direction;
+use crate::blocks::direction::Direction;
 
 pub const DOWN: usize = Direction::Down.index();
 pub const UP: usize = Direction::Up.index();

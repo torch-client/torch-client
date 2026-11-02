@@ -45,7 +45,8 @@ pub fn register(registry: &mut Registry) {
             saddle_texture,
             quadruped::setup_anim,
         )
-        .with_visible(|st| is_adult(st) && st.extras.saddled),
+        .with_visible(|st| is_adult(st) && st.extras.saddled)
+        .ignoring_invisibility(),
     );
 }
 

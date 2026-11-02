@@ -50,6 +50,7 @@ pub struct CullView {
     pub flags: u32,
     pub plane_count: u32,
     pub pad: [u32; 2],
+    pub origin: [i32; 4],
 }
 
 pub const VIEW_WATER: u32 = 1;
@@ -86,6 +87,21 @@ impl CullShape {
     }
 
     pub fn keeps(&self, lo: [f32; 3], hi: [f32; 3]) -> bool {
+        self.keeps_measured(lo, hi, lo, hi)
+    }
+
+    #[cfg(feature = "render_lod")]
+    pub fn keeps_section(&self, lo: [f32; 3], hi: [f32; 3], section: [f32; 3]) -> bool {
+        self.keeps_measured(lo, hi, section, section.map(|v| v + 16.0))
+    }
+
+    fn keeps_measured(
+        &self,
+        lo: [f32; 3],
+        hi: [f32; 3],
+        fog_lo: [f32; 3],
+        fog_hi: [f32; 3],
+    ) -> bool {
         if let Some([min, max]) = self.within
             && (0..3).any(|a| hi[a] < min[a] || lo[a] > max[a])
         {
@@ -93,7 +109,7 @@ impl CullShape {
         }
         if let Some([x, y, z, far]) = self.fog {
             let eye = [x, y, z];
-            let d = [0, 1, 2].map(|a| eye[a].max(lo[a]).min(hi[a]) - eye[a]);
+            let d = [0, 1, 2].map(|a| eye[a].max(fog_lo[a]).min(fog_hi[a]) - eye[a]);
             if (d[0] * d[0] + d[2] * d[2]).sqrt().max(d[1].abs()) > far {
                 return false;
             }
@@ -109,9 +125,11 @@ impl CullShape {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn view(
         &self,
         eye: Vec3,
+        origin: IVec3,
         slot_cap: u32,
         view_index: u32,
         pool_count: u32,
@@ -147,6 +165,7 @@ impl CullShape {
                 | if self.fog.is_some() { VIEW_FOG } else { 0 },
             plane_count: self.plane_count as u32,
             pad: [0; 2],
+            origin: origin.extend(0).to_array(),
         }
     }
 
@@ -165,6 +184,10 @@ impl CullShape {
 }
 
 fn fog_cull(fog: Option<&DistanceFog>, eye: Vec3) -> Option<[f32; 4]> {
+    #[cfg(feature = "render_lod")]
+    if fog.is_some() {
+        return Some([eye.x, eye.y, eye.z, crate::client::lod::real_radius()]);
+    }
     let fog = fog?;
     let FogFalloff::Linear { end, .. } = fog.falloff else {
         return None;
@@ -281,7 +304,13 @@ impl CullBuffers {
             && self.slot_cap >= slot_cap
     }
 
-    fn write_water(&mut self, queue: &RenderQueue, pools: &TerrainPools, view: &AssignedView) {
+    fn write_water(
+        &mut self,
+        queue: &RenderQueue,
+        pools: &TerrainPools,
+        view: &AssignedView,
+        origin: IVec3,
+    ) {
         let occluded = view.flags & VIEW_UNOCCLUDED == 0;
         let region_commands = self.region_commands();
         let cache = &mut self.water_cache[view.slot as usize];
@@ -314,7 +343,7 @@ impl CullBuffers {
                     continue;
                 }
                 let meta = &pools.meta_cpu[slot as usize];
-                let (lo, hi) = meta.world_box();
+                let (lo, hi) = meta.render_box(origin);
                 let centre = (Vec3::from(lo) + Vec3::from(hi)) * 0.5;
                 cache
                     .order
@@ -336,8 +365,14 @@ impl CullBuffers {
             self.water_args.clear();
             for &(_, _, slot) in run {
                 let meta = &pools.meta_cpu[slot as usize];
-                let (lo, hi) = meta.world_box();
-                if !view.shape.keeps(lo, hi) {
+                let (lo, hi) = meta.render_box(origin);
+                #[cfg(feature = "render_lod")]
+                let keep = view
+                    .shape
+                    .keeps_section(lo, hi, meta.render_box_of([0.0; 3], origin));
+                #[cfg(not(feature = "render_lod"))]
+                let keep = view.shape.keeps(lo, hi);
+                if !keep {
                     continue;
                 }
                 self.water_args.push([
@@ -663,7 +698,11 @@ pub fn finish(app: &mut App) {
         layout: vec![layout.clone()],
         push_constant_ranges: vec![],
         shader,
-        shader_defs: vec![],
+        shader_defs: if cfg!(feature = "render_lod") {
+            vec!["LOD_REAL_CUT".into()]
+        } else {
+            vec![]
+        },
         entry_point: Some("main".into()),
         zero_initialize_workgroup_memory: false,
     });
@@ -689,9 +728,11 @@ pub fn prepare_cull(
     #[cfg(feature = "builtin_shaders")] lights: Query<(&ExtractedView, &LightEntity)>,
     #[cfg(feature = "shader_support")] pack_view: Option<Res<PackCullView>>,
     takeover: Option<Res<super::draw::PackTakeover>>,
+    origin: Res<crate::renderer::RenderOrigin>,
     mut assigned: Local<Vec<AssignedView>>,
 ) {
     let pack_draws = takeover.is_some_and(|t| t.0);
+    let origin = origin.block();
     #[cfg(feature = "builtin_shaders")]
     let cascades = !pack_draws;
     views.index.clear();
@@ -774,6 +815,7 @@ pub fn prepare_cull(
         for view in assigned.iter() {
             let cull_view = view.shape.view(
                 view.eye,
+                origin,
                 cull.slot_cap,
                 view.slot,
                 cull.pool_count,
@@ -791,7 +833,7 @@ pub fn prepare_cull(
 
         for view in assigned.iter() {
             if view.flags & VIEW_WATER != 0 {
-                cull.write_water(&queue, &pools, view);
+                cull.write_water(&queue, &pools, view, origin);
             } else {
                 cull.forget_water(view.slot);
             }
@@ -821,8 +863,12 @@ pub fn prepare_cull(
             if flags & VIEW_UNOCCLUDED == 0 && !pools.is_visible(index as u32) {
                 continue;
             }
-            let (lo, hi) = meta.world_box();
-            if !shape.keeps(lo, hi) {
+            let (lo, hi) = meta.render_box(origin);
+            #[cfg(feature = "render_lod")]
+            let keep = shape.keeps_section(lo, hi, meta.render_box_of([0.0; 3], origin));
+            #[cfg(not(feature = "render_lod"))]
+            let keep = shape.keeps(lo, hi);
+            if !keep {
                 continue;
             }
             if flags == CAMERA_FLAGS {
@@ -1023,6 +1069,7 @@ mod tests {
             offset("plane_count"),
             std::mem::offset_of!(CullView, plane_count)
         );
+        assert_eq!(offset("origin"), std::mem::offset_of!(CullView, origin));
     }
 
     #[test]

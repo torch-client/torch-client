@@ -1,86 +1,23 @@
 use azalea_core::direction::Direction;
 
-pub const ALL: [Direction; 6] = [
-    Direction::Down,
-    Direction::Up,
-    Direction::North,
-    Direction::South,
-    Direction::West,
-    Direction::East,
-];
+use crate::blocks::direction::Direction as Face;
 
 pub fn from_3d_data_value(value: i32) -> Direction {
-    ALL[(value % 6).unsigned_abs() as usize]
+    Face::from_3d_data_value(value).into()
 }
 
 pub fn name(direction: Direction) -> &'static str {
-    match direction {
-        Direction::Down => "down",
-        Direction::Up => "up",
-        Direction::North => "north",
-        Direction::South => "south",
-        Direction::West => "west",
-        Direction::East => "east",
-    }
+    Face::from(direction).name()
 }
 
 pub fn from_name(name: &str) -> Option<Direction> {
-    Some(match name {
-        "down" => Direction::Down,
-        "up" => Direction::Up,
-        "north" => Direction::North,
-        "south" => Direction::South,
-        "west" => Direction::West,
-        "east" => Direction::East,
-        _ => return None,
-    })
+    Face::from_name(name).map(Direction::from)
 }
 
 pub fn clockwise(direction: Direction) -> Direction {
-    match direction {
-        Direction::North => Direction::East,
-        Direction::East => Direction::South,
-        Direction::South => Direction::West,
-        Direction::West => Direction::North,
-        other => other,
-    }
+    Face::from(direction).clockwise().into()
 }
 
 pub fn counter_clockwise(direction: Direction) -> Direction {
-    match direction {
-        Direction::North => Direction::West,
-        Direction::West => Direction::South,
-        Direction::South => Direction::East,
-        Direction::East => Direction::North,
-        other => other,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_round_trip() {
-        for direction in ALL {
-            assert_eq!(from_name(name(direction)), Some(direction));
-        }
-        assert_eq!(from_name("sideways"), None);
-    }
-
-    #[test]
-    fn the_3d_data_value_wraps_both_ways() {
-        assert_eq!(from_3d_data_value(5), Direction::East);
-        assert_eq!(from_3d_data_value(8), Direction::North);
-        assert_eq!(from_3d_data_value(-7), Direction::Up);
-    }
-
-    #[test]
-    fn the_two_rotations_undo_each_other() {
-        for direction in ALL {
-            assert_eq!(counter_clockwise(clockwise(direction)), direction);
-        }
-        assert_eq!(clockwise(Direction::North), Direction::East);
-        assert_eq!(counter_clockwise(Direction::North), Direction::West);
-    }
+    Face::from(direction).counter_clockwise().into()
 }

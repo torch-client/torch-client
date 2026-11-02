@@ -20,6 +20,15 @@ impl JavaRandom {
         }
     }
 
+    pub fn time_seeded() -> JavaRandom {
+        use crate::platform::time::{SystemTime, UNIX_EPOCH};
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        JavaRandom::new(seed)
+    }
+
     fn next(&mut self, bits: u32) -> i32 {
         self.seed = self.seed.wrapping_mul(MULTIPLIER).wrapping_add(ADDEND) & MASK;
         (self.seed >> (48 - bits)) as i32

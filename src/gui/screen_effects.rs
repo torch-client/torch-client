@@ -17,11 +17,16 @@ const VIEW_BLOCK_HEIGHT_SPREAD: f64 = 0.1;
 const NAUSEA_TINT: [f32; 3] = [0.2, 0.4, 0.2];
 const NAUSEA_SIZE: (f32, f32) = (2.0, 1.0);
 
+const PORTAL_FRAMES: u64 = 32;
+const PORTAL_MIN_ALPHA: f32 = 0.2;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScreenEffects {
     pub view_blocked: bool,
     pub on_fire: bool,
     pub confusion: f32,
+    pub portal: f32,
+    pub portal_frame: u64,
 }
 
 impl ScreenEffects {
@@ -36,8 +41,9 @@ impl ScreenEffects {
         let first_person = !detached && !view.sleeping;
         let spectator = view.gamemode == crate::session::Gamemode::Spectator;
         let view_blocked = first_person && !spectator && view_blocking(view);
+        let portal = view.portal;
         let scale = screen_effects.min(100) as f32 / 100.0;
-        let confusion = if view.nausea > 0.0 && scale < 1.0 {
+        let confusion = if portal <= 0.0 && view.nausea > 0.0 && scale < 1.0 {
             view.nausea * (1.0 - scale)
         } else {
             0.0
@@ -46,6 +52,8 @@ impl ScreenEffects {
             view_blocked,
             on_fire: first_person && !spectator && view.local_body.on_fire,
             confusion,
+            portal,
+            portal_frame: view.game_time % PORTAL_FRAMES,
         }
     }
 }
@@ -60,7 +68,7 @@ fn view_blocking(view: &crate::renderer::frame_view::FrameView) -> bool {
     };
     let world = world.read();
     let body = &view.local_body;
-    let [x, y, z] = view.player_pos.map(f64::from);
+    let [x, y, z] = view.player_pos;
     let eye = y + body.eye_height as f64;
     let width = body.bounding_box[0] as f64 * VIEW_BLOCK_WIDTH_SPREAD;
     let height = VIEW_BLOCK_HEIGHT_SPREAD * body.scale as f64;
@@ -126,6 +134,26 @@ fn draw_fire(p: &mut Painter, vw: f32, vh: f32) {
             );
         }
     }
+}
+
+pub fn draw_portal(p: &mut Painter, fx: &ScreenEffects, vw: f32, vh: f32) {
+    let mut alpha = fx.portal;
+    if alpha <= 0.0 {
+        return;
+    }
+    if alpha < 1.0 {
+        alpha = alpha.powi(4) * (1.0 - PORTAL_MIN_ALPHA) + PORTAL_MIN_ALPHA;
+    }
+    let argb = ((alpha * 255.0).round() as u32) << 24 | 0x00FF_FFFF;
+    let v0 = fx.portal_frame as f32 / PORTAL_FRAMES as f32;
+    let v1 = v0 + 1.0 / PORTAL_FRAMES as f32;
+    p.sprite_quad(
+        "portal_overlay",
+        [[0.0, 0.0], [vw, 0.0], [vw, vh], [0.0, vh]],
+        [[0.0, v0], [1.0, v0], [1.0, v1], [0.0, v1]],
+        argb,
+        false,
+    );
 }
 
 pub fn draw_confusion(p: &mut Painter, fx: &ScreenEffects, vw: f32, vh: f32) {

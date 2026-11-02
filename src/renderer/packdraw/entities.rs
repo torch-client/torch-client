@@ -279,19 +279,25 @@ pub(crate) fn prepare_entity_draws(
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::Rgba8Unorm,
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            usage: if cfg!(all(target_arch = "wasm32", not(feature = "webgpu"))) {
+                TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT
+            } else {
+                TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST
+            },
             view_formats: &[],
         });
-        encoder
-            .get_or_insert_with(|| {
-                device
-                    .wgpu_device()
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some(gpu_label!("entity textures")),
-                    })
-            })
-            .copy_texture_to_texture(image.texture.as_image_copy(), copy.as_image_copy(), size);
+        let encoder = encoder.get_or_insert_with(|| {
+            device
+                .wgpu_device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some(gpu_label!("entity textures")),
+                })
+        });
         let view = copy.create_view(&TextureViewDescriptor::default());
+        #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+        super::glcopy::copy_srgb_bytes(&device, encoder, &image.texture_view, &view);
+        #[cfg(not(all(target_arch = "wasm32", not(feature = "webgpu"))))]
+        encoder.copy_texture_to_texture(image.texture.as_image_copy(), copy.as_image_copy(), size);
         entity_textures.insert(id, (image.texture_view.id(), view));
         remade.push(id);
     }

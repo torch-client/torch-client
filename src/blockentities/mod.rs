@@ -28,6 +28,7 @@ pub struct BeState {
     pub partial: f32,
     pub game_time: u64,
     pub camera: CameraView,
+    pub origin: crate::renderer::RenderOrigin,
     pub open: f32,
     pub draw_outline: bool,
 }
@@ -352,14 +353,14 @@ impl Submit<'_> {
         self.place(shown, corner(self.pos), pose);
     }
 
-    pub fn block(&mut self, state_id: u32, feet: Vec3) {
+    pub fn block(&mut self, state_id: u32, feet: [f64; 3]) {
         let shown = Shown {
             kind: azalea_registry::builtin::EntityKind::BlockDisplay,
             carried: Some(Carried::MovingBlock),
             light: -1,
             what: What::Block(state_id),
         };
-        self.place(shown, feet.to_array(), Transform::IDENTITY);
+        self.place(shown, feet, Transform::IDENTITY);
     }
 
     pub fn entity(&mut self, kind: azalea_registry::builtin::EntityKind, pose: Transform) {
@@ -380,7 +381,7 @@ impl Submit<'_> {
         self.light = packed_light(levels);
     }
 
-    fn place(&mut self, shown: Shown, pos: [f32; 3], pose: Transform) {
+    fn place(&mut self, shown: Shown, pos: [f64; 3], pose: Transform) {
         let key = (self.pos, self.slot);
         self.slot += 1;
         let st = self.cache.state(self.states, key, &shown);
@@ -392,8 +393,8 @@ impl Submit<'_> {
     }
 }
 
-fn corner(pos: [i32; 3]) -> [f32; 3] {
-    [pos[0] as f32, pos[1] as f32, pos[2] as f32]
+fn corner(pos: [i32; 3]) -> [f64; 3] {
+    pos.map(f64::from)
 }
 
 struct Shown<'a> {
@@ -651,7 +652,7 @@ fn sync_block_entities(
     (mut images, mut entity_images): (ResMut<Assets<Image>>, ResMut<crate::entities::EntityImages>),
     mut materials: ResMut<Assets<EntityMaterial>>,
     gui: Option<Res<crate::gui::render::GuiAssets>>,
-    camera_q: Query<&GlobalTransform, With<crate::renderer::systems::WorldCamera>>,
+    origin: Res<crate::renderer::RenderOrigin>,
     mut nodes: Query<(&mut Transform, &mut Visibility), With<BeRigNode>>,
     mut mats: Query<&mut MeshMaterial3d<EntityMaterial>>,
     lightmap: Res<crate::renderer::systems::LightmapState>,
@@ -661,12 +662,8 @@ fn sync_block_entities(
 ) {
     crate::prof_span!("render:sync_block_entities");
     let Some(gui) = gui else { return };
-    let camera_view = camera_q
-        .iter()
-        .next()
-        .map(|t| CameraView::new(t.rotation(), t.translation()))
-        .unwrap_or_default();
-    let camera = camera_view.position;
+    let origin = *origin;
+    let camera = CameraView::of(&view);
 
     let (partial, game_time) = (view.partial, view.game_time);
     let snapshot = &*view.block_entities;
@@ -689,20 +686,15 @@ fn sync_block_entities(
 
     let dirs = diffuse_lights(crate::renderer::dimension::current());
 
-    let center_of = |pos: &[i32; 3]| {
-        Vec3::new(
-            pos[0] as f32 + 0.5,
-            pos[1] as f32 + 0.5,
-            pos[2] as f32 + 0.5,
-        )
-    };
+    let distance_sq_to =
+        |pos: &[i32; 3]| camera.distance_squared_to(crate::util::block_centre(*pos).to_array());
 
     live.retain(|pos, rig| {
         let keep = snapshot.get(pos).map(|info| info.kind) == Some(rig.kind)
             && registry
                 .by_kind
                 .get(&rig.kind)
-                .is_some_and(|entry| camera.distance_squared(center_of(pos)) < entry.drop_sq);
+                .is_some_and(|entry| distance_sq_to(pos) < entry.drop_sq);
         if !keep {
             for layer in &rig.layers {
                 commands.entity(layer.root).despawn();
@@ -716,7 +708,7 @@ fn sync_block_entities(
             continue;
         };
         let spec_ids = &entry.specs;
-        let distance_sq = camera.distance_squared(center_of(pos));
+        let distance_sq = distance_sq_to(pos);
         if distance_sq >= entry.drop_sq {
             continue;
         }
@@ -745,7 +737,8 @@ fn sync_block_entities(
             anim: info.anim.clone(),
             partial,
             game_time,
-            camera: camera_view,
+            camera,
+            origin,
             open: combined_openness(info, snapshot, partial),
             draw_outline,
         };
@@ -879,7 +872,7 @@ fn sync_block_entities(
                 _ => {}
             }
 
-            apply_layer(layer, &(spec.transform)(&st), *pos, &mut nodes);
+            apply_layer(layer, &(spec.transform)(&st), *pos, origin, &mut nodes);
         }
     }
 
@@ -1015,6 +1008,7 @@ fn spawn_layer(
                     ))
                     .id();
                 let geom_node = gpu.meshes[i].as_ref().map(|mesh| {
+                    #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_mut))]
                     let mut spawned = commands.spawn((
                         Mesh3d(mesh.clone()),
                         MeshMaterial3d(material.clone()),
@@ -1091,7 +1085,7 @@ fn spawn_layer(
 fn spawn_roots(commands: &mut Commands, spec: &BeSpec, st: &BeState) -> (Entity, Entity) {
     let root = commands
         .spawn((
-            Transform::from_xyz(st.pos[0] as f32, st.pos[1] as f32, st.pos[2] as f32),
+            Transform::from_translation(st.origin.block_to_render(st.pos)),
             Visibility::Hidden,
             BeRigNode,
             Name::new(spec.name),
@@ -1117,10 +1111,11 @@ fn apply_layer(
     layer: &LayerRig,
     transform: &Transform,
     pos: [i32; 3],
+    origin: crate::renderer::RenderOrigin,
     nodes: &mut Query<(&mut Transform, &mut Visibility), With<BeRigNode>>,
 ) {
     if let Ok((mut t, _)) = nodes.get_mut(layer.root) {
-        let want = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+        let want = origin.block_to_render(pos);
         if t.translation != want {
             t.translation = want;
         }

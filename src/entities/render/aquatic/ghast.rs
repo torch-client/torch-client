@@ -4,6 +4,7 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::aquatic::ghast;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
@@ -17,25 +18,21 @@ pub fn register(registry: &mut Registry) {
         ),
     );
 
-    registry.add(
-        EntityKind::HappyGhast,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::HappyGhast],
         RenderSpec::new(
             "happy_ghast",
             ghast::happy_ghast_layer,
             happy_ghast_texture,
             ghast::happy_ghast_setup,
-        )
-        .with_visible(is_adult),
-    );
-    registry.add(
-        EntityKind::HappyGhast,
+        ),
         RenderSpec::new(
             "happy_ghast_baby",
             ghast::happy_ghast_baby_layer,
             happy_ghast_baby_texture,
             ghast::happy_ghast_setup,
-        )
-        .with_visible(is_baby),
+        ),
     );
     registry.add(
         EntityKind::HappyGhast,
@@ -45,7 +42,8 @@ pub fn register(registry: &mut Registry) {
             harness_texture,
             ghast::harness_setup,
         )
-        .with_visible(shows_adult_harness),
+        .with_visible(shows_adult_harness)
+        .ignoring_invisibility(),
     );
     registry.add(
         EntityKind::HappyGhast,
@@ -55,7 +53,8 @@ pub fn register(registry: &mut Registry) {
             harness_texture,
             ghast::harness_setup,
         )
-        .with_visible(shows_baby_harness),
+        .with_visible(shows_baby_harness)
+        .ignoring_invisibility(),
     );
     registry.add(
         EntityKind::HappyGhast,
@@ -65,7 +64,8 @@ pub fn register(registry: &mut Registry) {
             ropes_texture,
             ghast::happy_ghast_setup,
         )
-        .with_visible(shows_adult_ropes),
+        .with_visible(shows_adult_ropes)
+        .ignoring_invisibility(),
     );
     registry.add(
         EntityKind::HappyGhast,
@@ -75,16 +75,9 @@ pub fn register(registry: &mut Registry) {
             ropes_texture,
             ghast::happy_ghast_setup,
         )
-        .with_visible(shows_baby_ropes),
+        .with_visible(shows_baby_ropes)
+        .ignoring_invisibility(),
     );
-}
-
-fn is_adult(st: &EntityState) -> bool {
-    !st.extras.is_baby
-}
-
-fn is_baby(st: &EntityState) -> bool {
-    st.extras.is_baby
 }
 
 fn ghast_texture(st: &EntityState) -> TexturePath {

@@ -36,6 +36,7 @@ struct CullView {
     plane_count: u32,
     pad0: u32,
     pad1: u32,
+    origin: vec4<i32>,
 }
 
 const STREAM_SOLID: u32 = 0u;
@@ -60,13 +61,17 @@ const FILL_QUADS: u32 = 32u;
 @group(0) @binding(3) var<storage, read_write> counts: array<atomic<u32>>;
 @group(0) @binding(4) var<uniform> cull: CullView;
 
-fn in_frustum(lo: vec3<f32>, hi: vec3<f32>) -> bool {
+fn in_frustum(lo: vec3<f32>, hi: vec3<f32>, section: vec3<f32>) -> bool {
     if (cull.flags & VIEW_WITHIN) != 0u
         && (any(hi < cull.within_min.xyz) || any(lo > cull.within_max.xyz)) {
         return false;
     }
     if (cull.flags & VIEW_FOG) != 0u {
+#ifdef LOD_REAL_CUT
+        let d = min(max(cull.fog.xyz, section), section + vec3(16.0)) - cull.fog.xyz;
+#else
         let d = min(max(cull.fog.xyz, lo), hi) - cull.fog.xyz;
+#endif
         if (max(length(d.xz), abs(d.y)) > cull.fog.w) {
             return false;
         }
@@ -216,9 +221,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var inside = false;
     var mask = ALL_GROUPS;
     if (live && visible) {
-        let lo = vec3<f32>(m.origin) + m.min;
-        let hi = vec3<f32>(m.origin) + m.max;
-        inside = in_frustum(lo, hi);
+        let base = vec3<f32>(m.origin - cull.origin.xyz);
+        let lo = base + m.min;
+        let hi = base + m.max;
+        inside = in_frustum(lo, hi, base);
         mask = face_mask(lo, hi);
     }
 

@@ -143,7 +143,6 @@ const MOUSE: &[(MouseButton, &str, &str)] = &[
     (MouseButton::Forward, "key.mouse.5", "Button 5"),
 ];
 
-#[cfg(feature = "click_gui")]
 const MOUSE_TAG: u32 = 1 << 16;
 
 impl Bound {
@@ -189,7 +188,48 @@ impl Bound {
         Bound::Unbound
     }
 
-    #[cfg(feature = "click_gui")]
+    #[cfg_attr(not(feature = "click_gui"), allow(dead_code))]
+    pub(crate) fn from_typed_name(name: &str) -> Option<Bound> {
+        let n: String = name
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| {
+                if c == '_' {
+                    '.'
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect();
+        if n.is_empty() {
+            return None;
+        }
+        let squash = |s: &str| -> String {
+            s.chars()
+                .filter(|c| *c != ' ' && *c != '.')
+                .collect::<String>()
+                .to_lowercase()
+        };
+        let wanted = squash(&n);
+        let keys = KEYS
+            .iter()
+            .map(|(k, saved, display)| (Bound::Key(*k), *saved, *display));
+        let mouse = MOUSE
+            .iter()
+            .map(|(b, saved, display)| (Bound::Mouse(*b), *saved, *display));
+        for (b, saved, _) in keys.clone().chain(mouse.clone()) {
+            if saved == n
+                || saved.strip_prefix("key.keyboard.") == Some(&n)
+                || saved.strip_prefix("key.") == Some(&n)
+            {
+                return Some(b);
+            }
+        }
+        keys.chain(mouse)
+            .find(|(_, _, display)| squash(display) == wanted)
+            .map(|(b, ..)| b)
+    }
+
     pub fn to_bits(self) -> u32 {
         match self {
             Bound::Unbound => 0,
@@ -204,7 +244,6 @@ impl Bound {
         }
     }
 
-    #[cfg(feature = "click_gui")]
     pub fn from_bits(bits: u32) -> Bound {
         if bits == 0 {
             return Bound::Unbound;
@@ -290,6 +329,8 @@ pub static BINDS: LazyLock<Vec<BindDef>> = LazyLock::new(|| {
     BindDef { action: Action::ChunkBorders, id: "key.debug.showChunkBorders", name: "Show Chunk Boundaries", category: DEBUG, default: Bound::Key(KeyCode::KeyG) },
     BindDef { action: Action::AdvancedTooltips, id: "key.debug.showAdvancedTooltips", name: "Show Advanced Tooltips", category: DEBUG, default: Bound::Key(KeyCode::KeyH) },
     BindDef { action: Action::ReloadResourcePacks, id: "key.debug.reloadResourcePacks", name: "Reload Resource Packs", category: DEBUG, default: Bound::Key(KeyCode::KeyT) },
+    BindDef { action: Action::DebugSpectate, id: "key.debug.spectate", name: "Cycle Spectator", category: DEBUG, default: Bound::Key(KeyCode::KeyN) },
+    BindDef { action: Action::SwitchGameMode, id: "key.debug.switchGameMode", name: "Game Mode Switcher", category: DEBUG, default: Bound::Key(KeyCode::F4) },
 
     BindDef { action: Action::Freecam, id: "key.client.freecam", name: "Detached Camera", category: CLIENT, default: Bound::Key(KeyCode::KeyC) },
     ];
@@ -340,6 +381,8 @@ pub enum Action {
     ChunkBorders,
     AdvancedTooltips,
     ReloadResourcePacks,
+    DebugSpectate,
+    SwitchGameMode,
     Freecam,
     #[cfg(target_arch = "wasm32")]
     Pause,
@@ -472,6 +515,19 @@ impl KeyBinds {
             Bound::Unbound => false,
             Bound::Key(code) => keys.just_pressed(code),
             Bound::Mouse(button) => buttons.just_pressed(button),
+        }
+    }
+
+    pub fn released(
+        &self,
+        action: Action,
+        keys: &ButtonInput<KeyCode>,
+        buttons: &ButtonInput<MouseButton>,
+    ) -> bool {
+        match self.bound(action) {
+            Bound::Unbound => false,
+            Bound::Key(code) => keys.just_released(code),
+            Bound::Mouse(button) => buttons.just_released(button),
         }
     }
 

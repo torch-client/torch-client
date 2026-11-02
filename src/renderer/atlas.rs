@@ -10,6 +10,8 @@ pub struct Sprites {
     tiles: HashMap<String, u32>,
     opaque: HashSet<String>,
     rows: u32,
+    #[cfg(any(feature = "render_lod", lua_mods))]
+    tile_colors: std::sync::Arc<crate::renderer::tile_colors::TileColors>,
 }
 
 impl Default for Sprites {
@@ -18,6 +20,8 @@ impl Default for Sprites {
             tiles: HashMap::new(),
             opaque: HashSet::new(),
             rows: 1,
+            #[cfg(any(feature = "render_lod", lua_mods))]
+            tile_colors: Default::default(),
         }
     }
 }
@@ -33,6 +37,11 @@ impl Sprites {
 
     pub fn is_opaque(&self, stem: &str) -> bool {
         self.opaque.contains(stem)
+    }
+
+    #[cfg(any(feature = "render_lod", lua_mods))]
+    pub fn tile_colors(&self) -> &std::sync::Arc<crate::renderer::tile_colors::TileColors> {
+        &self.tile_colors
     }
 
     pub fn mesh_tiles(&self) -> MeshTiles {
@@ -90,13 +99,18 @@ impl Textures {
 }
 
 fn decode_dir(dir: &str) -> BTreeMap<String, image::RgbaImage> {
-    let paths: Vec<std::path::PathBuf> = crate::platform::assets::read_dir(dir)
+    let paths: Vec<std::path::PathBuf> = crate::platform::assets::walk(dir)
         .into_iter()
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))
         .collect();
 
     let decode = |path: &std::path::Path| -> Option<(String, image::RgbaImage)> {
-        let stem = path.file_stem()?.to_str()?.to_owned();
+        let stem = path
+            .strip_prefix(dir)
+            .ok()?
+            .with_extension("")
+            .to_str()?
+            .replace('\\', "/");
         let bytes = crate::platform::assets::read(path)?;
         let decoded = image::load_from_memory(&bytes).ok()?;
         Some((stem, decoded.to_rgba8()))
@@ -252,6 +266,12 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
     let opaque_count = opaque.len();
 
     let (atlas_data, atlas_w, atlas_h, tex_to_tile) = pack_tiles(&entries);
+    #[cfg(any(feature = "render_lod", lua_mods))]
+    let tile_colors = std::sync::Arc::new(crate::renderer::tile_colors::TileColors::from_atlas(
+        &atlas_data,
+        atlas_w,
+        atlas_h,
+    ));
     #[cfg(feature = "shader_support")]
     let untinted_entries: Vec<(&str, &image::RgbaImage)> = entries
         .iter()
@@ -286,6 +306,12 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
         RenderAssetUsages::RENDER_WORLD,
     );
     image.texture_descriptor.mip_level_count = n_mips;
+    #[cfg(all(
+        feature = "shader_support",
+        target_arch = "wasm32",
+        not(feature = "webgpu")
+    ))]
+    super::packdraw::rawviews::keep_atlas(atlas_w, atlas_h, n_mips, &mip_data);
     image.data = Some(mip_data);
     image.sampler = block_atlas_sampler();
     #[cfg(feature = "shader_support")]
@@ -306,6 +332,8 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
             tiles: tex_to_tile,
             opaque,
             rows,
+            #[cfg(any(feature = "render_lod", lua_mods))]
+            tile_colors,
         },
         tables: AtlasTables {
             tints,

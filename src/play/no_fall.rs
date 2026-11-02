@@ -71,7 +71,6 @@ fn no_fall_claim_ground(
         if !module::spoofing(physics.velocity.y, fall_flying.is_some_and(|f| **f), mace) {
             continue;
         }
-
         physics.set_on_ground(true);
         claimed.0.insert(entity);
     }

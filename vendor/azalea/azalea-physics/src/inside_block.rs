@@ -6,12 +6,12 @@ use azalea_world::World;
 
 use crate::collision::BlockWithShape;
 
-const COBWEB: Vec3 = Vec3 {
+pub const COBWEB: Vec3 = Vec3 {
     x: 0.25,
     y: 0.05000000074505806,
     z: 0.25,
 };
-const COBWEB_WEAVING: Vec3 = Vec3 {
+pub const COBWEB_WEAVING: Vec3 = Vec3 {
     x: 0.5,
     y: 0.25,
     z: 0.5,
@@ -32,6 +32,13 @@ pub(crate) struct InsideBlockCtx<'a> {
     pub abilities: Option<&'a PlayerAbilities>,
     pub position: Vec3,
     pub width: f32,
+    pub kind: InsideKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InsideKind {
+    Living,
+    Boat,
 }
 
 impl InsideBlockCtx<'_> {
@@ -60,20 +67,25 @@ pub(crate) fn handle_entity_inside_block(
             ctx.make_stuck(physics, multiplier);
         }
         BlockKind::PowderSnow => {
-            let in_block_state = world
-                .get_block_state(BlockPos::from(ctx.position))
-                .unwrap_or_default();
-            if BlockKind::from(in_block_state) == BlockKind::PowderSnow {
+            let held = ctx.kind == InsideKind::Boat
+                || BlockKind::from(
+                    world
+                        .get_block_state(BlockPos::from(ctx.position))
+                        .unwrap_or_default(),
+                ) == BlockKind::PowderSnow;
+            if held {
                 ctx.make_stuck(physics, POWDER_SNOW);
             }
         }
-        BlockKind::SweetBerryBush => ctx.make_stuck(physics, SWEET_BERRY_BUSH),
+        BlockKind::SweetBerryBush if ctx.kind == InsideKind::Living => {
+            ctx.make_stuck(physics, SWEET_BERRY_BUSH)
+        }
         BlockKind::HoneyBlock => {
             if is_sliding_down(block_pos, physics, ctx) {
                 do_slide_movement(physics);
             }
         }
-        BlockKind::BubbleColumn => bubble_column(world, block, block_pos, physics),
+        BlockKind::BubbleColumn => bubble_column(world, block, block_pos, physics, ctx.kind),
         _ => {}
     }
 }
@@ -122,7 +134,13 @@ fn do_slide_movement(physics: &mut Physics) {
     physics.reset_fall_distance();
 }
 
-fn bubble_column(world: &World, block: BlockState, block_pos: BlockPos, physics: &mut Physics) {
+fn bubble_column(
+    world: &World,
+    block: BlockState,
+    block_pos: BlockPos,
+    physics: &mut Physics,
+    kind: InsideKind,
+) {
     let block_above = world.get_block_state(block_pos.up(1)).unwrap_or_default();
     let is_block_above_empty =
         block_above.is_collision_shape_empty() && FluidState::from(block_above).is_empty();
@@ -132,6 +150,9 @@ fn bubble_column(world: &World, block: BlockState, block_pos: BlockPos, physics:
     let velocity = &mut physics.velocity;
 
     if is_block_above_empty {
+        if kind == InsideKind::Boat {
+            return;
+        }
         velocity.y = if drag_down {
             f64::max(-0.9, velocity.y - 0.03)
         } else {

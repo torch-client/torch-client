@@ -209,6 +209,28 @@ impl BitStorage {
         self.size
     }
 
+    #[inline]
+    pub fn for_each(&self, mut f: impl FnMut(usize, u64)) {
+        if self.data.is_empty() {
+            for i in 0..self.size {
+                f(i, 0);
+            }
+            return;
+        }
+        let mut i = 0;
+        for &cell in self.data.iter() {
+            let mut cell = cell;
+            for _ in 0..self.values_per_long {
+                if i == self.size {
+                    return;
+                }
+                f(i, cell & self.mask);
+                cell >>= self.bits;
+                i += 1;
+            }
+        }
+    }
+
     pub fn iter(&self) -> BitStorageIter<'_> {
         BitStorageIter {
             storage: self,

@@ -1,5 +1,7 @@
-use bevy::math::{Mat4, Vec3};
+use bevy::math::{Mat4, Quat, Vec3};
 use bevy::prelude::Transform;
+
+use crate::entities::state::EntityState;
 
 use crate::entities::MODEL_Y_OFFSET;
 use crate::entities::registry::Registry;
@@ -35,6 +37,16 @@ pub(crate) fn mirror() -> Mat4 {
 pub(crate) fn hook_for(after: Mat4) -> Transform {
     let origin_inverse = Mat4::from_translation(Vec3::new(0.0, -MODEL_Y_OFFSET, 0.0));
     Transform::from_matrix(mirror() * after * origin_inverse)
+}
+
+pub(crate) fn hurt_wobble(st: &EntityState) -> Quat {
+    let hurt = st.extras.vehicle_hurt;
+    if hurt <= 0.0 {
+        return Quat::IDENTITY;
+    }
+    let degrees =
+        azalea_core::math::sin(hurt) * hurt * st.extras.vehicle_damage / 10.0 * st.extras.hurt_dir;
+    Quat::from_rotation_x(degrees.to_radians())
 }
 
 #[cfg(test)]

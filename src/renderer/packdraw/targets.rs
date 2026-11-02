@@ -43,15 +43,18 @@ fn depth_pair(device: &RenderDevice, size: Extent3d, labels: [&str; 2]) -> (Targ
                 | TextureUsages::TEXTURE_BINDING
                 | TextureUsages::COPY_SRC,
         ),
-        Target::new(
-            device,
-            labels[1],
-            size,
-            DEPTH_FORMAT,
-            TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-        ),
+        Target::new(device, labels[1], size, DEPTH_FORMAT, DEPTH_COPY_USAGE),
     )
 }
+
+const DEPTH_COPY_USAGE: TextureUsages =
+    if cfg!(all(target_arch = "wasm32", not(feature = "webgpu"))) {
+        TextureUsages::TEXTURE_BINDING
+            .union(TextureUsages::COPY_DST)
+            .union(TextureUsages::RENDER_ATTACHMENT)
+    } else {
+        TextureUsages::TEXTURE_BINDING.union(TextureUsages::COPY_DST)
+    };
 
 pub(super) struct Target {
     pub(super) texture: Texture,
@@ -309,7 +312,7 @@ fn noise_bytes(size: u32) -> Vec<u8> {
 }
 
 pub(super) fn display_view(image: &GpuImage) -> TextureView {
-    if image.texture_format != TextureFormat::Rgba8UnormSrgb {
+    if !super::RAW_VIEWS || image.texture_format != TextureFormat::Rgba8UnormSrgb {
         return image.texture_view.clone();
     }
     image.texture.create_view(&TextureViewDescriptor {
@@ -346,8 +349,17 @@ pub(super) fn image_stub(device: &RenderDevice, image: &CustomImage) -> Target {
         extent(1, 1),
         dimension,
         image_format(image.format),
-        TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+        storage_usage() | TextureUsages::TEXTURE_BINDING,
     )
+}
+
+fn storage_usage() -> TextureUsages {
+    use crate::shaderpack::features::{Feature, supported};
+    if supported(Feature::CustomImages) {
+        TextureUsages::STORAGE_BINDING
+    } else {
+        TextureUsages::empty()
+    }
 }
 
 pub(super) fn image_target(device: &RenderDevice, image: &CustomImage, screen: UVec2) -> Target {
@@ -379,7 +391,7 @@ pub(super) fn image_target(device: &RenderDevice, image: &CustomImage, screen: U
         size,
         dimension,
         image_format(image.format),
-        TextureUsages::STORAGE_BINDING
+        storage_usage()
             | TextureUsages::TEXTURE_BINDING
             | TextureUsages::COPY_DST
             | TextureUsages::COPY_SRC,
@@ -402,10 +414,16 @@ pub(super) fn storage_buffer(
     screen: [u32; 2],
 ) -> Buffer {
     let size = buffer.bytes(screen).div_ceil(4) * 4;
+    let storage =
+        if crate::shaderpack::features::supported(crate::shaderpack::features::Feature::Ssbo) {
+            BufferUsages::STORAGE
+        } else {
+            BufferUsages::empty()
+        };
     device.create_buffer(&BufferDescriptor {
         label: Some(&format!("{GPU_LABEL} bufferObject.{}", buffer.index)),
         size,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        usage: storage | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
 }
@@ -502,7 +520,7 @@ impl Targets {
                     gpu_label!("depthtex2"),
                     extent,
                     DEPTH_FORMAT,
-                    TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+                    DEPTH_COPY_USAGE,
                 )
             }),
             mipmapped,

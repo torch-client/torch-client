@@ -132,25 +132,22 @@ fn rss_bytes() -> u64 {
     return wasm_linear_memory_bytes();
 
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        if !MEMORY_METRICS {
-            return 0;
-        }
-        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-            return 0;
-        };
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("VmRSS:") {
-                let kb: u64 = rest
-                    .split_whitespace()
-                    .next()
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(0);
-                return kb * 1024;
-            }
-        }
-        0
+    return proc_kb_field("/proc/self/status", "VmRSS:");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn proc_kb_field(path: &str, key: &str) -> u64 {
+    if !MEMORY_METRICS {
+        return 0;
     }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return 0;
+    };
+    text.lines()
+        .find_map(|line| line.strip_prefix(key))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse::<u64>().ok())
+        .map_or(0, |kb| kb * 1024)
 }
 
 fn rss_anon_bytes() -> u64 {
@@ -158,25 +155,7 @@ fn rss_anon_bytes() -> u64 {
     return wasm_linear_memory_bytes();
 
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        if !MEMORY_METRICS {
-            return 0;
-        }
-        let Ok(rollup) = std::fs::read_to_string("/proc/self/smaps_rollup") else {
-            return 0;
-        };
-        for line in rollup.lines() {
-            if let Some(rest) = line.strip_prefix("Anonymous:") {
-                let kb: u64 = rest
-                    .split_whitespace()
-                    .next()
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(0);
-                return kb * 1024;
-            }
-        }
-        0
-    }
+    return proc_kb_field("/proc/self/smaps_rollup", "Anonymous:");
 }
 
 fn cpu_ticks() -> u64 {

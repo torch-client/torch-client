@@ -4,30 +4,23 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::goat;
 use crate::entities::registry::Registry;
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Goat,
-        RenderSpec::new("goat", goat::layer, texture, goat::setup_anim)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Goat,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Goat],
+        RenderSpec::new("goat", goat::layer, texture, goat::setup_anim),
         RenderSpec::new(
             "goat_baby",
             goat::baby_layer,
             texture,
             goat::baby_setup_anim,
-        )
-        .with_visible(|st| st.extras.is_baby),
+        ),
     );
 }
 
 fn texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/goat/goat_baby".into()
-    } else {
-        "entity/goat/goat".into()
-    }
+    aged_texture(st, "entity/goat/goat", "entity/goat/goat_baby")
 }

@@ -32,12 +32,7 @@ fn texture(_st: &EntityState) -> TexturePath {
 fn root(st: &EntityState) -> RootPose {
     let [jitter_x, jitter_y, jitter_z] = jitter(st.id);
 
-    let mut extra_rotation = Quat::from_rotation_z((-st.x_rot).to_radians());
-    let hurt = st.extras.hurt_time;
-    if hurt > 0.0 {
-        let degrees = hurt.sin() * hurt * st.extras.damage / 10.0 * st.extras.hurt_dir;
-        extra_rotation *= Quat::from_rotation_x(degrees.to_radians());
-    }
+    let extra_rotation = Quat::from_rotation_z((-st.x_rot).to_radians()) * super::hurt_wobble(st);
 
     RootPose {
         world_offset: Vec3::new(jitter_x, jitter_y + 0.375, jitter_z),

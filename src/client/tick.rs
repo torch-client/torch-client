@@ -3,6 +3,7 @@ use azalea::{SprintDirection, WalkDirection};
 use azalea_core::{direction::Direction, position::BlockPos as AzBlockPos};
 use azalea_inventory::ItemStack;
 use azalea_protocol::packets::game::{
+    s_change_game_mode::ServerboundChangeGameMode,
     s_chat_command::ServerboundChatCommand,
     s_client_command::{Action as ClientCommand, ServerboundClientCommand},
     s_command_suggestion::ServerboundCommandSuggestion,
@@ -55,16 +56,17 @@ struct TickSnapshot {
     saturation: f32,
     air_supply: i32,
     health_display: crate::session::HealthDisplay,
-    jumpable_mount: bool,
     active_effects: Vec<crate::play::mob_effects::MobEffectInstance>,
     gamemode: Gamemode,
+    previous_gamemode: Option<Gamemode>,
     crouching: bool,
     fall_flying: bool,
     swimming: bool,
     sleeping: bool,
-    bed_orientation: Option<crate::direction::Direction>,
+    bed_orientation: Option<crate::blocks::direction::Direction>,
     camera_distance: f32,
     local_body: crate::session::PlayerBody,
+    in_portal: bool,
     attack_strength: f32,
     attack_delay: f32,
     fov_modifier: f32,
@@ -94,6 +96,8 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
         viewwindow::keep_view_center_on_the_player(&partial, pos);
         crate::client::mesh_worker::sweep_parked(&partial);
     }
+    #[cfg(feature = "render_lod")]
+    crate::client::lod::cache::tick(bot, shared, pos);
 
     let (other_positions, seen_players) = collect_other_players(bot);
 
@@ -101,6 +105,8 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
     #[cfg(feature = "skins")]
     let local_skin = local_skin(bot, reads.skin_parts);
     let entity_anims = collect_entities(bot, &seen_players);
+    crate::play::tracking_emitter::tick(bot, shared);
+    crate::play::effect_particles::tick(bot, shared);
 
     GAME_TIME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -144,7 +150,7 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
                     crate::audio::play_at(
                         group.step_event,
                         crate::audio::SoundCategory::Players,
-                        [pos.x as f32, pos.y as f32, pos.z as f32],
+                        [pos.x, pos.y, pos.z],
                         0.15,
                         1.0,
                     );
@@ -208,8 +214,15 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
                     .collect()
             })
             .unwrap_or_default();
-        let armor: crate::renderer::Armor =
-            std::array::from_fn(|i| player_slots.get(5 + i).and_then(item_id));
+        let armor_slot = |i: usize| player_slots.get(5 + i);
+        let armor = crate::renderer::Armor {
+            items: std::array::from_fn(|i| armor_slot(i).and_then(item_id)),
+            foil: std::array::from_fn(|i| {
+                armor_slot(i)
+                    .and_then(ItemStack::as_present)
+                    .is_some_and(crate::items::glint::has_foil)
+            }),
+        };
         let carried = inventory
             .as_ref()
             .map(|inv| slot_stack(&inv.carried, registries, advanced_tooltips))
@@ -251,12 +264,8 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
     if let Some(world) = &world {
         let (game_time, players) = {
             let s = shared.lock().unwrap();
-            let own = s.session.player_pos.map(f64::from);
-            let others = s
-                .session
-                .other_players
-                .iter()
-                .map(|p| p.anim.position(1.0).map(f64::from));
+            let own = s.session.player_pos;
+            let others = s.session.other_players.iter().map(|p| p.anim.position(1.0));
             (
                 s.session.game_time,
                 std::iter::once(own).chain(others).collect::<Vec<_>>(),
@@ -302,7 +311,12 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
         .ok()
         .map(|gm| Gamemode::from_azalea(*gm))
         .unwrap_or(Gamemode::Survival);
-    let (health_display, jumpable_mount) = health_display(
+    let previous_gamemode = bot
+        .component::<azalea::local_player::PreviousGameMode>()
+        .ok()
+        .and_then(|gm| gm.0)
+        .map(Gamemode::from_azalea);
+    let health_display = health_display(
         bot,
         &active_effects,
         armor_value,
@@ -383,9 +397,9 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
         saturation,
         air_supply,
         health_display,
-        jumpable_mount,
         active_effects,
         gamemode,
+        previous_gamemode,
         crouching,
         fall_flying,
         swimming,
@@ -393,6 +407,7 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
         bed_orientation,
         camera_distance,
         local_body,
+        in_portal: inside_nether_portal(bot, pos, &local_body),
         attack_strength,
         attack_delay,
         fov_modifier,
@@ -484,6 +499,36 @@ fn attack_strength_ticker(bot: &Client, hotbar: &[SlotStack], hotbar_sel: u8) ->
         ticker.ticks = 0;
     }
     ticker.ticks
+}
+
+fn take_server_look(bot: &Client) -> Option<(f32, f32)> {
+    use azalea::movement::ServerSetLook;
+
+    if !bot.component::<ServerSetLook>().is_ok() {
+        return None;
+    }
+    let look = bot
+        .component::<azalea::entity::LookDirection>()
+        .ok()
+        .map(|l| (-l.y_rot() - 180.0, -l.x_rot()));
+    bot.ecs
+        .write()
+        .entity_mut(bot.entity)
+        .remove::<ServerSetLook>();
+    look
+}
+
+fn follow_executor_look(bot: &Client, shared: &Arc<SharedMutex>) {
+    let look = bot
+        .component::<azalea::entity::LookDirection>()
+        .ok()
+        .map(|l| (-l.y_rot() - 180.0, -l.x_rot()));
+    let Some(look) = look else {
+        return;
+    };
+    let mut s = shared.lock().unwrap();
+    (s.camera_yaw, s.camera_pitch) = look;
+    s.pending_look = Some(look);
 }
 
 static ATTACK_TICKER_RESET: std::sync::atomic::AtomicBool =
@@ -657,6 +702,16 @@ fn block_distance_sqr(pos: AzBlockPos, point: [f64; 3]) -> f64 {
 pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
     let _ticking = crate::diag::TickGuard::new();
 
+    #[cfg(eagler_skins)]
+    for data in crate::eagler::skins::take_outbox() {
+        bot.write_packet(
+            azalea_protocol::packets::game::s_custom_payload::ServerboundCustomPayload {
+                identifier: crate::eagler::skins::V4_CHANNEL.into(),
+                data: data.into(),
+            },
+        );
+    }
+
     let (inv_actions, horse) = {
         let mut s = shared.lock().unwrap();
         let actions = std::mem::take(&mut s.session.inv_actions);
@@ -714,9 +769,9 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         saturation,
         air_supply,
         health_display,
-        jumpable_mount,
         active_effects,
         gamemode,
+        previous_gamemode,
         crouching,
         fall_flying,
         swimming,
@@ -724,6 +779,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         bed_orientation,
         camera_distance,
         local_body,
+        in_portal,
         attack_strength,
         attack_delay,
         fov_modifier,
@@ -754,7 +810,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
     ) = {
         let mut s = shared.lock().unwrap();
         s.session.player_pos_prev = s.session.player_pos;
-        s.session.player_pos = [pos.x as f32, pos.y as f32, pos.z as f32];
+        s.session.player_pos = [pos.x, pos.y, pos.z];
         s.session.last_tick_time = Some(crate::platform::time::Instant::now());
         s.session.game_time = s.session.game_time.wrapping_add(1);
         s.session.day_clock.advance();
@@ -877,6 +933,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         s.session.health_display = health_display;
         s.session.active_effects = active_effects;
         s.session.gamemode = gamemode;
+        s.session.previous_gamemode = previous_gamemode;
         s.session.crouching = crouching;
         s.session.fall_flying = fall_flying;
         s.session.swimming = swimming;
@@ -884,6 +941,8 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         s.session.bed_orientation = bed_orientation;
         s.session.camera_distance = Some(camera_distance);
         s.session.local_body = local_body;
+        s.session.portal_effect.tick(in_portal);
+        crate::play::item_pickup::tick(&mut s.session);
         let eye_target = crate::renderer::systems::session_eye_height(&s.session);
         s.session.camera_eye.tick(eye_target);
         s.session.sleep_timer = if sleeping {
@@ -909,7 +968,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         s.session.xp_progress = xp_progress;
         s.session.xp_level = xp_level;
         (
-            s.move_flags,
+            s.move_keys,
             s.session.auto_jump,
             s.camera_yaw,
             s.camera_pitch,
@@ -931,11 +990,19 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         )
     };
 
-    let (jump_charge, jump_power) = crate::play::riding::tick_jump_charge(
-        jumpable_mount,
-        flags & crate::session::MOVE_JUMP != 0,
-    );
-    shared.lock().unwrap().session.jump_charge = jump_charge;
+    let riding = crate::play::riding::tick(flags & crate::session::MOVE_JUMP != 0);
+    let jump_power = riding.jump_power;
+    {
+        let mut s = shared.lock().unwrap();
+        s.session.jump_charge = riding.jump_charge;
+        s.session.jump_cooldown = riding.jump_cooldown;
+        s.session.hands_busy = riding.hands_busy;
+        s.session.vehicle_look = riding.rider_turn.map(|t| crate::session::VehicleLook {
+            seq: s.session.vehicle_look.map_or(0, |v| v.seq.wrapping_add(1)),
+            turn: -t.delta,
+            boat_yaw: -t.boat_yaw - 180.0,
+        });
+    }
 
     if let Some(slot) = hotbar_target {
         bot.set_selected_hotbar_slot(slot);
@@ -1061,6 +1128,8 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         });
     }
 
+    #[cfg(lua_mods)]
+    let outgoing_chat = crate::modules::script::chatsend(bot, shared, outgoing_chat);
     let (outgoing_chat, signing) = hold_unsigned(bot, shared, outgoing_chat, signing_state);
 
     for line in outgoing_chat {
@@ -1080,6 +1149,8 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         } else {
             bot.write_packet(chat_sign::chat_packet(bot, content, signing));
         }
+        #[cfg(target_arch = "wasm32")]
+        crate::client::chat_trace::written();
     }
 
     let suggestion = {
@@ -1090,13 +1161,33 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         bot.write_packet(ServerboundCommandSuggestion { id, command });
     }
 
-    let (sent_yaw, sent_pitch, flags) =
-        crate::modules::hooks::sent_look(bot, -yaw - 180.0, -pitch, flags);
-    if let Err(e) = bot.set_direction(sent_yaw, sent_pitch) {
-        note_movement_write("the look direction", e);
-    }
+    #[cfg(lua_mods)]
+    let script_look = crate::modules::script::tick(bot, shared);
+    #[cfg(not(lua_mods))]
+    let script_look: Option<(f32, f32)> = None;
+    let flags = crate::modules::hooks::script_flags(flags);
 
-    apply_movement(bot, flags, auto_jump_enabled);
+    let (yaw, pitch) = match take_server_look(bot) {
+        Some(look) => {
+            let mut s = shared.lock().unwrap();
+            (s.camera_yaw, s.camera_pitch) = look;
+            s.pending_look = Some(look);
+            look
+        }
+        None => script_look.map_or((yaw, pitch), |(y, p)| (-y - 180.0, -p)),
+    };
+
+    let (sent_yaw, sent_pitch, flags) =
+        crate::modules::hooks::sent_look(bot, shared, -yaw - 180.0, -pitch, flags);
+    if crate::modules::pathfinder::drives(bot, flags) {
+        follow_executor_look(bot, shared);
+    } else {
+        if let Err(e) = bot.set_direction(sent_yaw, sent_pitch) {
+            note_movement_write("the look direction", e);
+        }
+
+        apply_movement(bot, flags, auto_jump_enabled);
+    }
 
     if let Some(power) = jump_power {
         let id = bot
@@ -1115,7 +1206,16 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
 
     viewwindow::apply_client_information_requests(bot, shared);
 
-    let (quit, disconnect, reload_chunks, remesh_chunks, leave_bed, respawn) = {
+    let (
+        quit,
+        disconnect,
+        reload_chunks,
+        remesh_chunks,
+        leave_bed,
+        respawn,
+        gamemode,
+        request_stats,
+    ) = {
         let mut s = shared.lock().unwrap();
         (
             std::mem::take(&mut s.quit_requested),
@@ -1124,6 +1224,8 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
             std::mem::take(&mut s.remesh_chunks_requested),
             std::mem::take(&mut s.leave_bed_requested),
             std::mem::take(&mut s.respawn_requested),
+            s.session.gamemode_request.take(),
+            std::mem::take(&mut s.session.request_stats),
         )
     };
 
@@ -1160,6 +1262,18 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
             action: ClientCommand::PerformRespawn,
         });
     }
+
+    if request_stats {
+        bot.write_packet(ServerboundClientCommand {
+            action: ClientCommand::RequestStats,
+        });
+    }
+
+    if let Some(mode) = gamemode {
+        bot.write_packet(ServerboundChangeGameMode {
+            mode: mode.to_azalea(),
+        });
+    }
 }
 
 fn hold_unsigned(
@@ -1174,6 +1288,9 @@ fn hold_unsigned(
 
     if outgoing.is_empty() || !signing {
         return (outgoing, signing);
+    }
+    if !chat_sign::capable(bot) {
+        return (outgoing, false);
     }
     if chat_sign::ready(bot) {
         if waited != 0 {
@@ -1238,7 +1355,10 @@ fn collect_other_players(bot: &Client) -> (Vec<OtherPlayerInfo>, HashSet<i32>) {
                 interpolated: true,
                 main_hand: worn.main_hand,
                 off_hand: worn.off_hand,
-                armor: [worn.helmet, worn.chestplate, worn.leggings, worn.boots],
+                armor: crate::renderer::Armor {
+                    items: [worn.helmet, worn.chestplate, worn.leggings, worn.boots],
+                    foil: worn.armor_foil,
+                },
                 using_offhand: flag::<metadata::AbstractLivingUsingOffhand>(eref),
                 #[cfg(feature = "skins")]
                 on_ground: eref
@@ -1349,6 +1469,10 @@ fn tick_local_anim(
                     tint: st.potion.as_ref().map(|c| c.color()),
                     map_id: st.map_id,
                     layers: st.banner_layers.clone(),
+                    glint: st.glint,
+                    death_protection: st.death_protection,
+                    kinetic: st.kinetic,
+                    swing_ticks: st.swing_ticks,
                 })
                 .unwrap_or_default()
         };
@@ -1390,7 +1514,7 @@ fn tick_local_anim(
         main_arm_left: prefs.main_hand_left,
         crouching: pose == Pose::Crouching,
         sprinting,
-        fall_flying: pose == Pose::FallFlying,
+        fall_flying: flag::<metadata::FallFlying>(bot),
         visually_swimming: pose == Pose::Swimming,
         spin_attack: pose == Pose::SpinAttack,
         sleeping: local_sleeping_pos.is_some(),
@@ -1434,6 +1558,14 @@ fn avatar_metadata_trusted() -> bool {
 
 #[cfg(feature = "skins")]
 fn local_skin(bot: &Client, parts: u8) -> crate::client::skins::SkinState {
+    #[cfg(eagler_skins)]
+    if let Some((refs, default_index)) = crate::gui::skinpick::worn() {
+        return crate::client::skins::SkinState {
+            refs,
+            default_index,
+            parts,
+        };
+    }
     let uuid = bot
         .component::<azalea::player::GameProfileComponent>()
         .map(|g| g.0.uuid.as_u128())
@@ -1472,6 +1604,10 @@ pub(crate) fn held_item(stack: &ItemStack) -> renderer::HeldItem {
         count: data.count.clamp(0, u8::MAX as i32) as u8,
         map_id: data.get_component::<comp::MapId>().map(|m| m.id),
         layers: None,
+        glint: crate::items::glint::has_foil(data),
+        death_protection: crate::play::inventory_bridge::death_protection(data),
+        kinetic: crate::items::kinetic::kinetic(data),
+        swing_ticks: crate::items::kinetic::swing_ticks(data),
     }
 }
 
@@ -1488,7 +1624,7 @@ fn health_display(
     armor: u8,
     max_health: f32,
     vehicle_max: Option<f32>,
-) -> (crate::session::HealthDisplay, bool) {
+) -> crate::session::HealthDisplay {
     use crate::session::{HealthDisplay, HeartKind};
     use azalea::entity::metadata;
     use azalea_core::entity_id::MinecraftEntityId;
@@ -1508,52 +1644,58 @@ fn health_display(
         HeartKind::Normal
     };
 
-    let vehicle_id = crate::client::tracking::local_vehicle_id();
-
-    let saddled = vehicle_id.is_some_and(|id| {
-        equipment()
-            .lock()
-            .unwrap()
-            .get(&id)
-            .is_some_and(|worn| worn.saddle.is_some())
+    let vehicle = crate::client::tracking::local_vehicle_id().and_then(|vehicle_id| {
+        let ecs = bot.ecs.read();
+        let entity = ecs
+            .get::<azalea::entity::indexing::EntityIdIndex>(bot.entity)
+            .and_then(|index| index.get_by_minecraft_entity(MinecraftEntityId(vehicle_id)));
+        let health = entity.and_then(|e| ecs.get::<metadata::Health>(e).map(|h| h.0))?;
+        let max = vehicle_max.unwrap_or(health);
+        Some((health, max))
     });
 
-    let (vehicle, jumpable) = match vehicle_id {
-        Some(vehicle_id) => {
-            let ecs = bot.ecs.read();
-            let entity = ecs
-                .get::<azalea::entity::indexing::EntityIdIndex>(bot.entity)
-                .and_then(|index| index.get_by_minecraft_entity(MinecraftEntityId(vehicle_id)));
-            let health = entity.and_then(|e| ecs.get::<metadata::Health>(e).map(|h| h.0));
-            let jumpable = saddled
-                && entity.is_some_and(|e| {
-                    ecs.get::<azalea::entity::EntityKindComponent>(e)
-                        .is_some_and(|k| is_rideable_jumping(**k))
-                });
-            let max = vehicle_max
-                .or(health)
-                .unwrap_or(crate::session::VANILLA_MAX_HEALTH);
-            (health.map(|h| (h, max)), jumpable)
-        }
-        None => (None, false),
-    };
+    HealthDisplay {
+        max_health,
+        absorption: bot
+            .component::<metadata::PlayerAbsorption>()
+            .map(|a| a.0)
+            .unwrap_or(0.0),
+        armor,
+        kind,
+        regenerating: has("regeneration"),
+        hunger_effect: has("hunger"),
+        ticks_frozen,
+        vehicle,
+    }
+}
 
-    (
-        HealthDisplay {
-            max_health,
-            absorption: bot
-                .component::<metadata::PlayerAbsorption>()
-                .map(|a| a.0)
-                .unwrap_or(0.0),
-            armor,
-            kind,
-            regenerating: has("regeneration"),
-            hunger_effect: has("hunger"),
-            ticks_frozen,
-            vehicle,
-        },
-        jumpable,
-    )
+fn inside_nether_portal(
+    bot: &Client,
+    pos: azalea::Vec3,
+    body: &crate::session::PlayerBody,
+) -> bool {
+    use azalea::block::BlockTrait;
+    const SHRINK: f64 = 1.0E-5;
+    let Ok(world) = bot.world() else {
+        return false;
+    };
+    let world = world.read();
+    let half = body.bounding_box[0] as f64 / 2.0 - SHRINK;
+    let height = body.bounding_box[1] as f64 - SHRINK;
+    let min = [pos.x - half, pos.y + SHRINK, pos.z - half].map(|c| c.floor() as i32);
+    let max = [pos.x + half, pos.y + height, pos.z + half].map(|c| c.floor() as i32);
+    (min[0]..=max[0]).any(|x| {
+        (min[1]..=max[1]).any(|y| {
+            (min[2]..=max[2]).any(|z| {
+                world
+                    .get_block_state(AzBlockPos::new(x, y, z))
+                    .is_some_and(|state| {
+                        let block: Box<dyn BlockTrait> = state.into();
+                        block.id() == "nether_portal"
+                    })
+            })
+        })
+    })
 }
 
 fn player_body(
@@ -1565,21 +1707,15 @@ fn player_body(
 ) -> crate::session::PlayerBody {
     use azalea::entity::metadata;
     let d = crate::session::player_dimensions(pose, scale);
+    let invisible = flag::<metadata::Invisible>(player);
     crate::session::PlayerBody {
-        invisible: flag::<metadata::Invisible>(player) && !team_sees(),
+        invisible,
+        team_sees: invisible && team_sees(),
         on_fire: flag::<metadata::OnFire>(player) && !spectator,
         scale,
         bounding_box: [d.width, d.height],
         eye_height: d.eye_height,
     }
-}
-
-fn is_rideable_jumping(kind: azalea_registry::builtin::EntityKind) -> bool {
-    use azalea_registry::builtin::EntityKind as K;
-    matches!(
-        kind,
-        K::Horse | K::Donkey | K::Mule | K::SkeletonHorse | K::ZombieHorse | K::Camel
-    )
 }
 
 fn armor_value(attribute: Option<f64>, player_slots: &[ItemStack], selected: u8) -> u8 {
@@ -1661,8 +1797,16 @@ fn apply_movement(bot: &Client, flags: u8, auto_jump_enabled: bool) {
     let left = flags & 4 != 0;
     let right = flags & 8 != 0;
     let jump = flags & 16 != 0;
-    let sprint = flags & 32 != 0;
     let sneak = flags & crate::session::MOVE_SNEAK != 0;
+    let sprint = flags & 32 != 0
+        && (crate::client::tracking::local_vehicle_id().is_none()
+            || crate::play::riding::vehicle_can_sprint());
+    crate::play::riding::set_keys(crate::play::riding::Keys {
+        left,
+        right,
+        up: fwd,
+        down: back,
+    });
 
     let flying = bot
         .component::<azalea::entity::PlayerAbilities>()

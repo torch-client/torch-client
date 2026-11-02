@@ -1,17 +1,16 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::gui::dialog::CONFIRM_BUTTON_WIDTH;
+use crate::gui::packdrop::{self, Drops, GRAY, LAYOUT, Search};
 use crate::gui::painter::Painter;
 use crate::gui::ping::IconPixels;
 use crate::gui::tooltip::translate;
-use crate::gui::widgets::{
-    Button, FOOTER_GAP, HeaderFooter, TextBox, WIDGET_HEIGHT, centered_row_x,
-};
+use crate::gui::widgets::{Button, FOOTER_GAP, TextBox, WIDGET_HEIGHT};
 use crate::gui::{GuiState, Screen, ScreenCtx, confirmlink, focus};
+use crate::platform::packfs;
 use crate::resourcepacks::{self, Compat, Info, ServerPack};
 use crate::session::SharedMutex;
-use crate::text::{LINE_HEIGHT, Span, Style};
+use crate::text::{Span, Style};
 
 use super::options::{SCROLLBAR_GAP, SCROLLBAR_W, draw_scrollbar, row_visible, scroll_masked};
 
@@ -21,7 +20,6 @@ const AVAILABLE: &str = "Available";
 const SELECTED: &str = "Selected";
 const OPEN_FOLDER: &str = "Open Pack Folder";
 const DONE: &str = "Done";
-const RELOAD: &str = "R";
 const VANILLA_NAME: &str = "Default";
 const VANILLA_DESCRIPTION: &str = "The default look and feel of Minecraft";
 const VANILLA_HAYSTACK: &str = "vanilla\ndefault\nthe default look and feel of minecraft";
@@ -35,14 +33,6 @@ const SAVE_TOOLTIP: &str = "Copy this pack into the resource packs folder";
 const SAVED_TOOLTIP: &str = "A copy is already in the resource packs folder";
 const SAVE_W: f32 = 34.0;
 
-const SEARCH_H: f32 = 15.0;
-const TITLE_Y: f32 = 4.0;
-const DROP_INFO_Y: f32 = TITLE_Y + LINE_HEIGHT + 4.0;
-const SEARCH_Y: f32 = DROP_INFO_Y + LINE_HEIGHT + 4.0;
-const LAYOUT: HeaderFooter = HeaderFooter::new(SEARCH_Y + SEARCH_H + 4.0, HeaderFooter::DEFAULT_H);
-const SEARCH_MAX_LEN: usize = 32;
-const GRAY: u32 = 0xAA_AAAA;
-
 pub(in crate::gui) const LIST_W: f32 = 200.0;
 pub(in crate::gui) const LIST_GAP: f32 = 15.0;
 pub(in crate::gui) const ROW_H: f32 = 36.0;
@@ -52,8 +42,6 @@ pub(in crate::gui) const PADDING: f32 = 2.0;
 pub(in crate::gui) const ICON: f32 = 32.0;
 pub(in crate::gui) const TEXT_W: f32 = 157.0;
 pub(in crate::gui) const BAR_ROW_W: f32 = LIST_W - SCROLLBAR_W - SCROLLBAR_GAP;
-#[cfg(explore_modrinth)]
-const FOOTER3_W: f32 = 120.0;
 
 const INCOMPATIBLE_FILL: u32 = 0xFF77_0000;
 const HOVER_FILL: u32 = 0xA090_9090;
@@ -102,7 +90,7 @@ impl ServerRow {
         .to_lowercase();
         ServerRow {
             icon: pack.info.icon.clone().map(Arc::new),
-            saved: resourcepacks::dir().join(&pack.file_name).exists(),
+            saved: packfs::exists(&resourcepacks::dir().join(&pack.file_name)),
             pack,
             description,
             haystack,
@@ -115,12 +103,6 @@ enum Entry {
     Server(usize),
     Pack(usize),
     Default,
-}
-
-enum Prompt {
-    Incompatible(usize),
-    Drop(Vec<PathBuf>),
-    Rejected(String),
 }
 
 enum Action {
@@ -142,21 +124,19 @@ pub struct State {
     server_generation: Option<u64>,
     cursor: [Option<Entry>; 2],
     take_focus: Option<usize>,
-    prompt: Option<Prompt>,
-    dropped: Vec<PathBuf>,
+    incompatible: Option<usize>,
+    pub(in crate::gui) drops: Drops,
 }
 
 impl State {
     pub fn open(&mut self) {
         self.saved = resourcepacks::selected();
         self.load(&self.saved.clone());
-        self.search =
-            TextBox::bordered(SEARCH_MAX_LEN, &translate("gui.packSelection.search", &[]));
-        self.search.focus();
+        self.search = packdrop::search_box();
         self.server_generation = None;
         self.take_focus = None;
-        self.prompt = None;
-        self.dropped.clear();
+        self.incompatible = None;
+        self.drops.clear();
     }
 
     fn rescan(&mut self) {
@@ -165,7 +145,7 @@ impl State {
         self.load(&selection);
         self.scroll = scroll;
         for server in &mut self.server {
-            server.saved = resourcepacks::dir().join(&server.pack.file_name).exists();
+            server.saved = packfs::exists(&resourcepacks::dir().join(&server.pack.file_name));
         }
     }
 
@@ -217,7 +197,7 @@ impl State {
     }
 
     pub fn cancel_prompt(&mut self) -> bool {
-        self.prompt.take().is_some()
+        self.incompatible.take().is_some() || self.drops.cancel()
     }
 
     fn selected_names(&self) -> Vec<String> {
@@ -231,7 +211,7 @@ impl State {
         if self.rows[index].info.compat == Compat::Compatible {
             self.act(Action::Select(index));
         } else {
-            self.prompt = Some(Prompt::Incompatible(index));
+            self.incompatible = Some(index);
         }
     }
 
@@ -287,19 +267,6 @@ impl State {
     }
 }
 
-pub(crate) fn collect_drops(
-    mut drops: bevy::prelude::MessageReader<bevy::window::FileDragAndDrop>,
-    mut state: bevy::prelude::ResMut<GuiState>,
-) {
-    for drop in drops.read() {
-        if let bevy::window::FileDragAndDrop::DroppedFile { path_buf, .. } = drop
-            && state.screen == Screen::ResourcePacks
-        {
-            state.resourcepacks.dropped.push(path_buf.clone());
-        }
-    }
-}
-
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Arc<SharedMutex>) {
     #[cfg(explore_modrinth)]
     if state.explore_packs.take_changed() {
@@ -307,30 +274,38 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Arc
     }
     let packs = &mut state.resourcepacks;
     packs.refresh_server(shared);
-    if let Some(Prompt::Drop(paths)) = &mut packs.prompt {
-        paths.append(&mut packs.dropped);
-    } else if packs.prompt.is_none() && !packs.dropped.is_empty() {
-        packs.prompt = Some(Prompt::Drop(std::mem::take(&mut packs.dropped)));
+    if packs.incompatible.is_some() {
+        draw_incompatible(p, packs, ctx);
+        return;
     }
-    if packs.prompt.is_some() {
-        draw_prompt(p, packs, ctx, shared);
+    if let Some(copied) = packs.drops.draw(
+        p,
+        ctx,
+        shared,
+        &resourcepacks::dir(),
+        resourcepacks::is_pack_dir,
+    ) {
+        if copied {
+            packs.rescan();
+        }
         return;
     }
 
-    p.text_centered(TITLE, ctx.vw / 2.0, TITLE_Y, 0xFFFFFF, true);
-    p.text_centered(
-        &translate("pack.dropInfo", &[]),
-        ctx.vw / 2.0,
-        DROP_INFO_Y,
-        GRAY,
-        true,
-    );
-    let search_x = centered_row_x(ctx.vw, LIST_W);
-    packs
-        .search
-        .update(p, ctx, search_x, SEARCH_Y, LIST_W, SEARCH_H);
+    packdrop::header(p, ctx, TITLE, &mut packs.search);
 
-    let (_, list_y, _, list_h) = LAYOUT.content_rect(ctx.vw, ctx.vh);
+    let rect = LAYOUT.content_rect(ctx.vw, ctx.vh);
+    let list_y = rect.1;
+    let selection = packs.selected_names();
+    let failed: Vec<String> = resourcepacks::FAILED
+        .get()
+        .into_iter()
+        .filter(|name| selection.contains(name))
+        .collect();
+    let failed = packdrop::failed_message(&failed);
+    let message = failed
+        .as_deref()
+        .map(|text| (text, packdrop::MESSAGE_ERROR));
+    let list_h = packdrop::message(p, ctx, rect, ROW_H, message);
     let list_w = LIST_W.min((ctx.vw / 2.0 - LIST_GAP - PADDING).floor());
     let row_w = list_w - (LIST_W - ROW_W);
     let bar_row_w = list_w - (LIST_W - BAR_ROW_W);
@@ -339,9 +314,8 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Arc
         (ctx.vw / 2.0 + LIST_GAP).floor(),
     ];
 
-    let needle = packs.search.text.to_lowercase();
-    let blank = needle.trim().is_empty();
-    let matches = |haystack: &str| blank || haystack.contains(&needle);
+    let search = Search::of(&packs.search);
+    let matches = |haystack: &str| search.matches(haystack);
     let available: Vec<Entry> = (0..packs.rows.len())
         .filter(|i| !packs.selected.contains(i) && matches(&packs.rows[*i].haystack))
         .map(Entry::Pack)
@@ -555,47 +529,32 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Arc
         save_server_pack(packs, i, shared);
     }
 
-    let footer_y = LAYOUT.footer_y(ctx.vh);
-    #[cfg(explore_modrinth)]
-    let (wide, w) = (3.0, FOOTER3_W);
-    #[cfg(not(explore_modrinth))]
-    let (wide, w) = (2.0, crate::gui::widgets::FOOTER_W);
-    let mut x = centered_row_x(ctx.vw, WIDGET_HEIGHT + wide * (w + FOOTER_GAP));
-    if Button::new(x, footer_y, WIDGET_HEIGHT, WIDGET_HEIGHT, RELOAD).draw(p, ctx) {
+    let footer = packdrop::footer(p, ctx, if cfg!(explore_modrinth) { 3 } else { 2 });
+    if footer.reload {
         state.resourcepacks.rescan();
     }
-    x += WIDGET_HEIGHT + FOOTER_GAP;
+    let mut x = footer.x;
     #[cfg(explore_modrinth)]
     {
         let explore = crate::gui::explore_packs::EXPLORE;
-        if Button::new(x, footer_y, w, WIDGET_HEIGHT, explore).draw(p, ctx) {
+        if Button::new(x, footer.y, footer.w, WIDGET_HEIGHT, explore).draw(p, ctx) {
             state.explore_packs.open();
             state.nav = Some(Screen::ExplorePacks);
         }
-        x += w + FOOTER_GAP;
+        x += footer.w + FOOTER_GAP;
     }
-    if Button::new(x, footer_y, w, WIDGET_HEIGHT, OPEN_FOLDER).draw(p, ctx) {
-        crate::platform::url::open_folder(&resourcepacks::dir());
-    }
-    let folder_info = translate("pack.folderInfo", &[]);
-    if ctx.hovering(x, footer_y, w, WIDGET_HEIGHT) {
-        tooltip = Some(folder_info.as_str());
-    }
-    x += w + FOOTER_GAP;
-    if Button::new(x, footer_y, w, WIDGET_HEIGHT, DONE).draw(p, ctx) {
+    let folder_hovered =
+        packdrop::open_folder(p, ctx, &footer, x, OPEN_FOLDER, &resourcepacks::dir());
+    x += footer.w + FOOTER_GAP;
+    if Button::new(x, footer.y, footer.w, WIDGET_HEIGHT, DONE).draw(p, ctx) {
         state.resourcepacks.apply();
         state.nav = Some(Screen::Options);
     }
 
-    if let (Some(text), Some(m)) = (tooltip, ctx.mouse()) {
-        crate::gui::tooltip::draw_lines(
-            p,
-            &[vec![Span::colored(text, 0xFF_FFFF)]],
-            m.x,
-            m.y,
-            ctx.vw,
-            ctx.vh,
-        );
+    if let Some(text) = tooltip {
+        packdrop::tooltip(p, ctx, text);
+    } else if folder_hovered {
+        packdrop::folder_tooltip(p, ctx);
     }
 }
 
@@ -661,95 +620,38 @@ fn save_server_pack(packs: &mut State, i: usize, shared: &Arc<SharedMutex>) {
                 "could not save the server's pack as {}: {e}",
                 pack.file_name
             );
-            copy_failure_toast(shared, &e);
+            packdrop::copy_failure_toast(shared, &e);
         }
     }
 }
 
-fn copy_failure_toast(shared: &Arc<SharedMutex>, detail: &str) {
-    use crate::gui::toast::{SystemId, ToastEvent};
-    crate::session::queue_toasts(
-        shared,
-        [ToastEvent::System {
-            id: SystemId::PackCopyFailure,
-            title: crate::text::styled(&translate("pack.copyFailure", &[]), Style::default()),
-            message: crate::text::styled(detail, Style::default()),
-            multiline: false,
-        }],
-    );
-}
-
-fn draw_prompt(p: &mut Painter, packs: &mut State, ctx: &ScreenCtx, shared: &Arc<SharedMutex>) {
-    let yes_no = [translate("gui.yes", &[]), translate("gui.no", &[])];
-    let back = [translate("gui.back", &[])];
-    let (title, message, buttons) = match &packs.prompt {
-        Some(Prompt::Incompatible(index)) => {
-            let reason = match packs.rows[*index].info.compat {
-                Compat::TooOld => "pack.incompatible.confirm.old",
-                Compat::TooNew => "pack.incompatible.confirm.new",
-                _ => "pack.incompatible.confirm.unknown",
-            };
-            (
-                translate("pack.incompatible.confirm.title", &[]),
-                translate(reason, &[]),
-                &yes_no[..],
-            )
-        }
-        Some(Prompt::Drop(paths)) => {
-            let names: Vec<String> = paths.iter().map(|path| file_name(path)).collect();
-            (
-                translate("pack.dropConfirm", &[]),
-                names.join(", "),
-                &yes_no[..],
-            )
-        }
-        Some(Prompt::Rejected(names)) => (
-            translate("pack.dropRejected.title", &[]),
-            translate("pack.dropRejected.message", std::slice::from_ref(names)),
-            &back[..],
-        ),
-        None => return,
+fn draw_incompatible(p: &mut Painter, packs: &mut State, ctx: &ScreenCtx) {
+    let Some(index) = packs.incompatible else {
+        return;
     };
+    let reason = match packs.rows[index].info.compat {
+        Compat::TooOld => "pack.incompatible.confirm.old",
+        Compat::TooNew => "pack.incompatible.confirm.new",
+        _ => "pack.incompatible.confirm.unknown",
+    };
+    let title = translate("pack.incompatible.confirm.title", &[]);
+    let yes_no = [translate("gui.yes", &[]), translate("gui.no", &[])];
+    let message = translate(reason, &[]);
     let Some(chosen) = confirmlink::draw_box(
         p,
         ctx,
         &title,
         &message,
         None,
-        buttons,
+        &yes_no,
         CONFIRM_BUTTON_WIDTH,
     ) else {
         return;
     };
-    let Some(prompt) = packs.prompt.take() else {
-        return;
-    };
-    if chosen != 0 {
-        return;
+    packs.incompatible = None;
+    if chosen == 0 {
+        packs.act(Action::Select(index));
     }
-    match prompt {
-        Prompt::Incompatible(index) => packs.act(Action::Select(index)),
-        Prompt::Drop(paths) => {
-            let dropped = resourcepacks::copy_in(&paths);
-            if dropped.copied {
-                packs.rescan();
-            }
-            if dropped.failed {
-                copy_failure_toast(shared, &resourcepacks::dir().display().to_string());
-            }
-            if !dropped.rejected.is_empty() {
-                packs.prompt = Some(Prompt::Rejected(dropped.rejected.join(", ")));
-            }
-        }
-        Prompt::Rejected(_) => {}
-    }
-}
-
-fn file_name(path: &std::path::Path) -> String {
-    path.file_name().map_or_else(
-        || path.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    )
 }
 
 fn draw_icon(p: &mut Painter, key: &str, pixels: Option<&IconPixels>, x: f32, y: f32) {

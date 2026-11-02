@@ -6,16 +6,23 @@ pub mod entity_material;
 pub mod environment;
 pub mod esp_material;
 pub mod frame_view;
+#[cfg(lua_mods)]
+mod ghosts;
+pub(crate) mod glint;
 pub mod hand;
 pub mod input;
 pub mod intent;
+pub mod item_activation;
 pub mod item_assets;
 pub mod lighter;
 pub mod lightmap;
+#[cfg(feature = "render_lod")]
+pub mod lod;
 pub mod maps;
 mod mesh;
 pub mod occlusion;
 mod occupancy;
+pub mod origin;
 pub mod overlays;
 #[cfg(feature = "shader_support")]
 pub mod packdraw;
@@ -32,8 +39,12 @@ pub mod ssaa;
 pub mod systems;
 pub mod terrain;
 pub mod terrain_pool;
+#[cfg(any(feature = "render_lod", lua_mods))]
+pub mod tile_colors;
 pub mod timeline;
 pub mod visgraph;
+pub mod weather;
+pub mod world_draw;
 pub mod world_text;
 
 pub use anim::{AnimInput, Armor, HeldItem, HumanoidAnim};
@@ -46,6 +57,7 @@ pub use mesh::{
     smooth_lighting_enabled,
 };
 pub use occupancy::Occupancy;
+pub use origin::RenderOrigin;
 pub use systems::{Shared, run};
 
 pub const ATLAS_COLS: u32 = 16;

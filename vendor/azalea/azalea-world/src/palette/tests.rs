@@ -62,6 +62,26 @@ fn test_resize_0_bits_to_5() {
 }
 
 #[test]
+fn test_read_narrow_block_container_at_four_bits() {
+    let mut bytes = vec![2, 2, 0, 1];
+    let mut packed = 0u64;
+    for slot in 0..16 {
+        packed |= (slot as u64 & 1) << (slot * 4);
+    }
+    for _ in 0..256 {
+        bytes.extend_from_slice(&packed.to_be_bytes());
+    }
+    bytes.push(0xAB);
+
+    let mut cur = Cursor::new(&bytes[..]);
+    let container = PalettedContainer::<BlockState>::read(&mut cur).unwrap();
+    assert_eq!(container.bits_per_entry, 4);
+    assert_eq!(container.get_at_index(0), BlockState::AIR);
+    assert_eq!(container.get_at_index(1), BlockState::try_from(1_u32).unwrap());
+    assert_eq!(cur.position() as usize, bytes.len() - 1, "stopped at the next field");
+}
+
+#[test]
 fn test_coords_from_index() {
     let palette_container = PalettedContainer::<BlockState>::new();
 

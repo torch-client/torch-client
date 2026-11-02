@@ -79,13 +79,7 @@ impl WorldHolder {
     }
 
     pub fn reset(&mut self) {
-        let registries = self.shared.read().registries.clone();
-
-        let new_world = World {
-            registries,
-            ..Default::default()
-        };
-        self.shared = Arc::new(RwLock::new(new_world));
+        self.shared = Arc::new(RwLock::new(World::default()));
 
         self.partial.write().reset();
     }

@@ -32,6 +32,7 @@ pub struct ItemAssets {
     built: HashMap<String, Built>,
     contextual: HashMap<String, bool>,
     using_sensitive: HashMap<String, bool>,
+    swap_scale: HashMap<&'static str, f32>,
 }
 
 struct Built {
@@ -61,7 +62,19 @@ impl ItemAssets {
             built: HashMap::new(),
             contextual: HashMap::new(),
             using_sensitive: HashMap::new(),
+            swap_scale: HashMap::new(),
         }
+    }
+
+    pub fn swap_animation_scale(&mut self, id: &'static str) -> f32 {
+        if id.is_empty() {
+            return 1.0;
+        }
+        let builder = &self.builder;
+        *self
+            .swap_scale
+            .entry(id)
+            .or_insert_with(|| builder.swap_animation_scale(id))
     }
 
     pub fn reload_args(&mut self) -> Vec<ItemArgs> {
@@ -94,6 +107,7 @@ impl ItemAssets {
         self.builder = builder;
         self.contextual.clear();
         self.using_sensitive.clear();
+        self.swap_scale.clear();
         for (args, parts) in rebuilt {
             let Some(gpu) = self
                 .built

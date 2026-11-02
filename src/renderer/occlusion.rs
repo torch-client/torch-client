@@ -13,6 +13,7 @@ use super::visgraph::{Direction, VisibilitySet};
 pub struct OcclusionState {
     section: Option<(i32, i32, i32)>,
     generation: u64,
+    smart_cull: bool,
     filled_at: Option<Instant>,
     grid: Grid,
     spare: Grid,
@@ -213,6 +214,7 @@ struct FillResult {
     snapshot: VisSnapshot,
     section: (i32, i32, i32),
     generation: u64,
+    smart_cull: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -220,25 +222,7 @@ type FillTask = bevy::tasks::Task<FillResult>;
 #[cfg(target_arch = "wasm32")]
 type FillTask = FillResult;
 
-fn run_fill(
-    mut grid: Grid,
-    snapshot: VisSnapshot,
-    here: (i32, i32, i32),
-    radius: i32,
-    y_lo: i32,
-    y_hi: i32,
-    generation: u64,
-) -> FillResult {
-    grid.fill(here, radius, y_lo, y_hi, |pos| snapshot.at(pos));
-    FillResult {
-        grid,
-        snapshot,
-        section: here,
-        generation,
-    }
-}
-
-fn spawn_fill(
+struct FillJob {
     grid: Grid,
     snapshot: VisSnapshot,
     here: (i32, i32, i32),
@@ -246,15 +230,42 @@ fn spawn_fill(
     y_lo: i32,
     y_hi: i32,
     generation: u64,
-) -> FillTask {
+    smart_cull: bool,
+}
+
+fn run_fill(job: FillJob) -> FillResult {
+    let FillJob {
+        mut grid,
+        snapshot,
+        here,
+        radius,
+        y_lo,
+        y_hi,
+        generation,
+        smart_cull,
+    } = job;
+    if smart_cull {
+        grid.fill(here, radius, y_lo, y_hi, |pos| snapshot.at(pos));
+    } else {
+        grid.fill(here, radius, y_lo, y_hi, |_| VisibilitySet::all());
+    }
+    FillResult {
+        grid,
+        snapshot,
+        section: here,
+        generation,
+        smart_cull,
+    }
+}
+
+fn spawn_fill(job: FillJob) -> FillTask {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        bevy::tasks::AsyncComputeTaskPool::get()
-            .spawn(async move { run_fill(grid, snapshot, here, radius, y_lo, y_hi, generation) })
+        bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { run_fill(job) })
     }
     #[cfg(target_arch = "wasm32")]
     {
-        run_fill(grid, snapshot, here, radius, y_lo, y_hi, generation)
+        run_fill(job)
     }
 }
 
@@ -262,18 +273,29 @@ fn install(
     state: &mut OcclusionState,
     result: FillResult,
     here: (i32, i32, i32),
+    smart_cull: bool,
     now: Instant,
 ) -> bool {
     state.snapshot = result.snapshot;
-    if result.section != here {
+    if result.section != here || result.smart_cull != smart_cull {
         state.spare = result.grid;
         return false;
     }
     state.spare = std::mem::replace(&mut state.grid, result.grid);
     state.section = Some(result.section);
     state.generation = result.generation;
+    state.smart_cull = result.smart_cull;
     state.filled_at = Some(now);
     true
+}
+
+fn wants_smart_cull(
+    eye: bevy::math::DVec3,
+    free: bool,
+    gamemode: crate::session::Gamemode,
+) -> bool {
+    let noclip = free || gamemode == crate::session::Gamemode::Spectator;
+    !(noclip && crate::util::block_model::solid_at(eye))
 }
 
 fn poll_fill(task: &mut Option<FillTask>) -> Option<FillResult> {
@@ -292,7 +314,7 @@ fn poll_fill(task: &mut Option<FillTask>) -> Option<FillResult> {
     }
 }
 
-fn section_of(y: f32) -> i32 {
+fn section_of(y: f64) -> i32 {
     (y / 16.0).floor() as i32 * 16
 }
 
@@ -317,7 +339,10 @@ pub fn update_occlusion(
     mut state: ResMut<OcclusionState>,
     index: Res<ChunkIndex>,
     gui: Res<crate::gui::GuiState>,
-    camera: Query<&GlobalTransform, With<WorldCamera>>,
+    camera: Query<&Transform, With<WorldCamera>>,
+    origin: Res<crate::renderer::RenderOrigin>,
+    camera_view: Res<crate::renderer::input::CameraView>,
+    view: Res<crate::renderer::frame_view::FrameView>,
     ops: Res<TerrainOps>,
     mut hiding_everything: Local<bool>,
     mut disabled_pushed: Local<bool>,
@@ -337,18 +362,19 @@ pub fn update_occlusion(
         return;
     };
 
-    let eye = transform.translation();
+    let eye = origin.to_world(transform.translation);
     let here = (
         (eye.x / 16.0).floor() as i32,
         section_of(eye.y),
         (eye.z / 16.0).floor() as i32,
     );
+    let smart_cull = wants_smart_cull(eye, camera_view.free(), view.gamemode);
 
     let now = Instant::now();
 
     let mut refill = false;
     if let Some(result) = poll_fill(&mut state.task) {
-        refill = install(&mut state, result, here, now);
+        refill = install(&mut state, result, here, smart_cull, now);
     }
 
     let terrain_changed = state.generation != index.generation();
@@ -356,22 +382,32 @@ pub fn update_occlusion(
         .filled_at
         .is_none_or(|at| now.duration_since(at) >= TERRAIN_REFILL_INTERVAL);
 
-    if state.task.is_none() && (state.section != Some(here) || (terrain_changed && terrain_due)) {
+    let moved = state.section != Some(here) || state.smart_cull != smart_cull;
+    if state.task.is_none() && (moved || (terrain_changed && terrain_due)) {
         let radius = gui.options.render_distance as i32 + 1;
         let (y_lo, y_hi) = index.y_range();
         let generation = index.generation();
         let grid = std::mem::take(&mut state.spare);
         let mut snapshot = std::mem::take(&mut state.snapshot);
-        snapshot.reload(index.sections(), here, radius, y_lo, y_hi);
+        if smart_cull {
+            snapshot.reload(index.sections(), here, radius, y_lo, y_hi);
+        }
         state.fills += 1;
-        state.task = Some(spawn_fill(
-            grid, snapshot, here, radius, y_lo, y_hi, generation,
-        ));
+        state.task = Some(spawn_fill(FillJob {
+            grid,
+            snapshot,
+            here,
+            radius,
+            y_lo,
+            y_hi,
+            generation,
+            smart_cull,
+        }));
     }
 
     #[cfg(target_arch = "wasm32")]
     if let Some(result) = poll_fill(&mut state.task) {
-        refill |= install(&mut state, result, here, now);
+        refill |= install(&mut state, result, here, smart_cull, now);
     }
 
     if state.section.is_none() || !refill {

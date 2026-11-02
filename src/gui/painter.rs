@@ -1,5 +1,5 @@
 use crate::gui::atlas::{GuiAtlas, Region, Scaling};
-use crate::gui::draw::UNIHEX_UV_BIAS;
+use crate::gui::draw::{GLINT_UV_BIAS, UNIHEX_UV_BIAS};
 use crate::text::{Glyph, Span, Style};
 use crate::util::mth::srgb_to_linear;
 
@@ -84,6 +84,8 @@ pub struct Painter<'a> {
     pub frame: u32,
     pub scale: f32,
     pub unihex_enabled: bool,
+    glint: bool,
+    pub textures: Vec<(u32, u64)>,
     rng: u32,
     clip: Option<[f32; 4]>,
     xform: (f32, f32, f32),
@@ -98,7 +100,10 @@ pub struct PainterBuffers {
     pub uvs: Vec<[f32; 2]>,
     pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
+    pub textures: Vec<(u32, u64)>,
 }
+
+pub const ATLAS_TEXTURE: u64 = 0;
 
 impl<'a> Painter<'a> {
     pub fn new(atlas: &'a GuiAtlas, frame: u32) -> Self {
@@ -110,6 +115,7 @@ impl<'a> Painter<'a> {
         bufs.uvs.clear();
         bufs.colors.clear();
         bufs.indices.clear();
+        bufs.textures.clear();
         Painter {
             atlas,
             positions: bufs.positions,
@@ -119,6 +125,8 @@ impl<'a> Painter<'a> {
             frame,
             scale: 4.0,
             unihex_enabled: true,
+            glint: false,
+            textures: bufs.textures,
             rng: frame.wrapping_mul(0x9E37_79B9) | 1,
             clip: None,
             xform: (1.0, 0.0, 0.0),
@@ -136,6 +144,7 @@ impl<'a> Painter<'a> {
             uvs: self.uvs,
             colors: self.colors,
             indices: self.indices,
+            textures: self.textures,
         }
     }
 
@@ -189,6 +198,34 @@ impl<'a> Painter<'a> {
         out
     }
 
+    pub fn scaled_in<R>(
+        &mut self,
+        scale: f32,
+        x: f32,
+        y: f32,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved_xform = self.xform;
+        let saved_clip = self.clip;
+        let scale = scale.max(0.0);
+        if scale > 0.0 {
+            self.clip = self.clip.map(|[x0, y0, x1, y1]| {
+                [
+                    (x0 - x) / scale,
+                    (y0 - y) / scale,
+                    (x1 - x) / scale,
+                    (y1 - y) / scale,
+                ]
+            });
+        }
+        let (s0, ox, oy) = self.xform;
+        self.xform = (s0 * scale, ox + s0 * x, oy + s0 * y);
+        let out = f(self);
+        self.xform = saved_xform;
+        self.clip = saved_clip;
+        out
+    }
+
     fn next_rand(&mut self) -> u32 {
         let mut x = self.rng;
         x ^= x << 13;
@@ -214,22 +251,6 @@ impl<'a> Painter<'a> {
         self.quad_from(x, y, w, h, u0, v0, u1, v1, color, shear, false);
     }
 
-    fn quad_unihex(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        u0: f32,
-        v0: f32,
-        u1: f32,
-        v1: f32,
-        color: [f32; 4],
-        shear: f32,
-    ) {
-        self.quad_from(x, y, w, h, u0, v0, u1, v1, color, shear, true);
-    }
-
     #[allow(clippy::too_many_arguments, reason = "one quad's full geometry")]
     fn quad_from(
         &mut self,
@@ -248,27 +269,22 @@ impl<'a> Painter<'a> {
         if w <= 0.0 || h <= 0.0 || color[3] <= 0.0 {
             return;
         }
-        let (mut x, mut y, mut w, mut h) = (x, y, w, h);
-        let (mut u0, mut v0, mut u1, mut v1) = (u0, v0, u1, v1);
-        if let Some([cx0, cy0, cx1, cy1]) = self.clip {
-            let (x0, y0, x1, y1) = (x.max(cx0), y.max(cy0), (x + w).min(cx1), (y + h).min(cy1));
-            if x1 <= x0 || y1 <= y0 {
-                return;
-            }
-            let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
-            let (nu0, nu1) = (lerp(u0, u1, (x0 - x) / w), lerp(u0, u1, (x1 - x) / w));
-            let (nv0, nv1) = (lerp(v0, v1, (y0 - y) / h), lerp(v0, v1, (y1 - y) / h));
-            (u0, u1, v0, v1) = (nu0, nu1, nv0, nv1);
-            (x, y, w, h) = (x0, y0, x1 - x0, y1 - y0);
-        }
+        let Some(([x, y, w, h], [u0, v0, u1, v1])) = self.clipped([x, y, w, h], [u0, v0, u1, v1])
+        else {
+            return;
+        };
         let bias = if unihex { UNIHEX_UV_BIAS } else { 0.0 };
-        let ([mut au0, av0], [mut au1, av1]) = if unihex {
+        let ([mut au0, mut av0], [mut au1, mut av1]) = if unihex {
             (self.atlas.unihex_uv(u0, v0), self.atlas.unihex_uv(u1, v1))
         } else {
             (self.atlas.uv(u0, v0), self.atlas.uv(u1, v1))
         };
         au0 += bias;
         au1 += bias;
+        if self.glint && !unihex {
+            av0 += GLINT_UV_BIAS;
+            av1 += GLINT_UV_BIAS;
+        }
         let corners = [
             self.place(x + shear, y),
             self.place(x + w + shear, y),
@@ -277,6 +293,57 @@ impl<'a> Painter<'a> {
         ];
         let uvs = [[au0, av0], [au1, av0], [au1, av1], [au0, av1]];
         self.push_quad(corners, uvs, [color; 4]);
+    }
+
+    fn clipped(&self, rect: [f32; 4], uv: [f32; 4]) -> Option<([f32; 4], [f32; 4])> {
+        let [x, y, w, h] = rect;
+        let Some([cx0, cy0, cx1, cy1]) = self.clip else {
+            return Some((rect, uv));
+        };
+        let [u0, v0, u1, v1] = uv;
+        let (x0, y0, x1, y1) = (x.max(cx0), y.max(cy0), (x + w).min(cx1), (y + h).min(cy1));
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let (nu0, nu1) = (lerp(u0, u1, (x0 - x) / w), lerp(u0, u1, (x1 - x) / w));
+        let (nv0, nv1) = (lerp(v0, v1, (y0 - y) / h), lerp(v0, v1, (y1 - y) / h));
+        Some(([x0, y0, x1 - x0, y1 - y0], [nu0, nv0, nu1, nv1]))
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "one quad's full geometry")]
+    pub fn image(&mut self, key: u64, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], argb: u32) {
+        let color = unpack(argb);
+        if key == ATLAS_TEXTURE || w <= 0.0 || h <= 0.0 || color[3] <= 0.0 {
+            return;
+        }
+        let Some(([x, y, w, h], [u0, v0, u1, v1])) = self.clipped([x, y, w, h], uv) else {
+            return;
+        };
+        self.use_texture(key);
+        let corners = [
+            self.place(x, y),
+            self.place(x + w, y),
+            self.place(x + w, y + h),
+            self.place(x, y + h),
+        ];
+        self.push_quad(
+            corners,
+            [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+            [color; 4],
+        );
+        self.use_texture(ATLAS_TEXTURE);
+    }
+
+    fn use_texture(&mut self, key: u64) {
+        let at = self.indices.len() as u32;
+        if self.textures.last().map_or(ATLAS_TEXTURE, |&(_, k)| k) == key {
+            return;
+        }
+        match self.textures.last_mut() {
+            Some(last) if last.0 == at => last.1 = key,
+            _ => self.textures.push((at, key)),
+        }
     }
 
     fn push_quad(&mut self, corners: [[f32; 3]; 4], uvs: [[f32; 2]; 4], colors: [[f32; 4]; 4]) {
@@ -296,6 +363,29 @@ impl<'a> Painter<'a> {
         let c = unpack(argb);
         let (u, v) = (r.x as f32 + 0.5, r.y as f32 + 0.5);
         self.quad(x, y, w, h, u, v, u, v, c, 0.0);
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "two points, a width and a colour"
+    )]
+    #[cfg_attr(not(lua_mods), allow(dead_code))]
+    pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, argb: u32) {
+        let (dx, dy) = (x1 - x0, y1 - y0);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-3 {
+            return;
+        }
+        let (nx, ny) = (-dy / len * width * 0.5, dx / len * width * 0.5);
+        let r = self.atlas.white;
+        let uv = self.atlas.uv(r.x as f32 + 0.5, r.y as f32 + 0.5);
+        let corners = [
+            self.place(x0 + nx, y0 + ny),
+            self.place(x1 + nx, y1 + ny),
+            self.place(x1 - nx, y1 - ny),
+            self.place(x0 - nx, y0 - ny),
+        ];
+        self.push_quad(corners, [uv; 4], [unpack(argb); 4]);
     }
 
     pub fn gradient_v(&mut self, x: f32, y: f32, w: f32, h: f32, top: u32, bottom: u32) {
@@ -329,7 +419,16 @@ impl<'a> Painter<'a> {
         } else if color[3] <= 0.0 {
             return;
         }
-        let r = sp.region;
+        self.region_quad(sp.region, corners, uv, color);
+    }
+
+    pub fn region_quad(
+        &mut self,
+        r: Region,
+        corners: [[f32; 2]; 4],
+        uv: [[f32; 2]; 4],
+        color: [f32; 4],
+    ) {
         let positions = corners.map(|[x, y]| self.place(x, y));
         let uvs = uv.map(|[u, v]| {
             self.atlas
@@ -637,7 +736,7 @@ impl<'a> Painter<'a> {
         let shear = if italic { 1.0 } else { 0.0 };
         if self.atlas.font.is_unihex(ch) && self.unihex_enabled {
             let [x0, y0, w, h] = g.rect;
-            self.quad_unihex(
+            self.quad_from(
                 x,
                 y + g.y_off,
                 g.draw_w,
@@ -648,6 +747,7 @@ impl<'a> Painter<'a> {
                 (y0 + h) as f32,
                 color,
                 shear,
+                true,
             );
             return;
         }
@@ -698,6 +798,12 @@ impl<'a> Painter<'a> {
         self.region_part(
             r, 0.0, 0.0, r.w as f32, r.h as f32, x, y, ITEM_SIZE, ITEM_SIZE, [1.0; 4],
         );
+    }
+
+    pub fn item_icon_glint(&mut self, id: &str, x: f32, y: f32, glint: bool) {
+        self.glint = glint;
+        self.item_icon(id, x, y);
+        self.glint = false;
     }
 
     fn potion_layers(&mut self, item: &str, color: u32, x: f32, y: f32) {

@@ -36,7 +36,7 @@ pub fn mesh_in(blocks: &crate::blocks::Blocks, block: BlockRef) -> Option<Mesh> 
     (!out.is_empty()).then(|| out.finish())
 }
 
-fn state_model(
+pub(crate) fn state_model(
     blocks: &crate::blocks::Blocks,
     id: u32,
 ) -> Option<std::sync::Arc<crate::blocks::BakedBlock>> {
@@ -51,8 +51,15 @@ fn state_model(
 }
 
 fn push(out: &mut QuadMesh, quad: &BakedQuad) {
+    push_at(out, quad, [0.0; 3]);
+}
+
+pub(crate) fn push_at(out: &mut QuadMesh, quad: &BakedQuad, offset: [f32; 3]) {
     let shade = quad.shade(crate::renderer::dimension::current().cardinal());
-    out.colored(quad.pos, quad.uv, quad.normal, [1.0, 1.0, 1.0, shade]);
+    let pos = quad
+        .pos
+        .map(|c| [c[0] + offset[0], c[1] + offset[1], c[2] + offset[2]]);
+    out.colored(pos, quad.uv, quad.normal, [1.0, 1.0, 1.0, shade]);
 }
 
 #[cfg(test)]

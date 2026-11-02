@@ -31,15 +31,8 @@ pub fn rot_lerp_f64(t: f64, a: f64, b: f64) -> f64 {
     a + t * wrap_degrees_f64(b - a)
 }
 
-pub fn wrap_degrees(mut degrees: f32) -> f32 {
-    degrees %= 360.0;
-    if degrees >= 180.0 {
-        degrees -= 360.0;
-    }
-    if degrees < -180.0 {
-        degrees += 360.0;
-    }
-    degrees
+pub fn wrap_degrees(degrees: f32) -> f32 {
+    wrap_degrees_f64(degrees as f64) as f32
 }
 
 pub fn rot_lerp(t: f32, from: f32, to: f32) -> f32 {
@@ -109,6 +102,44 @@ pub mod ease {
         const C1: f32 = 1.701_58;
         const C3: f32 = 2.701_58;
         1.0 + C3 * (x - 1.0).powi(3) + C1 * (x - 1.0).powi(2)
+    }
+
+    pub fn out_cubic(x: f32) -> f32 {
+        1.0 - (1.0 - x).powi(3)
+    }
+
+    pub fn out_circ(x: f32) -> f32 {
+        (1.0 - (x - 1.0) * (x - 1.0)).sqrt()
+    }
+
+    pub fn in_circ(x: f32) -> f32 {
+        1.0 - (1.0 - x * x).sqrt()
+    }
+
+    pub fn in_out_back(x: f32) -> f32 {
+        const C2: f32 = 2.594_909_4;
+        if x < 0.5 {
+            4.0 * x * x * (7.189_819 * x - C2) / 2.0
+        } else {
+            let dt = 2.0 * x - 2.0;
+            (dt * dt * ((C2 + 1.0) * dt + C2) + 2.0) / 2.0
+        }
+    }
+
+    pub fn in_out_elastic(x: f32) -> f32 {
+        if x == 0.0 {
+            return 0.0;
+        }
+        if x == 1.0 {
+            return 1.0;
+        }
+        let xd = x as f64;
+        let sin = ((20.0 * xd - 11.125) * 1.396_263_480_186_462_4).sin();
+        if x < 0.5 {
+            (-(2.0f64.powf(20.0 * xd - 10.0) * sin) / 2.0) as f32
+        } else {
+            (2.0f64.powf(-20.0 * xd + 10.0) * sin / 2.0 + 1.0) as f32
+        }
     }
 }
 

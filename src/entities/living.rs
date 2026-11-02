@@ -132,6 +132,7 @@ pub struct LivingCore {
     swing_left: bool,
     attack_anim: f32,
     attack_anim_old: f32,
+    swing_duration: i32,
     death_time: u32,
     hurt_time: u32,
 }
@@ -249,16 +250,29 @@ impl LivingCore {
             self.hurt_time -= 1;
         }
         self.attack_anim_old = self.attack_anim;
+        let duration = self.swing_duration();
         if self.swinging {
             self.swing_time += 1;
-            if self.swing_time >= SWING_DURATION {
+            if self.swing_time >= duration {
                 self.swing_time = 0;
                 self.swinging = false;
             }
         } else {
             self.swing_time = 0;
         }
-        self.attack_anim = self.swing_time as f32 / SWING_DURATION as f32;
+        self.attack_anim = self.swing_time as f32 / duration as f32;
+    }
+
+    fn swing_duration(&self) -> i32 {
+        if self.swing_duration > 0 {
+            self.swing_duration
+        } else {
+            SWING_DURATION
+        }
+    }
+
+    pub fn set_swing_duration(&mut self, ticks: u8) {
+        self.swing_duration = i32::from(ticks);
     }
 
     pub fn turn_body(&mut self) {
@@ -291,7 +305,7 @@ impl LivingCore {
     }
 
     pub fn swing(&mut self, left_arm: bool) {
-        if !self.swinging || self.swing_time >= SWING_DURATION / 2 || self.swing_time < 0 {
+        if !self.swinging || self.swing_time >= self.swing_duration() / 2 || self.swing_time < 0 {
             self.swing_time = -1;
             self.swinging = true;
             self.swing_left = left_arm;
@@ -316,7 +330,11 @@ impl LivingCore {
     }
 
     pub fn attack_time(&self, partial: f32) -> f32 {
-        lerp(partial, self.attack_anim_old, self.attack_anim)
+        let mut diff = self.attack_anim - self.attack_anim_old;
+        if diff < 0.0 {
+            diff += 1.0;
+        }
+        self.attack_anim_old + diff * partial
     }
 
     pub fn death_time(&self, partial: f32) -> f32 {
@@ -335,7 +353,7 @@ impl LivingCore {
         (self.body_rot_old, self.body_rot)
     }
 
-    pub fn position(&self, partial: f32) -> [f32; 3] {
-        std::array::from_fn(|i| lerp_f64(partial, self.pos_old[i], self.pos[i]) as f32)
+    pub fn position(&self, partial: f32) -> [f64; 3] {
+        std::array::from_fn(|i| lerp_f64(partial, self.pos_old[i], self.pos[i]))
     }
 }

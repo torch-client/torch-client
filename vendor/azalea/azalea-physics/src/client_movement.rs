@@ -4,6 +4,7 @@ use bevy_ecs::component::Component;
 #[derive(Clone, Component, Default)]
 pub struct ClientMovementState {
     pub position_remainder: u32,
+    pub last_horizontal_collision: bool,
     pub was_sprinting: bool,
     pub trying_to_sprint: bool,
 

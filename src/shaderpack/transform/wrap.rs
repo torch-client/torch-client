@@ -8,13 +8,35 @@ use super::{
 
 pub(super) fn version(tokens: &mut Vec<Token>) {
     let line = format!("#version {TARGET_VERSION}");
-    match tokens.iter_mut().find(|t| lexer::is_version(t)) {
-        Some(directive) => directive.text = line,
-        None => {
+    match tokens.iter().position(|t| !t.is_trivia()) {
+        Some(at) if lexer::is_version(&tokens[at]) => tokens[at].text = line,
+        _ => {
+            tokens.retain(|t| !lexer::is_version(t));
             tokens.insert(0, Token::directive(&line));
             tokens.insert(1, Token::newline());
         }
     }
+
+    let Some(code) = tokens
+        .iter()
+        .position(|t| !t.is_trivia() && t.kind != Kind::Directive)
+    else {
+        return;
+    };
+    let late: Vec<usize> = (code..tokens.len())
+        .filter(|&at| lexer::is_extension(&tokens[at]))
+        .collect();
+    let mut moved = Vec::with_capacity(2 * late.len());
+    for &at in late.iter().rev() {
+        moved.push(tokens.remove(at));
+        moved.push(Token::newline());
+    }
+    moved.reverse();
+    let after = tokens
+        .iter()
+        .position(lexer::is_version)
+        .map_or(0, |at| at + 1);
+    tokens.splice(after..after, moved);
 }
 
 pub(super) fn epilogue(tokens: &mut Vec<Token>, interface: &Interface, target: &Target) {
@@ -194,14 +216,7 @@ pub(super) fn preamble(
         .map_or(0, |at| at + 1);
     let mut after = version;
     for (at, token) in tokens.iter().enumerate().skip(version) {
-        if token.kind == Kind::Directive
-            && token
-                .text
-                .trim_start()
-                .trim_start_matches('#')
-                .trim_start()
-                .starts_with("extension")
-        {
+        if lexer::is_extension(token) {
             after = at + 1;
         } else if !(token.is_trivia() || token.kind == Kind::Directive) {
             break;

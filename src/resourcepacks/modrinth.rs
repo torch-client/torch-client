@@ -4,8 +4,9 @@ use std::sync::{Mutex, PoisonError};
 
 use serde_json::Value;
 
-use crate::platform::{http, storage};
+use crate::platform::{http, packfs, storage};
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const USER_AGENT: &str =
     "torch-client/torch-client/0.1.0 (github.com/torch-client/torch-client)";
 
@@ -82,8 +83,19 @@ pub(crate) struct Tags {
     pub resolutions: Vec<String>,
 }
 
-fn get_json(url: &str) -> Result<Value, String> {
-    let bytes = http::get_as_blocking(url, USER_AGENT)?;
+async fn get(url: &str) -> Result<Vec<u8>, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return http::get_as_blocking(url, USER_AGENT);
+    #[cfg(target_arch = "wasm32")]
+    match http::get_bytes(url, 0, &mut |_, _| true).await {
+        Ok(http::Fetched::Body(bytes)) => Ok(bytes),
+        Ok(http::Fetched::Cancelled) => Err("cancelled".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+async fn get_json(url: &str) -> Result<Value, String> {
+    let bytes = get(url).await?;
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
@@ -119,7 +131,7 @@ fn strings_of(v: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub(crate) fn search(query: &Query, offset: usize) -> Result<(Vec<Hit>, usize), String> {
+pub(crate) async fn search(query: &Query, offset: usize) -> Result<(Vec<Hit>, usize), String> {
     let mut facets = vec![vec!["project_type:resourcepack".to_owned()]];
     if !query.versions.is_empty() {
         facets.push(
@@ -139,7 +151,7 @@ pub(crate) fn search(query: &Query, offset: usize) -> Result<(Vec<Hit>, usize), 
         json_param(Value::from(facets)),
         query.sort.index(),
     );
-    let root = get_json(&url)?;
+    let root = get_json(&url).await?;
     let hits = root["hits"]
         .as_array()
         .map(|hits| {
@@ -165,8 +177,8 @@ pub(crate) fn search(query: &Query, offset: usize) -> Result<(Vec<Hit>, usize), 
     Ok((hits, root["total_hits"].as_u64().unwrap_or(0) as usize))
 }
 
-pub(crate) fn tags() -> Result<Tags, String> {
-    let versions = get_json(&format!("{API}/tag/game_version"))?;
+pub(crate) async fn tags() -> Result<Tags, String> {
+    let versions = get_json(&format!("{API}/tag/game_version")).await?;
     let mut recent = Vec::new();
     for v in versions.as_array().into_iter().flatten() {
         if v["version_type"].as_str() != Some("release") {
@@ -180,7 +192,7 @@ pub(crate) fn tags() -> Result<Tags, String> {
         }
     }
 
-    let categories = get_json(&format!("{API}/tag/category"))?;
+    let categories = get_json(&format!("{API}/tag/category")).await?;
     let mut resolutions: Vec<String> = categories
         .as_array()
         .into_iter()
@@ -202,18 +214,18 @@ pub(crate) fn tags() -> Result<Tags, String> {
     })
 }
 
-pub(crate) fn body(project_id: &str) -> Result<String, String> {
+pub(crate) async fn body(project_id: &str) -> Result<String, String> {
     Ok(str_of(
-        &get_json(&format!("{API}/project/{}", encode(project_id)))?,
+        &get_json(&format!("{API}/project/{}", encode(project_id))).await?,
         "body",
     ))
 }
 
-pub(crate) fn icon(url: &str) -> Option<Vec<u8>> {
-    super::icon_pixels(&http::get_as_blocking(url, USER_AGENT).ok()?)
+pub(crate) async fn icon(url: &str) -> Option<Vec<u8>> {
+    super::icon_pixels(&get(url).await.ok()?)
 }
 
-pub(crate) fn download(project_id: &str, versions: &[String]) -> Result<String, String> {
+pub(crate) async fn download(project_id: &str, versions: &[String]) -> Result<String, String> {
     let mut url = format!(
         "{API}/project/{}/version?loaders={}&include_changelog=false",
         encode(project_id),
@@ -225,7 +237,7 @@ pub(crate) fn download(project_id: &str, versions: &[String]) -> Result<String, 
             json_param(Value::from(versions.to_vec()))
         ));
     }
-    let list = get_json(&url)?;
+    let list = get_json(&url).await?;
     let newest = list
         .as_array()
         .into_iter()
@@ -249,11 +261,11 @@ pub(crate) fn download(project_id: &str, versions: &[String]) -> Result<String, 
     {
         return Err(format!("not a pack zip: {name}"));
     }
-    if super::dir().join(&name).exists() {
+    if packfs::exists(&super::dir().join(&name)) {
         return Ok(name);
     }
 
-    let bytes = http::get_as_blocking(&str_of(file, "url"), USER_AGENT)?;
+    let bytes = get(&str_of(file, "url")).await?;
     let expected = file["hashes"]["sha1"].as_str().unwrap_or_default();
     if !super::sha1_hex(&bytes).eq_ignore_ascii_case(expected) {
         return Err("download does not match its hash".into());
@@ -276,7 +288,7 @@ pub(crate) fn delete(name: &str) -> Result<String, String> {
     let project = downloaded()
         .remove(name)
         .ok_or("not downloaded from Modrinth")?;
-    std::fs::remove_file(super::dir().join(name)).map_err(|e| e.to_string())?;
+    packfs::remove_file(super::dir().join(name)).map_err(|e| e.to_string())?;
     edit_downloaded(|record| {
         record.remove(name);
     });
@@ -294,19 +306,28 @@ fn edit_downloaded(edit: impl FnOnce(&mut HashMap<String, String>)) {
     }
 }
 
-pub(crate) fn installed_projects() -> Vec<String> {
+pub(crate) async fn installed_projects() -> Vec<String> {
     let dir = super::dir();
-    super::list()
-        .into_iter()
-        .filter(|pack| {
-            Path::new(&pack.name)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
-        })
-        .filter_map(|pack| {
-            let hash = super::sha1_hex(&std::fs::read(dir.join(&pack.name)).ok()?);
-            let version = get_json(&format!("{API}/version_file/{hash}?algorithm=sha1")).ok()?;
-            Some(str_of(&version, "project_id")).filter(|id| !id.is_empty())
-        })
-        .collect()
+    let mut projects = Vec::new();
+    for pack in super::list() {
+        if !Path::new(&pack.name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+        {
+            continue;
+        }
+        let Ok(bytes) = packfs::shared(&dir.join(&pack.name)) else {
+            continue;
+        };
+        let hash = super::sha1_hex(&bytes);
+        let Ok(version) = get_json(&format!("{API}/version_file/{hash}?algorithm=sha1")).await
+        else {
+            continue;
+        };
+        let id = str_of(&version, "project_id");
+        if !id.is_empty() {
+            projects.push(id);
+        }
+    }
+    projects
 }

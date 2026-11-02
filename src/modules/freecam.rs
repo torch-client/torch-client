@@ -26,6 +26,20 @@ pub fn toggle() {
     ACTIVE.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+static EYE: std::sync::Mutex<[f64; 3]> = std::sync::Mutex::new([0.0; 3]);
+
+pub fn publish_eye(eye: [f64; 3]) {
+    *EYE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = eye;
+}
+
+pub fn eye() -> Option<[f64; 3]> {
+    active().then(|| {
+        *EYE.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    })
+}
+
 pub fn speed(sprint: bool) -> f32 {
     let n = if sprint {
         setting::SPRINT_SPEED

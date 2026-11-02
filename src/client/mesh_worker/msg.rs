@@ -101,6 +101,18 @@ const TO_UNLOAD: u8 = 7;
 const TO_BACKLOG: u8 = 8;
 const TO_RESET_LIGHT: u8 = 9;
 const TO_RESET_LEVEL: u8 = 10;
+#[cfg(resource_packs)]
+const TO_PACKS: u8 = 11;
+#[cfg(feature = "shader_support")]
+const TO_PACK_IDS: u8 = 12;
+
+#[cfg(resource_packs)]
+const MESHER_FILES: [&str; 4] = [
+    "assets/minecraft/textures/block/",
+    "assets/minecraft/textures/colormap/",
+    "assets/minecraft/blockstates/",
+    "assets/minecraft/models/",
+];
 
 pub enum ToWorker {
     Options {
@@ -135,6 +147,10 @@ pub enum ToWorker {
     },
     ResetLight,
     ResetLevel,
+    #[cfg(resource_packs)]
+    Packs(Vec<std::sync::Arc<crate::platform::assets::archive::OwnedLayer>>),
+    #[cfg(feature = "shader_support")]
+    PackIds(Vec<u8>),
 }
 
 impl ToWorker {
@@ -150,6 +166,10 @@ impl ToWorker {
             ToWorker::Backlog { .. } => "backlog",
             ToWorker::ResetLight => "reset light",
             ToWorker::ResetLevel => "reset level",
+            #[cfg(resource_packs)]
+            ToWorker::Packs(_) => "packs",
+            #[cfg(feature = "shader_support")]
+            ToWorker::PackIds(_) => "pack ids",
         }
     }
 
@@ -222,6 +242,31 @@ impl ToWorker {
             }
             ToWorker::ResetLight => Writer::new(TO_RESET_LIGHT).finish(),
             ToWorker::ResetLevel => Writer::new(TO_RESET_LEVEL).finish(),
+            #[cfg(resource_packs)]
+            ToWorker::Packs(layers) => {
+                let mut w = Writer::new(TO_PACKS);
+                w.u32(layers.len() as u32);
+                for layer in layers {
+                    let files: Vec<(&String, &[u8])> = layer
+                        .files
+                        .keys()
+                        .filter(|key| MESHER_FILES.iter().any(|prefix| key.starts_with(prefix)))
+                        .filter_map(|key| Some((key, layer.get(key)?)))
+                        .collect();
+                    w.u32(files.len() as u32);
+                    for (key, bytes) in files {
+                        w.bytes(key.as_bytes());
+                        w.bytes(bytes);
+                    }
+                }
+                w.finish()
+            }
+            #[cfg(feature = "shader_support")]
+            ToWorker::PackIds(ids) => {
+                let mut w = Writer::new(TO_PACK_IDS);
+                w.bytes(ids);
+                w.finish()
+            }
         }
     }
 
@@ -275,6 +320,32 @@ impl ToWorker {
             },
             TO_RESET_LIGHT => ToWorker::ResetLight,
             TO_RESET_LEVEL => ToWorker::ResetLevel,
+            #[cfg(resource_packs)]
+            TO_PACKS => {
+                let n = r.count()?;
+                let mut layers = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let files = r.count()?;
+                    let mut layer = crate::platform::assets::archive::OwnedLayer {
+                        bytes: Box::default(),
+                        files: Default::default(),
+                    };
+                    let mut bytes = Vec::new();
+                    for _ in 0..files {
+                        let key = std::str::from_utf8(r.bytes()?).ok()?.to_owned();
+                        let data = r.bytes()?;
+                        layer
+                            .files
+                            .insert(key, bytes.len()..bytes.len() + data.len());
+                        bytes.extend_from_slice(data);
+                    }
+                    layer.bytes = bytes.into_boxed_slice();
+                    layers.push(std::sync::Arc::new(layer));
+                }
+                ToWorker::Packs(layers)
+            }
+            #[cfg(feature = "shader_support")]
+            TO_PACK_IDS => ToWorker::PackIds(r.bytes()?.to_vec()),
             _ => return None,
         })
     }
@@ -341,6 +412,8 @@ fn mesh_buf(w: &mut Writer, buf: &MeshBuf) {
     for v in buf.faces.as_flattened() {
         w.u32(u32::from(*v));
     }
+    #[cfg(feature = "shader_support")]
+    w.bytes(bytemuck::cast_slice(&buf.pack));
 }
 
 fn read_mesh_buf(r: &mut Reader) -> Option<MeshBuf> {
@@ -369,6 +442,10 @@ fn read_mesh_buf(r: &mut Reader) -> Option<MeshBuf> {
     };
     for v in buf.faces.as_flattened_mut() {
         *v = u16::try_from(r.u32()?).ok()?;
+    }
+    #[cfg(feature = "shader_support")]
+    {
+        buf.pack = read_pod(r.bytes()?)?;
     }
     Some(buf)
 }

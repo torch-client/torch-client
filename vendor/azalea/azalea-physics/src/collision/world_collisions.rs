@@ -1,6 +1,9 @@
 use std::{borrow::Cow, collections::HashSet, sync::Arc, sync::LazyLock};
 
-use azalea_block::{BlockState, fluid_state::FluidState};
+use azalea_block::{
+    BlockState,
+    fluid_state::{FluidKind, FluidState},
+};
 use azalea_core::{
     cursor3d::{Cursor3d, CursorIteration, CursorIterationType},
     math::EPSILON,
@@ -24,7 +27,11 @@ pub struct PowderSnowCollision {
     pub descending: bool,
     pub entity_bottom: f64,
     pub fall_distance: f64,
+    pub stands_on_lava: bool,
 }
+
+static LAVA_STABLE_SHAPE: LazyLock<VoxelShape> =
+    LazyLock::new(|| box_shape(0.0, 0.0, 0.0, 1.0, 0.5, 1.0));
 
 impl PowderSnowCollision {
     const FALL_THRESHOLD: f64 = 2.5;
@@ -141,6 +148,21 @@ impl<'a> BlockCollisionsState<'a> {
         if self.powder_snow.collides() && BlockKind::from(block_state) == BlockKind::PowderSnow {
             if let Some(shape) = self.powder_snow.shape(item.pos) {
                 let shape = shape.move_relative(item.pos.to_vec3_floored());
+                if Shapes::matches_anywhere(&shape, &self.entity_shape, |a, b| a && b) {
+                    block_collisions.push(shape);
+                }
+            }
+            return;
+        }
+
+        if self.powder_snow.stands_on_lava && BlockKind::from(block_state) == BlockKind::Lava {
+            let is_above = self.powder_snow.entity_bottom
+                > f64::from(item.pos.y) + 0.5 - 9.999999747378752e-6;
+            if is_above
+                && FluidState::from(block_state).is_source()
+                && FluidState::from(self.get_block_state(item.pos.up(1))).kind != FluidKind::Lava
+            {
+                let shape = LAVA_STABLE_SHAPE.move_relative(item.pos.to_vec3_floored());
                 if Shapes::matches_anywhere(&shape, &self.entity_shape, |a, b| a && b) {
                     block_collisions.push(shape);
                 }

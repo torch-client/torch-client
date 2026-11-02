@@ -5,7 +5,8 @@ use std::sync::{Mutex, OnceLock};
 use crate::util::zip;
 use crate::{log_info, log_warn};
 
-const VERSION_MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+pub(super) const VERSION_MANIFEST: &str =
+    "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
 const OBJECT_STORE: &str = "https://resources.download.minecraft.net";
 
@@ -18,7 +19,7 @@ const DATA_DIR: &str = "data/minecraft/";
 
 const ASSET_KEY_PREFIX: &str = NAMESPACE_DIR;
 
-const NAMESPACE_PREFIX: &str = "minecraft/";
+pub(super) const NAMESPACE_PREFIX: &str = "minecraft/";
 
 const PANORAMA_DIR: &str = "textures/gui/title/background/";
 
@@ -29,6 +30,9 @@ const PACK_ICON_SOURCE: &str = "pack.png";
 const PACK_ICON_KEY: &str = "assets/minecraft/textures/gui/pack.png";
 
 const META_KEY: &str = ".meta";
+
+#[cfg(feature = "asset_download")]
+const LANGUAGES_KEY: &str = ".languages";
 
 const KEEP_LIST: &str = include_str!("../../tools/asset_keep_list.txt");
 
@@ -104,12 +108,7 @@ mod store {
         }
 
         fn save(path: PathBuf, bytes: &[u8]) -> Result<(), String> {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            let part = path.with_extension("part");
-            std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
-            std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
+            super::super::write_whole(&path, bytes)?;
             crate::log_info!("assets", "wrote {} ({} bytes)", path.display(), bytes.len());
             Ok(())
         }
@@ -125,8 +124,15 @@ mod store {
             save(index_pack(id), bytes)
         }
 
-        pub(in crate::client::assets) fn has_index(id: &str) -> bool {
-            index_pack(id).is_file()
+        pub(in crate::client::assets) fn index_keys(
+            id: &str,
+        ) -> Option<std::collections::HashSet<String>> {
+            let path = index_pack(id);
+            let len = std::fs::metadata(&path).ok()?.len();
+            let mut file = std::io::BufReader::new(std::fs::File::open(&path).ok()?);
+            let (table, blobs_at) = crate::platform::assets::read_table(&mut file).ok()?;
+            let blobs: u64 = table.iter().map(|(_, n)| u64::from(*n)).sum();
+            (blobs_at + blobs == len).then(|| table.into_iter().map(|(key, _)| key).collect())
         }
 
         pub(in crate::client::assets) fn load_version(version: &str) -> Option<Vec<u8>> {
@@ -153,8 +159,10 @@ mod store {
             Ok(())
         }
 
-        pub(in crate::client::assets) fn has_index(_id: &str) -> bool {
-            false
+        pub(in crate::client::assets) fn index_keys(
+            _id: &str,
+        ) -> Option<std::collections::HashSet<String>> {
+            None
         }
 
         pub(in crate::client::assets) fn load_version(_version: &str) -> Option<Vec<u8>> {
@@ -190,6 +198,12 @@ pub(crate) fn take_installed() -> Option<Vec<u8>> {
 
 pub(crate) fn mount() -> bool {
     #[cfg(not(target_arch = "wasm32"))]
+    {
+        MISSING.store(0, Ordering::Relaxed);
+        finish_pending_clear();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     if std::env::var_os("MINECRAFT_ASSETS").is_some() {
         return false;
     }
@@ -219,30 +233,50 @@ pub(crate) fn mount() -> bool {
         return false;
     }
 
-    #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+    #[cfg(feature = "asset_download")]
+    match jar_layer.get(LANGUAGES_KEY) {
+        Some(table) => super::language::adopt(table),
+        None => log_info!(
+            "assets",
+            "the {version} archive lists no languages; English only"
+        ),
+    }
+
+    let index = meta["index"].as_str();
+
+    #[cfg(not(target_arch = "wasm32"))]
     {
-        let sounds_ok = meta["index"]
-            .as_str()
-            .is_some_and(crate::audio::store::installed);
+        #[cfg(feature = "audio")]
         if crate::platform::storage::SOUNDS_SKIPPED
             .load()
             .is_some_and(|s| !s.trim().is_empty())
         {
             SOUNDS_SKIPPED.store(true, Ordering::Relaxed);
         }
-        if !sounds_ok && !SOUNDS_SKIPPED.load(Ordering::Relaxed) {
+        let wanted = wanted_objects(|key| jar_layer.get(key).copied());
+        WANTED.store(wanted, Ordering::Relaxed);
+        *MOUNTED_INDEX.lock().unwrap() = index.map(str::to_owned);
+        let missing = (wanted | wanted_sounds()) & !present(index);
+        MISSING.store(missing, Ordering::Relaxed);
+
+        if missing & piece::SOUNDS != 0 {
             log_info!(
                 "assets",
                 "audio is enabled but no sound set is installed; the download screen will fetch it"
             );
-            SOUNDS_ONLY.store(true, Ordering::Relaxed);
             return false;
         }
-        SOUNDS_ONLY.store(false, Ordering::Relaxed);
+        if missing & piece::OBJECTS != 0 {
+            log_warn!(
+                "assets",
+                "the objects layer lacks pieces this build wants ({missing:#b}); \
+                 Manage Storage can fetch them"
+            );
+        }
     }
 
     let mut layers = Vec::with_capacity(2);
-    if let Some(id) = meta["index"].as_str() {
+    if let Some(id) = index {
         match store::load_index(id)
             .ok_or_else(|| "not on disk".to_owned())
             .and_then(crate::platform::assets::unpack)
@@ -251,12 +285,14 @@ pub(crate) fn mount() -> bool {
                 log_info!("assets", "objects layer {id}: {} entries", layer.len());
                 layers.push(layer);
             }
-            Err(e) => log_warn!("assets", "objects layer {id} unreadable: {e}"),
+            Err(e) => {
+                log_warn!("assets", "objects layer {id} unreadable: {e}");
+                #[cfg(not(target_arch = "wasm32"))]
+                MISSING.fetch_or(WANTED.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
         }
         #[cfg(feature = "audio")]
         crate::audio::init(id);
-        #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
-        MOUNTED_INDEX.set(id.to_owned()).ok();
     }
     log_info!("assets", "jar layer {version}: {} entries", jar_layer.len());
     layers.push(jar_layer);
@@ -265,7 +301,162 @@ pub(crate) fn mount() -> bool {
         log_warn!("assets", "could not mount the assets: {e}");
         return false;
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    RESTART_PENDING.store(false, Ordering::Relaxed);
     true
+}
+
+mod piece {
+    pub(super) const PANORAMA: u8 = 1;
+    pub(super) const UNIFONT: u8 = 2;
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) const SOUNDS: u8 = 4;
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) const OBJECTS: u8 = PANORAMA | UNIFONT;
+}
+
+fn wanted_objects<'a>(get: impl Fn(&str) -> Option<&'a [u8]>) -> u8 {
+    if !CAN_FETCH_OBJECTS {
+        return 0;
+    }
+    let mut wanted = 0;
+    if panorama_is_stubbed(&get) {
+        wanted |= piece::PANORAMA;
+    }
+    if cfg!(feature = "full_font") && unifont_is_stubbed(&get) {
+        wanted |= piece::UNIFONT;
+    }
+    wanted
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn wanted_sounds() -> u8 {
+    #[cfg(feature = "audio")]
+    if !SOUNDS_SKIPPED.load(Ordering::Relaxed) {
+        return piece::SOUNDS;
+    }
+    0
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn present(index: Option<&str>) -> u8 {
+    let Some(id) = index else {
+        return 0;
+    };
+    #[cfg_attr(not(feature = "audio"), allow(unused_mut))]
+    let mut held = store::index_keys(id).map_or(0, |keys| objects_hold(|key| keys.contains(key)));
+    #[cfg(feature = "audio")]
+    if crate::audio::store::installed(id) {
+        held |= piece::SOUNDS;
+    }
+    held
+}
+
+fn objects_hold(has: impl Fn(&str) -> bool) -> u8 {
+    let mut held = 0;
+    if (0..6).all(|face| has(&panorama_face(face))) {
+        held |= piece::PANORAMA;
+    }
+    if has(&format!("{ASSET_KEY_PREFIX}{UNIFONT_JSON_KEY}"))
+        && has(&format!("{ASSET_KEY_PREFIX}{UNIFONT_ZIP_KEY}"))
+    {
+        held |= piece::UNIFONT;
+    }
+    held
+}
+
+fn object_wanted(want: u8, key: &str) -> bool {
+    (want & piece::PANORAMA != 0 && key.starts_with(PANORAMA_DIR))
+        || (want & piece::UNIFONT != 0 && (key == UNIFONT_JSON_KEY || key == UNIFONT_ZIP_KEY))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn write_whole(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let parent = path.parent();
+    if let Some(parent) = parent {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let part = path.with_extension("part");
+    let written = std::fs::File::create(&part)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&part, path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&part);
+        return Err(e.to_string());
+    }
+    #[cfg(unix)]
+    if let Some(dir) = parent.and_then(|p| std::fs::File::open(p).ok()) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn clear_native_cache() -> Result<(), String> {
+    let result = delete_sets();
+    if result.is_err() {
+        let marker = root().join(CLEAR_MARKER);
+        if let Err(e) = std::fs::write(&marker, b"") {
+            log_warn!("assets", "could not leave {}: {e}", marker.display());
+        }
+    }
+    result
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const CLEAR_MARKER: &str = ".clear-pending";
+
+#[cfg(not(target_arch = "wasm32"))]
+fn finish_pending_clear() {
+    let marker = root().join(CLEAR_MARKER);
+    if !marker.is_file() {
+        return;
+    }
+    log_info!("assets", "finishing the clear the last session started");
+    match delete_sets() {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&marker);
+        }
+        Err(e) => log_warn!("assets", "the clear is still not finished: {e}"),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn delete_sets() -> Result<(), String> {
+    let mut removed = 0usize;
+    let mut first_failure = None;
+    for dir in ["versions", "indexes", "sounds"] {
+        let Ok(entries) = std::fs::read_dir(root().join(dir)) else {
+            continue;
+        };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            let ours = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| matches!(e, "bin" | "json" | "part"));
+            if !ours || !path.is_file() {
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(e) => {
+                    log_warn!("assets", "could not delete {}: {e}", path.display());
+                    first_failure.get_or_insert_with(|| format!("{}: {e}", path.display()));
+                }
+            }
+        }
+    }
+    log_info!(
+        "assets",
+        "cleared {removed} files under {}",
+        root().display()
+    );
+    first_failure.map_or(Ok(()), Err)
 }
 
 fn jar_key(name: &str) -> Option<String> {
@@ -381,43 +572,69 @@ pub(crate) fn download() -> &'static Download {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+static MISSING: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(not(target_arch = "wasm32"))]
+static WANTED: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(not(target_arch = "wasm32"))]
+static MOUNTED_INDEX: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(not(target_arch = "wasm32"))]
+static RESTART_PENDING: AtomicBool = AtomicBool::new(false);
+
 #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
-static SOUNDS_ONLY: AtomicBool = AtomicBool::new(false);
+static SOUNDS_FETCHED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
 static SOUNDS_SKIPPED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
-static MOUNTED_INDEX: OnceLock<String> = OnceLock::new();
-
-#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn check_missing() -> bool {
-    SOUNDS_SKIPPED.store(false, Ordering::Relaxed);
-    crate::platform::storage::SOUNDS_SKIPPED.store("");
-    let missing = MOUNTED_INDEX
-        .get()
-        .is_some_and(|id| !crate::audio::store::installed(id));
-    if missing {
-        log_info!("assets", "the sound set is missing; offering it again");
-        SOUNDS_ONLY.store(true, Ordering::Relaxed);
+    #[cfg(feature = "audio")]
+    {
+        SOUNDS_SKIPPED.store(false, Ordering::Relaxed);
+        crate::platform::storage::SOUNDS_SKIPPED.store("");
+    }
+    if !crate::platform::assets::archive::active() {
+        return false;
+    }
+    let index = MOUNTED_INDEX.lock().unwrap().clone();
+    let missing = (WANTED.load(Ordering::Relaxed) | wanted_sounds()) & !present(index.as_deref());
+    MISSING.store(missing, Ordering::Relaxed);
+    if missing != 0 {
+        log_info!(
+            "assets",
+            "pieces missing ({missing:#b}); offering them again"
+        );
         download().rewind();
     }
-    missing
+    missing != 0
 }
 
-#[cfg(not(all(feature = "audio", not(target_arch = "wasm32"))))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn check_missing() -> bool {
     false
 }
 
 pub(crate) fn adopt_sounds() {
     #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+    if SOUNDS_FETCHED.swap(false, Ordering::Relaxed)
+        && let Some(id) = MOUNTED_INDEX.lock().unwrap().clone()
     {
-        SOUNDS_ONLY.store(false, Ordering::Relaxed);
-        if let Some(id) = MOUNTED_INDEX.get() {
-            crate::audio::init(id);
-        }
+        crate::audio::init(&id);
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn needs_restart() -> bool {
+    RESTART_PENDING.load(Ordering::Relaxed)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn needs_restart() -> bool {
+    false
 }
 
 impl Download {
@@ -497,7 +714,7 @@ impl Download {
             .ok();
     }
 
-    #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     fn rewind(&self) {
         if matches!(self.stage(), Stage::Done | Stage::Cancelled | Stage::Failed) {
             self.set(Stage::Idle);
@@ -513,14 +730,68 @@ impl Download {
     }
 
     async fn run(&'static self, version: &str) {
-        #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
-        if SOUNDS_ONLY.load(Ordering::Relaxed) {
-            let result = self.install_sounds_only(version).await;
-            self.settle(self.settle_sounds(result), "sound set");
-            return;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let missing = MISSING.load(Ordering::Relaxed);
+            if missing != 0 {
+                let result = self.repair(version, missing).await;
+                self.settle(result, "the missing pieces");
+                return;
+            }
         }
         let result = self.install(version).await;
         self.settle(result, version);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn repair(&'static self, version: &str, missing: u8) -> Result<bool, Failure> {
+        let mounted = MOUNTED_INDEX.lock().unwrap().clone();
+        self.set(Stage::Asking);
+        let manifest = get_json(VERSION_MANIFEST).await?;
+        let meta = get_json(&pick_version(&manifest, version)?).await?;
+        let index_url = meta["assetIndex"]["url"]
+            .as_str()
+            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+        let index_id = meta["assetIndex"]["id"]
+            .as_str()
+            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+
+        if mounted.as_deref() != Some(index_id) {
+            log_warn!(
+                "assets",
+                "the installed set names index {mounted:?} and Mojang names {index_id}; \
+                 installing the whole set"
+            );
+            RESTART_PENDING.store(true, Ordering::Relaxed);
+            return self.install(version).await;
+        }
+
+        if missing & piece::OBJECTS != 0 {
+            let want = WANTED.load(Ordering::Relaxed);
+            let index = get_json(index_url).await?;
+            let Some(objects) = self
+                .fetch_objects(&index, |key| object_wanted(want, key))
+                .await?
+            else {
+                return Ok(false);
+            };
+            store::save_index(index_id, &pack(objects))
+                .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+            RESTART_PENDING.store(true, Ordering::Relaxed);
+        }
+
+        #[cfg(feature = "audio")]
+        if missing & piece::SOUNDS != 0 {
+            self.set(Stage::Sounds);
+            let fetched = self.install_sounds(index_url, index_id).await;
+            if !self.settle_sounds(fetched)? {
+                return Ok(false);
+            }
+            if crate::audio::store::installed(index_id) {
+                SOUNDS_FETCHED.store(true, Ordering::Relaxed);
+            }
+        }
+        Ok(true)
     }
 
     fn settle(&self, result: Result<bool, Failure>, what: &str) {
@@ -564,27 +835,39 @@ impl Download {
         };
         drop(jar);
 
-        let wants_panorama = panorama_is_stubbed(&entries);
-        let wants_unifont = cfg!(feature = "full_font") && unifont_is_stubbed(&entries);
+        let wants_objects = wanted_objects(|key| {
+            entries
+                .iter()
+                .find(|(k, _)| k.as_str() == key)
+                .map(|(_, bytes)| bytes.as_slice())
+        });
         let wants_sounds = cfg!(feature = "audio");
+        let wants_languages = cfg!(feature = "asset_download");
         let mut index_id = None;
-        if CAN_FETCH_OBJECTS && (wants_panorama || wants_unifont || wants_sounds) {
+        if CAN_FETCH_OBJECTS && (wants_objects != 0 || wants_sounds || wants_languages) {
             let id = meta["assetIndex"]["id"]
                 .as_str()
                 .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
             let index_url = meta["assetIndex"]["url"]
                 .as_str()
                 .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
-            if wants_panorama || wants_unifont {
-                if store::has_index(id) {
+            let index = get_json(index_url).await?;
+
+            #[cfg(feature = "asset_download")]
+            match super::language::table_from_index(&index, &|| self.cancelled()).await {
+                Ok(Some(table)) => entries.push((LANGUAGES_KEY.to_owned(), table)),
+                Ok(None) => return Ok(false),
+                Err(e) => log_warn!("assets", "no language list: {}", e.detail),
+            }
+
+            if wants_objects != 0 {
+                let held =
+                    store::index_keys(id).map_or(0, |keys| objects_hold(|key| keys.contains(key)));
+                if wants_objects & !held == 0 {
                     log_info!("assets", "objects layer {id} is already installed");
                 } else {
-                    let wanted = |key: &str| {
-                        (wants_panorama && key.starts_with(PANORAMA_DIR))
-                            || (wants_unifont
-                                && (key == UNIFONT_JSON_KEY || key == UNIFONT_ZIP_KEY))
-                    };
-                    let objects = match self.fetch_objects(index_url, wanted).await {
+                    let wanted = |key: &str| object_wanted(wants_objects, key);
+                    let objects = match self.fetch_objects(&index, wanted).await {
                         Ok(Some(objects)) => objects,
                         Ok(None) => return Ok(false),
                         #[cfg(target_arch = "wasm32")]
@@ -726,14 +1009,13 @@ impl Download {
 
     async fn fetch_objects(
         &self,
-        index_url: &str,
+        index: &serde_json::Value,
         want: impl Fn(&str) -> bool,
     ) -> Result<Option<Vec<(String, Vec<u8>)>>, Failure> {
         self.set(Stage::Fetching);
         self.done.store(0, Ordering::Relaxed);
         self.total.store(0, Ordering::Relaxed);
 
-        let index = get_json(index_url).await?;
         let objects = index["objects"]
             .as_object()
             .ok_or_else(|| Failure::plain("Mojang sent something unreadable"))?;
@@ -783,21 +1065,6 @@ impl Download {
             out.push((key, bytes));
         }
         Ok(Some(out))
-    }
-
-    #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
-    async fn install_sounds_only(&self, version: &str) -> Result<bool, Failure> {
-        self.set(Stage::Asking);
-        let manifest = get_json(VERSION_MANIFEST).await?;
-        let meta = get_json(&pick_version(&manifest, version)?).await?;
-        let index_url = meta["assetIndex"]["url"]
-            .as_str()
-            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
-        let index_id = meta["assetIndex"]["id"]
-            .as_str()
-            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
-        self.set(Stage::Sounds);
-        self.install_sounds(index_url, index_id).await
     }
 
     #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
@@ -936,23 +1203,30 @@ impl Download {
 
     #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
     async fn fetch_object(&self, hash: &str) -> Result<Option<Vec<u8>>, Failure> {
-        let url = object_url(hash);
-        let body = crate::platform::http::get_bytes(&url, 0, &mut |_, _| !self.cancelled())
-            .await
-            .map_err(|e| Failure::http("Mojang's asset store did not answer", e))?;
-        let bytes = match body {
-            crate::platform::http::Fetched::Body(bytes) => bytes,
-            crate::platform::http::Fetched::Cancelled => return Ok(None),
-        };
-        let got = sha1_hex(&bytes);
-        if got != hash {
-            return Err(Failure::new(
-                "An asset arrived damaged",
-                format!("sha1 {got}, expected {hash}"),
-            ));
-        }
-        Ok(Some(bytes))
+        get_object(hash, &|| self.cancelled()).await
     }
+}
+
+pub(super) async fn get_object(
+    hash: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<Vec<u8>>, Failure> {
+    let url = object_url(hash);
+    let body = crate::platform::http::get_bytes(&url, 0, &mut |_, _| !cancelled())
+        .await
+        .map_err(|e| Failure::http("Mojang's asset store did not answer", e))?;
+    let bytes = match body {
+        crate::platform::http::Fetched::Body(bytes) => bytes,
+        crate::platform::http::Fetched::Cancelled => return Ok(None),
+    };
+    let got = sha1_hex(&bytes);
+    if got != hash {
+        return Err(Failure::new(
+            "An asset arrived damaged",
+            format!("sha1 {got}, expected {hash}"),
+        ));
+    }
+    Ok(Some(bytes))
 }
 
 #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
@@ -1043,20 +1317,19 @@ fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((at(16), at(20)))
 }
 
-fn panorama_is_stubbed(entries: &[(String, Vec<u8>)]) -> bool {
+fn panorama_is_stubbed<'a>(get: impl Fn(&str) -> Option<&'a [u8]>) -> bool {
     (0..6).any(|face| {
-        let name = format!("{ASSET_KEY_PREFIX}{PANORAMA_DIR}panorama_{face}.png");
-        match entries.iter().find(|(key, _)| *key == name) {
-            Some((_, bytes)) => png_size(bytes) != Some((1024, 1024)),
-            None => true,
-        }
+        get(&panorama_face(face)).is_none_or(|bytes| png_size(bytes) != Some((1024, 1024)))
     })
 }
 
-fn unifont_is_stubbed(entries: &[(String, Vec<u8>)]) -> bool {
-    let name = format!("{ASSET_KEY_PREFIX}{UNIFONT_JSON_KEY}");
-    match entries.iter().find(|(key, _)| *key == name) {
-        Some((_, bytes)) => {
+fn panorama_face(face: u32) -> String {
+    format!("{ASSET_KEY_PREFIX}{PANORAMA_DIR}panorama_{face}.png")
+}
+
+fn unifont_is_stubbed<'a>(get: impl Fn(&str) -> Option<&'a [u8]>) -> bool {
+    match get(&format!("{ASSET_KEY_PREFIX}{UNIFONT_JSON_KEY}")) {
+        Some(bytes) => {
             let json: serde_json::Value = serde_json::from_slice(bytes).unwrap_or_default();
             json["providers"]
                 .as_array()
@@ -1068,13 +1341,13 @@ fn unifont_is_stubbed(entries: &[(String, Vec<u8>)]) -> bool {
 
 pub(crate) const NETWORK_FAILURE: &str = "Network connection problem";
 
-struct Failure {
-    short: &'static str,
-    detail: String,
+pub(super) struct Failure {
+    pub(super) short: &'static str,
+    pub(super) detail: String,
 }
 
 impl Failure {
-    fn new(short: &'static str, detail: impl std::fmt::Display) -> Failure {
+    pub(super) fn new(short: &'static str, detail: impl std::fmt::Display) -> Failure {
         Failure {
             short,
             detail: detail.to_string(),
@@ -1089,7 +1362,7 @@ impl Failure {
         }
     }
 
-    fn plain(short: &'static str) -> Failure {
+    pub(super) fn plain(short: &'static str) -> Failure {
         Failure {
             short,
             detail: short.to_string(),
@@ -1097,7 +1370,7 @@ impl Failure {
     }
 }
 
-async fn get_json(url: &str) -> Result<serde_json::Value, Failure> {
+pub(super) async fn get_json(url: &str) -> Result<serde_json::Value, Failure> {
     let text = match crate::platform::http::get_string(url).await {
         Ok(text) => Ok(text),
         Err(e) => match fallback_url(url) {
@@ -1122,7 +1395,7 @@ fn fallback_url(_: &str) -> Option<String> {
     None
 }
 
-fn pick_version(manifest: &serde_json::Value, version: &str) -> Result<String, Failure> {
+pub(super) fn pick_version(manifest: &serde_json::Value, version: &str) -> Result<String, Failure> {
     manifest["versions"]
         .as_array()
         .ok_or_else(|| Failure::plain("Mojang sent something unreadable"))?

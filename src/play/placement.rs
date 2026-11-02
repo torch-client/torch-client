@@ -212,7 +212,7 @@ fn fluid_replaceable(state: BlockState) -> bool {
     kind == BlockKind::Water || kind == BlockKind::Lava || REPLACEABLE.contains(&kind)
 }
 
-fn replaceable(state: BlockState, item_block: BlockKind) -> Option<bool> {
+pub(crate) fn replaceable(state: BlockState, item_block: BlockKind) -> Option<bool> {
     let kind = state.as_block_kind();
     if kind == item_block && !state.is_collision_shape_full() {
         return None;

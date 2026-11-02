@@ -29,6 +29,8 @@ use collision::{BLOCK_SHAPE, VoxelShape, move_colliding};
 
 use crate::collision::{MoveCtx, entity_collisions::update_last_bounding_box};
 use crate::inside_block::{InsideBlockCtx, handle_entity_inside_block};
+pub use crate::inside_block::InsideKind;
+pub use crate::inside_block::{COBWEB, COBWEB_WEAVING};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub struct PhysicsSystems;
@@ -205,9 +207,33 @@ pub fn apply_effects_from_blocks(
                 abilities,
                 position: **position,
                 width: dimensions.width,
+                kind: InsideKind::Living,
             },
         );
     }
+}
+
+pub fn apply_effects_from_blocks_for(
+    physics: &mut Physics,
+    dimensions: &EntityDimensions,
+    world: &World,
+    movement: EntityMovement,
+    kind: InsideKind,
+) {
+    let no_effects = ActiveEffects::default();
+    check_inside_blocks(
+        physics,
+        dimensions,
+        world,
+        &[movement],
+        &InsideBlockCtx {
+            active_effects: &no_effects,
+            abilities: None,
+            position: movement.to,
+            width: dimensions.width,
+            kind,
+        },
+    );
 }
 
 fn check_inside_blocks(
@@ -283,6 +309,7 @@ fn collided_with_shape_moving_from(
     )
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct EntityMovement {
     pub from: Vec3,
     pub to: Vec3,
@@ -424,7 +451,7 @@ fn get_friction_influenced_speed(
     }
 }
 
-fn block_jump_factor(world: &World, position: Position) -> f32 {
+pub fn block_jump_factor(world: &World, position: Position) -> f32 {
     let block_at_pos = world.chunks.get_block_state(position.into());
     let block_below = world
         .chunks

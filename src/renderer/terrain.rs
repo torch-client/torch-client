@@ -167,6 +167,12 @@ impl Default for ShaderQuality {
 }
 
 impl ShaderQuality {
+    pub const ALL: [ShaderQuality; 3] = [
+        ShaderQuality::Fancy,
+        ShaderQuality::Fast,
+        ShaderQuality::Mobile,
+    ];
+
     #[cfg(feature = "builtin_shaders")]
     pub fn caption(self) -> &'static str {
         match self {
@@ -183,25 +189,9 @@ impl ShaderQuality {
             ShaderQuality::Mobile => "mobile",
         }
     }
-
-    pub fn from_serialized_name(name: &str) -> Option<ShaderQuality> {
-        match name {
-            "fancy" => Some(ShaderQuality::Fancy),
-            "fast" => Some(ShaderQuality::Fast),
-            "mobile" => Some(ShaderQuality::Mobile),
-            _ => None,
-        }
-    }
-
-    #[cfg(feature = "builtin_shaders")]
-    pub fn next(self) -> ShaderQuality {
-        match self {
-            ShaderQuality::Fancy => ShaderQuality::Fast,
-            ShaderQuality::Fast => ShaderQuality::Mobile,
-            ShaderQuality::Mobile => ShaderQuality::Fancy,
-        }
-    }
 }
+
+crate::util::named_cycle::named_cycle!(ShaderQuality);
 
 #[cfg(all(feature = "builtin_shaders", not(target_arch = "wasm32")))]
 const SHADOW_MAX_DISTANCE: f32 = 112.0;
@@ -575,6 +565,16 @@ impl Plugin for TerrainMaterialPlugin {
             render_app.add_systems(
                 bevy::render::Render,
                 upload_lightmap.in_set(bevy::render::RenderSystems::PrepareResources),
+            );
+            #[cfg(all(
+                feature = "shader_support",
+                target_arch = "wasm32",
+                not(feature = "webgpu")
+            ))]
+            render_app.add_systems(
+                bevy::render::Render,
+                super::packdraw::rawviews::mirror_lightmap
+                    .in_set(bevy::render::RenderSystems::PrepareResources),
             );
         }
     }

@@ -1,8 +1,9 @@
-use bevy::math::{IVec2, IVec3, Mat4, Vec2, Vec3, Vec4};
+use bevy::math::{DVec3, IVec2, IVec3, Mat4, Vec2, Vec3, Vec4};
 use bevy::render::view::ExtractedView;
 
 use super::builtins::{BUILTINS, Builtin, Value};
 use super::{BlockHead, MatrixSet};
+use crate::renderer::RenderOrigin;
 use crate::renderer::hand::HAND_FOV_DEGREES;
 use crate::renderer::packdraw::inputs::{Inputs, MAX_ARMOR, MAX_HUNGER};
 use crate::shaderpack::directives::Constants;
@@ -107,6 +108,7 @@ impl FrameValues {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn of(
         view: &ExtractedView,
+        origin: RenderOrigin,
         time_counter: f32,
         frame_time: f32,
         frames: u32,
@@ -123,14 +125,15 @@ impl FrameValues {
         let far_plane = (far * FAR_PLANE_PER_BLOCK).max(NEAR * 2.0);
         let projection = Mat4::perspective_rh_gl(fov, size.x / size.y, NEAR, far_plane);
         let camera = view.world_from_view.translation();
+        let camera_world = origin.to_world(camera);
 
         let (previous_view_rotation, previous_projection) =
             history.previous.unwrap_or((view_rotation, projection));
         history.previous = Some((view_rotation, projection));
-        let (camera_uniform, previous_camera_uniform) = shifted_camera(history, camera.as_dvec3());
-        let previous_unshifted = history.unshifted_previous.unwrap_or(camera.as_dvec3());
-        history.unshifted_previous = Some(camera.as_dvec3());
-        let (camera_int, camera_fract) = split_position(camera.as_dvec3());
+        let (camera_uniform, previous_camera_uniform) = shifted_camera(history, camera_world);
+        let previous_unshifted = history.unshifted_previous.unwrap_or(camera_world);
+        history.unshifted_previous = Some(camera_world);
+        let (camera_int, camera_fract) = split_position(camera_world);
         let (previous_camera_int, previous_camera_fract) = split_position(previous_unshifted);
 
         let celestial = |angle: f32| -> Vec3 {
@@ -165,7 +168,7 @@ impl FrameValues {
             ) as i32
         });
 
-        let shadow_model_view = shadow_model_view(shadow_angle, constants, camera);
+        let shadow_model_view = shadow_model_view(shadow_angle, constants, camera_world);
         let shadow_projection = Mat4::orthographic_rh_gl(
             -constants.shadow_distance,
             constants.shadow_distance,
@@ -387,7 +390,7 @@ impl FrameValues {
     }
 }
 
-fn shadow_model_view(shadow_angle: f32, constants: &Constants, camera: Vec3) -> Mat4 {
+fn shadow_model_view(shadow_angle: f32, constants: &Constants, camera: DVec3) -> Mat4 {
     let sky_angle = if shadow_angle < 0.25 {
         shadow_angle + 0.75
     } else {
@@ -396,13 +399,9 @@ fn shadow_model_view(shadow_angle: f32, constants: &Constants, camera: Vec3) -> 
     let mut m = Mat4::from_rotation_x(90.0f32.to_radians())
         * Mat4::from_rotation_z((sky_angle * -360.0).to_radians())
         * Mat4::from_rotation_x(constants.sun_path_rotation.to_radians());
-    let interval = constants.shadow_interval;
+    let interval = f64::from(constants.shadow_interval);
     if interval != 0.0 {
-        let offset = Vec3::new(
-            camera.x % interval,
-            camera.y % interval,
-            camera.z % interval,
-        ) - interval / 2.0;
+        let offset = (camera % interval - interval / 2.0).as_vec3();
         m *= Mat4::from_translation(offset);
     }
     m
@@ -468,7 +467,7 @@ mod tests {
             shadow_interval: 0.0,
             ..Constants::default()
         };
-        let m = shadow_model_view(0.25, &constants, Vec3::new(10.5, 70.0, -3.25));
+        let m = shadow_model_view(0.25, &constants, DVec3::new(10.5, 70.0, -3.25));
         let toward_light = m.inverse().transform_vector3(Vec3::Z);
         assert!(toward_light.abs_diff_eq(Vec3::Y, 1e-5), "{toward_light:?}");
         assert!(m.w_axis.truncate().abs_diff_eq(Vec3::ZERO, 1e-5));

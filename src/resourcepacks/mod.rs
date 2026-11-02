@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::platform::assets::archive::{self, OwnedLayer};
+use crate::platform::packfs::{self, Stamp};
 use crate::platform::storage;
 use crate::text::Span;
 use crate::util::pack::{Pack, Source};
@@ -20,7 +21,11 @@ const FORMAT: Format = (84, 0);
 type Format = (u32, u32);
 
 pub(crate) fn dir() -> PathBuf {
-    storage::dir().join("resourcepacks")
+    packfs::root().join("resourcepacks")
+}
+
+pub(crate) fn is_pack_dir(path: &std::path::Path) -> bool {
+    packfs::is_file(&path.join("pack.mcmeta"))
 }
 
 pub(crate) fn list() -> Vec<Pack> {
@@ -29,19 +34,19 @@ pub(crate) fn list() -> Vec<Pack> {
 
 #[cfg(explore_modrinth)]
 pub(crate) fn size(name: &str) -> u64 {
-    fn walk(path: &std::path::Path, meta: std::fs::Metadata) -> u64 {
-        if !meta.is_dir() {
-            return meta.len();
+    fn walk(path: &std::path::Path, kind: packfs::Kind) -> u64 {
+        match kind {
+            packfs::Kind::Dir => packfs::entries(path)
+                .into_iter()
+                .flatten()
+                .map(|(name, kind)| walk(&path.join(name), kind))
+                .sum(),
+            packfs::Kind::File => packfs::len(path).unwrap_or(0),
+            packfs::Kind::Other => 0,
         }
-        std::fs::read_dir(path)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|entry| entry.metadata().map_or(0, |meta| walk(&entry.path(), meta)))
-            .sum()
     }
     let path = dir().join(name);
-    std::fs::metadata(&path).map_or(0, |meta| walk(&path, meta))
+    packfs::kind(&path).map_or(0, |kind| walk(&path, kind))
 }
 
 pub(crate) fn selected() -> Vec<String> {
@@ -190,23 +195,17 @@ fn overlays(meta: &Value) -> Vec<String> {
         .collect()
 }
 
-type Stamp = (u64, std::time::SystemTime);
-
 static INFLATED: LazyLock<Mutex<HashMap<String, (Stamp, Arc<OwnedLayer>)>>> =
     LazyLock::new(Default::default);
 
-fn zip_stamp(path: &std::path::Path) -> Option<Stamp> {
-    let meta = std::fs::metadata(path).ok()?;
-    meta.is_file().then_some(())?;
-    Some((meta.len(), meta.modified().ok()?))
-}
+pub(crate) static FAILED: crate::util::pack::Failed = crate::util::pack::Failed::new();
 
 pub(crate) fn mount() {
     let started = crate::platform::time::Instant::now();
     let names = selected();
     let stamps: Vec<Option<Stamp>> = names
         .iter()
-        .map(|name| zip_stamp(&dir().join(name)))
+        .map(|name| packfs::stamp(&dir().join(name)))
         .collect();
     let mut inflated = INFLATED.lock();
     inflated.retain(|name, _| names.contains(name));
@@ -220,6 +219,12 @@ pub(crate) fn mount() {
         })
         .collect();
     let missing: Vec<usize> = (0..names.len()).filter(|&i| layers[i].is_none()).collect();
+    #[cfg(target_arch = "wasm32")]
+    let opened: Vec<Result<OwnedLayer, String>> = missing
+        .iter()
+        .map(|&i| layer(&dir().join(&names[i])))
+        .collect();
+    #[cfg(not(target_arch = "wasm32"))]
     let opened: Vec<Result<OwnedLayer, String>> = std::thread::scope(|scope| {
         let handles: Vec<_> = missing
             .iter()
@@ -237,6 +242,7 @@ pub(crate) fn mount() {
             })
             .collect()
     });
+    let mut failed = Vec::new();
     for (i, result) in missing.into_iter().zip(opened) {
         let name = &names[i];
         match result {
@@ -251,9 +257,11 @@ pub(crate) fn mount() {
             Err(e) => {
                 inflated.remove(name);
                 crate::log_warn!("resourcepacks", "{name} is not mounted: {e}");
+                failed.push(name.clone());
             }
         }
     }
+    FAILED.set(failed);
     drop(inflated);
 
     let layers: Vec<Arc<OwnedLayer>> = layers.into_iter().flatten().collect();
@@ -321,86 +329,10 @@ fn server_file_name(url: &str, sha1: &str) -> String {
 pub(crate) fn install(name: &str, bytes: &[u8]) -> Result<(), String> {
     let dir = dir();
     let part = dir.join(format!("{name}.part"));
-    std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::write(&part, bytes))
-        .and_then(|()| std::fs::rename(&part, dir.join(name)))
+    packfs::create_dir_all(&dir)
+        .and_then(|()| packfs::write(&part, bytes))
+        .and_then(|()| packfs::rename(&part, dir.join(name)))
         .map_err(|e| e.to_string())
-}
-
-#[derive(Default)]
-pub(crate) struct Dropped {
-    pub(crate) copied: bool,
-    pub(crate) failed: bool,
-    pub(crate) rejected: Vec<String>,
-}
-
-pub(crate) fn copy_in(paths: &[PathBuf]) -> Dropped {
-    let target = dir();
-    let mut out = Dropped::default();
-    if let Err(e) = std::fs::create_dir_all(&target) {
-        crate::log_warn!(
-            "resourcepacks",
-            "could not create {}: {e}",
-            target.display()
-        );
-        out.failed = true;
-        return out;
-    }
-    for path in paths {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let kind = std::fs::symlink_metadata(path)
-            .ok()
-            .map(|meta| meta.file_type());
-        let is_pack = match kind {
-            Some(kind) if kind.is_dir() => path.join("pack.mcmeta").is_file(),
-            Some(kind) if kind.is_file() => name.ends_with(".zip"),
-            _ => false,
-        };
-        if !is_pack {
-            crate::log_warn!(
-                "resourcepacks",
-                "{} does not seem like a pack",
-                path.display()
-            );
-            out.rejected.push(name);
-            continue;
-        }
-        out.copied = true;
-        if let Err(e) = copy_tree(path, &target.join(&name)) {
-            crate::log_warn!(
-                "resourcepacks",
-                "could not copy {} into {}: {e}",
-                path.display(),
-                target.display()
-            );
-            out.failed = true;
-        }
-    }
-    out
-}
-
-fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
-    if to.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("{} already exists", to.display()),
-        ));
-    }
-    if !std::fs::symlink_metadata(from)?.is_dir() {
-        return std::fs::copy(from, to).map(drop);
-    }
-    std::fs::create_dir(to)?;
-    let mut first = None;
-    for entry in std::fs::read_dir(from)? {
-        let result = entry.and_then(|entry| copy_tree(&entry.path(), &to.join(entry.file_name())));
-        if let Err(e) = result {
-            first.get_or_insert(e);
-        }
-    }
-    first.map_or(Ok(()), Err)
 }
 
 fn owned(source: &Source) -> Result<OwnedLayer, String> {

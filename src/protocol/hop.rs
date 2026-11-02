@@ -3,9 +3,12 @@ use std::sync::OnceLock;
 
 use azalea_protocol::packets::ConnectionProtocol;
 
+use azalea::block::BlockState;
 use azalea_buf::AzBuf;
 use azalea_registry::Registry as _;
 use azalea_registry::builtin::{DataComponentKind, EntityKind, ParticleKind};
+use azalea_registry::data::Biome;
+use azalea_world::palette::PalletedContainerKind;
 
 use super::packets::{Direction, PacketTable, Phase};
 use super::remap::{IdSpace, Remap};
@@ -53,6 +56,9 @@ const V774: HopSpec = HopSpec {
         ("sound", sound),
         ("sound_entity", sound),
         ("update_recipes", update_recipes),
+        ("recipe_book_add", recipe_book_add),
+        ("update_advancements", update_advancements),
+        ("merchant_offers", merchant_offers),
     ],
     outbound: &[
         ("attack", "interact", attack),
@@ -159,12 +165,26 @@ impl Hop {
         };
         let body = r.rest();
 
-        let rewritten = self
+        let rewrite = self
             .inbound_rewrite
             .get(native_id as usize)
             .copied()
-            .flatten()
-            .and_then(|rewrite| rewrite(&self.ids, body));
+            .flatten();
+        let rewritten = rewrite.and_then(|rewrite| {
+            trail::reset();
+            rewrite(&self.ids, body)
+        });
+        if rewrite.is_some() && rewritten.is_none() {
+            let name = self
+                .native
+                .name_of(Phase::Game, Direction::Clientbound, native_id)
+                .unwrap_or("?");
+            crate::log_warn!(
+                "proto",
+                "{name}: could not translate the body; passed through as the wire sent it. {}",
+                trail::report(body)
+            );
+        }
 
         if self.trace {
             self.trace_frame(
@@ -196,7 +216,20 @@ impl Hop {
         let body = r.rest();
 
         if let Some(&Some((wire_id, rewrite))) = self.outbound_rewrite.get(native_id as usize) {
-            let body = rewrite(&self.ids, body);
+            trail::reset();
+            let rewritten = rewrite(&self.ids, body);
+            if rewritten.is_none() {
+                let name = self
+                    .native
+                    .name_of(Phase::Game, Direction::Serverbound, native_id)
+                    .unwrap_or("?");
+                crate::log_warn!(
+                    "proto",
+                    "{name}: could not rewrite the body for the wire; the frame was dropped. {}",
+                    trail::report(body)
+                );
+            }
+            let body = rewritten;
             if self.trace {
                 self.trace_frame(
                     "out",
@@ -293,6 +326,186 @@ impl azalea::connection::PacketTranslator for Translator {
 
     fn outbound(&mut self, phase: ConnectionProtocol, raw: Box<[u8]>) -> Box<[u8]> {
         self.hop.outbound(phase, raw)
+    }
+}
+
+mod trail {
+    use std::cell::RefCell;
+    use std::fmt::Write as _;
+
+    use azalea_registry::builtin::DataComponentKind;
+
+    use crate::protocol::remap::IdSpace;
+
+    #[derive(Clone, Copy)]
+    pub(super) enum Step {
+        Stack {
+            at: usize,
+            item: i32,
+            count: i32,
+        },
+        Component {
+            at: usize,
+            wire: i32,
+            kind: Option<DataComponentKind>,
+            len: usize,
+        },
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) enum Why {
+        Unmapped {
+            space: IdSpace,
+            raw: i32,
+            to_native: bool,
+        },
+        Decode(DataComponentKind),
+        Shape(&'static str),
+    }
+
+    #[derive(Default)]
+    struct Trail {
+        steps: Vec<Step>,
+        why: Option<Why>,
+        detail: String,
+        at: Option<usize>,
+    }
+
+    thread_local! {
+        static TRAIL: RefCell<Trail> = RefCell::new(Trail::default());
+    }
+
+    pub(super) fn reset() {
+        TRAIL.with(|t| {
+            let mut t = t.borrow_mut();
+            t.steps.clear();
+            t.why = None;
+            t.detail.clear();
+            t.at = None;
+        });
+    }
+
+    pub(super) fn step(step: Step) {
+        TRAIL.with(|t| t.borrow_mut().steps.push(step));
+    }
+
+    pub(super) fn finished(len: usize) {
+        TRAIL.with(|t| {
+            if let Some(Step::Component { len: slot, .. }) = t.borrow_mut().steps.last_mut() {
+                *slot = len;
+            }
+        });
+    }
+
+    pub(super) fn fail(why: Why) {
+        TRAIL.with(|t| {
+            let mut t = t.borrow_mut();
+            if t.why.is_none() {
+                t.why = Some(why);
+            }
+        });
+    }
+
+    pub(super) fn fail_decode(kind: DataComponentKind, error: &dyn std::fmt::Display) {
+        TRAIL.with(|t| {
+            let mut t = t.borrow_mut();
+            if t.why.is_none() {
+                t.why = Some(Why::Decode(kind));
+                t.detail = error.to_string();
+            }
+        });
+    }
+
+    pub(super) fn stopped_at(pos: usize) {
+        TRAIL.with(|t| {
+            let mut t = t.borrow_mut();
+            if t.at.is_none() {
+                t.at = Some(pos);
+            }
+        });
+    }
+
+    pub(super) fn reason() -> String {
+        TRAIL.with(|t| describe(&t.borrow()))
+    }
+
+    fn describe(t: &Trail) -> String {
+        match t.why {
+            Some(Why::Unmapped { space, raw, to_native: true }) => {
+                format!("wire {space:?} id {raw} names nothing in 775")
+            }
+            Some(Why::Unmapped { space, raw, to_native: false }) => {
+                format!("775 {space:?} id {raw} names nothing on the wire")
+            }
+            Some(Why::Decode(kind)) => format!("{kind:?} did not decode: {}", t.detail),
+            Some(Why::Shape(what)) => what.to_owned(),
+            None => {
+                "the frame ended before the layout did (a read ran off the end, or a count was negative)"
+                    .to_owned()
+            }
+        }
+    }
+
+    pub(super) fn report(body: &[u8]) -> String {
+        TRAIL.with(|t| {
+            let t = t.borrow();
+            let mut s = describe(&t);
+            let at = t.at.unwrap_or(body.len());
+            let _ = write!(s, " at byte {at} of {}", body.len());
+
+            let start = t
+                .steps
+                .iter()
+                .rposition(|step| matches!(step, Step::Stack { .. }))
+                .unwrap_or(0);
+            let stacks_before = t.steps[..start]
+                .iter()
+                .filter(|step| matches!(step, Step::Stack { .. }))
+                .count();
+            let _ = write!(s, "; {stacks_before} stacks walked before this one; trail:");
+            if t.steps.is_empty() {
+                s.push_str(" (no stack reached)");
+            }
+            for step in &t.steps[start..] {
+                match *step {
+                    Step::Stack { at, item, count } => {
+                        let _ = write!(s, " stack@{at}[item {item} x{count}]");
+                    }
+                    Step::Component {
+                        at,
+                        wire,
+                        kind: Some(kind),
+                        len: 0,
+                    } => {
+                        let _ = write!(s, " {kind:?}({wire})@{at}[unfinished]");
+                    }
+                    Step::Component {
+                        at,
+                        wire,
+                        kind: Some(kind),
+                        len,
+                    } => {
+                        let _ = write!(s, " {kind:?}({wire})@{at}[{len}b]");
+                    }
+                    Step::Component {
+                        at,
+                        wire,
+                        kind: None,
+                        ..
+                    } => {
+                        let _ = write!(s, " ?({wire})@{at}[unmapped]");
+                    }
+                }
+            }
+
+            let lo = at.saturating_sub(16).min(body.len());
+            let hi = (at + 48).min(body.len());
+            let _ = write!(s, "; bytes {lo}..{hi}:");
+            for byte in &body[lo..hi] {
+                let _ = write!(s, " {byte:02x}");
+            }
+            s
+        })
     }
 }
 
@@ -415,6 +628,10 @@ fn particle(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>, probe: &mut Vec<u8>) -
 }
 
 fn sound_holder(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    sound_holder_way(ids, Way::In, r, out)
+}
+
+fn sound_holder_way(ids: &Ids, way: Way, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     let raw = r.varint()?;
     if raw == 0 {
         write_varint(out, 0);
@@ -428,7 +645,7 @@ fn sound_holder(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
         }
         return Some(());
     }
-    let moved = ids.to_native.map(IdSpace::SoundEvent, raw - 1)?;
+    let moved = way.map(ids, IdSpace::SoundEvent, raw - 1)?;
     write_varint(out, moved + 1);
     Some(())
 }
@@ -440,39 +657,436 @@ const SERIALIZER_PARTICLE: i32 = 16;
 const SERIALIZER_PARTICLES: i32 = 17;
 
 fn item_stack(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    let at = r.pos();
     let count = r.varint()?;
     write_varint(out, count);
     if count <= 0 {
         return Some(());
     }
-    let item = ids.to_native.map(IdSpace::Item, r.varint()?)?;
-    write_varint(out, item);
+    let raw = r.varint()?;
+    trail::step(trail::Step::Stack {
+        at,
+        item: raw,
+        count,
+    });
+    let walked = Way::In.map(ids, IdSpace::Item, raw).and_then(|item| {
+        write_varint(out, item);
+        patch(ids, Way::In, r, out)
+    });
+    if walked.is_none() {
+        trail::stopped_at(r.pos());
+    }
+    walked
+}
 
+#[derive(Clone, Copy)]
+enum Way {
+    In,
+    Out,
+}
+
+impl Way {
+    fn map(self, ids: &Ids, space: IdSpace, raw: i32) -> Option<i32> {
+        let to_native = matches!(self, Way::In);
+        let remap = if to_native {
+            ids.to_native
+        } else {
+            ids.from_native
+        };
+        let moved = remap.map(space, raw);
+        if moved.is_none() {
+            trail::fail(trail::Why::Unmapped {
+                space,
+                raw,
+                to_native,
+            });
+        }
+        moved
+    }
+}
+
+fn patch(ids: &Ids, way: Way, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     let with_payload = r.count()?;
     let without = r.count()?;
     write_varint(out, with_payload as i32);
     write_varint(out, without as i32);
 
     for _ in 0..with_payload {
-        let kind = component(ids, r, out)?;
-        let mut cursor = std::io::Cursor::new(r.rest());
-        let mut value =
-            azalea_inventory::components::DataComponentUnion::azalea_read_as(kind, &mut cursor)
-                .ok()?;
-        unsafe { value.drop_as(kind) };
-        let length = usize::try_from(cursor.position()).ok()?;
-        out.extend_from_slice(r.take(length)?);
+        component(ids, way, r, out)?;
     }
     for _ in 0..without {
-        component(ids, r, out)?;
+        write_varint(out, way.map(ids, IdSpace::DataComponentType, r.varint()?)?);
     }
     Some(())
 }
 
-fn component(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<DataComponentKind> {
-    let id = ids.to_native.map(IdSpace::DataComponentType, r.varint()?)?;
-    write_varint(out, id);
-    DataComponentKind::from_u32(u32::try_from(id).ok()?)
+fn component(ids: &Ids, way: Way, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    let at = r.pos();
+    let raw = r.varint()?;
+    let moved = way.map(ids, IdSpace::DataComponentType, raw);
+    let native = match way {
+        Way::In => moved,
+        Way::Out => Some(raw),
+    };
+    let kind = native.and_then(|id| DataComponentKind::from_u32(u32::try_from(id).ok()?));
+    trail::step(trail::Step::Component {
+        at,
+        wire: raw,
+        kind,
+        len: 0,
+    });
+    let (moved, kind) = (moved?, kind?);
+    write_varint(out, moved);
+    let walked = payload(ids, way, kind, r, out);
+    match walked {
+        Some(()) => trail::finished(r.pos() - at),
+        None => trail::stopped_at(r.pos()),
+    }
+    walked
+}
+
+fn payload(
+    ids: &Ids,
+    way: Way,
+    kind: DataComponentKind,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+) -> Option<()> {
+    if nested(ids, way, kind, r, out)? {
+        return Some(());
+    }
+    let mut cursor = std::io::Cursor::new(r.rest());
+    let mut value =
+        match azalea_inventory::components::DataComponentUnion::azalea_read_as(kind, &mut cursor) {
+            Ok(value) => value,
+            Err(e) => {
+                trail::fail_decode(kind, &e);
+                return None;
+            }
+        };
+    unsafe { value.drop_as(kind) };
+    let length = usize::try_from(cursor.position()).ok()?;
+    out.extend_from_slice(r.take(length)?);
+    Some(())
+}
+
+fn nested(
+    ids: &Ids,
+    way: Way,
+    kind: DataComponentKind,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+) -> Option<bool> {
+    let (list, optional) = match kind {
+        DataComponentKind::Container => (true, true),
+        DataComponentKind::BundleContents | DataComponentKind::ChargedProjectiles => (true, false),
+        DataComponentKind::UseRemainder => (false, false),
+        _ => return widened(ids, way, kind, r, out),
+    };
+    let n = if list {
+        let n = r.count()?;
+        write_varint(out, n as i32);
+        n
+    } else {
+        1
+    };
+    for _ in 0..n {
+        match way {
+            Way::In => {
+                let count = r.varint()?;
+                if count <= 0 {
+                    if !optional {
+                        trail::fail(trail::Why::Shape(
+                            "an empty nested stack where 775 holds a template, which cannot be empty",
+                        ));
+                        return None;
+                    }
+                    out.push(0);
+                    continue;
+                }
+                if optional {
+                    out.push(1);
+                }
+                write_varint(out, way.map(ids, IdSpace::Item, r.varint()?)?);
+                write_varint(out, count);
+            }
+            Way::Out => {
+                if optional && r.u8()? == 0 {
+                    write_varint(out, 0);
+                    continue;
+                }
+                let item = way.map(ids, IdSpace::Item, r.varint()?)?;
+                write_varint(out, r.varint()?);
+                write_varint(out, item);
+            }
+        }
+        patch(ids, way, r, out)?;
+    }
+    Some(true)
+}
+
+fn widened(
+    ids: &Ids,
+    way: Way,
+    kind: DataComponentKind,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+) -> Option<bool> {
+    match kind {
+        DataComponentKind::DamageResistant | DataComponentKind::ProvidesBannerPatterns => {
+            tag_or_holder_set(way, r, out)?;
+        }
+        DataComponentKind::BlocksAttacks => {
+            out.extend_from_slice(r.take(8)?);
+            let n = r.count()?;
+            write_varint(out, n as i32);
+            for _ in 0..n {
+                out.extend_from_slice(r.take(4)?);
+                let present = r.u8()?;
+                out.push(present);
+                if present != 0 {
+                    copy_holder_set(r, out)?;
+                }
+                out.extend_from_slice(r.take(8)?);
+            }
+            out.extend_from_slice(r.take(12)?);
+            let present = r.u8()?;
+            out.push(present);
+            if present != 0 {
+                tag_or_holder_set(way, r, out)?;
+            }
+            for _ in 0..2 {
+                let present = r.u8()?;
+                out.push(present);
+                if present != 0 {
+                    sound_holder_way(ids, way, r, out)?;
+                }
+            }
+        }
+        DataComponentKind::CanPlaceOn | DataComponentKind::CanBreak => {
+            let n = r.count()?;
+            write_varint(out, n as i32);
+            for _ in 0..n {
+                block_predicate(ids, way, r, out)?;
+            }
+        }
+        DataComponentKind::TooltipDisplay => {
+            out.push(r.u8()?);
+            let n = r.count()?;
+            write_varint(out, n as i32);
+            for _ in 0..n {
+                write_varint(out, way.map(ids, IdSpace::DataComponentType, r.varint()?)?);
+            }
+        }
+        _ => return resound(ids, way, kind, r, out),
+    }
+    Some(true)
+}
+
+fn resound(
+    ids: &Ids,
+    way: Way,
+    kind: DataComponentKind,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+) -> Option<bool> {
+    use azalea_inventory::components as c;
+    match kind {
+        DataComponentKind::Equippable => rewrite_value::<c::Equippable>(kind, r, out, |v| {
+            sound_entry(ids, way, &mut v.equip_sound)?;
+            sound_entry(ids, way, &mut v.shearing_sound)
+        })?,
+        DataComponentKind::Consumable => rewrite_value::<c::Consumable>(kind, r, out, |v| {
+            sound_entry(ids, way, &mut v.sound)?;
+            effect_sounds(ids, way, &mut v.on_consume_effects)
+        })?,
+        DataComponentKind::DeathProtection => {
+            rewrite_value::<c::DeathProtection>(kind, r, out, |v| {
+                effect_sounds(ids, way, &mut v.death_effects)
+            })?
+        }
+        DataComponentKind::BreakSound => {
+            rewrite_value::<c::BreakSound>(kind, r, out, |v| sound_entry(ids, way, &mut v.sound))?
+        }
+        DataComponentKind::PiercingWeapon => {
+            rewrite_value::<c::PiercingWeapon>(kind, r, out, |v| {
+                v.sound
+                    .as_mut()
+                    .map_or(Some(()), |s| sound_entry(ids, way, s))?;
+                v.hit_sound
+                    .as_mut()
+                    .map_or(Some(()), |s| sound_entry(ids, way, s))
+            })?
+        }
+        DataComponentKind::KineticWeapon => rewrite_value::<c::KineticWeapon>(kind, r, out, |v| {
+            v.sound
+                .as_mut()
+                .map_or(Some(()), |s| sound_entry(ids, way, s))?;
+            v.hit_sound
+                .as_mut()
+                .map_or(Some(()), |s| sound_entry(ids, way, s))
+        })?,
+        DataComponentKind::Repairable => {
+            rewrite_value::<c::Repairable>(kind, r, out, |v| match &mut v.items {
+                azalea_registry::HolderSet::Direct { contents } => contents
+                    .iter_mut()
+                    .try_for_each(|item| registry_entry(ids, way, IdSpace::Item, item)),
+                azalea_registry::HolderSet::Named { .. } => Some(()),
+            })?
+        }
+        DataComponentKind::PotDecorations => {
+            rewrite_value::<c::PotDecorations>(kind, r, out, |v| {
+                v.items
+                    .iter_mut()
+                    .try_for_each(|item| registry_entry(ids, way, IdSpace::Item, item))
+            })?
+        }
+        _ => return Some(false),
+    }
+    Some(true)
+}
+
+fn rewrite_value<T: AzBuf>(
+    kind: DataComponentKind,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+    edit: impl FnOnce(&mut T) -> Option<()>,
+) -> Option<()> {
+    let mut cursor = std::io::Cursor::new(r.rest());
+    let mut value = match T::azalea_read(&mut cursor) {
+        Ok(value) => value,
+        Err(e) => {
+            trail::fail_decode(kind, &e);
+            return None;
+        }
+    };
+    edit(&mut value)?;
+    value.azalea_write(out).ok()?;
+    r.take(usize::try_from(cursor.position()).ok()?)?;
+    Some(())
+}
+
+fn registry_entry<R: azalea_registry::Registry>(
+    ids: &Ids,
+    way: Way,
+    space: IdSpace,
+    entry: &mut R,
+) -> Option<()> {
+    let moved = way.map(ids, space, i32::try_from(entry.to_u32()).ok()?)?;
+    *entry = R::from_u32(u32::try_from(moved).ok()?)?;
+    Some(())
+}
+
+fn sound_entry(
+    ids: &Ids,
+    way: Way,
+    holder: &mut azalea_registry::Holder<
+        azalea_registry::builtin::SoundEvent,
+        azalea_core::sound::CustomSound,
+    >,
+) -> Option<()> {
+    match holder {
+        azalea_registry::Holder::Reference(entry) => {
+            registry_entry(ids, way, IdSpace::SoundEvent, entry)
+        }
+        azalea_registry::Holder::Direct(_) => Some(()),
+    }
+}
+
+fn effect_sounds(
+    ids: &Ids,
+    way: Way,
+    effects: &mut [azalea_inventory::item::consume_effect::ConsumeEffect],
+) -> Option<()> {
+    use azalea_inventory::item::consume_effect::ConsumeEffect;
+    effects.iter_mut().try_for_each(|effect| match effect {
+        ConsumeEffect::PlaySound { sound: entry } => sound_entry(ids, way, entry),
+        _ => Some(()),
+    })
+}
+
+fn flag(r: &mut Reader, out: &mut Vec<u8>) -> Option<bool> {
+    let b = r.u8()?;
+    out.push(b);
+    Some(b != 0)
+}
+
+fn block_predicate(ids: &Ids, way: Way, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    if flag(r, out)? {
+        let n = r.varint()?;
+        write_varint(out, n);
+        if n == 0 {
+            identifier(r, out)?;
+        }
+        for _ in 1..n {
+            write_varint(out, way.map(ids, IdSpace::Block, r.varint()?)?);
+        }
+    }
+    if flag(r, out)? {
+        let n = r.count()?;
+        write_varint(out, n as i32);
+        for _ in 0..n {
+            identifier(r, out)?;
+            if flag(r, out)? {
+                identifier(r, out)?;
+            } else {
+                for _ in 0..2 {
+                    if flag(r, out)? {
+                        identifier(r, out)?;
+                    }
+                }
+            }
+        }
+    }
+    if flag(r, out)? {
+        nbt_tag(r, out)?;
+    }
+    let exact = r.count()?;
+    write_varint(out, exact as i32);
+    for _ in 0..exact {
+        component(ids, way, r, out)?;
+    }
+    let partial = r.count()?;
+    write_varint(out, partial as i32);
+    for _ in 0..partial {
+        let predicate_type = flag(r, out)?;
+        let id = r.varint()?;
+        let id = if predicate_type {
+            id
+        } else {
+            way.map(ids, IdSpace::DataComponentType, id)?
+        };
+        write_varint(out, id);
+        nbt_tag(r, out)?;
+    }
+    Some(())
+}
+
+fn tag_or_holder_set(way: Way, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    match way {
+        Way::In => write_varint(out, 0),
+        Way::Out => {
+            if r.varint()? != 0 {
+                trail::fail(trail::Why::Shape(
+                    "a direct holder set where the wire version takes one tag key",
+                ));
+                return None;
+            }
+        }
+    }
+    identifier(r, out)
+}
+
+fn copy_holder_set(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    let n = r.varint()?;
+    write_varint(out, n);
+    if n == 0 {
+        return identifier(r, out);
+    }
+    for _ in 1..n {
+        write_varint(out, r.varint()?);
+    }
+    Some(())
 }
 
 fn entity_data(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
@@ -605,7 +1219,7 @@ fn identifier(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
 }
 
 fn item(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
-    let id = ids.to_native.map(IdSpace::Item, r.varint()?)?;
+    let id = Way::In.map(ids, IdSpace::Item, r.varint()?)?;
     write_varint(out, id);
     Some(())
 }
@@ -628,24 +1242,16 @@ fn slot_display(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     write_varint(out, native);
     match kind {
         SLOT_DISPLAY_ITEM => item(ids, r, out)?,
-        SLOT_DISPLAY_ITEM_STACK => {
-            let mut stack = Vec::new();
-            item_stack(ids, r, &mut stack)?;
-            let mut s = Reader::new(&stack);
-            let count = s.varint()?;
-            if count <= 0 {
-                return None;
-            }
-            write_varint(out, s.varint()?);
-            write_varint(out, count);
-            out.extend_from_slice(s.rest());
-        }
+        SLOT_DISPLAY_ITEM_STACK => stack_template(ids, r, out)?,
         SLOT_DISPLAY_TAG => identifier(r, out)?,
         SLOT_DISPLAY_SMITHING_TRIM => {
             slot_display(ids, r, out)?;
             slot_display(ids, r, out)?;
             let pattern = r.varint()?;
             if pattern == 0 {
+                trail::fail(trail::Why::Shape(
+                    "an inline trim pattern in a smithing_trim slot display is not walked",
+                ));
                 return None;
             }
             write_varint(out, pattern);
@@ -662,6 +1268,168 @@ fn slot_display(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
             }
         }
         _ => {}
+    }
+    Some(())
+}
+
+fn stack_template(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    let mut stack = Vec::new();
+    item_stack(ids, r, &mut stack)?;
+    let mut s = Reader::new(&stack);
+    let count = s.varint()?;
+    if count <= 0 {
+        trail::fail(trail::Why::Shape(
+            "an empty stack where 775 holds a template, which cannot be empty",
+        ));
+        return None;
+    }
+    write_varint(out, s.varint()?);
+    write_varint(out, count);
+    out.extend_from_slice(s.rest());
+    Some(())
+}
+
+fn nbt_tag(r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    let mut cursor = std::io::Cursor::new(r.rest());
+    simdnbt::borrow::read_optional_tag(&mut cursor).ok()?;
+    let length = usize::try_from(cursor.position()).ok()?;
+    out.extend_from_slice(r.take(length)?);
+    Some(())
+}
+
+fn update_advancements(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    let mut out = Vec::with_capacity(body.len() + 16);
+    out.push(r.u8()?);
+    let added = r.count()?;
+    write_varint(&mut out, added as i32);
+    for _ in 0..added {
+        identifier(&mut r, &mut out)?;
+        let parent = r.u8()?;
+        out.push(parent);
+        if parent != 0 {
+            identifier(&mut r, &mut out)?;
+        }
+        let display = r.u8()?;
+        out.push(display);
+        if display != 0 {
+            nbt_tag(&mut r, &mut out)?;
+            nbt_tag(&mut r, &mut out)?;
+            stack_template(ids, &mut r, &mut out)?;
+            write_varint(&mut out, r.varint()?);
+            let flags = r.take(4)?;
+            out.extend_from_slice(flags);
+            if flags[3] & 1 != 0 {
+                identifier(&mut r, &mut out)?;
+            }
+            out.extend_from_slice(r.take(8)?);
+        }
+        let groups = r.count()?;
+        write_varint(&mut out, groups as i32);
+        for _ in 0..groups {
+            let names = r.count()?;
+            write_varint(&mut out, names as i32);
+            for _ in 0..names {
+                identifier(&mut r, &mut out)?;
+            }
+        }
+        out.push(r.u8()?);
+    }
+    out.extend_from_slice(r.rest());
+    Some(out.into_boxed_slice())
+}
+
+fn recipe_book_add(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    let mut out = Vec::with_capacity(body.len() + 16);
+    let entries = r.count()?;
+    write_varint(&mut out, entries as i32);
+    for _ in 0..entries {
+        write_varint(&mut out, r.varint()?);
+        recipe_display(ids, &mut r, &mut out)?;
+        write_varint(&mut out, r.varint()?);
+        write_varint(&mut out, r.varint()?);
+        let requirements = r.u8()?;
+        out.push(requirements);
+        if requirements != 0 {
+            let n = r.count()?;
+            write_varint(&mut out, n as i32);
+            for _ in 0..n {
+                ingredient(ids, &mut r, &mut out)?;
+            }
+        }
+        out.push(r.u8()?);
+    }
+    out.push(r.u8()?);
+    (r.remaining() == 0).then(|| out.into_boxed_slice())
+}
+
+fn recipe_display(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    let kind = r.varint()?;
+    write_varint(out, kind);
+    match kind {
+        0 => {
+            slot_display_list(ids, r, out)?;
+            slot_displays(ids, 2, r, out)?;
+        }
+        1 => {
+            write_varint(out, r.varint()?);
+            write_varint(out, r.varint()?);
+            slot_display_list(ids, r, out)?;
+            slot_displays(ids, 2, r, out)?;
+        }
+        2 => {
+            slot_displays(ids, 4, r, out)?;
+            write_varint(out, r.varint()?);
+            out.extend_from_slice(r.take(4)?);
+        }
+        3 => slot_displays(ids, 3, r, out)?,
+        4 => slot_displays(ids, 5, r, out)?,
+        _ => return None,
+    }
+    Some(())
+}
+
+fn slot_displays(ids: &Ids, n: usize, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    for _ in 0..n {
+        slot_display(ids, r, out)?;
+    }
+    Some(())
+}
+
+fn slot_display_list(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    let n = r.count()?;
+    write_varint(out, n as i32);
+    slot_displays(ids, n, r, out)
+}
+
+fn merchant_offers(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    let mut out = Vec::with_capacity(body.len() + 16);
+    write_varint(&mut out, r.varint()?);
+    let offers = r.count()?;
+    write_varint(&mut out, offers as i32);
+    for _ in 0..offers {
+        item_cost(ids, &mut r, &mut out)?;
+        item_stack(ids, &mut r, &mut out)?;
+        let second = r.u8()?;
+        out.push(second);
+        if second != 0 {
+            item_cost(ids, &mut r, &mut out)?;
+        }
+        out.extend_from_slice(r.take(1 + 6 * 4)?);
+    }
+    out.extend_from_slice(r.rest());
+    Some(out.into_boxed_slice())
+}
+
+fn item_cost(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    item(ids, r, out)?;
+    write_varint(out, r.varint()?);
+    let n = r.count()?;
+    write_varint(out, n as i32);
+    for _ in 0..n {
+        component(ids, Way::In, r, out)?;
     }
     Some(())
 }
@@ -701,13 +1469,13 @@ fn hashed_stack(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<bool> {
     back(ids, IdSpace::Item, r.varint()?, out, &mut ok);
     write_varint(out, r.varint()?);
     let added = r.count()?;
-    let removed = r.count()?;
     write_varint(out, added as i32);
-    write_varint(out, removed as i32);
     for _ in 0..added {
         back(ids, IdSpace::DataComponentType, r.varint()?, out, &mut ok);
         out.extend_from_slice(r.take(4)?);
     }
+    let removed = r.count()?;
+    write_varint(out, removed as i32);
     for _ in 0..removed {
         back(ids, IdSpace::DataComponentType, r.varint()?, out, &mut ok);
     }
@@ -715,7 +1483,7 @@ fn hashed_stack(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<bool> {
 }
 
 fn back(ids: &Ids, space: IdSpace, raw: i32, out: &mut Vec<u8>, ok: &mut bool) {
-    let id = ids.from_native.map(space, raw);
+    let id = Way::Out.map(ids, space, raw);
     *ok &= id.is_some();
     write_varint(out, id.unwrap_or_default());
 }
@@ -740,12 +1508,22 @@ fn container_click(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
         out.extend_from_slice(&slots);
     } else {
         write_varint(&mut out, 0);
+        crate::log_warn!(
+            "proto",
+            "container_click: changed_slots sent empty so the server resyncs: {}",
+            trail::reason()
+        );
     }
 
     let carried = out.len();
     if !hashed_stack(ids, &mut r, &mut out)? {
         out.truncate(carried);
         out.push(0);
+        crate::log_warn!(
+            "proto",
+            "container_click: the carried item was sent empty: {}",
+            trail::reason()
+        );
     }
     Some(out.into_boxed_slice())
 }
@@ -774,23 +1552,59 @@ fn creative_slot(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
 
     let with_payload = r.count()?;
     let without = r.count()?;
-    write_varint(&mut out, with_payload as i32);
-    write_varint(&mut out, without as i32);
+    let (mut kept_with, mut kept_without) = (0, 0);
+    let mut body = Vec::with_capacity(r.rest().len());
+    let mut dropped = false;
+    let mut nested_payload = Vec::new();
     for _ in 0..with_payload {
-        let kind = ids
-            .from_native
-            .map(IdSpace::DataComponentType, r.varint()?)?;
-        write_varint(&mut out, kind);
+        let native = r.varint()?;
         let length = r.count()?;
-        write_varint(&mut out, length as i32);
-        out.extend_from_slice(r.take(length)?);
+        let payload = r.take(length)?;
+        let Some(kind) = ids.from_native.map(IdSpace::DataComponentType, native) else {
+            dropped = true;
+            continue;
+        };
+        let payload = match u32::try_from(native)
+            .ok()
+            .and_then(DataComponentKind::from_u32)
+        {
+            Some(native_kind) => {
+                nested_payload.clear();
+                let mut pr = Reader::new(payload);
+                match nested(ids, Way::Out, native_kind, &mut pr, &mut nested_payload) {
+                    Some(false) => payload,
+                    Some(true) if pr.remaining() == 0 => &nested_payload[..],
+                    _ => {
+                        dropped = true;
+                        continue;
+                    }
+                }
+            }
+            None => payload,
+        };
+        write_varint(&mut body, kind);
+        write_varint(&mut body, payload.len() as i32);
+        body.extend_from_slice(payload);
+        kept_with += 1;
     }
     for _ in 0..without {
-        let kind = ids
-            .from_native
-            .map(IdSpace::DataComponentType, r.varint()?)?;
-        write_varint(&mut out, kind);
+        let Some(kind) = ids.from_native.map(IdSpace::DataComponentType, r.varint()?) else {
+            dropped = true;
+            continue;
+        };
+        write_varint(&mut body, kind);
+        kept_without += 1;
     }
+    if dropped {
+        crate::log_warn!(
+            "net",
+            "creative slot: left off components this server cannot take: {}",
+            trail::reason()
+        );
+    }
+    write_varint(&mut out, kept_with);
+    write_varint(&mut out, kept_without);
+    out.extend_from_slice(&body);
     Some(out.into_boxed_slice())
 }
 
@@ -874,7 +1688,7 @@ fn add_entity(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     r.varint()?;
     r.take(16)?;
     if r.varint()? != EntityKind::FallingBlock.to_u32() as i32 {
-        return None;
+        return Some(body.into());
     }
     r.take(3 * 8)?;
     skip_lp_vec3(&mut r)?;
@@ -896,7 +1710,7 @@ fn level_event(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let event = r.take(4)?;
     let kind = u32::from_be_bytes(event.try_into().ok()?);
     if !matches!(kind, LEVEL_EVENT_DESTROY_BLOCK | LEVEL_EVENT_BRUSH_COMPLETE) {
-        return None;
+        return Some(body.into());
     }
     let pos = r.take(8)?;
     let data = state(ids, i32::from_be_bytes(r.take(4)?.try_into().ok()?))?;
@@ -995,6 +1809,7 @@ enum Bail {
     Short,
     NoTarget(i32),
     TooWide { id: i32, bits: u8 },
+    BadWidth(u8),
 }
 
 #[derive(Debug)]
@@ -1022,6 +1837,9 @@ impl fmt::Display for Failure {
                 "774 block state {id} moved to an id too wide for the {bits}-bit \
                  container the server packed"
             ),
+            Bail::BadWidth(bits) => {
+                write!(f, "a container claimed {bits} bits per entry")
+            }
         }
     }
 }
@@ -1048,6 +1866,7 @@ fn sections(ids: &Ids, blob: &[u8]) -> Result<Vec<u8>, Failure> {
             &mut out,
             SECTION_STATES,
             STATES_INDIRECT_MAX,
+            <BlockState as PalletedContainerKind>::storage_bits,
             true,
         ) {
             return Err(Failure {
@@ -1063,6 +1882,7 @@ fn sections(ids: &Ids, blob: &[u8]) -> Result<Vec<u8>, Failure> {
             &mut out,
             SECTION_BIOMES,
             BIOMES_INDIRECT_MAX,
+            <Biome as PalletedContainerKind>::storage_bits,
             false,
         ) {
             return Err(Failure {
@@ -1083,9 +1903,14 @@ fn container(
     out: &mut Vec<u8>,
     size: usize,
     indirect_max: u8,
+    width: fn(u8) -> u8,
     remap: bool,
 ) -> Result<(), Bail> {
-    let bits = r.u8().ok_or(Bail::Short)?;
+    let sent = r.u8().ok_or(Bail::Short)?;
+    let bits = width(sent);
+    if bits > 32 {
+        return Err(Bail::BadWidth(sent));
+    }
     out.push(bits);
 
     let id = |r: &mut Reader, out: &mut Vec<u8>| -> Result<(), Bail> {
@@ -1586,6 +2411,28 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_block_container_is_read_at_vanillas_width() {
+        let palette = [BELOW_FIRST_RUN, FIRST_RUN, SECOND_RUN, LAST_RUN];
+        let one = section_bytes(&container_bytes(2, &palette, &[0x3210_3210_3210_3210; 256]));
+        let mut blob = Vec::new();
+        for _ in 0..24 {
+            blob.extend_from_slice(&one);
+        }
+
+        let out = sections(ids(), &blob).expect("a whole column");
+        assert_eq!(out[4], 4, "the stored width goes out, not the sent one");
+        let chunk = azalea_world::Chunk::read_with_dimension_height(
+            &mut std::io::Cursor::new(&out[..]),
+            384,
+            -64,
+            &[],
+        )
+        .expect("azalea decodes the rewritten column");
+        assert_eq!(chunk.sections.len(), 24);
+        assert_eq!(chunk.sections[23].states.bits_per_entry, 4);
+    }
+
+    #[test]
     fn the_failure_names_its_section() {
         let good = section_bytes(&container_bytes(0, &[FIRST_RUN], &[]));
         let bad = section_bytes(&container_bytes(0, &[i32::MAX], &[]));
@@ -1701,6 +2548,215 @@ mod tests {
         );
         assert_eq!(r.varint(), Some(COMPONENT_AT_THE_SEAM + 1), "at it");
         assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn an_advancement_icon_becomes_a_template() {
+        let nbt_string = |out: &mut Vec<u8>, s: &[u8]| {
+            out.push(8);
+            out.extend_from_slice(&(s.len() as u16).to_be_bytes());
+            out.extend_from_slice(s);
+        };
+        let mut head = vec![0u8];
+        write_varint(&mut head, 1);
+        identifier(&mut Reader::new(b"\x0dminecraft:a/b"), &mut head).unwrap();
+        head.push(0);
+        head.push(1);
+        nbt_string(&mut head, b"title");
+        nbt_string(&mut head, b"description");
+
+        let mut body = head.clone();
+        write_varint(&mut body, 1);
+        write_varint(&mut body, ITEM_AT_THE_SEAM);
+        write_varint(&mut body, 0);
+        write_varint(&mut body, 0);
+        let mut tail = Vec::new();
+        write_varint(&mut tail, 2);
+        tail.extend_from_slice(&0i32.to_be_bytes());
+        tail.extend_from_slice(&[0u8; 8]);
+        write_varint(&mut tail, 1);
+        write_varint(&mut tail, 1);
+        identifier(&mut Reader::new(b"\x04crit"), &mut tail).unwrap();
+        tail.push(0);
+        tail.extend_from_slice(&[0, 0, 1]);
+        body.extend_from_slice(&tail);
+
+        let out = update_advancements(ids(), &body).expect("rewrites");
+        let mut want = head;
+        write_varint(&mut want, ITEM_AT_THE_SEAM + 1);
+        write_varint(&mut want, 1);
+        write_varint(&mut want, 0);
+        write_varint(&mut want, 0);
+        want.extend_from_slice(&tail);
+        assert_eq!(&out[..], &want[..]);
+    }
+
+    #[test]
+    fn a_damage_resistant_tag_becomes_a_named_holder_set() {
+        let kind = DataComponentKind::DamageResistant;
+        let id = kind.to_u32() as i32;
+        assert_eq!(
+            Remap::from_native().map(IdSpace::DataComponentType, id),
+            Some(id),
+            "below the seam, so only the payload moves"
+        );
+        let tag = b"minecraft:is_fire";
+        let mut payload_774 = Vec::new();
+        write_varint(&mut payload_774, tag.len() as i32);
+        payload_774.extend_from_slice(tag);
+
+        let mut body = Vec::new();
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 0);
+        write_varint(&mut body, id);
+        body.extend_from_slice(&payload_774);
+
+        let out = translated(|r, out| item_stack(ids(), r, out), &body);
+        let mut cursor = std::io::Cursor::new(&out[..]);
+        let stack = azalea_inventory::ItemStack::azalea_read(&mut cursor).expect("decodes as 775");
+        assert_eq!(cursor.position() as usize, out.len());
+        assert!(!stack.is_empty());
+
+        let mut payload_775 = Vec::new();
+        write_varint(&mut payload_775, 0);
+        payload_775.extend_from_slice(&payload_774);
+        let back = translated(
+            |r, out| {
+                nested(ids(), Way::Out, kind, r, out)
+                    .filter(|&b| b)
+                    .map(|_| ())
+            },
+            &payload_775,
+        );
+        assert_eq!(back, payload_774);
+    }
+
+    #[test]
+    fn an_equippable_moves_both_sounds_and_keeps_what_follows_aligned() {
+        use azalea_inventory::components::{EquipmentSlot, Equippable, MaxStackSize};
+        use azalea_registry::Holder;
+        use azalea_registry::builtin::SoundEvent;
+
+        let sound_775 = Remap::to_native()
+            .map(IdSpace::SoundEvent, SOUND_774)
+            .expect("774 sound 280 exists in 775");
+        let wire = Equippable {
+            slot: EquipmentSlot::Feet,
+            equip_sound: Holder::Reference(SoundEvent::from_u32(SOUND_774 as u32).unwrap()),
+            shearing_sound: Holder::Direct(azalea_core::sound::CustomSound {
+                sound_id: "custom:clank".into(),
+                range: Some(8.0),
+            }),
+            asset_id: Some("minecraft:iron".into()),
+            ..Equippable::new()
+        };
+        let kind = DataComponentKind::Equippable;
+        let id = kind.to_u32() as i32;
+        assert_eq!(
+            Remap::to_native().map(IdSpace::DataComponentType, id),
+            Some(id),
+            "below the seam, so only the payload moves"
+        );
+
+        let mut body = Vec::new();
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 2);
+        write_varint(&mut body, 0);
+        write_varint(&mut body, id);
+        wire.azalea_write(&mut body).unwrap();
+        write_varint(&mut body, DataComponentKind::MaxStackSize.to_u32() as i32);
+        write_varint(&mut body, 7);
+
+        let out = translated(|r, out| item_stack(ids(), r, out), &body);
+        let mut cursor = std::io::Cursor::new(&out[..]);
+        let stack = azalea_inventory::ItemStack::azalea_read(&mut cursor).expect("decodes as 775");
+        assert_eq!(cursor.position() as usize, out.len());
+        let azalea_inventory::ItemStack::Present(data) = stack else {
+            panic!("a present stack");
+        };
+        let got = data.component_patch.get::<Equippable>().expect("kept");
+        assert_eq!(got.slot, EquipmentSlot::Feet);
+        assert_eq!(
+            got.equip_sound,
+            Holder::Reference(SoundEvent::from_u32(sound_775 as u32).unwrap()),
+            "the reference moved"
+        );
+        assert_eq!(
+            got.shearing_sound, wire.shearing_sound,
+            "the inline sound did not"
+        );
+        assert_eq!(got.asset_id, wire.asset_id);
+        assert_eq!(
+            data.component_patch.get::<MaxStackSize>().map(|m| m.count),
+            Some(7),
+            "the component after it is intact"
+        );
+    }
+
+    #[test]
+    fn a_failed_walk_reports_the_unmapped_id_and_the_trail() {
+        let mut body = Vec::new();
+        write_varint(&mut body, 5);
+        write_varint(&mut body, ITEM_AT_THE_SEAM);
+        write_varint(&mut body, 2);
+        write_varint(&mut body, 0);
+        let first_at = body.len();
+        write_varint(&mut body, DataComponentKind::MaxStackSize.to_u32() as i32);
+        write_varint(&mut body, 64);
+        let bad_at = body.len();
+        write_varint(&mut body, 9999);
+
+        trail::reset();
+        assert!(item_stack(ids(), &mut Reader::new(&body), &mut Vec::new()).is_none());
+        let report = trail::report(&body);
+        assert!(
+            report.contains("wire DataComponentType id 9999 names nothing in 775"),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!("at byte {} of {}", body.len(), body.len())),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!("stack@0[item {ITEM_AT_THE_SEAM} x5]")),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!(
+                "MaxStackSize({})@{first_at}[2b]",
+                DataComponentKind::MaxStackSize.to_u32()
+            )),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!("?(9999)@{bad_at}[unmapped]")),
+            "{report}"
+        );
+        assert!(report.contains("bytes 0.."), "{report}");
+    }
+
+    #[test]
+    fn a_failed_walk_reports_the_decode_error_against_its_kind() {
+        let mut body = Vec::new();
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 0);
+        write_varint(&mut body, DataComponentKind::Lore.to_u32() as i32);
+        write_varint(&mut body, 1);
+        body.push(0x7f);
+
+        trail::reset();
+        assert!(item_stack(ids(), &mut Reader::new(&body), &mut Vec::new()).is_none());
+        let report = trail::report(&body);
+        assert!(report.contains("Lore did not decode: "), "{report}");
+        assert!(report.contains("[unfinished]"), "{report}");
+
+        trail::reset();
+        assert!(trail::reason().contains("the frame ended before the layout did"));
     }
 
     #[test]
@@ -2167,8 +3223,10 @@ mod tests {
         assert_eq!(r.varint(), Some(moved(LAST_RUN)));
 
         let arrow = EntityKind::Arrow.to_u32() as i32;
-        assert!(
-            add_entity(ids(), &add_entity_bytes(arrow, LAST_RUN)).is_none(),
+        let body = add_entity_bytes(arrow, LAST_RUN);
+        assert_eq!(
+            add_entity(ids(), &body).as_deref(),
+            Some(&body[..]),
             "only a falling block reads that field as a state"
         );
     }
@@ -2196,7 +3254,7 @@ mod tests {
         body.extend_from_slice(&[0u8; 8]);
         body.extend_from_slice(&30i32.to_be_bytes());
         body.push(0);
-        assert!(level_event(ids(), &body).is_none());
+        assert_eq!(level_event(ids(), &body).as_deref(), Some(&body[..]));
     }
 
     #[test]
@@ -2205,9 +3263,9 @@ mod tests {
         write_varint(&mut body, ITEM_AT_THE_SEAM + 1);
         write_varint(&mut body, 2);
         write_varint(&mut body, 1);
-        write_varint(&mut body, 1);
         write_varint(&mut body, COMPONENT_AT_THE_SEAM + 1);
         body.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        write_varint(&mut body, 1);
         write_varint(&mut body, COMPONENT_AT_THE_SEAM + 3);
 
         let mut r = Reader::new(&body);
@@ -2219,10 +3277,34 @@ mod tests {
         assert_eq!(r.u8(), Some(1));
         assert_eq!(r.varint(), Some(ITEM_AT_THE_SEAM));
         assert_eq!(r.varint(), Some(2), "the count is not an id");
-        assert_eq!((r.count(), r.count()), (Some(1), Some(1)));
+        assert_eq!(r.count(), Some(1));
         assert_eq!(r.varint(), Some(COMPONENT_AT_THE_SEAM));
         assert_eq!(r.take(4), Some(&[0xDE, 0xAD, 0xBE, 0xEF][..]));
+        assert_eq!(r.count(), Some(1));
         assert_eq!(r.varint(), Some(COMPONENT_AT_THE_SEAM + 1));
+    }
+
+    #[test]
+    fn a_hashed_stack_from_azaleas_writer_walks_whole() {
+        use azalea::protocol::packets::game::s_container_click::{HashedPatchMap, HashedStack};
+        let stack = HashedStack(Some(
+            azalea::protocol::packets::game::s_container_click::HashedActualItem {
+                kind: azalea_registry::builtin::ItemKind::Stone,
+                count: 1,
+                components: HashedPatchMap {
+                    added_components: vec![
+                        (DataComponentKind::CustomName, Default::default()),
+                        (DataComponentKind::Lore, Default::default()),
+                    ],
+                    removed_components: vec![DataComponentKind::Food],
+                },
+            },
+        ));
+        let mut body = Vec::new();
+        stack.azalea_write(&mut body).unwrap();
+        let mut r = Reader::new(&body);
+        assert_eq!(hashed_stack(ids(), &mut r, &mut Vec::new()), Some(true));
+        assert_eq!(r.remaining(), 0);
     }
 
     #[test]
@@ -2280,6 +3362,97 @@ mod tests {
         assert_eq!(r.count(), Some(3), "the payload keeps its own length");
         assert_eq!(r.take(3), Some(&[1, 2, 3][..]));
         assert_eq!(r.remaining(), 0);
+    }
+
+    fn container_ids() -> (i32, i32) {
+        let native = DataComponentKind::Container.to_u32() as i32;
+        let wire = ids()
+            .from_native
+            .map(IdSpace::DataComponentType, native)
+            .expect("774 has container");
+        (native, wire)
+    }
+
+    #[test]
+    fn a_shulker_box_becomes_optional_templates_and_keeps_what_follows_aligned() {
+        let (native, wire) = container_ids();
+        let mut body = Vec::new();
+        for v in [
+            1,
+            5,
+            1,
+            0,
+            wire,
+            2,
+            0,
+            3,
+            ITEM_AT_THE_SEAM,
+            0,
+            1,
+            COMPONENT_AT_THE_SEAM,
+        ] {
+            write_varint(&mut body, v);
+        }
+        for v in [1, 7, 0, 0] {
+            write_varint(&mut body, v);
+        }
+
+        let out = translated(
+            |r, out| {
+                item_stack(ids(), r, out)?;
+                item_stack(ids(), r, out)
+            },
+            &body,
+        );
+        let mut expected = Vec::new();
+        for v in [
+            1,
+            5,
+            1,
+            0,
+            native,
+            2,
+            0,
+            1,
+            ITEM_AT_THE_SEAM + 1,
+            3,
+            0,
+            1,
+            COMPONENT_AT_THE_SEAM + 1,
+            1,
+            7,
+            0,
+            0,
+        ] {
+            write_varint(&mut expected, v);
+        }
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn a_creative_shulker_box_goes_out_in_774s_layout() {
+        let (native, wire) = container_ids();
+        let mut payload = Vec::new();
+        for v in [1, 1, ITEM_AT_THE_SEAM + 1, 3, 0, 0] {
+            write_varint(&mut payload, v);
+        }
+        let mut body = 9u16.to_be_bytes().to_vec();
+        for v in [1, 5, 1, 0, native, payload.len() as i32] {
+            write_varint(&mut body, v);
+        }
+        body.extend_from_slice(&payload);
+
+        let out = creative_slot(ids(), &body).expect("a whole stack");
+        let mut expected = 9u16.to_be_bytes().to_vec();
+        let mut wire_payload = Vec::new();
+        for v in [1, 3, ITEM_AT_THE_SEAM, 0, 0] {
+            write_varint(&mut wire_payload, v);
+        }
+        for v in [1, 5, 1, 0, wire, wire_payload.len() as i32] {
+            write_varint(&mut expected, v);
+        }
+        expected.extend_from_slice(&wire_payload);
+        assert_eq!(out.as_ref(), &expected[..]);
     }
 
     #[test]

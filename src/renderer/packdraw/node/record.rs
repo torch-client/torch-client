@@ -59,6 +59,25 @@ pub(super) fn copy_whole(encoder: &mut wgpu::CommandEncoder, from: &Texture, to:
     encoder.copy_texture_to_texture(from.as_image_copy(), to.as_image_copy(), from.size());
 }
 
+pub(super) fn copy_depth(
+    render_context: &mut bevy::render::renderer::RenderContext,
+    from: &super::super::targets::Target,
+    to: &super::super::targets::Target,
+) {
+    #[cfg(not(all(target_arch = "wasm32", not(feature = "webgpu"))))]
+    copy_whole(render_context.command_encoder(), &from.texture, &to.texture);
+    #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+    {
+        let device = render_context.render_device().clone();
+        super::super::rawviews::copy_depth(
+            &device,
+            render_context.command_encoder(),
+            &from.view,
+            &to.view,
+        );
+    }
+}
+
 pub(super) fn draw_pools<'w>(
     encoder: &mut TrackedRenderPass<'w>,
     sources: &StreamSources<'w>,

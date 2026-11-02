@@ -90,38 +90,35 @@ pub fn handle_interaction(bot: &Client, shared: &Arc<SharedMutex>) {
 
     let target = hit.as_ref().and_then(|h| {
         let state = bot.world().ok()?.read().get_block_state(h.block_pos)?;
-        let boxes = state
-            .outline_shape(h.block_pos)
-            .to_aabbs()
-            .iter()
-            .map(|a| {
-                [
-                    a.min.x as f32,
-                    a.min.y as f32,
-                    a.min.z as f32,
-                    a.max.x as f32,
-                    a.max.y as f32,
-                    a.max.z as f32,
-                ]
-            })
-            .collect();
         Some(TargetedBlock {
             pos: [h.block_pos.x, h.block_pos.y, h.block_pos.z],
-            boxes,
+            boxes: outline_boxes(state, h.block_pos),
         })
     });
 
-    let (breaking, mining_particle) = mining_overlay(bot);
+    let remote: Vec<([i32; 3], u8)> = {
+        let mut s = shared.lock().unwrap();
+        let remote = &mut s.session.remote_breaking;
+        remote.retain(|_, r| {
+            r.age += 1;
+            r.age <= REMOTE_BREAK_TIMEOUT
+        });
+        let mut out: Vec<_> = remote.values().map(|r| (r.pos, r.stage)).collect();
+        out.sort_unstable();
+        out
+    };
+
+    let (local, mining_particle) = mining_overlay(bot);
+    let breaking = breaking_overlays(bot, local, &remote);
     let targeted_entity = living_target(bot);
     let crosshair_entity = picked_entity(bot);
 
-    #[cfg_attr(not(feature = "mobile_ui"), allow(unused_variables))]
-    let (attack_held, attack_clicked, use_held, use_clicked, pick, attack_ready) = {
+    let (attack_held, attack_clicked, use_held, use_clicked, pick, attack_strength) = {
         let mut s = shared.lock().unwrap();
         s.session.targeted_block = target;
         s.session.targeted_entity = targeted_entity;
         s.session.crosshair_entity = crosshair_entity;
-        let attack_ready = s.session.attack_strength >= 1.0;
+        let attack_strength = s.session.attack_strength;
         s.session.breaking = breaking;
         if let Some(spawn) = mining_particle {
             crate::session::push_particle_emit(
@@ -133,7 +130,7 @@ pub fn handle_interaction(bot: &Client, shared: &Arc<SharedMutex>) {
             s.session.attack_clicked = false;
             s.session.use_clicked = false;
             s.session.pick_clicked = false;
-            (false, false, false, false, None, attack_ready)
+            (false, false, false, false, None, attack_strength)
         } else {
             (
                 s.session.attack_held,
@@ -141,7 +138,7 @@ pub fn handle_interaction(bot: &Client, shared: &Arc<SharedMutex>) {
                 s.session.use_held,
                 std::mem::take(&mut s.session.use_clicked),
                 std::mem::take(&mut s.session.pick_clicked).then_some(s.session.pick_include_data),
-                attack_ready,
+                attack_strength,
             )
         }
     };
@@ -149,8 +146,10 @@ pub fn handle_interaction(bot: &Client, shared: &Arc<SharedMutex>) {
     if let Some(include_data) = pick {
         apply_pick_block(bot, include_data);
     }
+    let hands_busy = crate::play::riding::hands_busy();
+    let attack_clicked = attack_clicked && !hands_busy;
     #[cfg(feature = "mobile_ui")]
-    let attack_entity = attack_clicked || (attack_held && attack_ready);
+    let attack_entity = attack_clicked || (attack_held && attack_strength >= 1.0 && !hands_busy);
     #[cfg(not(feature = "mobile_ui"))]
     let attack_entity = attack_clicked;
 
@@ -167,6 +166,10 @@ pub fn handle_interaction(bot: &Client, shared: &Arc<SharedMutex>) {
     let attack_held = crate::modules::auto_mine::tick(bot, shared, hit.as_ref()) || attack_held;
 
     crate::modules::auto_mace::tick(bot, shared);
+
+    crate::modules::scaffold::tick(bot, shared);
+
+    crate::modules::pathfinder::tick(bot, shared);
 
     let attack_entity = attack_entity
         || (crate::modules::triggerbot::enabled() && {
@@ -185,8 +188,32 @@ pub fn handle_interaction(bot: &Client, shared: &Arc<SharedMutex>) {
             crate::modules::triggerbot::should_attack(kind, strength, weapon)
         });
 
-    let attacked_entity = attack_entity
+    let weapon = if attack_entity || attack_held {
+        crate::play::spear::held_weapon(bot)
+    } else {
+        crate::play::spear::HeldWeapon::default()
+    };
+    let attack_entity = attack_entity && !weapon.cannot_attack(attack_strength);
+    let attack_clicked = attack_clicked && !weapon.cannot_attack(attack_strength);
+    let piercing = weapon.piercing.is_some();
+    if let Some(sound) = weapon.piercing
+        && attack_entity
+        && !hands_busy
+        && !is_using_item()
+        && bot
+            .component::<GameMode>()
+            .map_or(true, |gm| *gm != GameMode::Spectator)
+    {
+        crate::play::spear::stab(bot, shared, sound);
+    }
+
+    let attacked_entity = !piercing
+        && attack_entity
         && match bot.hit_result() {
+            #[cfg(lua_mods)]
+            Ok(HitResult::Entity(e)) if crate::modules::script::attack(bot, shared, e.entity) => {
+                true
+            }
             Ok(HitResult::Entity(e)) => {
                 bot.attack(e.entity);
                 crate::client::tick::swing_local_player(false, shared);
@@ -195,14 +222,99 @@ pub fn handle_interaction(bot: &Client, shared: &Arc<SharedMutex>) {
             _ => false,
         };
 
-    if attack_clicked && !attacked_entity && hit.is_none() {
+    if !piercing && attack_clicked && !attacked_entity && hit.is_none() {
         crate::client::tick::request_attack_ticker_reset();
     }
 
-    if !attacked_entity {
+    if !piercing && !attacked_entity {
         apply_break(bot, shared, hit.as_ref(), attack_held, attack_clicked);
     }
-    apply_place(bot, shared, use_held, use_clicked);
+    apply_place(bot, shared, use_held, use_clicked, hands_busy);
+    publish_item_in_use(bot);
+}
+
+fn publish_item_in_use(bot: &Client) {
+    use azalea::movement::ItemInUse;
+    use azalea_inventory::components::UseEffects;
+
+    let want = is_using_item().then(|| {
+        let effects = bot
+            .component::<azalea::entity::inventory::Inventory>()
+            .ok()
+            .and_then(|inv| {
+                inv.held_item()
+                    .get_component::<UseEffects>()
+                    .map(|e| e.into_owned())
+            })
+            .unwrap_or_default();
+        ItemInUse {
+            speed_multiplier: effects.speed_multiplier,
+            can_sprint: effects.can_sprint,
+        }
+    });
+    let have = bot.component::<ItemInUse>().ok().map(|u| *u);
+    if have == want {
+        return;
+    }
+    let mut ecs = bot.ecs.write();
+    let mut player = ecs.entity_mut(bot.entity);
+    match want {
+        Some(u) => {
+            player.insert(u);
+        }
+        None => {
+            player.remove::<ItemInUse>();
+        }
+    }
+}
+
+const REMOTE_BREAK_TIMEOUT: u32 = 400;
+
+fn outline_boxes(state: BlockState, pos: BlockPos) -> Vec<[f32; 6]> {
+    state
+        .outline_shape(pos)
+        .to_aabbs()
+        .iter()
+        .map(|a| {
+            [
+                a.min.x as f32,
+                a.min.y as f32,
+                a.min.z as f32,
+                a.max.x as f32,
+                a.max.y as f32,
+                a.max.z as f32,
+            ]
+        })
+        .collect()
+}
+
+fn breaking_overlays(
+    bot: &Client,
+    local: Option<BreakingBlock>,
+    remote: &[([i32; 3], u8)],
+) -> Vec<BreakingBlock> {
+    let mut out: Vec<BreakingBlock> = local.into_iter().collect();
+    if remote.is_empty() {
+        return out;
+    }
+    let Ok(world) = bot.world() else { return out };
+    let world = world.read();
+    for &(pos, stage) in remote {
+        if let Some(b) = out.iter_mut().find(|b| b.pos == pos) {
+            b.stage = b.stage.max(stage);
+            continue;
+        }
+        let block = BlockPos::new(pos[0], pos[1], pos[2]);
+        let Some(state) = world.get_block_state(block) else {
+            continue;
+        };
+        out.push(BreakingBlock {
+            pos,
+            stage,
+            boxes: outline_boxes(state, block),
+        });
+    }
+    out
 }
 
 fn mining_overlay(bot: &Client) -> (Option<BreakingBlock>, Option<ParticleSpawn>) {
@@ -219,25 +331,10 @@ fn mining_overlay(bot: &Client) -> (Option<BreakingBlock>, Option<ParticleSpawn>
     let Some(state) = bot.world().ok().and_then(|w| w.read().get_block_state(pos)) else {
         return (None, None);
     };
-    let boxes = state
-        .outline_shape(pos)
-        .to_aabbs()
-        .iter()
-        .map(|a| {
-            [
-                a.min.x as f32,
-                a.min.y as f32,
-                a.min.z as f32,
-                a.max.x as f32,
-                a.max.y as f32,
-                a.max.z as f32,
-            ]
-        })
-        .collect();
     let breaking = BreakingBlock {
         pos: [pos.x, pos.y, pos.z],
         stage: stage.min(9) as u8,
-        boxes,
+        boxes: outline_boxes(state, pos),
     };
     let face = match block_hit(bot) {
         Some(h) if h.block_pos == pos => {
@@ -380,11 +477,25 @@ fn place_step(
     (swing, RIGHT_CLICK_DELAY)
 }
 
-fn apply_place(bot: &Client, shared: &Arc<SharedMutex>, held: bool, clicked: bool) {
+fn apply_place(
+    bot: &Client,
+    shared: &Arc<SharedMutex>,
+    held: bool,
+    clicked: bool,
+    hands_busy: bool,
+) {
     let game_mode = bot
         .component::<GameMode>()
         .map(|gm| *gm)
         .unwrap_or(GameMode::Survival);
+    #[cfg(lua_mods)]
+    let offered = clicked && !hands_busy && !is_using_item();
+    #[cfg(lua_mods)]
+    if offered && crate::modules::script::use_item(bot, shared) {
+        sync_server_using_item(bot);
+        updating_using_item(bot);
+        return;
+    }
     open_book_editor(bot, shared, clicked);
     let secondary_use = {
         let s = shared.lock().unwrap();
@@ -404,6 +515,13 @@ fn apply_place(bot: &Client, shared: &Arc<SharedMutex>, held: bool, clicked: boo
         PLACE_DELAY.load(Ordering::Relaxed),
         was_using,
         || {
+            if hands_busy {
+                return false;
+            }
+            #[cfg(lua_mods)]
+            if !offered && crate::modules::script::use_item(bot, shared) {
+                return false;
+            }
             if predict_place(bot, secondary_use) {
                 consume_held_item(bot);
                 item_used(shared);
@@ -412,7 +530,7 @@ fn apply_place(bot: &Client, shared: &Arc<SharedMutex>, held: bool, clicked: boo
                 item_used(shared);
                 true
             } else {
-                start_use_item(bot, shared)
+                start_use_item(bot, shared, secondary_use)
             }
         },
     );
@@ -422,13 +540,10 @@ fn apply_place(bot: &Client, shared: &Arc<SharedMutex>, held: bool, clicked: boo
     }
 }
 
-fn start_use_item(bot: &Client, shared: &Arc<SharedMutex>) -> bool {
+fn start_use_item(bot: &Client, shared: &Arc<SharedMutex>, secondary_use: bool) -> bool {
     let hit = match bot.hit_result() {
         Ok(HitResult::Block(hit)) if !hit.miss => hit,
-        Ok(HitResult::Entity(_)) => {
-            bot.start_use_item();
-            return false;
-        }
+        Ok(HitResult::Entity(hit)) => return interact_entity(bot, shared, &hit, secondary_use),
         _ => return use_item(bot, shared),
     };
 
@@ -444,6 +559,104 @@ fn start_use_item(bot: &Client, shared: &Arc<SharedMutex>) -> bool {
     use_item(bot, shared)
 }
 
+fn interact_entity(
+    bot: &Client,
+    shared: &Arc<SharedMutex>,
+    hit: &azalea_core::hit_result::EntityHitResult,
+    secondary_use: bool,
+) -> bool {
+    use azalea::interact::EntityInteractEvent;
+
+    let target = entity_target(bot, hit.entity);
+    bot.ecs.write().trigger(EntityInteractEvent {
+        client: bot.entity,
+        target: hit.entity,
+        location: Some(hit.location),
+    });
+
+    if bot
+        .component::<GameMode>()
+        .is_ok_and(|gm| *gm == GameMode::Spectator)
+    {
+        return false;
+    }
+    let Some(target) = target else {
+        return false;
+    };
+    match entity_use(target, secondary_use, held_item_kind(bot)) {
+        EntityUse::Success => true,
+        EntityUse::Pass => use_item(bot, shared),
+        EntityUse::Unknown => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EntityTarget {
+    kind: azalea_registry::builtin::EntityKind,
+    has_riders: bool,
+    hull_under_water: bool,
+}
+
+fn entity_target(bot: &Client, entity: azalea::ecs::entity::Entity) -> Option<EntityTarget> {
+    use azalea::entity::dimensions::EntityDimensions;
+    use azalea::entity::{EntityKindComponent, Position};
+    use azalea_core::entity_id::MinecraftEntityId;
+
+    let (kind, pos, id) = {
+        let ecs = bot.ecs.read();
+        (
+            **ecs.get::<EntityKindComponent>(entity)?,
+            **ecs.get::<Position>(entity)?,
+            ecs.get::<MinecraftEntityId>(entity)?.0,
+        )
+    };
+    let has_riders = crate::client::tracking::passengers()
+        .lock()
+        .unwrap()
+        .get(&id)
+        .is_some_and(|riders| !riders.is_empty());
+    let hull_under_water = crate::play::riding::Hull::of(kind).is_some() && {
+        let hull = EntityDimensions::from(kind).make_bounding_box(pos);
+        bot.world()
+            .is_ok_and(|world| crate::play::riding::hull_under_water(&world.read(), &hull))
+    };
+    Some(EntityTarget {
+        kind,
+        has_riders,
+        hull_under_water,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EntityUse {
+    Success,
+    Pass,
+    Unknown,
+}
+
+fn entity_use(target: EntityTarget, secondary_use: bool, held: Option<ItemKind>) -> EntityUse {
+    use azalea_registry::builtin::EntityKind;
+
+    let boat = crate::play::riding::Hull::of(target.kind).is_some();
+    if !boat && target.kind != EntityKind::Minecart {
+        return EntityUse::Unknown;
+    }
+    if matches!(held, Some(ItemKind::Lead | ItemKind::Shears)) {
+        return EntityUse::Unknown;
+    }
+    if secondary_use {
+        return EntityUse::Pass;
+    }
+    if boat {
+        if target.hull_under_water {
+            return EntityUse::Unknown;
+        }
+    } else if target.has_riders {
+        return EntityUse::Pass;
+    }
+    EntityUse::Success
+}
+
 fn use_item(bot: &Client, shared: &Arc<SharedMutex>) -> bool {
     let Some(kind) = held_item_kind(bot) else {
         return false;
@@ -455,6 +668,7 @@ fn use_item(bot: &Client, shared: &Arc<SharedMutex>) -> bool {
         return false;
     }
     start_using_item(kind, duration);
+    crate::play::spear::charge_started(bot, shared);
     item_used(shared);
     false
 }
@@ -596,6 +810,50 @@ fn send_use_item_on(bot: &Client, hit: &BlockHitResult, interacted: bool) {
     });
 }
 
+#[cfg(lua_mods)]
+pub(crate) fn place_at(
+    bot: &Client,
+    hit: &BlockHitResult,
+    offhand: bool,
+    slot: Option<u8>,
+    sneak: bool,
+) {
+    use azalea::movement::LastSentInput;
+    use azalea_protocol::packets::game::{
+        s_interact::InteractionHand, s_player_input::ServerboundPlayerInput,
+        s_use_item_on::ServerboundUseItemOn,
+    };
+
+    if let Some(slot) = slot {
+        select_hotbar_slot(bot, slot);
+    }
+    let input = bot
+        .component::<LastSentInput>()
+        .map(|i| i.0.clone())
+        .unwrap_or_default();
+    let press = sneak && !input.shift;
+    if press {
+        bot.write_packet(ServerboundPlayerInput {
+            shift: true,
+            ..input.clone()
+        });
+    }
+    if let Some(seq) = next_sequence(bot) {
+        bot.write_packet(ServerboundUseItemOn {
+            hand: if offhand {
+                InteractionHand::OffHand
+            } else {
+                InteractionHand::MainHand
+            },
+            block_hit: hit.into(),
+            seq,
+        });
+    }
+    if press {
+        bot.write_packet(input);
+    }
+}
+
 fn predict_open_toggle(bot: &Client, hit: &BlockHitResult) {
     use azalea::interact::BlockStatePredictionHandler;
 
@@ -645,7 +903,7 @@ fn predict_open_toggle(bot: &Client, hit: &BlockHitResult) {
     }
 }
 
-fn swing_main_hand(bot: &Client, shared: &Arc<SharedMutex>) {
+pub(crate) fn swing_main_hand(bot: &Client, shared: &Arc<SharedMutex>) {
     use azalea_protocol::packets::game::{s_interact::InteractionHand, s_swing::ServerboundSwing};
 
     crate::client::tick::swing_local_player(false, shared);
@@ -764,7 +1022,7 @@ fn predict_place(bot: &Client, secondary_use: bool) -> bool {
         s_interact::InteractionHand, s_use_item_on::ServerboundUseItemOn,
     };
 
-    let Some(predicted) = predict_use(bot, UseKind::Place, secondary_use) else {
+    let Some(predicted) = predict_use(bot, UseKind::Place, secondary_use, None) else {
         return false;
     };
 
@@ -773,13 +1031,59 @@ fn predict_place(bot: &Client, secondary_use: bool) -> bool {
         block_hit: (&predicted.hit).into(),
         seq: predicted.seq,
     });
+    crate::modules::scaffold::note_hand_place(predicted.pos);
     true
+}
+
+pub(crate) fn module_place(
+    bot: &Client,
+    shared: &Arc<SharedMutex>,
+    hit: &BlockHitResult,
+    look: (f32, f32),
+    secondary_use: bool,
+) -> bool {
+    use azalea_protocol::packets::game::{
+        s_interact::InteractionHand, s_use_item_on::ServerboundUseItemOn,
+    };
+
+    let Some(predicted) = predict_use(
+        bot,
+        UseKind::Place,
+        secondary_use,
+        Some((hit.clone(), look)),
+    ) else {
+        return false;
+    };
+    bot.write_packet(ServerboundUseItemOn {
+        hand: InteractionHand::MainHand,
+        block_hit: (&predicted.hit).into(),
+        seq: predicted.seq,
+    });
+    consume_held_item(bot);
+    item_used(shared);
+    swing_main_hand(bot, shared);
+    true
+}
+
+pub(crate) fn select_hotbar_slot(bot: &Client, slot: u8) {
+    use azalea::inventory::LastSentSelectedHotbarSlot;
+    use azalea_protocol::packets::game::s_set_carried_item::ServerboundSetCarriedItem;
+
+    if !bot.selected_hotbar_slot().is_ok_and(|s| s != slot) {
+        return;
+    }
+    bot.set_selected_hotbar_slot(slot);
+    bot.write_packet(ServerboundSetCarriedItem { slot: slot as u16 });
+    bot.ecs
+        .write()
+        .entity_mut(bot.entity)
+        .insert(LastSentSelectedHotbarSlot { slot });
 }
 
 fn predict_bucket_use(bot: &Client) -> bool {
     use azalea_protocol::packets::game::{ServerboundUseItem, s_interact::InteractionHand};
 
-    let Some(predicted) = predict_use(bot, UseKind::Bucket, false) else {
+    let Some(predicted) = predict_use(bot, UseKind::Bucket, false, None) else {
         return false;
     };
 
@@ -859,12 +1163,18 @@ struct PlannedWrite {
 
 struct Predicted {
     hit: BlockHitResult,
+    pos: BlockPos,
     x_rot: f32,
     y_rot: f32,
     seq: u32,
 }
 
-fn predict_use(bot: &Client, kind: UseKind, secondary_use: bool) -> Option<Predicted> {
+fn predict_use(
+    bot: &Client,
+    kind: UseKind,
+    secondary_use: bool,
+    aimed: Option<(BlockHitResult, (f32, f32))>,
+) -> Option<Predicted> {
     use azalea::interact::BlockStatePredictionHandler;
 
     match bot.component::<GameMode>().map(|gm| *gm) {
@@ -876,17 +1186,22 @@ fn predict_use(bot: &Client, kind: UseKind, secondary_use: bool) -> Option<Predi
         return None;
     }
 
-    let hit = block_hit(bot)?;
-    let (Ok(world), Ok(inventory), Ok(look), Ok(player_pos), Ok(physics)) = (
+    let (hit, (x_rot, y_rot)) = match aimed {
+        Some(aimed) => aimed,
+        None => {
+            let hit = block_hit(bot)?;
+            let look = bot.component::<azalea::entity::LookDirection>().ok()?;
+            (hit, (look.x_rot(), look.y_rot()))
+        }
+    };
+    let (Ok(world), Ok(inventory), Ok(player_pos), Ok(physics)) = (
         bot.world(),
         bot.component::<azalea::entity::inventory::Inventory>(),
-        bot.component::<azalea::entity::LookDirection>(),
         bot.position(),
         bot.component::<azalea::entity::Physics>(),
     ) else {
         return None;
     };
-    let (x_rot, y_rot) = (look.x_rot(), look.y_rot());
     let player_box = physics.bounding_box;
     drop(physics);
 
@@ -938,7 +1253,6 @@ fn predict_use(bot: &Client, kind: UseKind, secondary_use: bool) -> Option<Predi
         })
     };
     drop(inventory);
-    drop(look);
     let PlannedWrite {
         pos,
         new: state,
@@ -960,7 +1274,7 @@ fn predict_use(bot: &Client, kind: UseKind, secondary_use: bool) -> Option<Predi
         Some(BucketAction::Empty(_is_lava)) => {
             #[cfg(feature = "audio")]
             {
-                let at = [pos.x as f32 + 0.5, pos.y as f32 + 0.5, pos.z as f32 + 0.5];
+                let at = crate::util::block_centre([pos.x, pos.y, pos.z]).to_array();
                 let event = if _is_lava {
                     "item.bucket.empty_lava"
                 } else {
@@ -973,7 +1287,7 @@ fn predict_use(bot: &Client, kind: UseKind, secondary_use: bool) -> Option<Predi
             fill_held_bucket(bot, is_lava);
             #[cfg(feature = "audio")]
             {
-                let at = [pos.x as f32 + 0.5, pos.y as f32 + 0.5, pos.z as f32 + 0.5];
+                let at = crate::util::block_centre([pos.x, pos.y, pos.z]).to_array();
                 let event = if is_lava {
                     "item.bucket.fill_lava"
                 } else {
@@ -987,6 +1301,7 @@ fn predict_use(bot: &Client, kind: UseKind, secondary_use: bool) -> Option<Predi
 
     Some(Predicted {
         hit,
+        pos,
         x_rot,
         y_rot,
         seq,
@@ -1060,6 +1375,69 @@ mod tests {
 
     const P: BlockPos = BlockPos { x: 1, y: 2, z: 3 };
     const Q: BlockPos = BlockPos { x: 1, y: 2, z: 4 };
+
+    fn target(kind: azalea_registry::builtin::EntityKind) -> EntityTarget {
+        EntityTarget {
+            kind,
+            has_riders: false,
+            hull_under_water: false,
+        }
+    }
+
+    #[test]
+    fn a_boat_click_swings_and_a_sneak_passes() {
+        use azalea_registry::builtin::EntityKind;
+        for kind in [EntityKind::OakBoat, EntityKind::BambooChestRaft] {
+            assert_eq!(entity_use(target(kind), false, None), EntityUse::Success);
+            assert_eq!(
+                entity_use(target(kind), false, Some(ItemKind::Bread)),
+                EntityUse::Success
+            );
+            assert_eq!(
+                entity_use(target(kind), true, Some(ItemKind::Bread)),
+                EntityUse::Pass
+            );
+        }
+    }
+
+    #[test]
+    fn entity_use_declines_what_it_cannot_know() {
+        use azalea_registry::builtin::EntityKind;
+        let ridden = |kind| EntityTarget {
+            has_riders: true,
+            ..target(kind)
+        };
+        assert_eq!(
+            entity_use(ridden(EntityKind::OakBoat), false, None),
+            EntityUse::Success
+        );
+        assert_eq!(
+            entity_use(ridden(EntityKind::Minecart), false, None),
+            EntityUse::Pass
+        );
+        assert_eq!(
+            entity_use(target(EntityKind::Minecart), false, None),
+            EntityUse::Success
+        );
+
+        let sunk = EntityTarget {
+            hull_under_water: true,
+            ..target(EntityKind::OakBoat)
+        };
+        assert_eq!(entity_use(sunk, false, None), EntityUse::Unknown);
+        assert_eq!(
+            entity_use(target(EntityKind::OakBoat), false, Some(ItemKind::Lead)),
+            EntityUse::Unknown
+        );
+        assert_eq!(
+            entity_use(target(EntityKind::Villager), false, None),
+            EntityUse::Unknown
+        );
+        assert_eq!(
+            entity_use(target(EntityKind::ChestMinecart), false, None),
+            EntityUse::Unknown
+        );
+    }
 
     #[test]
     fn creative_holds_the_destroy_delay() {

@@ -81,6 +81,20 @@ pub(super) fn compile_program(
         fragment: &fragment.interface,
     });
     undeclared_buffer(pack, name, &layout)?;
+    {
+        use crate::shaderpack::features::{Feature, supported};
+        if !supported(Feature::CustomImages)
+            && layout
+                .bindings
+                .iter()
+                .any(|b| matches!(b, Binding::Image { .. } | Binding::Buffer { .. }))
+        {
+            return Err(format!(
+                "{name} uses image or buffer storage: {}",
+                Feature::CustomImages.absence()
+            ));
+        }
+    }
     if !layout.attributes.is_empty() {
         let locations: Vec<u32> = layout.attributes.iter().map(|a| a.location).collect();
         return Err(format!(
@@ -134,6 +148,7 @@ pub(super) fn compile_program(
             fragment: fragment_wgsl,
             fragment_tests,
             alpha_override: pack.alpha_tests.get(name).copied(),
+            blend: pack.blends.get(name).cloned().unwrap_or_default(),
             fragment_linear,
             compute: None,
             compute_used: None,
@@ -206,6 +221,7 @@ pub(super) fn compile_compute(pack: &mut Pack, name: &str) -> Result<(Program, S
             fragment: String::new(),
             fragment_tests: Vec::new(),
             alpha_override: None,
+            blend: super::Blend::default(),
             fragment_linear: None,
             compute: Some(wgsl),
             compute_used: used,

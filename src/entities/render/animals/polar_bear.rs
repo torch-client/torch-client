@@ -4,35 +4,28 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::polar_bear;
 use crate::entities::registry::Registry;
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::PolarBear,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::PolarBear],
         RenderSpec::new(
             "polar_bear",
             polar_bear::layer,
             texture,
             polar_bear::setup_anim,
-        )
-        .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::PolarBear,
+        ),
         RenderSpec::new(
             "polar_bear_baby",
             polar_bear::baby_layer,
             texture,
             polar_bear::setup_anim,
-        )
-        .with_visible(|st| st.extras.is_baby),
+        ),
     );
 }
 
 fn texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/bear/polarbear_baby".into()
-    } else {
-        "entity/bear/polarbear".into()
-    }
+    aged_texture(st, "entity/bear/polarbear", "entity/bear/polarbear_baby")
 }

@@ -55,7 +55,7 @@ use crate::{
         system::{Commands, Query, Res},
     },
     pathfinder::{
-        astar::{PathfinderTimeout, a_star},
+        astar::{PathfinderTimeout, a_star_sliced},
         execute::{DefaultPathfinderExecutionPlugin, simulation::SimulatingPathState},
         moves::MovesCtx,
         world::CachedWorld,
@@ -267,7 +267,9 @@ pub fn goto_listener(
         }
 
         pathfinder.goal = Some(event.goal.clone());
-        pathfinder.opts = Some(event.opts.clone());
+        if !event.continuation {
+            pathfinder.opts = Some(event.opts.clone());
+        }
         pathfinder.is_calculating = true;
 
         let world_lock = worlds
@@ -292,58 +294,59 @@ pub fn goto_listener(
         let mut start = cur_pos;
 
         if let Some(mut executing_path) = executing_path {
+            if !event.continuation {
+                let instant_path_start = simulating_path_state
+                    .and_then(|s| s.as_simulated().map(|s| s.target))
+                    .unwrap_or_else(|| {
+                        executing_path
+                            .path
+                            .iter()
+                            .next()
+                            .map(|e| e.movement.target)
+                            .unwrap_or(cur_pos)
+                    });
 
-            let instant_path_start = simulating_path_state
-                .and_then(|s| s.as_simulated().map(|s| s.target))
-                .unwrap_or_else(|| {
-                    executing_path
-                        .path
-                        .iter()
-                        .next()
-                        .map(|e| e.movement.target)
-                        .unwrap_or(cur_pos)
+                let path_found_event = calculate_path(CalculatePathCtx {
+                    entity,
+                    start: instant_path_start,
+                    goal: goal.clone(),
+                    world_lock: world_lock.clone(),
+                    goto_id_atomic: goto_id_atomic.clone(),
+                    mining_cache: MiningCache::new(inventory_menu.clone()),
+                    custom_state: custom_state.clone(),
+                    opts: PathfinderOpts {
+                        min_timeout: PathfinderTimeout::Nodes(2_000),
+                        max_timeout: PathfinderTimeout::Nodes(2_000),
+                        ..opts
+                    },
                 });
 
-            let path_found_event = calculate_path(CalculatePathCtx {
-                entity,
-                start: instant_path_start,
-                goal: goal.clone(),
-                world_lock: world_lock.clone(),
-                goto_id_atomic: goto_id_atomic.clone(),
-                mining_cache: MiningCache::new(inventory_menu.clone()),
-                custom_state: custom_state.clone(),
-                opts: PathfinderOpts {
-                    min_timeout: PathfinderTimeout::Nodes(2_000),
-                    max_timeout: PathfinderTimeout::Nodes(2_000),
-                    ..opts
-                },
-            });
+                if let Some(path_found_event) = path_found_event
+                    && !path_found_event.is_partial
+                {
+                    debug!("Found path instantly!");
 
-            if let Some(path_found_event) = path_found_event
-                && !path_found_event.is_partial
-            {
-                debug!("Found path instantly!");
+                    let instant_path_start_index = executing_path
+                        .path
+                        .iter()
+                        .position(|e| e.movement.target == instant_path_start);
+                    if let Some(instant_path_start_index) = instant_path_start_index {
+                        let truncate_to_len = instant_path_start_index + 1;
+                        debug!("truncating to {truncate_to_len} for instant path");
+                        executing_path.path.truncate(truncate_to_len);
 
-                let instant_path_start_index = executing_path
-                    .path
-                    .iter()
-                    .position(|e| e.movement.target == instant_path_start);
-                if let Some(instant_path_start_index) = instant_path_start_index {
-                    let truncate_to_len = instant_path_start_index + 1;
-                    debug!("truncating to {truncate_to_len} for instant path");
-                    executing_path.path.truncate(truncate_to_len);
+                        path_found_events.write(path_found_event);
 
-                    path_found_events.write(path_found_event);
-
-                    continue;
+                        continue;
+                    } else {
+                        warn!(
+                            "we just calculated an instant path, but the start of it isn't in the current path? instant_path_start: {instant_path_start:?}, simulating_path_state: {simulating_path_state:?}, executing_path.path: {:?}",
+                            executing_path.path
+                        )
+                    }
                 } else {
-                    warn!(
-                        "we just calculated an instant path, but the start of it isn't in the current path? instant_path_start: {instant_path_start:?}, simulating_path_state: {simulating_path_state:?}, executing_path.path: {:?}",
-                        executing_path.path
-                    )
+                    debug!("Couldn't find path instantly...");
                 }
-            } else {
-                debug!("Couldn't find path instantly...");
             }
 
             if !executing_path.path.is_empty() {
@@ -371,8 +374,12 @@ pub fn goto_listener(
         }
 
         let mining_cache = MiningCache::new(inventory_menu);
+        let spawn_id = goto_id_atomic.fetch_add(1, atomic::Ordering::SeqCst) + 1;
         let task = thread_pool.spawn(async move {
-            calculate_path(CalculatePathCtx {
+            if goto_id_atomic.load(atomic::Ordering::SeqCst) != spawn_id {
+                return None;
+            }
+            let ctx = CalculatePathCtx {
                 entity,
                 start,
                 goal,
@@ -381,7 +388,8 @@ pub fn goto_listener(
                 mining_cache,
                 custom_state,
                 opts,
-            })
+            };
+            calculate_path_on_pool(ctx).await
         });
 
         commands.entity(event.entity).insert(ComputePath(task));
@@ -405,13 +413,38 @@ pub struct CalculatePathCtx {
     pub opts: PathfinderOpts,
 }
 
-pub fn calculate_path(ctx: CalculatePathCtx) -> Option<PathFoundEvent> {
+pub fn calculate_path(mut ctx: CalculatePathCtx) -> Option<PathFoundEvent> {
+    ctx.opts.yield_fn = None;
+    future::block_on(calculate_path_sliced(ctx))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn calculate_path_on_pool(ctx: CalculatePathCtx) -> Option<PathFoundEvent> {
+    calculate_path_sliced(ctx).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn calculate_path_on_pool(ctx: CalculatePathCtx) -> Option<PathFoundEvent> {
+    calculate_path(ctx)
+}
+
+pub async fn calculate_path_sliced(ctx: CalculatePathCtx) -> Option<PathFoundEvent> {
     debug!("start: {}", ctx.start);
 
     let goto_id = ctx.goto_id_atomic.fetch_add(1, atomic::Ordering::SeqCst) + 1;
 
     let origin = ctx.start;
     let cached_world = CachedWorld::new(ctx.world_lock, origin);
+    let successors_into = |pos: RelBlockPos, out: &mut Vec<astar::Edge<RelBlockPos, moves::MoveData>>| {
+        call_successors_fn_into(
+            &cached_world,
+            &ctx.mining_cache,
+            &ctx.custom_state.0.read(),
+            ctx.opts.successors_fn,
+            pos,
+            out,
+        )
+    };
     let successors = |pos: RelBlockPos| {
         call_successors_fn(
             &cached_world,
@@ -424,18 +457,22 @@ pub fn calculate_path(ctx: CalculatePathCtx) -> Option<PathFoundEvent> {
 
     let start_time = Instant::now();
 
+    let goto_id_atomic = &ctx.goto_id_atomic;
     let astar::Path {
         movements,
         is_partial,
         cost,
-    } = a_star(
+    } = a_star_sliced(
         RelBlockPos::get_origin(origin),
         |n| ctx.goal.heuristic(n.apply(origin)),
-        successors,
+        successors_into,
         |n| ctx.goal.success(n.apply(origin)),
         ctx.opts.min_timeout,
         ctx.opts.max_timeout,
-    );
+        || goto_id_atomic.load(atomic::Ordering::Relaxed) != goto_id,
+        ctx.opts.yield_fn,
+    )
+    .await;
     let end_time = Instant::now();
     debug!("partial: {is_partial:?}, cost: {cost}");
     let duration = end_time - start_time;
@@ -607,7 +644,7 @@ pub fn path_found_listener(
                     new_path.iter().take(10).collect::<Vec<_>>()
                 );
                 executing_path.queued_path = Some(new_path);
-                executing_path.is_path_partial = event.is_partial;
+                executing_path.is_path_partial = event.is_partial && !found_path.is_empty();
             } else if found_path.is_empty() {
                 debug!("calculated path is empty, so didn't add ExecutingPath");
                 if !pathfinder.opts.as_ref().is_some_and(|o| o.retry_on_no_path) {
@@ -647,17 +684,24 @@ pub struct StopPathfindingEvent {
 
 pub fn handle_stop_pathfinding_event(
     mut events: MessageReader<StopPathfindingEvent>,
-    mut query: Query<(&mut Pathfinder, &mut ExecutingPath)>,
+    mut query: Query<(&mut Pathfinder, Option<&mut ExecutingPath>)>,
     mut walk_events: MessageWriter<StartWalkEvent>,
     mut commands: Commands,
 ) {
     for event in events.read() {
         commands.entity(event.entity).remove::<ComputePath>();
 
-        let Ok((mut pathfinder, mut executing_path)) = query.get_mut(event.entity) else {
+        let Ok((mut pathfinder, executing_path)) = query.get_mut(event.entity) else {
             continue;
         };
         pathfinder.goal = None;
+        if pathfinder.is_calculating {
+            pathfinder.is_calculating = false;
+            pathfinder.goto_id.fetch_add(1, atomic::Ordering::SeqCst);
+        }
+        let Some(mut executing_path) = executing_path else {
+            continue;
+        };
         if event.force {
             executing_path.path.clear();
             executing_path.queued_path = None;
@@ -700,12 +744,23 @@ pub fn call_successors_fn(
     pos: RelBlockPos,
 ) -> Vec<astar::Edge<RelBlockPos, moves::MoveData>> {
     let mut edges = Vec::with_capacity(16);
+    call_successors_fn_into(cached_world, mining_cache, custom_state, successors_fn, pos, &mut edges);
+    edges
+}
+
+pub fn call_successors_fn_into(
+    cached_world: &CachedWorld,
+    mining_cache: &MiningCache,
+    custom_state: &CustomPathfinderStateRef,
+    successors_fn: SuccessorsFn,
+    pos: RelBlockPos,
+    edges: &mut Vec<astar::Edge<RelBlockPos, moves::MoveData>>,
+) {
     let mut ctx = MovesCtx {
-        edges: &mut edges,
+        edges,
         world: cached_world,
         mining_cache,
         custom_state,
     };
     successors_fn(&mut ctx, pos);
-    edges
 }

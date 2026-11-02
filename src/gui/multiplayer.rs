@@ -694,17 +694,31 @@ fn draw_form(
 }
 
 pub fn draw_manage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
+    let quarter = (ctx.vh / 4.0).floor();
+
+    #[cfg(feature = "mobile_ui")]
+    let (name_label, name_y, address_label, address_y) = (33.0, 46.0, 74.0, 86.0);
+    #[cfg(not(feature = "mobile_ui"))]
+    let (name_label, name_y, address_label, address_y) = (53.0, 66.0, 94.0, 106.0);
+    let below_address = address_y + WIDGET_HEIGHT + 4.0;
+    #[cfg(feature = "mobile_ui")]
+    let (cycle_y, ok_y) = (below_address, below_address + 24.0);
+    #[cfg(not(feature = "mobile_ui"))]
+    let (cycle_y, ok_y) = {
+        let cycle_y = (quarter + 72.0).max(below_address);
+        (cycle_y, cycle_y + 42.0)
+    };
+
     let form = Form {
         title: MANAGE_TITLE,
         title_y: 17.0,
         ok_label: DONE,
-        button_y: 114.0,
+        button_y: ok_y - quarter,
     };
     let (confirmed, cancelled) = draw_form(p, state, ctx, &form, |p, menu, ctx, x| {
-        p.text_str(NAME_LABEL, x + 1.0, 53.0, 0xA0A0A0, true);
-        p.text_str(ADDRESS_LABEL, x + 1.0, 94.0, 0xA0A0A0, true);
+        p.text_str(NAME_LABEL, x + 1.0, name_label, 0xA0A0A0, true);
+        p.text_str(ADDRESS_LABEL, x + 1.0, address_label, 0xA0A0A0, true);
 
-        let (name_y, address_y) = (66.0, 106.0);
         menu.name
             .update(p, ctx, x, name_y, WIDGET_WIDTH_BIG, WIDGET_HEIGHT);
         menu.address
@@ -715,8 +729,7 @@ pub fn draw_manage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             label!("manageServer.resourcePack"),
             menu.resource_packs.caption()
         );
-        let y = (ctx.vh / 4.0).floor() + 72.0;
-        if Button::new(x, y, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, &label).draw(p, ctx) {
+        if Button::new(x, cycle_y, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, &label).draw(p, ctx) {
             menu.resource_packs = menu.resource_packs.next();
         }
         valid_address(&menu.address.text)

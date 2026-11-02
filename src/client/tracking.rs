@@ -63,12 +63,6 @@ pub(crate) fn on_living_anim(
     }
 }
 
-static CRIT_HITS: OnceLock<SideMutex<Vec<(i32, bool)>>> = OnceLock::new();
-
-pub(crate) fn crit_hits() -> &'static SideMutex<Vec<(i32, bool)>> {
-    CRIT_HITS.get_or_init(Default::default)
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct Equipment {
     pub main_hand: renderer::HeldItem,
@@ -77,6 +71,7 @@ pub struct Equipment {
     pub chestplate: Option<&'static str>,
     pub leggings: Option<&'static str>,
     pub boots: Option<&'static str>,
+    pub armor_foil: [bool; 4],
     pub body_armor: Option<&'static str>,
     pub saddle: Option<&'static str>,
 }

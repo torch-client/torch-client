@@ -66,12 +66,17 @@ impl Feature {
             Feature::ComputeShaders | Feature::CustomImages | Feature::Ssbo => {
                 "the browser build uses WebGL2, which has no compute shaders"
             }
+            Feature::PerBufferBlending => {
+                "the browser build uses WebGL2, which blends every target alike"
+            }
             _ => "not implemented yet",
         }
     }
 }
 
 const COMPUTE: bool = !cfg!(all(target_arch = "wasm32", not(feature = "webgpu")));
+
+const INDEPENDENT_BLEND: bool = COMPUTE;
 
 pub(crate) fn supported(feature: Feature) -> bool {
     match feature {
@@ -81,11 +86,12 @@ pub(crate) fn supported(feature: Feature) -> bool {
 
         Feature::SeparateHardwareSamplers => true,
 
-        Feature::HigherShadowcolor
-        | Feature::PerBufferBlending
-        | Feature::EntityTranslucent
-        | Feature::ReversedCulling
-        | Feature::BlockEmissionAttribute
+        Feature::HigherShadowcolor => true,
+        Feature::EntityTranslucent => true,
+        Feature::BlockEmissionAttribute => true,
+        Feature::PerBufferBlending => INDEPENDENT_BLEND,
+
+        Feature::ReversedCulling
         | Feature::CanDisableWeather
         | Feature::FadeVariable
         | Feature::TextureFiltering => false,
@@ -108,7 +114,9 @@ const GL_VERSION: u32 = super::transform::TARGET_VERSION;
 
 const MIPMAP_LEVEL: &str = "4";
 
-const OS_DEFINE: &str = if cfg!(target_os = "windows") {
+const OS_DEFINE: &str = if !COMPUTE {
+    "MC_OS_MAC"
+} else if cfg!(target_os = "windows") {
     "MC_OS_WINDOWS"
 } else if cfg!(target_os = "macos") {
     "MC_OS_MAC"

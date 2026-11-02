@@ -6,6 +6,30 @@
 const UNIHEX_UV_BIAS: f32 = 2.0;
 const UNIHEX_UV_TEST: f32 = 1.5;
 
+const GLINT_UV_BIAS: f32 = 2.0;
+const GLINT_UV_TEST: f32 = 1.5;
+
+struct Glint {
+    region: vec4<f32>,
+    params: vec4<f32>,
+};
+@group(0) @binding(4) var<uniform> glint: Glint;
+
+const GLINT_GAMMA: f32 = 2.2;
+
+fn add_glint(rgb: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
+    let rot = bitcast<f32>(#{GLINT_ROTATION_BITS}u);
+    let c = cos(rot);
+    let s = sin(rot);
+    let p = frag * glint.params.z;
+    let g = glint.params.xy + vec2(c * p.x - s * p.y, s * p.x + c * p.y);
+    let uv = glint.region.xy + fract(g) * glint.region.zw;
+    let texel = textureSampleLevel(atlas_texture, atlas_sampler, uv, 0.0).rgb;
+    let add = pow(texel, vec3(1.0 / GLINT_GAMMA)) * glint.params.w;
+    let base = pow(rgb, vec3(1.0 / GLINT_GAMMA));
+    return pow(min(base + add * add, vec3(1.0)), vec3(GLINT_GAMMA));
+}
+
 struct Vertex {
     @location(0) position: vec2<f32>,
     @location(1) uv: vec2<f32>,
@@ -34,10 +58,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let a = in.color.a * textureSampleLevel(unihex_texture, unihex_sampler, uv, 0.0).r;
         return vec4(in.color.rgb * a, a);
     }
-    let texel = textureSampleLevel(atlas_texture, atlas_sampler, in.uv, 0.0);
+    var uv = in.uv;
+    let glinting = uv.y >= GLINT_UV_TEST;
+    if glinting {
+        uv.y -= GLINT_UV_BIAS;
+    }
+    let texel = textureSampleLevel(atlas_texture, atlas_sampler, uv, 0.0);
     if in.color.a < 0.0 {
         return vec4(texel.rgb * in.color.rgb, 0.0);
     }
     let color = in.color * texel;
-    return vec4(color.rgb * color.a, color.a);
+    var rgb = color.rgb;
+    if glinting && glint.params.w > 0.0 {
+        rgb = add_glint(rgb, in.clip_position.xy);
+    }
+    return vec4(rgb * color.a, color.a);
 }

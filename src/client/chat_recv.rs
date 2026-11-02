@@ -138,15 +138,23 @@ pub(crate) fn handle_chat(bot: &Client, shared: &Arc<SharedMutex>, m: ChatPacket
         None => (decorated_spans, decorated_events),
     };
     let spans = crate::modules::special::filter(spans);
+    #[cfg(lua_mods)]
+    let shown = !crate::modules::script::chat(bot, shared, &spans);
+    #[cfg(not(lua_mods))]
+    let shown = true;
 
+    #[cfg(target_arch = "wasm32")]
+    crate::client::chat_trace::received(&spans.iter().map(|s| s.text.as_str()).collect::<String>());
     let mut s = shared.lock().unwrap();
 
-    s.session.chat_incoming.push(ChatEntry {
-        spans,
-        events,
-        tag,
-        original,
-    });
+    if shown {
+        s.session.chat_incoming.push(ChatEntry {
+            spans,
+            events,
+            tag,
+            original,
+        });
+    }
     if send_error.is_some() {
         s.session.chat_send_error = send_error;
     }

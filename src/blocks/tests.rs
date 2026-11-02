@@ -643,9 +643,8 @@ fn the_mesher_culls_a_face_against_a_solid_neighbour() {
         for (x, y, z) in occupied {
             occ.set_solid(*x, *y, *z);
         }
-        let blocks = vec![(0, 0, 0, stone.clone())];
         let tiles = super::registry().sprites().mesh_tiles();
-        let (opaque, water) = build_section_mesh(&blocks, 0, 0, 0, tiles, &occ);
+        let (opaque, water) = build_section_mesh([(0, 0, 0, &stone)], 0, 0, 0, tiles, &occ);
         assert!(water.is_empty());
         assert_eq!(opaque.verts.len() % 4, 0);
         assert_eq!(

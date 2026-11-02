@@ -6,11 +6,12 @@ use std::sync::Arc;
 
 const LEAVE_BED: &str = "Leave Bed";
 
-const BUTTON_WIDTH: f32 = 150.0;
+const BUTTON_WIDTH: f32 = 200.0;
+const BUTTON_BOTTOM_OFFSET: f32 = 40.0;
 
 pub fn draw(p: &mut Painter, ctx: &ScreenCtx, shared: &Arc<SharedMutex>) {
-    let x = ((ctx.vw - BUTTON_WIDTH) / 2.0).floor();
-    let y = (ctx.vh * 0.75).floor();
+    let x = (ctx.vw / 2.0 - BUTTON_WIDTH / 2.0).floor();
+    let y = (ctx.vh - BUTTON_BOTTOM_OFFSET).floor();
 
     if Button::new(x, y, BUTTON_WIDTH, WIDGET_HEIGHT, LEAVE_BED).draw(p, ctx) {
         shared.lock().unwrap().leave_bed_requested = true;

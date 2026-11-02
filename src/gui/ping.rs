@@ -10,7 +10,10 @@ pub type IconPixels = std::sync::Arc<Vec<u8>>;
 
 pub const ICON_BYTES: usize = (SERVER_ICON_PX * SERVER_ICON_PX * 4) as usize;
 
+#[cfg(not(target_arch = "wasm32"))]
 const TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_arch = "wasm32")]
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub enum PingState {
@@ -160,6 +163,12 @@ pub(crate) fn note_icon(address: &str, pixels: IconPixels) {
             slot
         }
     };
+    drop(icons);
+    note_slot(slot, pixels);
+}
+
+pub(crate) fn note_slot(slot: usize, pixels: IconPixels) {
+    let mut icons = icons().lock().unwrap();
     icons.pending.retain(|(pending, _)| *pending != slot);
     icons.written.insert(slot, pixels.clone());
     icons.pending.push((slot, pixels));

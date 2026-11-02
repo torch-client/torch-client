@@ -59,12 +59,11 @@ pub fn draw(
             hardcore: s.session.hardcore,
             health_epoch: s.session.health_epoch,
             jump_charge: s.session.jump_charge,
+            jump_cooldown: s.session.jump_cooldown,
             eye_in_water: false,
             chat_incoming: std::mem::take(&mut s.session.chat_incoming),
             toast_incoming: std::mem::take(&mut s.session.toast_incoming),
             chat_error: s.session.chat_send_error.take(),
-            enforces_secure_chat: s.session.enforces_secure_chat,
-            chat_signing: s.chat_signing_allowed || s.session.chat_signing_session,
             attack_strength: s.session.attack_strength,
             attack_delay: s.session.attack_delay,
             targeted_entity: s.session.targeted_entity,
@@ -114,7 +113,7 @@ pub fn draw(
                 && s.session.xp_display_tick.saturating_add(100)
                     > crate::client::tracking::GAME_TIME.load(std::sync::atomic::Ordering::Relaxed),
             waypoints: s.session.waypoints.clone(),
-            eye_pos: [eye_pos[0], eye_pos[1] + eye_height as f32, eye_pos[2]],
+            eye_pos: [eye_pos[0], eye_pos[1] + eye_height, eye_pos[2]],
             camera_yaw: s.camera_yaw,
             camera_pitch: s.camera_pitch,
             sleep_timer: s.session.sleep_timer,
@@ -133,11 +132,9 @@ pub fn draw(
         }
     };
 
-    snap.eye_in_water = crate::util::block_model::eye_fluid_at(
-        eye_pos[0] as f64,
-        eye_pos[1] as f64 + eye_height,
-        eye_pos[2] as f64,
-    ) == Some(crate::util::block_model::EyeFluid::Water);
+    snap.eye_in_water =
+        crate::util::block_model::eye_fluid_at(eye_pos[0], eye_pos[1] + eye_height, eye_pos[2])
+            == Some(crate::util::block_model::EyeFluid::Water);
 
     #[cfg(feature = "mobile_ui")]
     let lift = {
@@ -147,7 +144,7 @@ pub fn draw(
             0.0
         };
         crate::gui::widgets::keyboard_lift::begin(
-            state.screen.is_menu(),
+            state.screen_is_menu(),
             input.size.y,
             inset,
             input.left_down || input.left_release,
@@ -204,8 +201,6 @@ pub fn draw(
 
     let chat_incoming = std::mem::take(&mut snap.chat_incoming);
     let chat_error = snap.chat_error.take();
-    let secure_chat = snap.enforces_secure_chat;
-    let chat_signing = snap.chat_signing;
 
     let in_menu = state.in_menu();
     #[cfg(feature = "hud_editor")]
@@ -224,6 +219,7 @@ pub fn draw(
         crate::gui::screen_effects::draw(p, &state.screen_effects, ctx.vw, ctx.vh);
     }
 
+    state.hud_state.layout.sync_mod_panels();
     state.hud_state.frames.begin(ctx.vw, ctx.vh);
     let mut elements = Hud::new(
         &state.hud_state.layout,
@@ -249,7 +245,7 @@ pub fn draw(
             &ctx,
             &state.hud,
             &snap.sidebar,
-            state.screen == Screen::Chat,
+            state.screen.chat_open(),
             show_fps,
             &mut elements,
         );
@@ -278,7 +274,7 @@ pub fn draw(
     }
 
     if !in_menu {
-        let focused = state.screen == Screen::Chat;
+        let focused = state.screen.chat_open();
         let placed = !focused && hud_visible && elements.shown(ElementId::Chat);
         let visible = hud_visible && (focused || placed);
         macro_rules! draw_chat {
@@ -291,8 +287,6 @@ pub fn draw(
                     visible,
                     chat_incoming,
                     chat_error,
-                    secure_chat,
-                    chat_signing,
                     state.advanced_tooltips,
                     shared,
                 )
@@ -389,6 +383,7 @@ pub fn draw(
             p,
             &mut state.creative,
             &mut state.slots,
+            &state.puppet,
             &ctx,
             &snap,
             &mut actions,
@@ -446,11 +441,7 @@ pub fn draw(
         }
         #[cfg(explore_modrinth)]
         Screen::ExplorePacks => {
-            if state.in_menu() {
-                crate::gui::menu::background(p, ctx.vw, ctx.vh);
-            } else {
-                dim_background(p, ctx.vw, ctx.vh);
-            }
+            crate::gui::menu::dirt_background(p, ctx.vw, ctx.vh);
             crate::gui::explore_packs::draw(p, state, &ctx);
             None
         }
@@ -462,7 +453,7 @@ pub fn draw(
                 dim_background(p, ctx.vw, ctx.vh);
             }
             match state.screen {
-                Screen::ShaderPacks => crate::gui::shaderpacks::draw_packs(p, state, &ctx),
+                Screen::ShaderPacks => crate::gui::shaderpacks::draw_packs(p, state, &ctx, shared),
                 _ => crate::gui::shaderpacks::draw_options(p, state, &ctx),
             }
             None
@@ -514,9 +505,19 @@ pub fn draw(
             None
         }
         Screen::Credits => {
-            if let Some(next) = crate::gui::credits::draw(p, &ctx) {
+            if state.in_menu() {
+                crate::gui::menu::background(p, ctx.vw, ctx.vh);
+            } else {
+                dim_background(p, ctx.vw, ctx.vh);
+            }
+            if let Some(next) = crate::gui::credits::draw(p, &ctx, state.credits_parent) {
                 state.nav = Some(next);
             }
+            None
+        }
+        #[cfg(feature = "asset_download")]
+        Screen::Language => {
+            crate::gui::language::draw(p, state, &ctx);
             None
         }
         Screen::Disconnected => {
@@ -535,6 +536,13 @@ pub fn draw(
             if state.clickgui.take_close() {
                 state.nav = Some(state.clickgui_parent);
             }
+            None
+        }
+        #[cfg(lua_mods)]
+        Screen::LuaList => {
+            dim_background(p, ctx.vw, ctx.vh);
+            let look = state.clickgui.look();
+            crate::gui::lua_list::draw(p, &mut state.lua_list, look, &ctx);
             None
         }
         #[cfg(feature = "hud_editor")]
@@ -586,12 +594,29 @@ pub fn draw(
             crate::gui::configphase::draw_reconfig(p, state, &ctx);
             None
         }
+        Screen::GameModeSwitcher => {
+            let select_key = state
+                .keybinds
+                .bound(crate::gui::keybinds::Action::SwitchGameMode)
+                .display_name();
+            crate::gui::gamemode_switcher::draw(p, &mut state.gamemode_switcher, &ctx, select_key);
+            None
+        }
         Screen::Advancements => {
             if let Some(next) =
                 crate::gui::advancements::draw(p, &mut state.advancements, &ctx, &snap, shared)
             {
                 state.nav = Some(next);
                 clear_world_clicks(shared);
+            }
+            None
+        }
+        Screen::Statistics => {
+            dim_background(p, ctx.vw, ctx.vh);
+            if let Some(next) =
+                crate::gui::stats::draw(p, &mut state.stats, &ctx, shared, state.advanced_tooltips)
+            {
+                state.nav = Some(next);
             }
             None
         }
@@ -752,6 +777,9 @@ fn local_stack(stack: &SlotStack) -> SlotStack {
     if stack.is_empty() {
         return SlotStack::default();
     }
+    if stack.raw.is_some() {
+        return stack.clone();
+    }
     let max_damage = crate::generated_items::item(stack.item)
         .map(|d| d.max_damage)
         .unwrap_or(0);
@@ -761,6 +789,8 @@ fn local_stack(stack: &SlotStack) -> SlotStack {
         max_damage,
         enchantments: stack.enchantments.clone(),
         potion: stack.potion.clone(),
+        glint: crate::items::glint::default_foil(stack.item)
+            || (stack.item != "enchanted_book" && !stack.enchantments.is_empty()),
         ..Default::default()
     }
 }
@@ -872,6 +902,7 @@ fn draw_hud(
     let (vw, vh) = (ctx.vw, ctx.vh);
 
     health::draw_freeze_overlay(p, snap, vw, vh);
+    crate::gui::screen_effects::draw_portal(p, screen_effects, vw, vh);
     crate::gui::screen_effects::draw_confusion(p, screen_effects, vw, vh);
 
     p.sprite(
@@ -984,18 +1015,26 @@ fn draw_contextual_bar(p: &mut Painter, vw: f32, vh: f32, snap: &Snapshot) {
         crate::session::Gamemode::Survival | crate::session::Gamemode::Adventure
     );
     let has_locator = !snap.waypoints.is_empty();
-    let charging = snap.jump_charge.is_some_and(|scale| scale > 0.0);
+    let charging = snap
+        .jump_charge
+        .is_some_and(|scale| scale > 0.0 || snap.jump_cooldown);
 
     if has_locator {
         if charging {
-            draw_jump_bar(p, vw, vh, snap.jump_charge.unwrap_or(0.0));
+            draw_jump_bar(
+                p,
+                vw,
+                vh,
+                snap.jump_charge.unwrap_or(0.0),
+                snap.jump_cooldown,
+            );
         } else if has_experience && snap.xp_recent_gain {
             draw_experience_bar(p, vw, vh, snap);
         } else {
             draw_locator_bar(p, vw, vh, snap);
         }
-    } else if snap.jump_charge.is_some() {
-        draw_jump_bar(p, vw, vh, snap.jump_charge.unwrap_or(0.0));
+    } else if let Some(scale) = snap.jump_charge {
+        draw_jump_bar(p, vw, vh, scale, snap.jump_cooldown);
     } else if has_experience {
         draw_experience_bar(p, vw, vh, snap);
     }
@@ -1026,9 +1065,13 @@ fn draw_experience_bar(p: &mut Painter, vw: f32, vh: f32, snap: &Snapshot) {
     }
 }
 
-fn draw_jump_bar(p: &mut Painter, vw: f32, vh: f32, scale: f32) {
+fn draw_jump_bar(p: &mut Painter, vw: f32, vh: f32, scale: f32, cooldown: bool) {
     let (left, top) = contextual_bar_origin(vw, vh);
     p.sprite("hud/jump_bar_background", left, top, 182.0, 5.0);
+    if cooldown {
+        p.sprite("hud/jump_bar_cooldown", left, top, 182.0, 5.0);
+        return;
+    }
     let progress = (scale.clamp(0.0, 1.0) * 182.0) as i32;
     if progress > 0 {
         p.sprite_part(
@@ -1147,15 +1190,15 @@ fn waypoint_delta(snap: &Snapshot, wp: &crate::session::WaypointInfo) -> (f32, f
     use crate::session::WaypointPos;
     match wp.pos {
         WaypointPos::Block([bx, by, bz]) => {
-            let dx = bx as f64 + 0.5 - snap.eye_pos[0] as f64;
-            let dy = by as f64 + 0.5 - snap.eye_pos[1] as f64;
-            let dz = bz as f64 + 0.5 - snap.eye_pos[2] as f64;
+            let dx = bx as f64 + 0.5 - snap.eye_pos[0];
+            let dy = by as f64 + 0.5 - snap.eye_pos[1];
+            let dz = bz as f64 + 0.5 - snap.eye_pos[2];
             let horiz = (dx * dx + dz * dz).sqrt();
             (dx as f32, dz as f32, horiz as f32, dy)
         }
         WaypointPos::Chunk { x, z } => {
-            let dx = (x * 16 + 8) as f64 - snap.eye_pos[0] as f64;
-            let dz = (z * 16 + 8) as f64 - snap.eye_pos[2] as f64;
+            let dx = (x * 16 + 8) as f64 - snap.eye_pos[0];
+            let dz = (z * 16 + 8) as f64 - snap.eye_pos[2];
             let horiz = (dx * dx + dz * dz).sqrt();
             (dx as f32, dz as f32, horiz as f32, 0.0)
         }
@@ -1268,6 +1311,13 @@ fn draw_inventory(
         |p, state, frame, out| {
             let (left, top) = frame.origin;
             p.blit_sheet("container/inventory", 0.0, 0.0, INV_W, INV_H, left, top);
+            state.puppet.draw(
+                p,
+                [left + 26.0, top + 8.0, left + 75.0, top + 78.0],
+                30.0,
+                0.0625,
+                ctx.mouse(),
+            );
             let hovered = slots::panel(
                 p,
                 Layout::PlayerMenu,

@@ -10,7 +10,7 @@ pub(crate) mod tests;
 
 pub use candidates::Source;
 pub use suggestion::{Range, Suggestion, Suggestions};
-pub use tree::CommandTree;
+pub use tree::{CommandTree, Node, NodeKind, Provider};
 
 use crate::text::Span;
 
@@ -35,16 +35,19 @@ pub struct CommandInfo {
 pub struct Options {
     pub commands_only: bool,
     pub only_show_if_cursor_past_error: bool,
+    pub lead: char,
 }
 
 impl Options {
     pub const CHAT: Options = Options {
         commands_only: false,
         only_show_if_cursor_past_error: false,
+        lead: '/',
     };
     pub const COMMAND_ONLY: Options = Options {
         commands_only: true,
         only_show_if_cursor_past_error: true,
+        lead: '/',
     };
 }
 
@@ -59,7 +62,7 @@ pub fn update_command_info(
     let input: Vec<char> = value.chars().collect();
     let cursor = cursor.min(input.len());
     let mut info = CommandInfo::default();
-    let starts_with_slash = input.first() == Some(&'/');
+    let starts_with_slash = input.first() == Some(&options.lead);
     let is_command = options.commands_only || starts_with_slash;
     let parse_start = usize::from(starts_with_slash);
 

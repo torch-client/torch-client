@@ -258,6 +258,16 @@ pub(crate) fn is_version(token: &Token) -> bool {
     token.kind == Kind::Directive && token.text.trim_start().starts_with("#version")
 }
 
+pub(crate) fn is_extension(token: &Token) -> bool {
+    token.kind == Kind::Directive
+        && token
+            .text
+            .trim_start()
+            .trim_start_matches('#')
+            .trim_start()
+            .starts_with("extension")
+}
+
 pub(crate) fn in_define(token: &mut Token, mut rename: impl FnMut(&mut Token)) {
     in_define_body(token, |body| {
         for word in body.iter_mut().filter(|t| t.kind == Kind::Word) {

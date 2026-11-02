@@ -4,21 +4,16 @@ use bevy::prelude::Quat;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::fox;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 use crate::entities::{RenderSpec, RootPose, default_root};
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Fox,
-        RenderSpec::new("fox", fox::layer, texture, fox::setup_anim)
-            .with_root(root)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Fox,
-        RenderSpec::new("fox_baby", fox::baby_layer, texture, fox::baby_setup_anim)
-            .with_root(root)
-            .with_visible(|st| st.extras.is_baby),
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Fox],
+        RenderSpec::new("fox", fox::layer, texture, fox::setup_anim).with_root(root),
+        RenderSpec::new("fox_baby", fox::baby_layer, texture, fox::baby_setup_anim).with_root(root),
     );
 }
 

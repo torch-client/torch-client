@@ -7,6 +7,12 @@
 import re
 import sys
 
+CHROMEBOOK = (
+    '<link rel="manifest" href="manifest.webmanifest">\n'
+    '<meta name="theme-color" content="#000000">\n'
+    '<script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js");</script>'
+)
+
 def strip_block_comments(text, opener="/*", closer="*/"):
     out = []
     at = 0
@@ -107,10 +113,16 @@ def minify(text):
 
 def main(argv):
     argv = list(argv)
+    chromebook = "--chromebook" in argv[1:]
+    argv = [a for a in argv if a != "--chromebook"]
     if len(argv) != 3:
         raise SystemExit(__doc__)
     source = open(argv[1], encoding="utf-8").read()
     result = minify(source) + "\n"
+    if chromebook:
+        if result.count("</title>") != 1:
+            raise SystemExit("--chromebook needs exactly one </title> to insert after")
+        result = result.replace("</title>", "</title>\n" + CHROMEBOOK)
     open(argv[2], "w", encoding="utf-8").write(result)
     before = len(source.encode("utf-8"))
     after = len(result.encode("utf-8"))

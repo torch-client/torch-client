@@ -56,9 +56,18 @@ async fn run_client(
         })
         .add_plugins(chat_sign::ChatSigningPlugin)
         .add_plugins(flight::FlightPlugin)
+        .add_plugins(crate::play::elytra::ElytraPlugin)
         .add_plugins(no_fall::NoFallPlugin)
         .add_plugins(crate::play::vclip::VClipPlugin)
         .add_plugins(crate::play::riding::RidingPlugin)
+        .add_plugins(crate::play::speed::SpeedPlugin)
+        .add_plugins(crate::play::velocity::VelocityPlugin)
+        .add_plugins(|app: &mut azalea::app::App| {
+            app.add_systems(
+                azalea_core::tick::GameTick,
+                crate::play::pick_box::step_pick_boxes,
+            );
+        })
         .add_plugins(PacketRelayPlugin)
         .add_plugins(ProtocolPlugin)
         .add_plugins(crate::client::dialogs::ConfigRelayPlugin)
@@ -145,6 +154,11 @@ pub struct PacketRelayPlugin;
 impl azalea::app::Plugin for PacketRelayPlugin {
     fn build(&self, app: &mut azalea::app::App) {
         app.add_systems(azalea::app::Update, relay_packets);
+        #[cfg(feature = "audio")]
+        app.add_systems(
+            azalea::app::Update,
+            crate::client::server_sounds::play_server_sounds,
+        );
     }
 }
 
@@ -457,17 +471,21 @@ async fn handle_event(
             );
             shared.lock().unwrap().session.status =
                 Some("Connected — waiting for chunks...".into());
+            #[cfg(lua_mods)]
+            crate::modules::script::joined();
         }
         Event::Spawn => {
             crate::diag::on_spawned();
             log_info!("net", "spawned; the world is up");
+            #[cfg(lua_mods)]
+            crate::modules::script::spawned();
             let mut s = shared.lock().unwrap();
             if s.session_ended {
                 return Ok(());
             }
             s.in_world = true;
             if let Ok(pos) = bot.position() {
-                s.session.player_pos = [pos.x as f32, pos.y as f32, pos.z as f32];
+                s.session.player_pos = [pos.x, pos.y, pos.z];
                 s.session.status =
                     Some(format!("Spawned at ({:.1},{:.1},{:.1})", pos.x, pos.y, pos.z).into());
             }
@@ -479,6 +497,8 @@ async fn handle_event(
         Event::Chat(m) => chat_recv::handle_chat(&bot, shared, m),
         Event::Death(packet) => {
             let cause = packet.map(|p| crate::client::chat_text::to_spans(&p.message));
+            #[cfg(lua_mods)]
+            crate::modules::script::died(cause.iter().flatten().map(|s| s.text.as_str()).collect());
             let mut s = shared.lock().unwrap();
             s.session.death_cause = cause;
         }
@@ -577,8 +597,8 @@ fn reset_session_side_tables(blocking: bool) {
             }
         }
         use crate::client::tracking::{
-            add_entity_data, crit_hits, entity_anims, meta_dirty, meta_index_18, on_grounds,
-            passengers, velocities,
+            add_entity_data, entity_anims, meta_dirty, meta_index_18, on_grounds, passengers,
+            velocities,
         };
         clear(entity_anims());
         clear(meta_index_18());
@@ -587,7 +607,7 @@ fn reset_session_side_tables(blocking: bool) {
         clear(velocities());
         clear(add_entity_data());
         clear(passengers());
-        clear(crit_hits());
+        crate::play::tracking_emitter::reset();
     }
     crate::client::tracking::LOCAL_ENTITY_ID.store(i32::MIN, std::sync::atomic::Ordering::Relaxed);
     crate::play::riding::reset(blocking);

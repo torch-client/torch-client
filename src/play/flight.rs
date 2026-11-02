@@ -38,24 +38,32 @@ const AZALEA_AIR_SPEED_SPRINTING: f32 = 0.025999999;
 #[derive(Resource, Default)]
 pub(crate) struct PreTravelVelocityY(HashMap<Entity, f64>);
 
+#[derive(Resource, Default)]
+pub(crate) struct JustToggledFlight {
+    pub(crate) toggled: bool,
+    pub(crate) jump: bool,
+}
+
 pub struct FlightPlugin;
 
 impl Plugin for FlightPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PreTravelVelocityY>().add_systems(
-            GameTick,
-            (
-                flight_pre_travel
-                    .in_set(PhysicsSystems)
-                    .after(ai_step)
-                    .before(travel),
-                flight_post_travel
-                    .after(PhysicsSystems)
-                    .after(azalea::attack::handle_attack_queued)
-                    .before(azalea::movement::send_position),
-                flight_anti_kick.after(azalea::movement::send_position),
-            ),
-        );
+        app.init_resource::<PreTravelVelocityY>()
+            .init_resource::<JustToggledFlight>()
+            .add_systems(
+                GameTick,
+                (
+                    flight_pre_travel
+                        .in_set(PhysicsSystems)
+                        .after(ai_step)
+                        .before(travel),
+                    flight_post_travel
+                        .after(PhysicsSystems)
+                        .after(azalea::attack::handle_attack_queued)
+                        .before(azalea::movement::send_position),
+                    flight_anti_kick.after(azalea::movement::send_position),
+                ),
+            );
     }
 }
 
@@ -85,7 +93,7 @@ fn flying_speed(abilities: &PlayerAbilities, sprinting: bool) -> f32 {
 }
 
 #[allow(clippy::type_complexity)]
-fn flight_pre_travel(
+pub(crate) fn flight_pre_travel(
     mut query: Query<
         (
             Entity,
@@ -102,8 +110,10 @@ fn flight_pre_travel(
     >,
     worlds: Res<Worlds>,
     mut pre_travel_y: ResMut<PreTravelVelocityY>,
+    mut just_toggled: ResMut<JustToggledFlight>,
     mut commands: Commands,
 ) {
+    *just_toggled = JustToggledFlight::default();
     let Some(shared) = crate::SHARED.get() else {
         return;
     };
@@ -116,6 +126,7 @@ fn flight_pre_travel(
             std::mem::take(&mut s.session.fly_speed_scroll),
         )
     };
+    just_toggled.jump = move_flags & MOVE_JUMP != 0;
 
     let demand = module::poll();
 
@@ -163,6 +174,7 @@ fn flight_pre_travel(
             abilities.flying = true;
         } else if toggle_requested {
             abilities.flying = !abilities.flying;
+            just_toggled.toggled = true;
         }
 
         if abilities.flying != was_flying && matches!(demand, module::State::Idle) {

@@ -84,6 +84,7 @@ pub struct State {
     pub list: Option<List>,
     pub ghost: Option<String>,
     force: bool,
+    client_gen: u64,
 }
 
 #[derive(Default)]
@@ -380,12 +381,32 @@ impl Field {
 
         let value = self.input.text.clone();
         let cursor = self.input.cursor;
+        let client_gen = if st.options.commands_only {
+            0
+        } else {
+            crate::modules::commands::generation()
+        };
         let changed = std::mem::take(&mut self.suggest.force)
             || value != self.suggest.last_value
-            || cursor != self.suggest.last_cursor;
+            || cursor != self.suggest.last_cursor
+            || client_gen != self.suggest.client_gen;
+        self.suggest.client_gen = client_gen;
         if !changed && !accepted {
             return;
         }
+
+        let client = if st.options.commands_only {
+            None
+        } else {
+            crate::modules::commands::completion().filter(|(lead, _)| value.starts_with(*lead))
+        };
+        let options = match &client {
+            Some((lead, _)) => commands::Options {
+                lead: *lead,
+                ..st.options
+            },
+            None => st.options,
+        };
 
         let (tree, source) = {
             let s = shared.lock().unwrap();
@@ -404,20 +425,30 @@ impl Field {
         }
 
         let request: String = value.chars().take(cursor).collect();
-        let held = self
-            .suggest
-            .client
-            .reply_for(&request)
-            .cloned()
-            .or_else(|| self.suggest.client.narrow(&request));
+        let held = match client {
+            Some(_) => None,
+            None => self
+                .suggest
+                .client
+                .reply_for(&request)
+                .cloned()
+                .or_else(|| self.suggest.client.narrow(&request)),
+        };
+        let tree = match &client {
+            Some((_, t)) => Some(t.clone()),
+            None => tree,
+        };
         self.suggest.info = commands::update_command_info(
             tree.as_deref(),
             &value,
             cursor,
             &source,
-            st.options,
+            options,
             held.as_ref(),
         );
+        if client.is_some() {
+            self.suggest.info.ask_server = None;
+        }
 
         if let Some(request) = &self.suggest.info.ask_server
             && let Some(packet) = self.suggest.client.request(request)

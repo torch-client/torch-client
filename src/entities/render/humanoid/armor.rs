@@ -77,11 +77,15 @@ pub fn register_set(
         leggings_texture,
         boots_texture,
     ];
+    const FOIL: [fn(&EntityState) -> bool; 4] =
+        [helmet_foil, chestplate_foil, leggings_foil, boots_foil];
     for slot in 0..4 {
         registry.add_many(
             kinds,
             RenderSpec::new(names[slot], layers[slot], TEXTURES[slot], setup)
-                .with_visible(visible[slot]),
+                .with_visible(visible[slot])
+                .with_armor_glint(FOIL[slot])
+                .ignoring_invisibility(),
         );
     }
     super::elytra::register(registry, kinds);
@@ -92,19 +96,31 @@ pub(crate) fn equipment_asset(item: Option<&str>) -> &'static str {
         return "iron";
     };
     let id = id.rsplit(':').next().unwrap_or(id);
-    if id == "turtle_helmet" {
-        return "turtle_scute";
+    match id {
+        "turtle_helmet" => return "turtle_scute",
+        "elytra" => return "elytra",
+        _ => {}
     }
-    match id.split('_').next().unwrap_or("") {
+    let (material, piece) = id.split_once('_').unwrap_or((id, ""));
+    if !matches!(
+        piece,
+        "helmet" | "chestplate" | "leggings" | "boots" | "horse_armor" | "nautilus_armor"
+    ) {
+        return NO_ASSET;
+    }
+    match material {
         "leather" => "leather",
         "chainmail" => "chainmail",
+        "iron" => "iron",
         "gold" | "golden" => "gold",
         "diamond" => "diamond",
         "netherite" => "netherite",
         "copper" => "copper",
-        _ => "iron",
+        _ => NO_ASSET,
     }
 }
+
+const NO_ASSET: &str = "";
 
 struct EquipmentLayer {
     texture: String,
@@ -122,10 +138,18 @@ impl EquipmentAsset {
 }
 
 pub(crate) const LAYER_HUMANOID: &str = "humanoid";
-const LAYER_HUMANOID_LEGGINGS: &str = "humanoid_leggings";
+pub(crate) const LAYER_HUMANOID_LEGGINGS: &str = "humanoid_leggings";
 pub(crate) const LAYER_WINGS: &str = "wings";
+pub(crate) const LAYER_HORSE_BODY: &str = "horse_body";
+pub(crate) const LAYER_NAUTILUS_BODY: &str = "nautilus_body";
 
-const LAYER_TYPES: [&str; 3] = [LAYER_HUMANOID, LAYER_HUMANOID_LEGGINGS, LAYER_WINGS];
+const LAYER_TYPES: [&str; 5] = [
+    LAYER_HUMANOID,
+    LAYER_HUMANOID_LEGGINGS,
+    LAYER_WINGS,
+    LAYER_HORSE_BODY,
+    LAYER_NAUTILUS_BODY,
+];
 
 pub(crate) const STACK_PREFIX: &str = "equipment_stack/";
 
@@ -315,6 +339,22 @@ fn boots_texture(st: &EntityState) -> TexturePath {
     humanoid_texture(st.extras.boots.as_deref()).into()
 }
 
+fn helmet_foil(st: &EntityState) -> bool {
+    st.extras.armor_foil[0]
+}
+
+pub(crate) fn chestplate_foil(st: &EntityState) -> bool {
+    st.extras.armor_foil[1]
+}
+
+fn leggings_foil(st: &EntityState) -> bool {
+    st.extras.armor_foil[2]
+}
+
+fn boots_foil(st: &EntityState) -> bool {
+    st.extras.armor_foil[3]
+}
+
 pub const FILLED: [fn(&EntityState) -> bool; 4] =
     [has_helmet, has_chestplate, has_leggings, has_boots];
 
@@ -328,16 +368,16 @@ pub const SMALL_STAND: [fn(&EntityState) -> bool; 4] =
     [small_helmet, small_chestplate, small_leggings, small_boots];
 
 fn has_helmet(st: &EntityState) -> bool {
-    st.extras.helmet.is_some()
+    has_layer(st.extras.helmet.as_deref(), LAYER_HUMANOID)
 }
 fn has_chestplate(st: &EntityState) -> bool {
-    st.extras.chestplate.is_some()
+    has_layer(st.extras.chestplate.as_deref(), LAYER_HUMANOID)
 }
 fn has_leggings(st: &EntityState) -> bool {
-    st.extras.leggings.is_some()
+    has_layer(st.extras.leggings.as_deref(), LAYER_HUMANOID_LEGGINGS)
 }
 fn has_boots(st: &EntityState) -> bool {
-    st.extras.boots.is_some()
+    has_layer(st.extras.boots.as_deref(), LAYER_HUMANOID)
 }
 
 fn adult_helmet(st: &EntityState) -> bool {
@@ -448,9 +488,29 @@ mod tests {
             ("copper_helmet", "copper"),
             ("leather_boots", "leather"),
             ("turtle_helmet", "turtle_scute"),
+            ("minecraft:elytra", "elytra"),
+            ("iron_chestplate", "iron"),
+            ("carved_pumpkin", NO_ASSET),
+            ("zombie_head", NO_ASSET),
+            ("golden_apple", NO_ASSET),
+            ("minecraft:golden_horse_armor", "gold"),
+            ("leather_horse_armor", "leather"),
+            ("minecraft:iron_nautilus_armor", "iron"),
+            ("golden_nautilus_armor", "gold"),
+            ("white_carpet", NO_ASSET),
         ] {
             assert_eq!(equipment_asset(Some(item)), asset, "{item}");
         }
         assert_eq!(equipment_asset(None), "iron");
+    }
+
+    #[test]
+    fn an_elytra_is_wings_and_not_a_chestplate() {
+        if !equipment_assets().contains_key("elytra") {
+            return;
+        }
+        assert!(has_layer(Some("minecraft:elytra"), LAYER_WINGS));
+        assert!(!has_layer(Some("minecraft:elytra"), LAYER_HUMANOID));
+        assert!(!has_layer(Some("carved_pumpkin"), LAYER_HUMANOID));
     }
 }

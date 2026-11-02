@@ -46,6 +46,8 @@ pub struct ProfileState {
     scrollbar_drag: Option<f32>,
     editing: Option<usize>,
     username: TextBox,
+    #[cfg(eagler_skins)]
+    skin: crate::gui::skinpick::SkinPick,
     confirm_delete: Option<usize>,
     pub first_run: bool,
     pub pending_connect: Option<String>,
@@ -63,6 +65,8 @@ impl Default for ProfileState {
             scrollbar_drag: None,
             editing: None,
             username: TextBox::bordered(USERNAME_MAX_LEN, ""),
+            #[cfg(eagler_skins)]
+            skin: Default::default(),
             confirm_delete: None,
             first_run: false,
             pending_connect: None,
@@ -107,6 +111,8 @@ impl ProfileState {
         self.editing = None;
         self.username.set_text("");
         self.username.focus();
+        #[cfg(eagler_skins)]
+        self.skin.open(None);
     }
 
     fn begin_edit(&mut self, index: usize) {
@@ -117,12 +123,22 @@ impl ProfileState {
         self.editing = Some(index);
         self.username.set_text(&name);
         self.username.focus();
+        #[cfg(eagler_skins)]
+        self.skin.open(Some(&name));
     }
 
     fn commit_form(&mut self) {
         let name = self.username.text.trim().to_string();
         if !valid_username(&name) {
             return;
+        }
+        #[cfg(eagler_skins)]
+        {
+            let old = self
+                .editing
+                .and_then(|i| self.accounts.get(i))
+                .map(|a| a.name.clone());
+            self.skin.commit(old.as_deref(), &name);
         }
         match self.editing {
             Some(i) if i < self.accounts.entries.len() => {
@@ -607,6 +623,20 @@ pub fn draw_edit(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let title = if editing { EDIT_TITLE } else { ADD_TITLE };
     let x = widgets::centered_x(ctx.vw);
     p.text_centered(title, ctx.vw / 2.0, 17.0, 0xFFFFFF, true);
+    #[cfg(eagler_skins)]
+    let (x, buttons, bottom) = {
+        let x = x + 60.0;
+        let buttons = 92.0 + crate::gui::skinpick::HEIGHT + 8.0;
+        let bottom = buttons + WIDGET_HEIGHT + 6.0;
+        p.fill(
+            x - 124.0,
+            44.0,
+            WIDGET_WIDTH_BIG + 128.0,
+            bottom - 44.0,
+            0x80000000,
+        );
+        (x, buttons, bottom)
+    };
     p.text_str(USERNAME_LABEL, x + 1.0, 53.0, 0xA0A0A0, true);
 
     let field = &mut state.profile.username;
@@ -614,11 +644,44 @@ pub fn draw_edit(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     let valid = valid_username(&field.text);
 
-    let base = (ctx.vh / 4.0).floor();
-    let done = Button {
+    #[cfg(eagler_skins)]
+    state.profile.skin.draw(
+        p,
+        ctx,
         x,
-        y: base + 114.0,
-        w: WIDGET_WIDTH_BIG,
+        92.0,
+        WIDGET_WIDTH_BIG,
+        [x - 118.0, 48.0, 108.0, bottom - 52.0],
+    );
+
+    let back = if state.profile.first_run {
+        (entry_screen() != Screen::EditProfile).then(entry_screen)
+    } else {
+        Some(Screen::Accounts)
+    };
+
+    #[cfg(eagler_skins)]
+    let (done_at, cancel_at) = {
+        let half = (WIDGET_WIDTH_BIG - 4.0) / 2.0;
+        let done_w = if back.is_some() {
+            half
+        } else {
+            WIDGET_WIDTH_BIG
+        };
+        ([x, buttons, done_w], [x + half + 4.0, buttons, half])
+    };
+    #[cfg(not(eagler_skins))]
+    let (done_at, cancel_at) = {
+        let base = (ctx.vh / 4.0).floor();
+        (
+            [x, base + 114.0, WIDGET_WIDTH_BIG],
+            [x, base + 138.0, WIDGET_WIDTH_BIG],
+        )
+    };
+    let done = Button {
+        x: done_at[0],
+        y: done_at[1],
+        w: done_at[2],
         h: WIDGET_HEIGHT,
         label: DONE,
         active: valid,
@@ -629,18 +692,14 @@ pub fn draw_edit(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         leave(state, Screen::Accounts);
     }
 
-    let back = if state.profile.first_run {
-        (entry_screen() != Screen::EditProfile).then(entry_screen)
-    } else {
-        Some(Screen::Accounts)
-    };
     if let Some(back) = back {
         let label = if state.profile.first_run {
             BACK
         } else {
             CANCEL
         };
-        let cancel = Button::new(x, base + 138.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, label);
+        let [cx, cy, cw] = cancel_at;
+        let cancel = Button::new(cx, cy, cw, WIDGET_HEIGHT, label);
         if cancel.draw(p, ctx) || ctx.input.escape {
             state.nav = Some(back);
         }

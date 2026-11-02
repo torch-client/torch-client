@@ -41,13 +41,16 @@ pub(crate) fn reset_positioned() {
 }
 
 fn recenter_view(partial: &PartialWorldRef, here: azalea_core::position::ChunkPos) {
+    if !POSITIONED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     let out_of_range;
     {
         let guard = partial.read();
         let center = guard.chunks.view_center();
         crate::diag::note_view((center.x, center.z), (here.x, here.z));
         let drift = (here.x - center.x).abs().max((here.z - center.z).abs());
-        let adrift = drift > CENTER_SLACK && POSITIONED.load(std::sync::atomic::Ordering::Relaxed);
+        let adrift = drift > CENTER_SLACK;
         if guard.chunks.in_range(&here) && !adrift {
             return;
         }

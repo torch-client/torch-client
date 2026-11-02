@@ -7,7 +7,16 @@
 @group(2) @binding(1) var atlas_sampler: sampler;
 @group(2) @binding(2) var lightmap_texture: texture_2d<f32>;
 @group(2) @binding(3) var lightmap_sampler: sampler;
-@group(2) @binding(4) var<uniform> params: vec4<f32>;
+struct TerrainParams {
+    misc: vec4<f32>,
+    fog_color: vec4<f32>,
+    fog_ramps: vec4<f32>,
+    origin: vec4<i32>,
+    wave_phase: vec4<f32>,
+    wind_plant_phase: vec4<f32>,
+    wind_leaf_phase: vec4<f32>,
+}
+@group(2) @binding(4) var<uniform> params: TerrainParams;
 
 struct SlotMeta { min: vec3<f32>, first_index: u32, max: vec3<f32>, index_count: u32, origin: vec3<i32>, base_vertex: u32, solid_count: u32, flags: u32, pool: u32, cutout_first: u32, faces: array<vec4<u32>, 2>, }
 #ifdef META_TEXTURE
@@ -20,9 +29,9 @@ fn section_origin(instance_index: u32, slot_lane: i32) -> vec3<f32> {
 #ifdef META_TEXTURE
     let slot = slot_lane & 0xFFFF;
     let texel = textureLoad(origins, vec2<i32>(slot % ORIGIN_ROW, slot / ORIGIN_ROW), 0);
-    return vec3<f32>(texel.xyz);
+    return vec3<f32>(texel.xyz - params.origin.xyz);
 #else
-    return vec3<f32>(metas[instance_index].origin);
+    return vec3<f32>(metas[instance_index].origin - params.origin.xyz);
 #endif
 }
 
@@ -52,15 +61,19 @@ struct VertexOutput {
 #endif
 };
 
-fn wind_offset(world_position: vec3<f32>, t: f32, freq: f32) -> vec3<f32> {
+fn wind_offset(world_position: vec3<f32>, t: f32, freq: f32, phase: vec3<f32>) -> vec3<f32> {
     let p = world_position * freq;
-    let sway = sin(p.x + p.z + t * 1.7) + 0.5 * sin(p.x * 1.7 - p.z * 1.1 + t * 2.6);
-    let lift = cos(p.z * 0.9 - p.x * 0.4 + t * 1.3);
+    let sway = sin(p.x + p.z + phase.x + t * 1.7) + 0.5 * sin(p.x * 1.7 - p.z * 1.1 + phase.y + t * 2.6);
+    let lift = cos(p.z * 0.9 - p.x * 0.4 + phase.z + t * 1.3);
     return vec3(sway, lift * 0.25, lift * 0.8);
 }
 
 fn wind_frequency(material: f32) -> f32 {
     return select(WIND_FREQ_PLANT, WIND_FREQ_LEAF, material == MATERIAL_LEAF);
+}
+
+fn wind_phase(material: f32) -> vec3<f32> {
+    return select(params.wind_plant_phase.xyz, params.wind_leaf_phase.xyz, material == MATERIAL_LEAF);
 }
 
 fn wind_weight(material: f32, anchor: f32) -> f32 {
@@ -87,6 +100,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             world_position.xyz,
             globals.time * WIND_SPEED,
             wind_frequency(material),
+            wind_phase(material),
         );
         world_position = vec4(world_position.xyz + gust * weight, world_position.w);
     }
@@ -110,7 +124,7 @@ fn casts(uv: vec2<f32>, material: f32) -> bool {
     if material == MATERIAL_PLANT {
         return false;
     }
-    return textureSampleLevel(atlas_texture, atlas_sampler, uv, params.z).a
+    return textureSampleLevel(atlas_texture, atlas_sampler, uv, params.misc.z).a
         >= SHADOW_ALPHA_CUTOFF;
 }
 

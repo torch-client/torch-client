@@ -178,7 +178,8 @@ impl<'a> Beam<'a> {
 }
 
 fn beacon_beam<'a>(st: &BeState, segments: Segments<'a>) -> Beam<'a> {
-    let center = Vec2::new(st.pos[0] as f32 + 0.5, st.pos[2] as f32 + 0.5);
+    let centre = st.origin.block_centre_to_render(st.pos);
+    let center = Vec2::new(centre.x, centre.z);
     let camera = Vec2::new(st.camera.position.x, st.camera.position.z);
     let radius_scale = (center.distance(camera) / BEAM_SCALE_THRESHOLD).max(1.0);
     Beam {

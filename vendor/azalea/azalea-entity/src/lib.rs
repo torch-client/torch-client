@@ -180,7 +180,7 @@ impl LookDirection {
         let delta_x_rot = (delta_x_rot / sensitivity).round() * sensitivity;
 
         self.y_rot += delta_y_rot;
-        self.x_rot += delta_x_rot;
+        self.x_rot = (self.x_rot + delta_x_rot).clamp(-90., 90.);
     }
 
     #[must_use]
@@ -334,6 +334,7 @@ impl Attributes {
             step_height: AttributeInstance::new(0.6),
             block_break_speed: AttributeInstance::new(1.0),
             submerged_mining_speed: AttributeInstance::new(0.2),
+            scale: AttributeInstance::new(1.0),
         }
     }
 }

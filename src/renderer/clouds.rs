@@ -7,7 +7,7 @@ use super::AppState;
 use super::mesh::QUAD_INDICES;
 use super::systems::WorldCamera;
 use super::timeline::{self, CLOUD_HEIGHT};
-use crate::direction::Direction;
+use crate::blocks::direction::Direction;
 use crate::gui::GuiState;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -19,6 +19,8 @@ pub enum CloudStatus {
 }
 
 impl CloudStatus {
+    pub const ALL: [CloudStatus; 3] = [CloudStatus::Off, CloudStatus::Fast, CloudStatus::Fancy];
+
     pub fn caption(self) -> &'static str {
         match self {
             CloudStatus::Off => "OFF",
@@ -34,24 +36,9 @@ impl CloudStatus {
             CloudStatus::Fancy => "true",
         }
     }
-
-    pub fn from_serialized_name(name: &str) -> Option<CloudStatus> {
-        match name {
-            "false" => Some(CloudStatus::Off),
-            "fast" => Some(CloudStatus::Fast),
-            "true" => Some(CloudStatus::Fancy),
-            _ => None,
-        }
-    }
-
-    pub fn next(self) -> CloudStatus {
-        match self {
-            CloudStatus::Off => CloudStatus::Fast,
-            CloudStatus::Fast => CloudStatus::Fancy,
-            CloudStatus::Fancy => CloudStatus::Off,
-        }
-    }
 }
+
+crate::util::named_cycle::named_cycle!(CloudStatus);
 
 const CELL_SIZE: f32 = 12.0;
 const CELL_HEIGHT: f32 = 4.0;
@@ -414,6 +401,7 @@ fn update_clouds(
     gui: Res<GuiState>,
     view: Res<super::frame_view::FrameView>,
     env: Res<super::environment::Environment>,
+    origin: Res<super::RenderOrigin>,
     mut assets: ResMut<CloudAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -442,11 +430,8 @@ fn update_clouds(
     visibility.set_if_neq(Visibility::Visible);
 
     let Ok(camera) = camera.single() else { return };
-    let (cam_x, cam_y, cam_z) = (
-        camera.translation.x as f64,
-        camera.translation.y as f64,
-        camera.translation.z as f64,
-    );
+    let camera_world = origin.to_world(camera.translation);
+    let (cam_x, cam_y, cam_z) = (camera_world.x, camera_world.y, camera_world.z);
 
     let relative_bottom = CLOUD_HEIGHT as f64 - cam_y;
     let relative_top = relative_bottom + CELL_HEIGHT as f64;
@@ -471,11 +456,11 @@ fn update_clouds(
     let x_in_cell = cloud_x - cell_x as f64 * CELL_SIZE as f64;
     let z_in_cell = cloud_z - cell_z as f64 * CELL_SIZE as f64;
 
-    transform.translation = Vec3::new(
-        (cam_x - x_in_cell) as f32,
-        CLOUD_HEIGHT,
-        (cam_z - z_in_cell) as f32,
-    );
+    transform.translation = origin.to_render(bevy::math::DVec3::new(
+        cam_x - x_in_cell,
+        f64::from(CLOUD_HEIGHT),
+        cam_z - z_in_cell,
+    ));
 
     let key = (cell_x, cell_z, relative, status);
     if assets.built != Some(key) {

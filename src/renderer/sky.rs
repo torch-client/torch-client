@@ -665,8 +665,8 @@ const LAVA_FOG_RANGE: (f32, f32) = (0.25, 1.0);
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_sky(
-    view: Res<super::frame_view::FrameView>,
     env: Res<super::environment::Environment>,
+    origin: Res<super::RenderOrigin>,
     mut assets: ResMut<SkyAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<BackdropMaterial>>,
@@ -694,7 +694,6 @@ fn update_sky(
     >,
 ) {
     crate::prof_span!("render:update_sky");
-    let [eye_x, eye_y, eye_z] = view.tick_eye();
     let dim = dimension::current();
     let skybox = dim.skybox();
     let mut sky = env.sky;
@@ -702,6 +701,7 @@ fn update_sky(
     let Ok(world_transform) = world_camera.single() else {
         return;
     };
+    let [eye_x, eye_y, eye_z] = origin.to_world(world_transform.translation).to_array();
 
     sky.fog_color = super::environment::fog_base_color(
         &sky,

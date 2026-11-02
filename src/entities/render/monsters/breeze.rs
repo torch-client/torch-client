@@ -20,7 +20,8 @@ pub fn register(registry: &mut Registry) {
             wind_texture,
             breeze::setup_anim,
         )
-        .with_blend(Blend::Translucent),
+        .with_blend(Blend::Translucent)
+        .ignoring_invisibility(),
     );
     registry.add(
         EntityKind::Breeze,
@@ -30,7 +31,8 @@ pub fn register(registry: &mut Registry) {
             eyes_texture,
             breeze::setup_anim,
         )
-        .with_blend(Blend::Additive),
+        .with_blend(Blend::Additive)
+        .ignoring_invisibility(),
     );
 }
 

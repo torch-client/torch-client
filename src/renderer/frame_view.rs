@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use bevy::math::DVec3;
 use bevy::prelude::*;
 
-use crate::direction::Direction;
+use crate::blocks::direction::Direction;
 use crate::entities::feed::EntityAnim;
 use crate::renderer::anim::AnimSample;
 use crate::renderer::environment::BiomeLayer;
@@ -14,8 +15,8 @@ pub struct FrameViewSystems;
 #[derive(Resource, Default)]
 pub struct FrameView {
     pub partial: f32,
-    pub player_pos: [f32; 3],
-    pub player_lerp: [f32; 3],
+    pub player_pos: [f64; 3],
+    pub player_lerp: [f64; 3],
     pub eye_height: f32,
     pub camera_eye_height: f32,
     pub sleeping: bool,
@@ -23,27 +24,34 @@ pub struct FrameView {
     pub camera_distance: f32,
     pub local_body: crate::session::PlayerBody,
     pub nausea: f32,
+    pub portal: f32,
     pub day_ticks: f64,
     pub day_rate: f32,
     pub biome: Option<BiomeLayer>,
     pub fov_modifier: f32,
     pub camera_yaw: f32,
     pub camera_pitch: f32,
+    pub camera_world: DVec3,
+    pub camera_render: Vec3,
+    pub camera_rotation: Quat,
     pub in_world: bool,
     pub gamemode: Gamemode,
     pub flying: bool,
     pub hotbar_selected: u8,
     pub item_used: [u32; 2],
+    pub item_activation: Option<crate::session::ItemActivation>,
+    pub hands_busy: bool,
     pub crosshair_entity: Option<i32>,
     pub main_hand_left: bool,
     pub entities: Arc<Vec<EntityAnim>>,
+    pub item_pickups: Vec<crate::play::item_pickup::ItemPickup>,
     pub block_entities:
         Arc<std::collections::HashMap<[i32; 3], crate::blockentities::feed::BlockEntityInfo>>,
     pub block_entities_version: u64,
     pub game_time: u64,
     pub op_level: u8,
     pub local: AnimSample,
-    pub breaking: Option<BreakingBlock>,
+    pub breaking: Vec<BreakingBlock>,
     pub targeted_block: Option<TargetedBlock>,
     #[cfg(feature = "skins")]
     pub local_skin: crate::client::skins::SkinState,
@@ -58,7 +66,8 @@ impl FrameView {
         self.partial = partial;
         let (prev, cur) = (session.player_pos_prev, session.player_pos);
         self.player_pos = cur;
-        self.player_lerp = std::array::from_fn(|i| prev[i] + (cur[i] - prev[i]) * partial);
+        self.player_lerp =
+            std::array::from_fn(|i| prev[i] + (cur[i] - prev[i]) * f64::from(partial));
         self.eye_height = super::systems::session_eye_height(session);
         self.camera_eye_height = session.camera_eye.sample(partial);
         self.sleeping = session.sleeping;
@@ -72,6 +81,7 @@ impl FrameView {
             "nausea",
             partial,
         );
+        self.portal = session.portal_effect.sample(partial);
         self.day_ticks = session.day_clock.at(partial);
         self.day_rate = session.day_clock.rate;
         self.biome = match (session.env_prev, session.env) {
@@ -86,9 +96,12 @@ impl FrameView {
         self.flying = session.flying;
         self.hotbar_selected = session.hotbar_selected;
         self.item_used = session.item_used;
+        self.item_activation.clone_from(&session.item_activation);
+        self.hands_busy = session.hands_busy;
         self.crosshair_entity = session.crosshair_entity;
         self.main_hand_left = s.skin_prefs.main_hand_left;
         self.entities = session.entities.clone();
+        self.item_pickups.clone_from(&session.item_pickups);
         self.game_time = session.game_time;
         self.op_level = session.op_level;
         #[cfg(feature = "skins")]
@@ -116,9 +129,17 @@ impl FrameView {
 
     pub fn tick_eye(&self) -> [f64; 3] {
         [
-            self.player_pos[0] as f64,
-            self.player_pos[1] as f64 + self.eye_height as f64,
-            self.player_pos[2] as f64,
+            self.player_pos[0],
+            self.player_pos[1] + f64::from(self.eye_height),
+            self.player_pos[2],
+        ]
+    }
+
+    pub fn lerp_eye(&self) -> [f64; 3] {
+        [
+            self.player_lerp[0],
+            self.player_lerp[1] + f64::from(self.eye_height),
+            self.player_lerp[2],
         ]
     }
 }

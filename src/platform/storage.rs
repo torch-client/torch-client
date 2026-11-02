@@ -21,6 +21,8 @@ slots! {
     PROFILE = "profile.json";
     ACCOUNTS = "accounts.json";
     COMMAND_HISTORY = "command_history.txt";
+    #[cfg(eagler_skins)]
+    SKINS = "skins.json";
     #[cfg(feature = "hud_editor")]
     HUD = "hud.json";
     #[cfg(feature = "tutorial")]
@@ -35,12 +37,27 @@ slots! {
     SOUNDS_SKIPPED = "sounds_skipped.txt";
     #[cfg(all(feature = "update_checker", not(target_arch = "wasm32")))]
     UPDATE_CHECK = "update_check.json";
+    #[cfg(lua_mods)]
+    MODS_DISABLED = "mods_disabled.json";
+    #[cfg(lua_mods)]
+    MODS_LOOKUP = "mods_lookup.json";
+    #[cfg(lua_mods)]
+    MODS_FILES = "mods_files.json";
+    #[cfg(lua_mods)]
+    MODS_PACKETS = "mods_packets.json";
+    #[cfg(lua_mods)]
+    MODS_LARGE_FILES = "mods_large_files.json";
+    #[cfg(feature = "asset_download")]
+    LANGUAGE = "language.txt";
 }
 
 impl Slot {
     pub(crate) fn load(&self) -> Option<String> {
         #[cfg(target_arch = "wasm32")]
         {
+            if self.in_memory() {
+                return web::MEMORY.lock().get(self.0).cloned();
+            }
             return web::get(&self.web_key());
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -50,6 +67,10 @@ impl Slot {
     pub(crate) fn store(&self, value: &str) {
         #[cfg(target_arch = "wasm32")]
         {
+            if self.in_memory() {
+                web::MEMORY.lock().insert(self.0, value.to_owned());
+                return;
+            }
             web::set(&self.web_key(), value);
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -80,6 +101,24 @@ impl Slot {
         }
     }
 
+    #[cfg(lua_mods)]
+    pub(crate) fn remove(&self) -> std::io::Result<()> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if self.in_memory() {
+                web::MEMORY.lock().remove(self.0);
+            } else {
+                web::remove(&self.web_key());
+            }
+            return Ok(());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match std::fs::remove_file(self.path()) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn path(&self) -> std::path::PathBuf {
         dir().join(self.0)
@@ -88,6 +127,23 @@ impl Slot {
     #[cfg(target_arch = "wasm32")]
     fn web_key(&self) -> String {
         format!("torch-client/{}", self.0)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn in_memory(&self) -> bool {
+        #[cfg(resource_packs)]
+        if self.0 == RESOURCE_PACKS.0 {
+            return true;
+        }
+        #[cfg(explore_modrinth)]
+        if self.0 == MODRINTH_PACKS.0 {
+            return true;
+        }
+        #[cfg(feature = "shader_support")]
+        if self.0 == SHADER_PACK.0 {
+            return true;
+        }
+        false
     }
 }
 
@@ -127,6 +183,9 @@ fn default_dir() -> std::path::PathBuf {
 
 #[cfg(target_arch = "wasm32")]
 mod web {
+    pub(super) static MEMORY: parking_lot::Mutex<std::collections::BTreeMap<&'static str, String>> =
+        parking_lot::Mutex::new(std::collections::BTreeMap::new());
+
     fn storage() -> Option<web_sys::Storage> {
         web_sys::window()?.local_storage().ok()?
     }
@@ -138,6 +197,13 @@ mod web {
     pub(super) fn set(key: &str, value: &str) {
         if let Some(storage) = storage() {
             let _ = storage.set_item(key, value);
+        }
+    }
+
+    #[cfg(lua_mods)]
+    pub(super) fn remove(key: &str) {
+        if let Some(storage) = storage() {
+            let _ = storage.remove_item(key);
         }
     }
 }

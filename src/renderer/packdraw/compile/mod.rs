@@ -93,6 +93,7 @@ pub(crate) struct Program {
     pub(crate) fragment: String,
     pub(crate) fragment_tests: Vec<(AlphaTest, String)>,
     pub(crate) alpha_override: Option<Option<AlphaTest>>,
+    pub(crate) blend: Blend,
     pub(crate) fragment_linear: Option<String>,
     pub(crate) compute: Option<String>,
     pub(crate) compute_used: Option<Vec<u32>>,
@@ -196,7 +197,7 @@ pub(crate) fn compile_frame(
     let files: Vec<String> = crate::shaderpack::include::option_texts(&source);
     let declared = options::discover(files.iter().map(String::as_str));
     let values = values.unwrap_or_else(|| {
-        std::fs::read_to_string(discover::dir().join(format!("{name}.txt")))
+        crate::platform::packfs::read_to_string(discover::dir().join(format!("{name}.txt")))
             .map(|text| Values::load(&text, &declared))
             .unwrap_or_default()
     });
@@ -217,6 +218,7 @@ pub(crate) fn compile_frame(
         .collect();
     let images = CustomTextures::read(&props.other, &source, &mut notes);
     let alpha_tests = alpha_tests(&props.other);
+    let blends = blends(&props.other, &mut notes);
     let custom_images = crate::shaderpack::customimages::read(&props.other, &mut notes);
     let buffers = crate::shaderpack::customimages::buffers(&props.other, &mut notes);
 
@@ -230,6 +232,7 @@ pub(crate) fn compile_frame(
         cache: include::Cache::new(),
         images,
         alpha_tests,
+        blends,
         folder,
         custom_images,
         buffers,
@@ -302,7 +305,17 @@ pub(crate) fn compile_frame(
         preprocessed: &mut Vec<String>,
         names: Vec<String>,
     ) -> Vec<usize> {
+        use crate::shaderpack::features::{Feature, supported};
         let mut out = Vec::new();
+        if !supported(Feature::ComputeShaders) {
+            for name in names {
+                frame.notes.push(format!(
+                    "{name} skipped: {}",
+                    Feature::ComputeShaders.absence()
+                ));
+            }
+            return out;
+        }
         for name in names {
             match compile_compute(pack, &name) {
                 Ok((compiled, source)) => out.push(frame.push(preprocessed, compiled, [source])),
@@ -631,6 +644,7 @@ mod tests {
             fragment: String::new(),
             fragment_tests: Vec::new(),
             alpha_override: None,
+            blend: Blend::default(),
             fragment_linear: None,
             compute: None,
             compute_used: None,

@@ -26,6 +26,9 @@ pub enum Spot {
     EditHud,
     Storage,
     Restart,
+    ShaderButton,
+    ShaderFolder,
+    ShaderList,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,7 +38,11 @@ enum Place {
     Accounts,
     Multiplayer,
     Video,
+    #[cfg(all(feature = "shader_support", not(target_arch = "wasm32")))]
+    ShaderPacks,
+    #[cfg(feature = "hud_editor")]
     Editor(Layer),
+    #[cfg(feature = "mobile_ui")]
     Chat,
     Options,
     Storage,
@@ -47,108 +54,145 @@ struct Step {
     text: &'static str,
 }
 
-const STEPS: &[Step] = &[
-    Step {
-        place: Place::Home,
-        spot: None,
-        text: "A quick tour. Skip leaves it at any point.",
-    },
-    Step {
-        place: Place::Title,
-        spot: Some(Spot::Credits),
-        text: "Credits: the licence and the project's links.",
-    },
-    Step {
-        place: Place::Title,
-        spot: Some(Spot::EditProfile),
-        text: "Edit Profile sets the name you join with.",
-    },
-    Step {
-        place: Place::Accounts,
-        spot: Some(Spot::Accounts),
-        text: "Add an account, then Select it to play as it.",
-    },
-    Step {
-        place: Place::Multiplayer,
-        spot: Some(Spot::Version),
-        text: "Picking a version here forces it. Left alone, the client matches each server.",
-    },
+static STEPS: std::sync::LazyLock<Vec<Step>> = std::sync::LazyLock::new(steps);
+
+fn steps() -> Vec<Step> {
+    #[allow(unused_mut)]
+    let mut steps = vec![
+        Step {
+            place: Place::Home,
+            spot: None,
+            text: "A quick tour. Skip leaves it at any point.",
+        },
+        Step {
+            place: Place::Title,
+            spot: Some(Spot::Credits),
+            text: "Credits: the licence and the project's links.",
+        },
+        Step {
+            place: Place::Title,
+            spot: Some(Spot::EditProfile),
+            text: "Edit Profile sets the name you join with.",
+        },
+        Step {
+            place: Place::Accounts,
+            spot: Some(Spot::Accounts),
+            text: "Add an account, then Select it to play as it.",
+        },
+        Step {
+            place: Place::Multiplayer,
+            spot: Some(Spot::Version),
+            text: "Picking a version here forces it. Left alone, the client matches each server.",
+        },
+        Step {
+            place: Place::Video,
+            spot: Some(Spot::Video),
+            text: "Video Settings: render distance, GUI scale, brightness.",
+        },
+    ];
+    #[cfg(all(feature = "shader_support", not(target_arch = "wasm32")))]
+    steps.extend([
     Step {
         place: Place::Video,
-        spot: Some(Spot::Video),
-        text: "Video Settings: render distance, GUI scale, brightness.",
+        spot: Some(Spot::ShaderButton),
+        text: "Shaders: open Shader Packs at the bottom of Video Settings.",
     },
     Step {
-        place: Place::Editor(Layer::Areas),
-        spot: Some(Spot::Tab(Layer::Areas)),
-        text: "The HUD editor. Areas are touch zones.",
+        place: Place::ShaderPacks,
+        spot: Some(Spot::ShaderFolder),
+        text: if cfg!(target_os = "android") {
+            "Put a shader pack zip in this folder. R reads the folder again."
+        } else {
+            "Put a shader pack zip in this folder, or drop it on the window. R reads the folder again."
+        },
     },
     Step {
-        place: Place::Editor(Layer::Areas),
-        spot: Some(Spot::LookArea),
-        text: "Look area: only turns the camera.",
+        place: Place::ShaderPacks,
+        spot: Some(Spot::ShaderList),
+        text: "Tap a pack to turn it on. (none) turns shaders off.",
     },
-    Step {
-        place: Place::Editor(Layer::Areas),
-        spot: Some(Spot::ZoomArea),
-        text: "Zoom: double tap and hold. Triple tap locks it.",
-    },
-    Step {
-        place: Place::Editor(Layer::Areas),
-        spot: None,
-        text: "Elsewhere: tap attacks, hold mines, double tap places.",
-    },
-    Step {
-        place: Place::Editor(Layer::Areas),
-        spot: Some(Spot::NewArea),
-        text: "Adds an area. Drag to move, drag an edge to resize.",
-    },
-    Step {
-        place: Place::Editor(Layer::Controls),
-        spot: Some(Spot::Tab(Layer::Controls)),
-        text: "Touch buttons. Drag to move, pinch to resize.",
-    },
-    Step {
-        place: Place::Editor(Layer::Controls),
-        spot: Some(Spot::ChatButton),
-        text: "Chat. Its SWAP button turns chat portrait.",
-    },
-    Step {
+    ]);
+    #[cfg(all(feature = "hud_editor", feature = "mobile_ui"))]
+    steps.extend([
+        Step {
+            place: Place::Editor(Layer::Areas),
+            spot: Some(Spot::Tab(Layer::Areas)),
+            text: "The HUD editor. Areas are touch zones.",
+        },
+        Step {
+            place: Place::Editor(Layer::Areas),
+            spot: Some(Spot::LookArea),
+            text: "Look area: only turns the camera.",
+        },
+        Step {
+            place: Place::Editor(Layer::Areas),
+            spot: Some(Spot::ZoomArea),
+            text: "Zoom: double tap and hold. Triple tap locks it.",
+        },
+        Step {
+            place: Place::Editor(Layer::Areas),
+            spot: None,
+            text: "Elsewhere: tap attacks, hold mines, double tap places.",
+        },
+        Step {
+            place: Place::Editor(Layer::Areas),
+            spot: Some(Spot::NewArea),
+            text: "Adds an area. Drag to move, drag an edge to resize.",
+        },
+        Step {
+            place: Place::Editor(Layer::Controls),
+            spot: Some(Spot::Tab(Layer::Controls)),
+            text: "Touch buttons. Drag to move, pinch to resize.",
+        },
+        Step {
+            place: Place::Editor(Layer::Controls),
+            spot: Some(Spot::ChatButton),
+            text: "Chat. Its SWAP button turns chat portrait.",
+        },
+    ]);
+    #[cfg(feature = "mobile_ui")]
+    steps.push(Step {
         place: Place::Chat,
         spot: Some(Spot::Swap),
         text: "SWAP: chat like a messaging app. Tap again to go back.",
-    },
-    Step {
-        place: Place::Editor(Layer::Extras),
-        spot: Some(Spot::Tab(Layer::Extras)),
-        text: "The HUD itself: hotbar, chat, coordinates.",
-    },
-    Step {
-        place: Place::Editor(Layer::Extras),
-        spot: Some(Spot::Reset),
-        text: "Resets only the open tab.",
-    },
-    Step {
-        place: Place::Editor(Layer::Extras),
-        spot: Some(Spot::Done),
-        text: "Saves the layout.",
-    },
-    Step {
-        place: Place::Options,
-        spot: Some(Spot::EditHud),
-        text: "Reopen the editor from here.",
-    },
-    Step {
-        place: Place::Options,
-        spot: Some(Spot::Storage),
-        text: "Resets live in Manage Storage.",
-    },
-    Step {
-        place: Place::Storage,
-        spot: Some(Spot::Restart),
-        text: "Replays this tour.",
-    },
-];
+    });
+    #[cfg(feature = "hud_editor")]
+    steps.extend([
+        Step {
+            place: Place::Editor(Layer::Extras),
+            spot: Some(Spot::Tab(Layer::Extras)),
+            text: "The HUD itself: hotbar, chat, coordinates.",
+        },
+        Step {
+            place: Place::Editor(Layer::Extras),
+            spot: Some(Spot::Reset),
+            text: "Resets only the open tab.",
+        },
+        Step {
+            place: Place::Editor(Layer::Extras),
+            spot: Some(Spot::Done),
+            text: "Saves the layout.",
+        },
+        Step {
+            place: Place::Options,
+            spot: Some(Spot::EditHud),
+            text: "Reopen the editor from here.",
+        },
+    ]);
+    steps.extend([
+        Step {
+            place: Place::Options,
+            spot: Some(Spot::Storage),
+            text: "Resets live in Manage Storage.",
+        },
+        Step {
+            place: Place::Storage,
+            spot: Some(Spot::Restart),
+            text: "Replays this tour.",
+        },
+    ]);
+    steps
+}
 
 const DIM: u32 = 0xB000_0000;
 const LINE: u32 = 0xFFFF_FF55;
@@ -184,6 +228,7 @@ impl Run {
         let swap = crate::platform::orientation::SUPPORTED;
         match (STEPS[i].place, STEPS[i].spot) {
             (Place::Title | Place::Accounts | Place::Multiplayer, _) => !self.in_game,
+            #[cfg(feature = "mobile_ui")]
             (Place::Chat, _) => self.in_game && swap,
             (_, Some(Spot::ChatButton)) => swap,
             _ => true,
@@ -245,19 +290,25 @@ fn want(place: Place, home: Screen) -> Screen {
         Place::Accounts => Screen::Accounts,
         Place::Multiplayer => Screen::Multiplayer,
         Place::Video => Screen::VideoSettings,
+        #[cfg(all(feature = "shader_support", not(target_arch = "wasm32")))]
+        Place::ShaderPacks => Screen::ShaderPacks,
+        #[cfg(feature = "hud_editor")]
         Place::Editor(_) => Screen::HudEditor,
+        #[cfg(feature = "mobile_ui")]
         Place::Chat => Screen::Chat,
         Place::Options => Screen::Options,
         Place::Storage => Screen::ManageStorage,
     }
 }
 
+#[cfg_attr(not(feature = "hud_editor"), allow(unused_variables))]
 fn go(state: &mut GuiState, screen: Screen, home: Screen) {
     if state.screen == Screen::Chat {
         state.chat.close();
     }
     match screen {
         Screen::Chat => state.chat.open(""),
+        #[cfg(feature = "hud_editor")]
         Screen::HudEditor => {
             state.hud_state.parent = home;
             state.hud_state.over_menu = state.in_menu();
@@ -267,6 +318,8 @@ fn go(state: &mut GuiState, screen: Screen, home: Screen) {
             state.video_scroll = 0.0;
             state.video_scroll_drag = None;
         }
+        #[cfg(feature = "shader_support")]
+        Screen::ShaderPacks => state.shaderpacks.refresh(),
         _ => {}
     }
     state.nav = Some(screen);
@@ -284,11 +337,16 @@ pub fn begin(state: &mut GuiState, input: &GuiInput) -> Option<GuiInput> {
     }
     ACTIVE.store(state.tutorial.run.is_some(), Ordering::Relaxed);
     let run = state.tutorial.run?;
+    #[cfg(feature = "hud_editor")]
     if state.screen == Screen::HudEditor {
         if let Place::Editor(layer) = STEPS[run.step].place {
             state.hud_state.frames.layer = layer;
         }
+        #[cfg(feature = "mobile_ui")]
         state.hud_state.set_touches(std::iter::empty());
+    }
+    if state.screen == Screen::VideoSettings && STEPS[run.step].spot == Some(Spot::ShaderButton) {
+        state.video_scroll = f32::MAX;
     }
     Some(GuiInput {
         size: input.size,
@@ -342,7 +400,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, input: &GuiInput) {
     }
 
     let w = CAPTION_W.min(vw - 2.0 * INSET);
-    let lines = crate::gui::hud_editor::wrap(p, &[step.text], w - INSET);
+    let lines = crate::gui::widgets::wrap(p, &[step.text], w - INSET);
     let h = lines.len() as f32 * LINE_H + 3.0 * INSET + BUTTON_H;
     let centred = (((vw - w) / 2.0).floor(), ((vh - h) / 2.0).floor());
     let (x, y) = match target {

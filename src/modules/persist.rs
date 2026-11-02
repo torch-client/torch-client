@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde_json::{Map, Value as Json, json};
 
 use super::list::{self, BitList};
-use super::registry::{Kind, MODULES, Mode};
+use super::registry::{Kind, MODULES, Mode, ModuleDef, ModuleIx};
 use super::{Store, Value};
 use crate::gui::keybinds::Bound;
 use crate::platform::storage;
@@ -24,22 +24,8 @@ pub fn load(s: &Store) {
 
     if let Some(mods) = root.get("modules").and_then(Json::as_object) {
         for m in &MODULES {
-            let Some(saved) = mods.get(m.name).and_then(Json::as_object) else {
-                continue;
-            };
-            if let Some(on) = saved.get("on").and_then(Json::as_bool) {
-                s.set_enabled(m.id, on);
-            }
-            if let Some(key) = saved.get("bind").and_then(Json::as_str) {
-                s.set_bind(m.id, Bound::from_serialized_name(key));
-            }
-            let Some(vals) = saved.get("settings").and_then(Json::as_object) else {
-                continue;
-            };
-            for (slot, def) in m.slots().zip(m.settings()) {
-                if let Some(v) = vals.get(def.name) {
-                    read_setting(s, slot, def.kind, v);
-                }
+            if let Some(saved) = mods.get(m.name).and_then(Json::as_object) {
+                load_module(s, m.id, saved, by_name(m));
             }
         }
     }
@@ -47,6 +33,52 @@ pub fn load(s: &Store) {
     for l in list::ALL {
         load_list(l, &root);
     }
+}
+
+fn by_name(m: &ModuleDef) -> impl Iterator<Item = (usize, &'static str, Kind)> {
+    m.slots()
+        .zip(m.settings())
+        .map(|(slot, def)| (slot, def.name, def.kind))
+}
+
+pub(super) fn load_module<'a>(
+    s: &Store,
+    id: ModuleIx,
+    saved: &Map<String, Json>,
+    settings: impl Iterator<Item = (usize, &'a str, Kind)>,
+) {
+    if let Some(on) = saved.get("on").and_then(Json::as_bool) {
+        s.set_enabled(id, on);
+    }
+    if let Some(key) = saved.get("bind").and_then(Json::as_str) {
+        s.set_bind(id, Bound::from_serialized_name(key));
+    }
+    let Some(vals) = saved.get("settings").and_then(Json::as_object) else {
+        return;
+    };
+    for (slot, key, kind) in settings {
+        if let Some(v) = vals.get(key) {
+            read_setting(s, slot, kind, v);
+        }
+    }
+}
+
+pub(super) fn module_json<'a>(
+    s: &Store,
+    id: ModuleIx,
+    settings: impl Iterator<Item = (usize, &'a str, Kind)>,
+) -> Json {
+    let mut vals = Map::new();
+    for (slot, key, kind) in settings {
+        if let Some(v) = write_setting(s, slot, kind) {
+            vals.insert(key.to_string(), v);
+        }
+    }
+    json!({
+        "on": s.armed(id),
+        "bind": s.bind(id).serialized_name(),
+        "settings": vals,
+    })
 }
 
 fn read_setting(s: &Store, idx: usize, kind: Kind, v: &Json) {
@@ -82,27 +114,28 @@ fn read_setting(s: &Store, idx: usize, kind: Kind, v: &Json) {
                 s.set_text_at(idx, &t.chars().take(max_len).collect::<String>());
             }
         }
+        Kind::Key { .. } => {
+            if let Some(name) = v.as_str() {
+                s.set_value(idx, Value::Key(Bound::from_serialized_name(name)));
+            }
+        }
+        #[cfg(lua_mods)]
+        Kind::List { list } if list.inline => {
+            if let Some(a) = v.as_array() {
+                let on: std::collections::HashSet<&str> =
+                    a.iter().filter_map(Json::as_str).collect();
+                list.set_only(|label| on.contains(label));
+            }
+        }
         Kind::List { .. } => {}
+        Kind::Button { .. } => {}
     }
 }
 
 pub fn save(s: &Store) {
     let mut mods = Map::new();
     for m in &MODULES {
-        let mut vals = Map::new();
-        for (slot, def) in m.slots().zip(m.settings()) {
-            if let Some(v) = write_setting(s, slot, def.kind) {
-                vals.insert(def.name.to_string(), v);
-            }
-        }
-        mods.insert(
-            m.name.to_string(),
-            json!({
-                "on": s.armed(m.id),
-                "bind": s.bind(m.id).serialized_name(),
-                "settings": vals,
-            }),
-        );
+        mods.insert(m.name.to_string(), module_json(s, m.id, by_name(m)));
     }
 
     let mut root = Map::new();
@@ -126,6 +159,15 @@ fn write_setting(s: &Store, slot: usize, kind: Kind) -> Option<Json> {
         (_, Some(Value::Num(x))) => json!(x),
         (_, Some(Value::Range(lo, hi))) => json!([lo, hi]),
         (Kind::Enum { options, .. }, Some(Value::Choice(c))) => json!(options.get(c as usize)?),
+        (_, Some(Value::Key(b))) => json!(b.serialized_name()),
+        (Kind::List { list }, _) if list.inline => {
+            json!(
+                (0..list.count())
+                    .filter(|&i| list.enabled(i))
+                    .map(|i| list.label(i))
+                    .collect::<Vec<_>>()
+            )
+        }
         _ => return None,
     })
 }

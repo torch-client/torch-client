@@ -4,37 +4,26 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::aquatic::axolotl;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Axolotl,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Axolotl],
         RenderSpec::new(
             "axolotl",
             axolotl::adult_layer,
             adult_texture,
             axolotl::adult_setup,
-        )
-        .with_visible(is_adult),
-    );
-    registry.add(
-        EntityKind::Axolotl,
+        ),
         RenderSpec::new(
             "axolotl_baby",
             axolotl::baby_layer,
             baby_texture,
             axolotl::baby_setup,
-        )
-        .with_visible(is_baby),
+        ),
     );
-}
-
-fn is_adult(st: &EntityState) -> bool {
-    !st.extras.is_baby
-}
-
-fn is_baby(st: &EntityState) -> bool {
-    st.extras.is_baby
 }
 
 fn variant_name(st: &EntityState) -> &'static str {

@@ -3,24 +3,22 @@ use azalea_registry::builtin::EntityKind;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::equine;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
+use crate::entities::render::humanoid::armor;
 use crate::entities::state::EntityState;
 use crate::entities::{Blend, RenderSpec};
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Horse,
-        RenderSpec::new("horse", equine::horse_layer, texture, equine::setup_anim)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Horse,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Horse],
+        RenderSpec::new("horse", equine::horse_layer, texture, equine::setup_anim),
         RenderSpec::new(
             "horse_baby",
             equine::baby_horse_layer,
             texture,
             equine::baby_setup_anim,
-        )
-        .with_visible(|st| st.extras.is_baby),
+        ),
     );
     registry.add(
         EntityKind::Horse,
@@ -52,7 +50,8 @@ pub fn register(registry: &mut Registry) {
             armor_texture,
             equine::setup_anim,
         )
-        .with_visible(|st| !st.extras.is_baby && armor_material(st).is_some()),
+        .with_visible(|st| !st.extras.is_baby && wears_armor(st))
+        .ignoring_invisibility(),
     );
     registry.add(
         EntityKind::Horse,
@@ -62,7 +61,8 @@ pub fn register(registry: &mut Registry) {
             saddle_texture,
             equine::saddle_setup_anim,
         )
-        .with_visible(|st| !st.extras.is_baby && st.extras.saddled),
+        .with_visible(|st| !st.extras.is_baby && st.extras.saddled)
+        .ignoring_invisibility(),
     );
 }
 
@@ -107,18 +107,12 @@ fn markings_texture(st: &EntityState) -> TexturePath {
     }
 }
 
-pub fn armor_material(st: &EntityState) -> Option<&'static str> {
-    let item = st.extras.body_armor.as_ref()?;
-    let id = item.rsplit(':').next()?;
-    let material = id.strip_suffix("_horse_armor")?;
-    ["copper", "diamond", "gold", "iron", "leather", "netherite"]
-        .into_iter()
-        .find(|known| *known == material)
+pub fn wears_armor(st: &EntityState) -> bool {
+    armor::has_layer(st.extras.body_armor.as_deref(), armor::LAYER_HORSE_BODY)
 }
 
-fn armor_texture(st: &EntityState) -> TexturePath {
-    let material = armor_material(st).unwrap_or("iron");
-    format!("entity/equipment/horse_body/{material}").into()
+pub fn armor_texture(st: &EntityState) -> TexturePath {
+    armor::slot_texture(st.extras.body_armor.as_deref(), armor::LAYER_HORSE_BODY).into()
 }
 
 fn saddle_texture(_st: &EntityState) -> TexturePath {

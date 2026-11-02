@@ -32,6 +32,18 @@ impl EntityDimensions {
         Self { eye_height, ..self }
     }
 
+    pub fn scale(self, factor: f32) -> Self {
+        if self.fixed || factor == 1.0 {
+            return self;
+        }
+        Self {
+            width: self.width * factor,
+            height: self.height * factor,
+            eye_height: self.eye_height * factor,
+            fixed: false,
+        }
+    }
+
     pub fn make_bounding_box(&self, pos: Vec3) -> Aabb {
         let radius = (self.width / 2.0) as f64;
         let height = self.height as f64;

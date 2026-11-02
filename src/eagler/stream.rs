@@ -23,10 +23,14 @@ use crate::{log_error, log_info, log_warn};
 
 static PREPARED: Mutex<Option<transport::HandshakeConn>> = Mutex::new(None);
 
-pub(super) fn prepare(socket: Socket, profile: GameProfile) {
+pub(super) fn prepare(socket: Socket, profile: GameProfile, eagler_version: u16) {
     let (to_server, outgoing) = unbounded_channel();
     let (from_server, incoming) = unbounded_channel();
     let (open_gate, gate) = oneshot::channel();
+    #[cfg(eagler_skins)]
+    super::skins::begin(eagler_version, to_server.clone());
+    #[cfg(not(eagler_skins))]
+    let _ = eagler_version;
 
     let (tx, rx) = socket.split();
     let pump_side = from_server.clone();
@@ -87,6 +91,8 @@ async fn pump(
                 match message?.unwrap_or(Frame::Close(None)) {
                     Frame::Binary(payload) if is_injected(&payload) => {
                         note_injected(&payload);
+                        #[cfg(eagler_skins)]
+                        super::skins::receive_injected(&payload);
                     }
                     Frame::Binary(payload) => {
                         for body in unprefixed(payload) {
@@ -168,8 +174,7 @@ fn note_injected(payload: &[u8]) {
         log_info!(
             "net",
             "eagler: this server sends EaglerX messages of its own over the game socket \
-             (first was {} bytes, {}); dropping them, since this client declines every \
-             capability they belong to",
+             (first was {} bytes, {}); reading skin replies, dropping the rest",
             payload.len(),
             if multi {
                 "a multi-packet"

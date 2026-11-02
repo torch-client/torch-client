@@ -19,7 +19,8 @@ pub fn register(registry: &mut Registry) {
             eyes_texture,
             enderman::setup_anim,
         )
-        .with_blend(Blend::Additive),
+        .with_blend(Blend::Additive)
+        .ignoring_invisibility(),
     );
 }
 

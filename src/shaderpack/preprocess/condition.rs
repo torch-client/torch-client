@@ -5,8 +5,9 @@ const MAX_EXPANSION: u32 = 32;
 const MAX_EXPANSIONS: u32 = 4096;
 
 pub(super) fn eval(expr: &str, defines: &Defines, line: usize) -> Result<i64, Error> {
-    let tokens = tokenize(expr, line)?;
+    let tokens = tokenize(expr);
     let budget = std::cell::Cell::new(MAX_EXPANSIONS);
+    let problem = std::cell::RefCell::new(None);
     let mut parser = Parser {
         tokens: &tokens,
         at: 0,
@@ -14,10 +15,17 @@ pub(super) fn eval(expr: &str, defines: &Defines, line: usize) -> Result<i64, Er
         line,
         depth: 0,
         budget: &budget,
+        problem: &problem,
     };
     let value = parser.expression(0)?;
     if parser.at != parser.tokens.len() {
-        return Err(err(line, format!("trailing text in condition: {expr:?}")));
+        parser.note("trailing text");
+    }
+    if let Some(problem) = problem.into_inner() {
+        crate::log_debug!(
+            "shaders",
+            "line {line}: {problem} in condition {expr:?}; read as {value}, as JCPP reads it"
+        );
     }
     Ok(value)
 }
@@ -27,6 +35,7 @@ enum Token<'a> {
     Number(i64),
     Ident(&'a str),
     Op(&'a str),
+    Other(&'a str),
 }
 
 const OPERATORS: &[&str] = &[
@@ -34,7 +43,7 @@ const OPERATORS: &[&str] = &[
     "!", "~", "&", "|", "^",
 ];
 
-fn tokenize(expr: &str, line: usize) -> Result<Vec<Token<'_>>, Error> {
+fn tokenize(expr: &str) -> Vec<Token<'_>> {
     let mut out = Vec::new();
     let bytes = expr.as_bytes();
     let mut at = 0;
@@ -55,12 +64,10 @@ fn tokenize(expr: &str, line: usize) -> Result<Vec<Token<'_>>, Error> {
             while at < bytes.len() && (bytes[at] as char).is_digit(radix) {
                 at += 1;
             }
-            let value = i64::from_str_radix(&expr[digits..at], radix).map_err(|_| {
-                err(
-                    line,
-                    format!("cannot read the number {:?}", &expr[start..at]),
-                )
-            })?;
+            let Ok(value) = i64::from_str_radix(&expr[digits..at], radix) else {
+                out.push(Token::Other(&expr[start..at]));
+                continue;
+            };
             let mut value = value;
             if radix == 10 {
                 if bytes.get(at) == Some(&b'.') {
@@ -99,16 +106,16 @@ fn tokenize(expr: &str, line: usize) -> Result<Vec<Token<'_>>, Error> {
                 at += 1;
             }
             out.push(Token::Ident(&expr[start..at]));
-        } else {
-            let op = OPERATORS
-                .iter()
-                .find(|op| expr[at..].starts_with(**op))
-                .ok_or_else(|| err(line, format!("unexpected {:?} in condition", c as char)))?;
+        } else if let Some(op) = OPERATORS.iter().find(|op| expr[at..].starts_with(**op)) {
             at += op.len();
             out.push(Token::Op(op));
+        } else {
+            let len = expr[at..].chars().next().map_or(1, char::len_utf8);
+            out.push(Token::Other(&expr[at..at + len]));
+            at += len;
         }
     }
-    Ok(out)
+    out
 }
 
 struct Parser<'a> {
@@ -118,6 +125,7 @@ struct Parser<'a> {
     line: usize,
     depth: u32,
     budget: &'a std::cell::Cell<u32>,
+    problem: &'a std::cell::RefCell<Option<String>>,
 }
 
 fn precedence(op: &str) -> Option<u8> {
@@ -149,8 +157,16 @@ impl<'a> Parser<'a> {
         false
     }
 
+    fn note(&self, problem: impl Into<String>) {
+        self.problem
+            .borrow_mut()
+            .get_or_insert_with(|| problem.into());
+    }
+
     fn expression(&mut self, min: u8) -> Result<i64, Error> {
-        let mut left = self.unary()?;
+        let Some(mut left) = self.unary()? else {
+            return Ok(0);
+        };
         while let Some(Token::Op(op)) = self.peek() {
             let Some(power) = precedence(op) else { break };
             if power < min {
@@ -163,54 +179,64 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn unary(&mut self) -> Result<i64, Error> {
-        match self.peek() {
+    fn unary(&mut self) -> Result<Option<i64>, Error> {
+        Ok(Some(match self.peek() {
             Some(Token::Op("!")) => {
                 self.at += 1;
-                Ok((self.unary()? == 0) as i64)
+                (self.unary()?.unwrap_or(0) == 0) as i64
             }
             Some(Token::Op("~")) => {
                 self.at += 1;
-                Ok(!self.unary()?)
+                !self.unary()?.unwrap_or(0)
             }
             Some(Token::Op("-")) => {
                 self.at += 1;
-                Ok(self.unary()?.wrapping_neg())
+                self.unary()?.unwrap_or(0).wrapping_neg()
             }
             Some(Token::Op("+")) => {
                 self.at += 1;
-                self.unary()
+                self.unary()?.unwrap_or(0)
             }
             Some(Token::Op("(")) => {
                 self.at += 1;
                 let value = self.expression(0)?;
                 if !self.eat_op(")") {
-                    return Err(err(self.line, "a ( in the condition is never closed"));
+                    self.note("a ( never closed");
+                    return Ok(None);
                 }
-                Ok(value)
+                value
             }
             Some(Token::Number(value)) => {
                 self.at += 1;
-                Ok(*value)
+                *value
             }
             Some(Token::Ident("defined")) => {
                 self.at += 1;
                 let parenthesised = self.eat_op("(");
                 let Some(Token::Ident(name)) = self.peek() else {
-                    return Err(err(self.line, "defined names nothing"));
+                    self.note("defined naming nothing");
+                    return Ok(None);
                 };
                 self.at += 1;
                 if parenthesised && !self.eat_op(")") {
-                    return Err(err(self.line, "defined( is never closed"));
+                    self.note("a defined( never closed");
+                    return Ok(None);
                 }
-                Ok(self.defines.is_defined(name) as i64)
+                self.defines.is_defined(name) as i64
             }
             Some(Token::Ident(name)) => {
                 self.at += 1;
-                self.substitute(name)
+                self.substitute(name)?
             }
-            _ => Err(err(self.line, "the condition ends early")),
-        }
+            Some(Token::Op(text) | Token::Other(text)) => {
+                self.note(format!("a stray {text:?}"));
+                return Ok(None);
+            }
+            None => {
+                self.note("an early end");
+                return Ok(None);
+            }
+        }))
     }
 
     fn substitute(&mut self, name: &str) -> Result<i64, Error> {
@@ -222,7 +248,8 @@ impl<'a> Parser<'a> {
             return Ok(1);
         }
         if self.depth >= MAX_EXPANSION {
-            return Err(err(self.line, format!("{name} expands into itself")));
+            self.note(format!("{name} expanding into itself"));
+            return Ok(0);
         }
         let Some(left) = self.budget.get().checked_sub(1) else {
             return Err(err(
@@ -231,7 +258,7 @@ impl<'a> Parser<'a> {
             ));
         };
         self.budget.set(left);
-        let tokens = tokenize(value, self.line)?;
+        let tokens = tokenize(value);
         let mut inner = Parser {
             tokens: &tokens,
             at: 0,
@@ -239,13 +266,11 @@ impl<'a> Parser<'a> {
             line: self.line,
             depth: self.depth + 1,
             budget: self.budget,
+            problem: self.problem,
         };
         let result = inner.expression(0)?;
         if inner.at != inner.tokens.len() {
-            return Err(err(
-                self.line,
-                format!("{name} is not a number in a condition: {value:?}"),
-            ));
+            self.note(format!("{name} not being a number ({value:?})"));
         }
         Ok(result)
     }

@@ -25,7 +25,7 @@ pub enum Pose {
     Inhaling,
 }
 
-pub use crate::direction::Direction;
+pub use crate::blocks::direction::Direction;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Billboard {
@@ -105,6 +105,9 @@ pub struct Extras {
     pub jump_progress: f32,
     pub paddle_left: f32,
     pub paddle_right: f32,
+    pub bubble_angle: f32,
+    pub vehicle_hurt: f32,
+    pub vehicle_damage: f32,
 
     pub head_eat_position_scale: f32,
     pub head_eat_angle_scale: f32,
@@ -243,6 +246,7 @@ pub struct ExtrasShared {
     pub chestplate: Option<&'static str>,
     pub leggings: Option<&'static str>,
     pub boots: Option<&'static str>,
+    pub armor_foil: [bool; 4],
     pub body_armor: Option<&'static str>,
     pub left_handed: bool,
     pub name: Option<String>,
@@ -317,6 +321,9 @@ impl Extras {
             jump_progress: 0.0,
             paddle_left: 0.0,
             paddle_right: 0.0,
+            bubble_angle: 0.0,
+            vehicle_hurt: 0.0,
+            vehicle_damage: 0.0,
             head_eat_position_scale: 0.0,
             head_eat_angle_scale: 0.0,
             flap: 0.0,
@@ -465,6 +472,7 @@ impl Default for ExtrasShared {
             chestplate: None,
             leggings: None,
             boots: None,
+            armor_foil: [false; 4],
             body_armor: None,
             left_handed: false,
             name: None,
@@ -508,7 +516,7 @@ impl Default for ExtrasShared {
 pub struct EntityState {
     pub id: i32,
     pub kind: EntityKind,
-    pub pos: [f32; 3],
+    pub pos: [f64; 3],
     pub body_rot: f32,
     pub y_rot: f32,
     pub x_rot: f32,
@@ -534,6 +542,7 @@ pub struct EntityState {
     pub swing_left: bool,
     pub extras: Extras,
     pub carrier: Option<Carrier>,
+    pub frozen_light: Option<(u8, u8)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -600,6 +609,7 @@ impl EntityState {
             swing_left: false,
             extras,
             carrier: None,
+            frozen_light: None,
         }
     }
 }

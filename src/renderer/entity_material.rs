@@ -40,6 +40,7 @@ pub struct EntityParams {
     pub light_floor: Vec4,
     pub light_block: Vec4,
     pub light_sky: Vec4,
+    pub glint: Vec4,
     pub mode: u32,
 }
 
@@ -62,6 +63,7 @@ impl Default for EntityParams {
                     0.0
                 },
             ),
+            glint: Vec4::ZERO,
             mode: LightMode::Cardinal as u32,
         }
     }
@@ -134,6 +136,9 @@ pub struct EntityMaterial {
     pub texture: Option<Handle<Image>>,
     #[uniform(2)]
     pub params: EntityParams,
+    #[texture(3)]
+    #[sampler(4)]
+    pub glint_texture: Option<Handle<Image>>,
     pub alpha_mode: AlphaMode,
     pub depth_bias: i32,
     pub see_through: bool,
@@ -143,6 +148,7 @@ pub struct EntityMaterial {
 pub struct EntityMaterialKey {
     depth_bias: i32,
     see_through: bool,
+    glint: bool,
     fancy: bool,
 }
 
@@ -151,6 +157,7 @@ impl From<&EntityMaterial> for EntityMaterialKey {
         EntityMaterialKey {
             depth_bias: material.depth_bias,
             see_through: material.see_through,
+            glint: material.params.glint.z > 0.0 && material.glint_texture.is_some(),
             fancy: crate::renderer::terrain::builtin_shaders_enabled(),
         }
     }
@@ -170,9 +177,25 @@ impl EntityMaterial {
         EntityMaterial {
             texture,
             params: EntityParams::new(mode, cutoff, lit),
+            glint_texture: None,
             alpha_mode,
             depth_bias,
             see_through: false,
+        }
+    }
+
+    pub fn with_glint(mut self, glint: Vec4, texture: Option<Handle<Image>>) -> EntityMaterial {
+        self.set_glint(glint, texture);
+        self
+    }
+
+    pub fn set_glint(&mut self, glint: Vec4, texture: Option<Handle<Image>>) {
+        if glint.z > 0.0 && texture.is_some() {
+            self.params.glint = glint;
+            self.glint_texture = texture;
+        } else {
+            self.params.glint = Vec4::ZERO;
+            self.glint_texture = None;
         }
     }
 
@@ -310,6 +333,12 @@ impl Material for EntityMaterial {
                 fragment.shader_defs.push("FANCY_SHADERS".into());
             }
         }
+        if key.bind_group_data.glint
+            && let Some(fragment) = descriptor.fragment.as_mut()
+        {
+            fragment.shader_defs.push("ENTITY_GLINT".into());
+            fragment.shader_defs.extend(super::glint::shader_defs());
+        }
         Ok(())
     }
 }
@@ -318,6 +347,8 @@ pub struct EntityMaterialPlugin;
 
 impl Plugin for EntityMaterialPlugin {
     fn build(&self, app: &mut App) {
+        bevy::shader::load_shader_library!(app, "vanilla_fog.wgsl");
+        super::glint::build(app);
         embedded_asset!(app, "entity.wgsl");
         #[cfg(feature = "builtin_shaders")]
         embedded_asset!(app, "entity_prepass.wgsl");

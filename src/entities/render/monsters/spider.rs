@@ -20,7 +20,8 @@ pub fn register(registry: &mut Registry) {
             spider::setup_anim,
         )
         .with_root(root)
-        .with_blend(Blend::Additive),
+        .with_blend(Blend::Additive)
+        .ignoring_invisibility(),
     );
     registry.add(
         EntityKind::CaveSpider,
@@ -41,7 +42,8 @@ pub fn register(registry: &mut Registry) {
             spider::setup_anim,
         )
         .with_root(root)
-        .with_blend(Blend::Additive),
+        .with_blend(Blend::Additive)
+        .ignoring_invisibility(),
     );
 }
 

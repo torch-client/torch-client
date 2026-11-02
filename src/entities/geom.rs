@@ -5,7 +5,7 @@ use bevy::prelude::*;
 
 use super::quads::QuadMesh;
 
-pub use crate::direction::{Direction, Faces};
+pub use crate::blocks::direction::{Direction, Faces};
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Grow(pub f32, pub f32, pub f32);
@@ -352,6 +352,20 @@ impl PartDef {
         node
     }
 
+    pub fn cubes(&self) -> &[CubeDef] {
+        &self.cubes
+    }
+
+    fn find(&self, name: &str) -> Option<&PartDef> {
+        self.children.iter().find_map(|(n, child)| {
+            if n == name {
+                Some(child)
+            } else {
+                child.find(name)
+            }
+        })
+    }
+
     pub fn clear_child(&mut self, name: &str) -> &mut PartDef {
         let node = self.get(name);
         node.cubes.clear();
@@ -391,6 +405,10 @@ impl MeshDef {
         &mut self.root
     }
 
+    pub fn find(&self, name: &str) -> Option<&PartDef> {
+        self.root.find(name)
+    }
+
     pub fn transformed(mut self, f: impl FnOnce(PartPose) -> PartPose) -> MeshDef {
         self.root.pose = f(self.root.pose);
         self
@@ -407,6 +425,24 @@ pub struct LayerDef {
 impl LayerDef {
     pub fn create(mesh: MeshDef, tex_w: u32, tex_h: u32) -> LayerDef {
         LayerDef { mesh, tex_w, tex_h }
+    }
+
+    pub fn single_box(
+        name: &str,
+        tex: (i32, i32),
+        cube: [f32; 6],
+        tex_size: (u32, u32),
+    ) -> LayerDef {
+        let [x, y, z, w, h, d] = cube;
+        let mut mesh = MeshDef::new();
+        mesh.root().child(
+            name,
+            CubeList::new()
+                .tex_offs(tex.0, tex.1)
+                .add_box(x, y, z, w, h, d),
+            PartPose::ZERO,
+        );
+        LayerDef::create(mesh, tex_size.0, tex_size.1)
     }
 }
 

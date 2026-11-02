@@ -59,18 +59,7 @@ pub(crate) fn slot_stack(
         .get_component::<comp::Lore>()
         .map(|c| c.lines.iter().map(chat_text::to_spans).collect())
         .unwrap_or_default();
-    let name_for = |e: &azalea_registry::Enchantment| -> String {
-        use azalea_core::data_registry::DataRegistryWithKey;
-        use azalea_registry::DataRegistry;
-        registries
-            .and_then(|r| e.key_owned(r))
-            .map(|k| {
-                azalea_registry::DataRegistryKey::into_ident(k)
-                    .path()
-                    .to_string()
-            })
-            .unwrap_or_else(|| format!("#{}", e.protocol_id()))
-    };
+    let name_for = |e: &azalea_registry::data::Enchantment| enchantment_name(registries, e);
     let mut enchantments: Vec<(String, i32)> = data
         .get_component::<comp::StoredEnchantments>()
         .map(|c| {
@@ -122,15 +111,24 @@ pub(crate) fn slot_stack(
         enchantments,
         potion: potion_contents(data),
         unbreakable: data.get_component::<comp::Unbreakable>().is_some(),
+        glint: crate::items::glint::has_foil(data),
         charged: data
             .get_component::<comp::ChargedProjectiles>()
             .is_some_and(|c| !c.items.is_empty()),
+        death_protection: death_protection(data),
+        kinetic: crate::items::kinetic::kinetic(data),
+        swing_ticks: crate::items::kinetic::swing_ticks(data),
         map_id: data.get_component::<comp::MapId>().map(|m| m.id),
         component_count: data.component_patch.iter().count() as u16,
         nbt_bytes,
         banner_patterns: banner_patterns(data, registries),
         banner_layers: banner_layers(data, registries),
         book: book(data).map(Box::new),
+        raw: (data.component_patch.iter().next().is_some()).then(|| {
+            let mut data = data.clone();
+            data.count = 1;
+            std::sync::Arc::new(ItemStack::Present(data))
+        }),
     }
 }
 
@@ -184,6 +182,7 @@ pub(crate) fn slot_stack_nbt(item: &simdnbt::owned::NbtCompound) -> Option<SlotS
                 .collect(),
             _ => Vec::new(),
         },
+        glint: crate::items::glint::codec_foil(id, components),
         enchantments,
         unbreakable: component(components, "unbreakable").is_some(),
         component_count: components.map(|c| c.len()).unwrap_or(0) as u16,
@@ -298,6 +297,10 @@ fn book(data: &azalea_inventory::ItemStackData) -> Option<Book> {
 
 const MAX_GENERATION: u8 = 3;
 
+pub(crate) fn death_protection(data: &azalea_inventory::ItemStackData) -> bool {
+    crate::items::component::<azalea_inventory::components::DeathProtection>(data).is_some()
+}
+
 pub(crate) fn potion_contents(
     data: &azalea_inventory::ItemStackData,
 ) -> Option<potions::PotionContents> {
@@ -324,10 +327,26 @@ pub(crate) fn potion_contents(
     })
 }
 
-fn resolve_enchantments(
+pub(crate) fn enchantment_name(
+    registries: Option<&azalea_core::registry_holder::RegistryHolder>,
+    e: &azalea_registry::data::Enchantment,
+) -> String {
+    use azalea_core::data_registry::DataRegistryWithKey;
+    use azalea_registry::DataRegistry;
+    registries
+        .and_then(|r| e.key_owned(r))
+        .map(|k| {
+            azalea_registry::DataRegistryKey::into_ident(k)
+                .path()
+                .to_string()
+        })
+        .unwrap_or_else(|| format!("#{}", e.protocol_id()))
+}
+
+pub(crate) fn resolve_enchantments(
     registries: Option<&azalea_core::registry_holder::RegistryHolder>,
     enchantments: &[(String, i32)],
-) -> std::collections::HashMap<azalea_registry::Enchantment, i32> {
+) -> std::collections::HashMap<azalea_registry::data::Enchantment, i32> {
     use azalea_registry::DataRegistry;
     use azalea_registry::identifier::Identifier;
 
@@ -341,7 +360,10 @@ fn resolve_enchantments(
                 .enchantment
                 .map
                 .get_index_of(&Identifier::new(name.clone()))?;
-            Some((azalea_registry::Enchantment::new_raw(id as u32), *level))
+            Some((
+                azalea_registry::data::Enchantment::new_raw(id as u32),
+                *level,
+            ))
         })
         .collect()
 }
@@ -359,14 +381,26 @@ fn creative_stack(
     let Ok(kind) = ItemKind::from_str(stack.item) else {
         return ItemStack::Empty;
     };
+    if let Some(raw) = &stack.raw
+        && let ItemStack::Present(data) = raw.as_ref()
+        && data.kind == kind
+    {
+        let mut data = data.clone();
+        data.count = stack.count as i32;
+        return ItemStack::Present(data);
+    }
     let mut out = ItemStack::new(kind, stack.count as i32);
     if !stack.enchantments.is_empty() {
         let levels = resolve_enchantments(registries, &stack.enchantments);
         if !levels.is_empty() {
             use azalea_inventory::components as comp;
-            out = out.with_component(comp::StoredEnchantments {
-                enchantments: levels,
-            });
+            out = if kind == ItemKind::EnchantedBook {
+                out.with_component(comp::StoredEnchantments {
+                    enchantments: levels,
+                })
+            } else {
+                out.with_component(comp::Enchantments { levels })
+            };
         }
     }
     if let Some(contents) = &stack.potion {
@@ -407,6 +441,21 @@ fn creative_stack(
     out
 }
 
+pub(crate) fn set_creative_slot(bot: &Client, slot: u16, stack: ItemStack) {
+    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+
+    bot.write_packet(ServerboundSetCreativeModeSlot {
+        slot_num: slot,
+        item_stack: stack.clone().into(),
+    });
+    let mut ecs = bot.ecs.write();
+    if let Some(mut inv) = ecs.get_mut::<azalea::entity::inventory::Inventory>(bot.entity)
+        && let Some(dst) = inv.inventory_menu.slot_mut(slot as usize)
+    {
+        *dst = stack;
+    }
+}
+
 pub(crate) fn apply_inv_actions(bot: &Client, actions: Vec<InvAction>, horse: Option<HorseMenu>) {
     use azalea_protocol::packets::game::s_container_button_click::ServerboundContainerButtonClick;
     use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
@@ -438,18 +487,7 @@ pub(crate) fn apply_inv_actions(bot: &Client, actions: Vec<InvAction>, horse: Op
                 });
             }
             InvAction::CreativeSet { slot, stack } => {
-                let stack = creative_stack(&stack, registries);
-                bot.write_packet(ServerboundSetCreativeModeSlot {
-                    slot_num: slot,
-                    item_stack: stack.clone().into(),
-                });
-                let mut ecs = bot.ecs.write();
-                if let Some(mut inv) =
-                    ecs.get_mut::<azalea::entity::inventory::Inventory>(bot.entity)
-                    && let Some(dst) = inv.inventory_menu.slot_mut(slot as usize)
-                {
-                    *dst = stack;
-                }
+                set_creative_slot(bot, slot, creative_stack(&stack, registries));
             }
             InvAction::CreativeDrop { stack } => {
                 let stack = creative_stack(&stack, registries);
@@ -614,5 +652,24 @@ mod tests {
                 UntrustedItemStack::azalea_read(&mut std::io::Cursor::new(&bytes[..])).unwrap();
             assert_eq!(read, built, "{}", stack.item);
         }
+    }
+
+    #[test]
+    fn death_protection_reads_the_patch_before_the_default() {
+        use azalea_inventory::ItemStack;
+        use azalea_inventory::components::DeathProtection;
+        use azalea_registry::builtin::ItemKind;
+
+        let protects = |stack: ItemStack| death_protection(stack.as_present().unwrap());
+        assert!(protects(ItemStack::new(ItemKind::TotemOfUndying, 1)));
+        assert!(!protects(
+            ItemStack::new(ItemKind::TotemOfUndying, 1).with_component::<DeathProtection>(None)
+        ));
+        assert!(!protects(ItemStack::new(ItemKind::Stick, 1)));
+        assert!(protects(ItemStack::new(ItemKind::Stick, 1).with_component(
+            DeathProtection {
+                death_effects: Vec::new()
+            }
+        )));
     }
 }

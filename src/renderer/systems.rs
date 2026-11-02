@@ -9,17 +9,18 @@ use bevy::camera::ClearColorConfig;
 use bevy::camera::visibility::RenderLayers;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::light::cluster::ClusterConfig;
+use bevy::math::DVec3;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use super::input::{
-    CameraAngles, FreecamState, ThirdPersonState, apply_gui_nav, bot_movement_input,
-    flight_toggle_input, freecam_movement, fullscreen_key, handle_hotbar_keys,
-    handle_hotbar_scroll, handle_keybinds, handle_mouse_input, handle_spectator_action_key,
-    handle_spectator_fly_speed_scroll, mouse_look, reload_all_chunks, toggle_advanced_tooltips,
-    toggle_chunk_borders, toggle_freecam, toggle_screen, toggle_third_person, web_pointer_lock,
-    window_focus_cursor,
+    CameraAngles, CameraView, VehicleTurnSpread, apply_gui_nav, apply_server_look,
+    apply_vehicle_look, bot_movement_input, debug_spectate, flight_toggle_input, freecam_movement,
+    fullscreen_key, handle_hotbar_keys, handle_hotbar_scroll, handle_keybinds, handle_mouse_input,
+    handle_spectator_action_key, handle_spectator_fly_speed_scroll, mouse_look, reload_all_chunks,
+    toggle_advanced_tooltips, toggle_chunk_borders, toggle_freecam, toggle_screen,
+    toggle_third_person, web_pointer_lock, window_focus_cursor,
 };
 use super::overlays::{
     BlockOutline, BlockOutlineMarker, BreakOverlay, BreakOverlayMarker, ChunkBorderMarker,
@@ -30,6 +31,8 @@ use super::overlays::{
 const SKY_COLOR: Color = Color::srgb(0.753, 0.847, 1.0);
 
 pub const VANILLA_FOV_DEGREES: f32 = 70.0;
+
+pub const WORLD_NEAR: f32 = 0.05;
 
 use super::frame_view::{FrameView, FrameViewSystems};
 use super::terrain_pool::{TerrainOp, TerrainOps};
@@ -95,7 +98,7 @@ fn update_environment(
         &layer,
         gui.options.render_distance as i32,
         delta_ticks,
-        || super::lightmap::levels_at([eye[0] as f32, eye[1] as f32, eye[2] as f32]).1 as f32,
+        || super::lightmap::levels_at(eye).1 as f32,
         crate::client::envprobe::camera_has_precipitation(),
     );
 }
@@ -389,8 +392,7 @@ fn setup(
         BreakOverlayMarker,
     );
     commands.insert_resource(BreakOverlay {
-        entity,
-        mesh,
+        pool: vec![(entity, mesh)],
         material: break_mat,
         shown: None,
     });
@@ -451,6 +453,31 @@ fn setup(
             shown: None,
         });
     }
+    #[cfg(feature = "click_gui")]
+    {
+        use crate::renderer::esp_material::EspMaterial;
+        let mut spawn = |through: bool| {
+            spawn_overlay(
+                &mut commands,
+                &mut meshes,
+                super::overlays::empty_esp_mesh(),
+                esp_materials.add(EspMaterial {
+                    through,
+                    ..EspMaterial::default()
+                }),
+                super::overlays::WorldDrawMarker,
+            )
+        };
+        let tested = spawn(false);
+        let through = spawn(true);
+        commands.insert_resource(super::overlays::WorldDrawOverlay {
+            tested,
+            through,
+            shown: None,
+        });
+    }
+    #[cfg(lua_mods)]
+    commands.insert_resource(super::ghosts::Ghosts::default());
 
     if let Ok(opts) = cursor_opts.single_mut() {
         let open = start_screen.0.is_open();
@@ -476,6 +503,7 @@ fn setup(
         RenderLayers::from_layers(&[0, super::hand::HAND_LAYER]),
         Projection::Perspective(PerspectiveProjection {
             fov: VANILLA_FOV_DEGREES.to_radians(),
+            near: WORLD_NEAR,
             ..default()
         }),
         DistanceFog {
@@ -500,16 +528,21 @@ fn take_budgeted(
         return Vec::new();
     }
     let mut room = 0usize;
+    let mut charged = 0usize;
     for sec in queue.iter() {
         room += 1;
         let n = sec.opaque.verts.len() + sec.water.verts.len();
+        if n == 0 {
+            continue;
+        }
+        charged += 1;
         let over = n >= *verts;
         *verts = verts.saturating_sub(n);
-        if over || room >= *sections {
+        if over || charged >= *sections {
             break;
         }
     }
-    *sections -= room.min(*sections);
+    *sections -= charged.min(*sections);
     queue.drain(..room).collect()
 }
 
@@ -530,15 +563,105 @@ fn mesh_on_render_thread(mut scratch: Local<crate::client::worker::Scratch>) {
     crate::client::worker::drain_on_caller(queue, &mut scratch);
 }
 
+fn place_camera(
+    view: &FrameView,
+    camera: &CameraView,
+    angles: &CameraAngles,
+    origin: &mut super::RenderOrigin,
+    transform: &mut Transform,
+    last_zoom: &mut f32,
+) {
+    if camera.free() {
+        let eye = camera.free_eye();
+        crate::modules::freecam::publish_eye(eye.to_array());
+        origin.follow(eye);
+        transform.translation = origin.to_render(eye);
+        transform.rotation = angles.rotation();
+        return;
+    }
+    let [ix, iy, iz] = view.player_lerp;
+    let eye_world = DVec3::new(ix, iy + f64::from(view.camera_eye_height), iz);
+    origin.follow(eye_world);
+    let eye = origin.to_render(eye_world);
+    if camera.third_person() {
+        let rotation = if camera.mirrored() {
+            Quat::from_rotation_y((angles.yaw + 180.0).to_radians())
+                * Quat::from_rotation_x((-angles.pitch).to_radians())
+        } else {
+            angles.rotation()
+        };
+        let back = -(rotation * Vec3::NEG_Z);
+        if let Some(zoom) = max_zoom(eye_world, back.as_dvec3(), view.camera_distance) {
+            *last_zoom = zoom;
+        }
+        let zoom = last_zoom.min(view.camera_distance);
+        transform.translation = eye + back * zoom;
+        transform.rotation = rotation;
+    } else if view.sleeping {
+        let mc_yaw = match view.bed_orientation {
+            Some(dir) => dir.to_y_rot() - 180.0,
+            None => 0.0,
+        };
+        let bevy_yaw = -mc_yaw - 180.0;
+        transform.translation = eye + Vec3::Y * SLEEPING_CAMERA_NUDGE;
+        transform.rotation = Quat::from_rotation_y(bevy_yaw.to_radians());
+    } else {
+        transform.translation = eye;
+        transform.rotation = angles.rotation();
+    }
+}
+
+const CAMERA_CLIP_SPREAD: f64 = 0.1;
+
+fn max_zoom(eye: DVec3, back: DVec3, max: f32) -> Option<f32> {
+    use azalea::physics::clip::{BlockShapeType, ClipContext, FluidPickType, clip};
+    use azalea_core::position::Vec3 as AzVec3;
+
+    let world = crate::client::tracking::current_world()
+        .lock()
+        .unwrap()
+        .clone()?;
+    let world = world.try_read()?;
+    let az = |p: DVec3| AzVec3 {
+        x: p.x,
+        y: p.y,
+        z: p.z,
+    };
+    let mut zoom = max;
+    for i in 0..8u32 {
+        let corner = |bit: u32| f64::from((i >> bit) & 1) * 2.0 - 1.0;
+        let from = eye + DVec3::new(corner(0), corner(1), corner(2)) * CAMERA_CLIP_SPREAD;
+        let to = from + back * f64::from(zoom);
+        let hit = clip(
+            &world.chunks,
+            ClipContext {
+                from: az(from),
+                to: az(to),
+                block_shape_type: BlockShapeType::Visual,
+                fluid_pick_type: FluidPickType::None,
+            },
+        );
+        if !hit.miss {
+            let at = DVec3::new(hit.location.x, hit.location.y, hit.location.z);
+            let dist = at.distance(eye) as f32;
+            if dist < zoom {
+                zoom = dist;
+            }
+        }
+    }
+    Some(zoom)
+}
+
 fn poll_shared_state(
     shared: Res<Shared>,
-    freecam: Res<FreecamState>,
-    third_person: Res<ThirdPersonState>,
+    camera_view: Res<CameraView>,
     angles: Res<CameraAngles>,
     ops: Res<TerrainOps>,
     mut index: ResMut<ChunkIndex>,
     mut camera: Query<&mut Transform, With<WorldCamera>>,
+    mut origin: ResMut<super::RenderOrigin>,
     mut last_poll_ms: Local<f32>,
+    mut last_zoom: Local<f32>,
     mut dedup_seen: Local<HashSet<(i32, i32, i32)>>,
     mut dedup_keep: Local<Vec<bool>>,
     gui: Res<crate::gui::GuiState>,
@@ -553,29 +676,22 @@ fn poll_shared_state(
     let mut state = shared.0.lock().unwrap();
     let lock_wait_ms = lock_t0.elapsed().as_secs_f32() * 1000.0;
 
-    sync_bot_options(&mut state, &gui, &third_person, &freecam);
+    sync_bot_options(&mut state, &gui, &camera_view);
     view.fill(&state, true);
-
-    if !freecam.active {
-        let [ix, iy, iz] = view.player_lerp;
-        if let Ok(mut transform) = camera.single_mut() {
-            let eye = Vec3::new(ix, iy + view.camera_eye_height, iz);
-            if third_person.active {
-                let forward = angles.rotation() * Vec3::NEG_Z;
-                transform.translation = eye - forward * view.camera_distance;
-            } else if view.sleeping {
-                let mc_yaw = match view.bed_orientation {
-                    Some(dir) => dir.to_y_rot() - 180.0,
-                    None => 0.0,
-                };
-                let bevy_yaw = -mc_yaw - 180.0;
-                transform.translation = eye + Vec3::Y * SLEEPING_CAMERA_NUDGE;
-                transform.rotation = Quat::from_rotation_y(bevy_yaw.to_radians());
-            } else {
-                transform.translation = eye;
-                transform.rotation = angles.rotation();
-            }
-        }
+    if let Ok(mut transform) = camera.single_mut() {
+        let mut moved = *origin;
+        place_camera(
+            &view,
+            &camera_view,
+            &angles,
+            &mut moved,
+            &mut transform,
+            &mut last_zoom,
+        );
+        origin.set_if_neq(moved);
+        view.camera_world = moved.to_world(transform.translation);
+        view.camera_render = transform.translation;
+        view.camera_rotation = transform.rotation;
     }
 
     state.profiling.record_lock_wait(lock_wait_ms);
@@ -677,12 +793,11 @@ fn poll_shared_state(
 fn refresh_frame_view(
     shared: Res<Shared>,
     gui: Res<crate::gui::GuiState>,
-    third_person: Res<ThirdPersonState>,
-    freecam: Res<FreecamState>,
+    camera: Res<CameraView>,
     mut view: ResMut<FrameView>,
 ) {
     let mut state = shared.0.lock().unwrap();
-    sync_bot_options(&mut state, &gui, &third_person, &freecam);
+    sync_bot_options(&mut state, &gui, &camera);
     view.fill(&state, false);
 }
 
@@ -706,7 +821,7 @@ pub fn partial_ticks(state: &SharedState) -> f32 {
 
 const TICK_SECS: f32 = 0.05;
 
-fn spawn_overlay<M: bevy::pbr::Material, K: Component>(
+pub(super) fn spawn_overlay<M: bevy::pbr::Material, K: Component>(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     mesh: Mesh,
@@ -836,11 +951,19 @@ struct TagProjector {
     clip_from_view: Mat4,
     units_per_block: f32,
     view: Vec2,
+    origin: super::RenderOrigin,
 }
 
 impl TagProjector {
-    fn new(camera: &Camera, cam_tf: &Transform, projection: &Projection, view: Vec2) -> Self {
+    fn new(
+        camera: &Camera,
+        cam_tf: &Transform,
+        projection: &Projection,
+        view: Vec2,
+        origin: super::RenderOrigin,
+    ) -> Self {
         Self {
+            origin,
             eye: cam_tf.translation,
             forward: *cam_tf.forward(),
             view_from_world: cam_tf.compute_affine().inverse(),
@@ -853,11 +976,15 @@ impl TagProjector {
         }
     }
 
+    fn anchor(&self, feet: [f64; 3], lift: f32) -> Vec3 {
+        self.origin.to_render_array(feet) + Vec3::Y * lift
+    }
+
     fn project(
         &self,
         name: &[crate::text::Span],
         below: &[crate::text::Span],
-        world: Vec3,
+        at: Vec3,
         range: f32,
     ) -> Option<crate::gui::hud::NameTag> {
         let Self {
@@ -867,16 +994,17 @@ impl TagProjector {
             clip_from_view,
             units_per_block,
             view,
+            origin: _,
         } = *self;
-        let depth = (world - eye).dot(forward);
+        let depth = (at - eye).dot(forward);
         if depth <= 0.05 {
             return None;
         }
-        let distance = world.distance(eye);
+        let distance = at.distance(eye);
         if distance > range {
             return None;
         }
-        let ndc = clip_from_view.project_point3(view_from_world.transform_point3(world));
+        let ndc = clip_from_view.project_point3(view_from_world.transform_point3(at));
         if ndc.is_nan() {
             return None;
         }
@@ -938,9 +1066,8 @@ fn collect_player_tags(
             (false, true) => NAME_TAG_RANGE_DISCRETE,
             (false, false) => NAME_TAG_RANGE,
         };
-        let world = Vec3::new(feet[0], feet[1] + height + 0.5, feet[2]);
-        let Some(mut tag) = projector.project(&info.name_tag, &info.below_name, world, range)
-        else {
+        let at = projector.anchor(feet, height + 0.5);
+        let Some(mut tag) = projector.project(&info.name_tag, &info.below_name, at, range) else {
             continue;
         };
         if on {
@@ -978,9 +1105,8 @@ fn collect_nametags(
         {
             continue;
         }
-        let pos = anim.position(partial);
-        let world = Vec3::new(pos[0], pos[1] + anim.bounding_box_height() + 0.5, pos[2]);
-        tags.extend(projector.project(&extras.name_spans, &[], world, NAME_TAG_RANGE));
+        let at = projector.anchor(anim.position(partial), anim.bounding_box_height() + 0.5);
+        tags.extend(projector.project(&extras.name_spans, &[], at, NAME_TAG_RANGE));
     }
 
     tags.sort_by(|a, b| b.distance.total_cmp(&a.distance));
@@ -990,7 +1116,7 @@ fn collect_hud_info(
     shared: Res<Shared>,
     view: Res<FrameView>,
     time: Res<Time>,
-    freecam: Res<FreecamState>,
+    camera_view: Res<CameraView>,
     prof: Res<ProfVisible>,
     angles: Res<CameraAngles>,
     input: Res<crate::gui::GuiInput>,
@@ -1001,11 +1127,12 @@ fn collect_hud_info(
     block_entity_rigs: Res<crate::blockentities::BeRigs>,
     images: Res<Assets<Image>>,
     mut state: ResMut<crate::gui::GuiState>,
-    (mut memory_cache, frame_gate, mut gated_ms, mut fps): (
+    (mut memory_cache, frame_gate, mut gated_ms, mut fps, origin): (
         Local<Option<(Instant, crate::gui::hud::MemoryUse)>>,
         Res<FrameGate>,
         Local<f32>,
         Local<FpsWindow>,
+        Res<super::RenderOrigin>,
     ),
 ) {
     crate::prof_span!("render:collect_hud_info");
@@ -1018,9 +1145,9 @@ fn collect_hud_info(
     let (pos, gamemode, flying, in_world) =
         (view.player_lerp, view.gamemode, view.flying, view.in_world);
     let projector = match (camera, hud_visible) {
-        (Some((camera, cam_tf, projection)), true) => {
-            Some(TagProjector::new(camera, cam_tf, projection, input.size))
-        }
+        (Some((camera, cam_tf, projection)), true) => Some(TagProjector::new(
+            camera, cam_tf, projection, input.size, *origin,
+        )),
         _ => None,
     };
     let (status, profiling, active_effects) = if hud_visible || prof.shown {
@@ -1149,7 +1276,7 @@ fn collect_hud_info(
         gamemode,
         yaw: angles.yaw,
         flying,
-        freecam: freecam.active,
+        freecam: camera_view.free(),
         status,
         fps: fps_now,
         in_world,
@@ -1455,6 +1582,11 @@ pub(super) fn enter_screen(
     if next == crate::gui::Screen::Advancements && state.screen != next {
         state.advancements.opened();
     }
+    #[cfg(lua_mods)]
+    if state.screen == crate::gui::Screen::LuaList && next != state.screen {
+        state.lua_list.close();
+    }
+    let stats_opened = next == crate::gui::Screen::Statistics && state.screen != next;
     state.screen = next;
     let open = next.is_open();
     {
@@ -1462,6 +1594,10 @@ pub(super) fn enter_screen(
         s.screen_open = open;
         if advancements_closed {
             s.session.seen_advancements.push(None);
+        }
+        if stats_opened {
+            s.session.request_stats = true;
+            state.stats.open(s.session.stats.updates);
         }
         s.session.attack_held = false;
         s.session.use_held = false;
@@ -1565,12 +1701,13 @@ fn unfocused_update_mode() -> bevy::winit::UpdateMode {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn web_text_focus_pacing(
-    gui: Res<crate::gui::GuiState>,
+fn web_visibility_pacing(
     mut settings: ResMut<bevy::winit::WinitSettings>,
     mut overridden: Local<bool>,
 ) {
-    let held = (gui.screen.is_open() || *overridden) && crate::platform::keyboard::has_focus();
+    let held = web_sys::window()
+        .and_then(|w| w.document())
+        .is_some_and(|d| !d.hidden());
     if held == *overridden {
         return;
     }
@@ -1843,16 +1980,17 @@ fn trace_reextracted_meshes(
     }
 }
 
-fn sync_bot_options(
-    s: &mut SharedState,
-    state: &crate::gui::GuiState,
-    third_person: &ThirdPersonState,
-    freecam: &FreecamState,
-) {
+fn sync_bot_options(s: &mut SharedState, state: &crate::gui::GuiState, camera: &CameraView) {
+    #[cfg(feature = "render_lod")]
+    let wanted = state
+        .options
+        .render_distance
+        .max(state.options.lod_distance);
+    #[cfg(not(feature = "render_lod"))]
     let wanted = state.options.render_distance;
     let signing = state.options.allow_signed_chat;
     let effects = state.options.fov_effects as f32 / 100.0;
-    let first_person = !third_person.active && !freecam.active;
+    let first_person = camera.first_person();
     if s.render_distance_sent != Some(wanted) {
         s.render_distance_sent = Some(wanted);
         s.session.render_distance_request = Some(wanted);
@@ -1875,12 +2013,15 @@ fn sync_bot_options(
 }
 
 #[cfg(feature = "audio")]
-fn sync_audio_listener(camera_q: Query<&GlobalTransform, With<WorldCamera>>) {
+fn sync_audio_listener(
+    camera_q: Query<&Transform, With<WorldCamera>>,
+    origin: Res<super::RenderOrigin>,
+) {
     let Ok(transform) = camera_q.single() else {
         return;
     };
     crate::audio::set_listener(
-        transform.translation().into(),
+        origin.to_world(transform.translation).to_array(),
         (*transform.forward()).into(),
         (*transform.right()).into(),
     );
@@ -1908,7 +2049,7 @@ fn sync_lighting_enabled(
     shared: Res<Shared>,
     mut last: Local<Option<bool>>,
 ) {
-    let wanted = state.options.lighting_enabled;
+    let wanted = state.options.lighting_enabled && !crate::modules::fullbright::active();
     if *last == Some(wanted) {
         return;
     }
@@ -1978,7 +2119,6 @@ fn auto_harness(
     time: Res<Time<bevy::time::Real>>,
     mut angles: ResMut<CameraAngles>,
     shared: Res<Shared>,
-    mut camera: Query<&mut Transform, With<WorldCamera>>,
     mut cfg: Local<Option<(f32, Option<u64>)>>,
     mut exit: bevy::ecs::message::MessageWriter<bevy::app::AppExit>,
 ) {
@@ -2002,9 +2142,6 @@ fn auto_harness(
         return;
     }
     angles.yaw += look * time.delta_secs();
-    if let Ok(mut t) = camera.single_mut() {
-        t.rotation = angles.rotation();
-    }
     let mut s = shared.0.lock().unwrap();
     s.camera_yaw = angles.yaw;
     s.camera_pitch = angles.pitch;
@@ -2244,15 +2381,21 @@ pub fn run(
     .add_plugins(crate::blockentities::BlockEntityPlugin)
     .add_plugins(crate::renderer::player_model::PlayerModelPlugin)
     .add_plugins(crate::renderer::hand::HandPlugin)
+    .add_plugins(crate::renderer::item_activation::ItemActivationPlugin)
     .add_plugins(crate::renderer::panorama::PanoramaPlugin)
     .add_plugins(crate::renderer::occlusion::OcclusionPlugin)
     .add_plugins(crate::renderer::terrain::TerrainMaterialPlugin)
     .add_plugins(crate::renderer::terrain_pool::TerrainPoolPlugin)
     .add_plugins(crate::renderer::entity_material::EntityMaterialPlugin)
     .add_plugins(crate::renderer::esp_material::EspMaterialPlugin)
+    .add_plugins((
+        #[cfg(feature = "render_lod")]
+        crate::renderer::lod::LodPlugin,
+    ))
     .add_plugins(crate::renderer::sky::SkyPlugin)
     .add_plugins(crate::renderer::ssaa::SsaaPlugin)
     .add_plugins(crate::renderer::clouds::CloudPlugin)
+    .add_plugins(crate::renderer::weather::WeatherPlugin)
     .add_plugins(crate::renderer::post::PostPlugin)
     .add_plugins(crate::entities::EntityPlugin)
     .add_plugins(crate::util::particles::ParticlePlugin)
@@ -2263,8 +2406,8 @@ pub fn run(
     .insert_resource(ClearColor(SKY_COLOR))
     .init_resource::<ChunkIndex>()
     .init_resource::<CameraAngles>()
-    .init_resource::<FreecamState>()
-    .init_resource::<ThirdPersonState>()
+    .init_resource::<VehicleTurnSpread>()
+    .init_resource::<CameraView>()
     .init_resource::<ProfVisible>()
     .init_resource::<FrameGate>()
     .insert_resource(crate::renderer::item_assets::ItemAssets::new())
@@ -2273,6 +2416,10 @@ pub fn run(
     .init_resource::<LightmapState>()
     .init_resource::<super::environment::Environment>()
     .init_resource::<FrameView>()
+    .init_resource::<super::RenderOrigin>()
+    .add_plugins(bevy::render::extract_resource::ExtractResourcePlugin::<
+        super::RenderOrigin,
+    >::default())
     .add_systems(
         Update,
         refresh_frame_view
@@ -2313,7 +2460,7 @@ pub fn run(
         apply_fov.after(FrameViewSystems).before(collect_hud_info),
     );
     #[cfg(feature = "audio")]
-    app.add_systems(Update, sync_audio_listener);
+    app.add_systems(Update, sync_audio_listener.after(FrameViewSystems));
     #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(Update, sync_vsync);
     app.add_systems(Last, trace_reextracted_meshes)
@@ -2329,14 +2476,33 @@ pub fn run(
         )
         .add_systems(
             Update,
+            apply_server_look
+                .before(mouse_look)
+                .before(FrameViewSystems)
+                .run_if(in_state(AppState::InGame)),
+        )
+        .add_systems(
+            Update,
+            apply_vehicle_look
+                .after(apply_server_look)
+                .before(mouse_look)
+                .before(FrameViewSystems)
+                .run_if(in_state(AppState::InGame)),
+        )
+        .add_systems(
+            Update,
             poll_shared_state
                 .in_set(FrameViewSystems)
                 .after(mouse_look)
+                .after(toggle_freecam)
+                .after(toggle_third_person)
+                .after(freecam_movement)
                 .run_if(in_state(AppState::InGame)),
         )
         .add_systems(Update, toggle_advanced_tooltips)
         .add_systems(Update, toggle_chunk_borders)
         .add_systems(Update, reload_all_chunks.run_if(in_state(AppState::InGame)))
+        .add_systems(Update, debug_spectate)
         .add_systems(
             Update,
             handle_keybinds
@@ -2367,6 +2533,30 @@ pub fn run(
                 || {}
             }
         })
+        .add_systems(Update, {
+            #[cfg(feature = "click_gui")]
+            {
+                super::overlays::update_world_draw
+                    .after(FrameViewSystems)
+                    .run_if(in_state(AppState::InGame))
+            }
+            #[cfg(not(feature = "click_gui"))]
+            {
+                || {}
+            }
+        })
+        .add_systems(Update, {
+            #[cfg(lua_mods)]
+            {
+                super::ghosts::update_ghosts
+                    .after(FrameViewSystems)
+                    .run_if(in_state(AppState::InGame))
+            }
+            #[cfg(not(lua_mods))]
+            {
+                || {}
+            }
+        })
         .add_systems(Update, toggle_freecam.run_if(in_state(AppState::InGame)))
         .add_systems(
             Update,
@@ -2378,7 +2568,12 @@ pub fn run(
             Update,
             toggle_third_person.run_if(in_state(AppState::InGame)),
         )
-        .add_systems(Update, freecam_movement.run_if(in_state(AppState::InGame)))
+        .add_systems(
+            Update,
+            freecam_movement
+                .after(toggle_freecam)
+                .run_if(in_state(AppState::InGame)),
+        )
         .add_systems(
             Update,
             flight_toggle_input.run_if(in_state(AppState::InGame)),
@@ -2401,7 +2596,7 @@ pub fn run(
         .add_systems(Update, toggle_prof_overlay)
         .add_systems(Update, select_debug_page)
         .add_systems(Update, dump_flamegraph)
-        .add_systems(Update, auto_harness)
+        .add_systems(Update, auto_harness.before(FrameViewSystems))
         .add_systems(
             Update,
             handle_hotbar_keys
@@ -2499,11 +2694,14 @@ pub fn run(
     app.init_resource::<GatedCameras>()
         .add_systems(First, (web_frame_gate, ungate_cameras).chain())
         .add_systems(Last, gate_cameras)
-        .add_systems(Update, web_text_focus_pacing);
+        .add_systems(Update, web_visibility_pacing);
 
     #[cfg(target_os = "android")]
     app.add_systems(Update, track_native_window_size.before(log_window_geometry))
         .add_systems(Update, log_frame_rate);
+
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    app.add_systems(Update, crate::platform::icon::apply_window_icon);
 
     #[cfg(feature = "mobile_ui")]
     crate::mobile::register(&mut app);

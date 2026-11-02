@@ -21,14 +21,27 @@ impl ProcessGpu {
         queue: &RenderQueue,
         atlas: &GpuImage,
     ) -> TextureView {
-        let Some(tiles) = crate::renderer::atlas::untinted_tiles() else {
-            return display_view(atlas);
-        };
         if let Some(existing) = &self.pack_atlas
             && existing.source == atlas.texture_view.id()
         {
             return existing.view.clone();
         }
+        #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+        if let Some(raw) = super::rawviews::atlas() {
+            let texture = raw.upload(device, queue);
+            if let Some(tiles) = crate::renderer::atlas::untinted_tiles() {
+                write_tiles(queue, &texture, raw.width, raw.levels, &tiles);
+            }
+            let view = texture.create_view(&TextureViewDescriptor::default());
+            self.pack_atlas = Some(PackAtlas {
+                source: atlas.texture_view.id(),
+                view: view.clone(),
+            });
+            return view;
+        }
+        let Some(tiles) = crate::renderer::atlas::untinted_tiles() else {
+            return display_view(atlas);
+        };
         let size = atlas.texture.size();
         let levels = atlas.texture.mip_level_count();
         let texture = device.create_texture(&TextureDescriptor {
@@ -39,7 +52,11 @@ impl ProcessGpu {
             dimension: TextureDimension::D2,
             format: atlas.texture.format(),
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-            view_formats: &[TextureFormat::Rgba8Unorm],
+            view_formats: if super::RAW_VIEWS {
+                &[TextureFormat::Rgba8Unorm]
+            } else {
+                &[]
+            },
         });
         let mut encoder =
             device
@@ -61,36 +78,9 @@ impl ProcessGpu {
             );
         }
         queue.submit([encoder.finish()]);
-        for (tile, tile_levels) in tiles.iter() {
-            let (tx, ty) = (
-                tile % crate::renderer::ATLAS_COLS,
-                tile / crate::renderer::ATLAS_COLS,
-            );
-            for (level, bytes) in tile_levels.iter().enumerate().take(levels as usize) {
-                let side = (size.width / crate::renderer::ATLAS_COLS) >> level;
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: level as u32,
-                        origin: wgpu::Origin3d {
-                            x: tx * side,
-                            y: ty * side,
-                            z: 0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    bytes,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(side * 4),
-                        rows_per_image: Some(side),
-                    },
-                    extent(side, side),
-                );
-            }
-        }
+        write_tiles(queue, &texture, size.width, levels, &tiles);
         let view = texture.create_view(&TextureViewDescriptor {
-            format: Some(TextureFormat::Rgba8Unorm),
+            format: super::RAW_VIEWS.then_some(TextureFormat::Rgba8Unorm),
             ..Default::default()
         });
         self.pack_atlas = Some(PackAtlas {
@@ -98,5 +88,42 @@ impl ProcessGpu {
             view: view.clone(),
         });
         view
+    }
+}
+
+fn write_tiles(
+    queue: &RenderQueue,
+    texture: &wgpu::Texture,
+    width: u32,
+    levels: u32,
+    tiles: &crate::renderer::atlas::UntintedTiles,
+) {
+    for (tile, tile_levels) in tiles.iter() {
+        let (tx, ty) = (
+            tile % crate::renderer::ATLAS_COLS,
+            tile / crate::renderer::ATLAS_COLS,
+        );
+        for (level, bytes) in tile_levels.iter().enumerate().take(levels as usize) {
+            let side = (width / crate::renderer::ATLAS_COLS) >> level;
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d {
+                        x: tx * side,
+                        y: ty * side,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(side * 4),
+                    rows_per_image: Some(side),
+                },
+                extent(side, side),
+            );
+        }
     }
 }

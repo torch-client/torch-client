@@ -1,7 +1,7 @@
 use std::io::{self, Cursor, Write};
 
 use azalea_buf::{AzBuf, AzBufVar, BufReadError};
-use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
+use azalea_inventory::{DataComponentPatch, ItemStack};
 use azalea_registry::{
     HolderSet,
     builtin::{DataComponentKind, ItemKind},
@@ -99,15 +99,8 @@ pub struct ItemStackSlotDisplay {
 }
 impl AzBuf for ItemStackSlotDisplay {
     fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let kind = ItemKind::azalea_read(buf)?;
-        let count = i32::azalea_read_var(buf)?;
-        let component_patch = DataComponentPatch::azalea_read(buf)?;
         Ok(Self {
-            stack: ItemStack::from(ItemStackData {
-                count,
-                kind,
-                component_patch,
-            }),
+            stack: ItemStack::read_template(buf)?,
         })
     }
     fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
@@ -117,11 +110,7 @@ impl AzBuf for ItemStackSlotDisplay {
                 1_i32.azalea_write_var(buf)?;
                 DataComponentPatch::default().azalea_write(buf)
             }
-            ItemStack::Present(data) => {
-                data.kind.azalea_write(buf)?;
-                data.count.azalea_write_var(buf)?;
-                data.component_patch.azalea_write(buf)
-            }
+            stack => stack.write_template(buf),
         }
     }
 }

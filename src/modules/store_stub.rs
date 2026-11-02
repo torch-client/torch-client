@@ -1,4 +1,4 @@
-use super::registry::{Id, Kind, Options, SETTINGS, handle};
+use super::registry::{Kind, ModuleIx, Options, SETTINGS, handle};
 use super::value;
 use crate::gui::keybinds::Bound;
 
@@ -20,28 +20,28 @@ fn bits(slot: u16) -> u64 {
 
 impl Store {
     #[inline(always)]
-    pub fn enabled(&self, _: Id) -> bool {
+    pub fn enabled(&self, _: impl Into<ModuleIx>) -> bool {
         false
     }
 
     #[inline(always)]
-    pub fn armed(&self, _: Id) -> bool {
+    pub fn armed(&self, _: impl Into<ModuleIx>) -> bool {
         false
     }
 
     #[inline(always)]
-    pub fn set_enabled(&self, _: Id, _: bool) {}
+    pub fn set_enabled(&self, _: impl Into<ModuleIx>, _: bool) {}
 
     #[inline(always)]
-    pub fn toggle(&self, _: Id) {}
+    pub fn toggle(&self, _: impl Into<ModuleIx>) {}
 
     #[inline(always)]
-    pub fn toggle_count(&self, _: Id) -> u32 {
+    pub fn toggle_count(&self, _: impl Into<ModuleIx>) -> u32 {
         0
     }
 
     #[inline(always)]
-    pub fn bind(&self, _: Id) -> Bound {
+    pub fn bind(&self, _: impl Into<ModuleIx>) -> Bound {
         Bound::Unbound
     }
 

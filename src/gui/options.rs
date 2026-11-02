@@ -26,10 +26,10 @@ const GAME: &str = "Game...";
 
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
 const STORAGE_HEADER: &str = "Storage";
-#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+#[cfg(feature = "asset_download")]
 const CLEAR_ASSETS: &str = "Clear Cached Assets";
 
-#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+#[cfg(feature = "asset_download")]
 const CLEAR_ASSETS_TITLE: &str = "Clear cached assets?";
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
 const CLEAR_ASSETS_MESSAGE: &str = concat!(
@@ -39,9 +39,17 @@ const CLEAR_ASSETS_MESSAGE: &str = concat!(
 );
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
 const CLEAR_ASSETS_WARNING: &str = "The page reloads immediately.";
-#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "asset_download"))]
+const CLEAR_ASSETS_MESSAGE: &str = concat!(
+    "The downloaded copy of the game's assets will be deleted.\n",
+    "The client downloads them from Mojang again\n",
+    "the next time it starts.",
+);
+#[cfg(all(not(target_arch = "wasm32"), feature = "asset_download"))]
+const CLEAR_ASSETS_WARNING: &str = "The client closes immediately.";
+#[cfg(feature = "asset_download")]
 const CLEAR_ASSETS_YES: &str = "Clear";
-#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+#[cfg(feature = "asset_download")]
 const CLEAR_ASSETS_NO: &str = "Cancel";
 
 const DISPLAY_HEADER: &str = "Display";
@@ -96,6 +104,10 @@ const CHECK_ASSETS: &str = "Install missing assets";
 const NOTHING_MISSING: &str = "Nothing is missing";
 
 const AUTO_JUMP: &str = "Auto-Jump";
+
+const SPRINT_MODE: &str = "Sprint Mode";
+const SPRINT_MODE_TOGGLE: &str = "Toggle";
+const SPRINT_MODE_HOLD: &str = "Hold";
 
 const MAIN_HAND: &str = "Main Hand";
 const MAIN_HAND_LEFT: &str = "Left";
@@ -181,6 +193,10 @@ const VOLUME_SLIDER_ID_BASE: u32 = 7;
 
 const SCREEN_EFFECTS_SLIDER_ID: u32 = 30;
 
+const MAX_FRAMERATE_SLIDER_ID: u32 = 31;
+
+const FRAMERATE_STEP: u32 = 10;
+
 const ROW_SPACING: f32 = 4.0;
 
 fn menu_content_h(entries: usize) -> f32 {
@@ -209,6 +225,21 @@ const Y_DISPLAY_ROW_0: f32 = Y_DISPLAY_HEADER + HEADER_H;
 const Y_DISPLAY_ROW_1: f32 = Y_DISPLAY_ROW_0 + ROW_H;
 const Y_DISPLAY_ROW_2: f32 = Y_DISPLAY_ROW_1 + ROW_H;
 const Y_DISPLAY_ROW_3: f32 = Y_DISPLAY_ROW_2 + ROW_H;
+#[cfg(feature = "render_lod")]
+const Y_LOD_HEADER: f32 = Y_DISPLAY_ROW_3 + ROW_H;
+#[cfg(feature = "render_lod")]
+const Y_LOD_HINT: f32 = Y_LOD_HEADER + HEADER_PAD_TOP + HEADER_H;
+#[cfg(feature = "render_lod")]
+const LOD_HINT_H: f32 = LOD_HINT.len() as f32 * (LINE_HEIGHT + 1.0) - 1.0 + 4.0;
+#[cfg(feature = "render_lod")]
+const Y_LOD_ROW_0: f32 = Y_LOD_HINT + LOD_HINT_H;
+#[cfg(feature = "render_lod")]
+const Y_LOD_ROW_1: f32 = Y_LOD_ROW_0 + ROW_H;
+#[cfg(feature = "render_lod")]
+const Y_LOD_ROW_2: f32 = Y_LOD_ROW_1 + ROW_H;
+#[cfg(feature = "render_lod")]
+const Y_QUALITY_HEADER: f32 = Y_LOD_ROW_2 + ROW_H;
+#[cfg(not(feature = "render_lod"))]
 const Y_QUALITY_HEADER: f32 = Y_DISPLAY_ROW_3 + ROW_H;
 const Y_QUALITY_ROW_0: f32 = Y_QUALITY_HEADER + HEADER_PAD_TOP + HEADER_H;
 const Y_QUALITY_ROW_1: f32 = Y_QUALITY_ROW_0 + ROW_H;
@@ -274,6 +305,31 @@ pub(in crate::gui) fn scroll_input(
     list_h: f32,
     content_h: f32,
 ) {
+    scroll_input_in(
+        scroll,
+        drag,
+        ctx,
+        left,
+        row_w,
+        (0.0, ctx.vw),
+        list_y,
+        list_h,
+        content_h,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::gui) fn scroll_input_in(
+    scroll: &mut f32,
+    drag: &mut Option<f32>,
+    ctx: &ScreenCtx,
+    left: f32,
+    row_w: f32,
+    (list_x, list_w): (f32, f32),
+    list_y: f32,
+    list_h: f32,
+    content_h: f32,
+) {
     let max_scroll = (content_h - list_h).max(0.0);
     if max_scroll <= 0.0 {
         *scroll = 0.0;
@@ -281,7 +337,7 @@ pub(in crate::gui) fn scroll_input(
         return;
     }
 
-    if ctx.input.scroll != 0.0 && ctx.hovering(0.0, list_y, ctx.vw, list_h) {
+    if ctx.input.scroll != 0.0 && ctx.hovering(list_x, list_y, list_w, list_h) {
         *scroll -= ctx.input.scroll * SCROLL_RATE;
     }
 
@@ -295,7 +351,9 @@ pub(in crate::gui) fn scroll_input(
     );
 
     #[cfg(feature = "mobile_ui")]
-    content_drag(scroll, ctx, list_y, list_h, over_bar, max_scroll);
+    content_drag_in(
+        scroll, ctx, list_x, list_y, list_w, list_h, over_bar, max_scroll,
+    );
 
     if !ctx.input.left_down || ctx.input.left_release {
         *drag = None;
@@ -352,27 +410,23 @@ pub(in crate::gui) fn scroll_masked(
     rect: (f32, f32, f32, f32),
     content_h: f32,
 ) -> GuiInput {
-    scroll_input(scroll, drag, ctx, left, row_w, rect.1, rect.3, content_h);
+    scroll_input_in(
+        scroll,
+        drag,
+        ctx,
+        left,
+        row_w,
+        (rect.0, rect.2),
+        rect.1,
+        rect.3,
+        content_h,
+    );
     masked_input(ctx, rect, drag.is_some())
 }
 
 #[cfg_attr(not(any(feature = "shader_support", resource_packs)), allow(dead_code))]
 pub(in crate::gui) fn row_visible(y: f32, row_h: f32, list_y: f32, list_h: f32) -> bool {
     y + row_h >= list_y && y <= list_y + list_h
-}
-
-#[cfg(feature = "mobile_ui")]
-pub(in crate::gui) fn content_drag(
-    scroll: &mut f32,
-    ctx: &ScreenCtx,
-    list_y: f32,
-    list_h: f32,
-    over_bar: bool,
-    max_scroll: f32,
-) {
-    content_drag_in(
-        scroll, ctx, 0.0, list_y, ctx.vw, list_h, over_bar, max_scroll,
-    );
 }
 
 #[cfg(feature = "mobile_ui")]
@@ -388,33 +442,38 @@ pub(in crate::gui) fn content_drag_in(
     max_scroll: f32,
 ) {
     use crate::gui::widgets::touch_tap;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     const DRAG_THRESHOLD: f32 = 4.0;
+    const NO_OWNER: u32 = u32::MAX;
 
-    static ACTIVE: AtomicBool = AtomicBool::new(false);
+    static OWNER: AtomicU32 = AtomicU32::new(NO_OWNER);
     static LAST_Y: AtomicU32 = AtomicU32::new(0);
     static START_Y: AtomicU32 = AtomicU32::new(0);
 
     let Some(m) = ctx.mouse() else {
-        ACTIVE.store(false, Ordering::Relaxed);
+        OWNER.store(NO_OWNER, Ordering::Relaxed);
         return;
     };
 
     if !ctx.input.left_down || ctx.input.left_release {
-        ACTIVE.store(false, Ordering::Relaxed);
+        OWNER.store(NO_OWNER, Ordering::Relaxed);
         return;
     }
 
+    let me = list_x.to_bits();
     if ctx.input.left_click {
-        let inside = ctx.hovering(list_x, list_y, list_w, list_h);
-        ACTIVE.store(inside && !over_bar, Ordering::Relaxed);
-        LAST_Y.store(m.y.to_bits(), Ordering::Relaxed);
-        START_Y.store(m.y.to_bits(), Ordering::Relaxed);
+        if ctx.hovering(list_x, list_y, list_w, list_h) && !over_bar {
+            OWNER.store(me, Ordering::Relaxed);
+            LAST_Y.store(m.y.to_bits(), Ordering::Relaxed);
+            START_Y.store(m.y.to_bits(), Ordering::Relaxed);
+        } else if OWNER.load(Ordering::Relaxed) == me {
+            OWNER.store(NO_OWNER, Ordering::Relaxed);
+        }
         return;
     }
 
-    if !ACTIVE.load(Ordering::Relaxed) {
+    if OWNER.load(Ordering::Relaxed) != me {
         return;
     }
     let start = f32::from_bits(START_Y.load(Ordering::Relaxed));
@@ -453,7 +512,8 @@ pub(in crate::gui) fn draw_scrollbar(
 }
 
 const Y_GAME_ROW_0: f32 = 0.0;
-const Y_CHAT_HEADER: f32 = Y_GAME_ROW_0 + ROW_H;
+const Y_GAME_ROW_1: f32 = Y_GAME_ROW_0 + ROW_H;
+const Y_CHAT_HEADER: f32 = Y_GAME_ROW_1 + ROW_H;
 const Y_CHAT_ROW_0: f32 = Y_CHAT_HEADER + HEADER_PAD_TOP + HEADER_H;
 const Y_TOAST_HEADER: f32 = Y_CHAT_ROW_0 + ROW_H;
 const Y_TOAST_ROW_0: f32 = Y_TOAST_HEADER + HEADER_PAD_TOP + HEADER_H;
@@ -525,6 +585,131 @@ fn render_distance_label(value: i32) -> String {
     format!("{RENDER_DISTANCE}: {value} {CHUNKS}")
 }
 
+#[cfg(feature = "render_lod")]
+const LOD_HEADER: &str = "Far terrain";
+
+#[cfg(feature = "render_lod")]
+const LOD_HINT: [&str; 2] = [
+    "Real blocks draw to Render Distance, low-detail terrain to",
+    "LOD Distance, from chunks the server sent this session.",
+];
+
+#[cfg(feature = "render_lod")]
+const REAL_BLOCKS: &str = "(real blocks)";
+
+#[cfg(feature = "render_lod")]
+const LOD_DISTANCE: &str = "LOD Distance";
+
+#[cfg(feature = "render_lod")]
+const LOD_DISTANCE_FLOOR: &str = "(Render Distance + 1)";
+
+#[cfg(feature = "render_lod")]
+const LOD_QUALITY: &str = "LOD Detail";
+
+#[cfg(feature = "render_lod")]
+const LOD_DISTANCE_SLIDER_ID: u32 = 32;
+
+#[cfg(feature = "render_lod")]
+const LOD_QUALITY_SLIDER_ID: u32 = 33;
+
+#[cfg(feature = "render_lod")]
+const LOD_DISTANCE_STOPS: [u32; 44] = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+    28, 29, 30, 31, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096,
+];
+
+#[cfg(feature = "render_lod")]
+fn lod_distance_stop(chunks: u32) -> i32 {
+    LOD_DISTANCE_STOPS
+        .iter()
+        .position(|&s| s >= chunks)
+        .unwrap_or(LOD_DISTANCE_STOPS.len() - 1) as i32
+}
+
+#[cfg(feature = "render_lod")]
+fn lod_render_distance_label(value: i32) -> String {
+    format!("{} {REAL_BLOCKS}", render_distance_label(value))
+}
+
+#[cfg(feature = "render_lod")]
+fn lod_distance_label(stop: i32, render_distance: u32) -> String {
+    let chunks = LOD_DISTANCE_STOPS[(stop.max(0) as usize).min(LOD_DISTANCE_STOPS.len() - 1)];
+    let floor = render_distance + 1;
+    if chunks >= floor {
+        format!("{LOD_DISTANCE}: {chunks} {CHUNKS}")
+    } else {
+        format!("{LOD_DISTANCE}: {floor} {CHUNKS} {LOD_DISTANCE_FLOOR}")
+    }
+}
+
+#[cfg(feature = "render_lod")]
+fn lod_quality_label(index: i32) -> String {
+    let q = crate::gui::LodQuality::ALL
+        [(index.max(0) as usize).min(crate::gui::LodQuality::ALL.len() - 1)];
+    format!("{LOD_QUALITY}: {}", q.caption())
+}
+
+#[cfg(feature = "render_lod")]
+fn draw_lod_group(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    state: &mut GuiState,
+    cell: &dyn Fn(f32, f32) -> (f32, f32),
+    header: &dyn Fn(&mut Painter, f32, f32, &str),
+) {
+    header(p, Y_LOD_HEADER, HEADER_PAD_TOP, LOD_HEADER);
+
+    let (x, y) = cell(0.0, Y_LOD_HINT);
+    for (i, line) in LOD_HINT.iter().enumerate() {
+        p.text_str(line, x, y + i as f32 * (LINE_HEIGHT + 1.0), 0xA0A0A0, true);
+    }
+
+    let (x, y) = cell(0.0, Y_LOD_ROW_1);
+    let stop = lod_distance_stop(state.options.lod_distance);
+    let render_distance = state.options.render_distance;
+    let picked = Slider {
+        id: LOD_DISTANCE_SLIDER_ID,
+        x,
+        y,
+        w: BIG_W,
+        h: WIDGET_HEIGHT,
+        min: 0,
+        max: LOD_DISTANCE_STOPS.len() as i32 - 1,
+        value: stop,
+        label: |v| lod_distance_label(v, render_distance),
+    }
+    .draw(p, ctx)
+    .clamp(0, LOD_DISTANCE_STOPS.len() as i32 - 1);
+    if picked != stop {
+        state.options.lod_distance = LOD_DISTANCE_STOPS[picked as usize];
+        crate::gui::save_options(&state.options);
+    }
+
+    let (x, y) = cell(0.0, Y_LOD_ROW_2);
+    let all = crate::gui::LodQuality::ALL;
+    let current = all
+        .iter()
+        .position(|q| *q == state.options.lod_quality)
+        .unwrap_or(0) as i32;
+    let picked = Slider {
+        id: LOD_QUALITY_SLIDER_ID,
+        x,
+        y,
+        w: BIG_W,
+        h: WIDGET_HEIGHT,
+        min: 0,
+        max: all.len() as i32 - 1,
+        value: current,
+        label: lod_quality_label,
+    }
+    .draw(p, ctx)
+    .clamp(0, all.len() as i32 - 1);
+    if picked != current {
+        state.options.lod_quality = all[picked as usize];
+        crate::gui::save_options(&state.options);
+    }
+}
+
 fn brightness_label(value: i32) -> String {
     match value {
         0 => format!("{BRIGHTNESS}: {BRIGHTNESS_MOODY}"),
@@ -535,6 +720,14 @@ fn brightness_label(value: i32) -> String {
 
 fn toast_time_label(value: i32) -> String {
     format!("{TOAST_TIME}: {}.{}s", value / 10, value % 10)
+}
+
+fn max_framerate_label(fps: u32) -> String {
+    if fps >= crate::gui::MAX_FPS_UNLIMITED {
+        format!("{MAX_FRAMERATE}: {UNLIMITED}")
+    } else {
+        format!("{MAX_FRAMERATE}: {fps} fps")
+    }
 }
 
 fn gui_scale_label(value: i32) -> String {
@@ -571,52 +764,55 @@ pub(in crate::gui) fn draw_done(p: &mut Painter, ctx: &ScreenCtx) -> bool {
     .draw(p, ctx)
 }
 
+const VIDEO_KEYS: &[&str] = &[
+    "guiScale",
+    "fov",
+    "fovEffectScale",
+    "screenEffectScale",
+    "renderClouds",
+    "particles",
+    "renderDistance",
+    "gamma",
+    "antialiasing",
+    "ao",
+    "lightingEnabled",
+    "maxFps",
+    "vsync",
+    "fpsCounter",
+    "shaders",
+    "shaderQuality",
+    "playerShadows",
+    "touchMovement",
+    #[cfg(feature = "render_lod")]
+    "lodDistance",
+    #[cfg(feature = "render_lod")]
+    "lodQuality",
+];
+
+const GAME_KEYS: &[&str] = &[
+    "autoJump",
+    "toggleSprint",
+    "mainHand",
+    "allowSignedChat",
+    "toastAdvancement",
+    "toastRecipe",
+    "toastSystem",
+    "toastDisplayTime",
+];
+
 fn reset_video_options(o: &mut crate::gui::GuiOptions) {
-    o.gui_scale = 0;
-    o.fov = crate::renderer::systems::VANILLA_FOV_DEGREES as u32;
-    o.fov_effects = crate::gui::FOV_EFFECTS_DEFAULT;
-    o.screen_effects = crate::gui::SCREEN_EFFECTS_DEFAULT;
-    o.clouds = if cfg!(feature = "mobile_ui") {
-        crate::renderer::clouds::CloudStatus::Fast
-    } else {
-        Default::default()
-    };
-    o.particles = if cfg!(feature = "mobile_ui") {
-        crate::util::particles::ParticleStatus::Decreased
-    } else {
-        Default::default()
-    };
-    o.render_distance = crate::gui::RENDER_DISTANCE_DEFAULT;
-    o.gamma = crate::gui::GAMMA_DEFAULT;
-    o.antialiasing = false;
-    o.smooth_lighting = crate::gui::SMOOTH_LIGHTING_DEFAULT;
-    o.lighting_enabled = crate::gui::LIGHTING_ENABLED_DEFAULT;
-    o.max_fps = crate::gui::MAX_FPS_DEFAULT;
-    o.vsync = crate::gui::VSYNC_DEFAULT;
-    o.fps_counter = crate::gui::FPS_COUNTER_DEFAULT;
-    o.shaders_enabled = false;
-    o.shader_quality = Default::default();
-    o.player_shadows = false;
-    o.touch_movement = Default::default();
+    crate::gui::reset_options(o, |key| VIDEO_KEYS.contains(&key));
 }
 
 fn reset_game_options(o: &mut crate::gui::GuiOptions) {
-    o.auto_jump = crate::gui::AUTO_JUMP_DEFAULT;
-    o.main_hand_left = false;
-    #[cfg(feature = "skins")]
-    {
-        o.skin_parts = crate::client::skins::ALL_PARTS;
-    }
-    o.allow_signed_chat = false;
-    o.toast_advancement = true;
-    o.toast_recipe = true;
-    o.toast_system = true;
-    o.toast_time = crate::gui::TOAST_TIME_DEFAULT;
+    crate::gui::reset_options(o, |key| {
+        GAME_KEYS.contains(&key) || key.starts_with("modelPart_")
+    });
 }
 
 #[cfg(feature = "audio")]
 fn reset_audio_options(o: &mut crate::gui::GuiOptions) {
-    o.volumes = [crate::gui::VOLUME_DEFAULT; crate::audio::category::SoundCategory::COUNT];
+    crate::gui::reset_options(o, |key| key.starts_with("soundCategory_"));
 }
 
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
@@ -654,6 +850,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         {
             let r = crate::gui::hud_layout::Rect::new(x, row(i / 2), COLUMN_W, WIDGET_HEIGHT);
             match entry {
+                #[cfg(feature = "hud_editor")]
                 Entry::Hud => crate::gui::tutorial::mark(crate::gui::tutorial::Spot::EditHud, r),
                 Entry::Screen(Screen::ManageStorage) => {
                     crate::gui::tutorial::mark(crate::gui::tutorial::Spot::Storage, r)
@@ -670,12 +867,9 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                 state.video_scroll_drag = None;
                 state.game_scroll = 0.0;
                 state.game_scroll_drag = None;
-                #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-                {
-                    state.confirm_clear_assets = false;
-                }
                 #[cfg(feature = "asset_download")]
                 {
+                    state.confirm_clear_assets = false;
                     state.storage_nothing_missing = false;
                 }
                 state.controls_scroll = 0.0;
@@ -703,6 +897,12 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 }
 
 pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "asset_download"))]
+    if state.confirm_clear_assets {
+        draw_clear_assets(p, state, ctx);
+        return;
+    }
+
     draw_title(p, ctx, MANAGE_STORAGE_TITLE);
 
     let mut count = 1;
@@ -710,6 +910,9 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         count += 1;
     }
     if cfg!(feature = "asset_download") {
+        count += 1;
+    }
+    if cfg!(all(not(target_arch = "wasm32"), feature = "asset_download")) {
         count += 1;
     }
     if cfg!(feature = "tutorial") {
@@ -774,6 +977,15 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         }
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), feature = "asset_download"))]
+    {
+        let (x, y) = cell(next);
+        next += 1;
+        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, CLEAR_ASSETS).draw(p, ctx) {
+            state.confirm_clear_assets = true;
+        }
+    }
+
     if draw_done(p, ctx) {
         state.nav = Some(Screen::Options);
     }
@@ -827,24 +1039,31 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     header(p, Y_DISPLAY_HEADER, 0.0, DISPLAY_HEADER);
 
-    let max_fps_label = format!(
-        "{MAX_FRAMERATE}: {}",
-        if state.options.max_fps >= crate::gui::MAX_FPS_UNLIMITED {
-            UNLIMITED.to_string()
-        } else {
-            format!("{} fps", state.options.max_fps)
-        }
-    );
+    let stored_fps = state.options.max_fps;
+    let stored_step = (stored_fps / FRAMERATE_STEP) as i32;
     let (x, y) = cell(0.0, Y_DISPLAY_ROW_0);
-    let max_fps = Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &max_fps_label);
-    if max_fps.draw(p, ctx) {
-        const STEPS: [u32; 6] = [30, 60, 75, 120, 144, crate::gui::MAX_FPS_UNLIMITED];
-        let next = STEPS
-            .iter()
-            .find(|s| **s > state.options.max_fps)
-            .copied()
-            .unwrap_or(crate::gui::MAX_FPS_MIN);
-        state.options.max_fps = next;
+    let max_fps = Slider {
+        id: MAX_FRAMERATE_SLIDER_ID,
+        x,
+        y,
+        w: COLUMN_W,
+        h: WIDGET_HEIGHT,
+        min: (crate::gui::MAX_FPS_MIN / FRAMERATE_STEP) as i32,
+        max: (crate::gui::MAX_FPS_UNLIMITED / FRAMERATE_STEP) as i32,
+        value: stored_step,
+        label: |step: i32| {
+            let fps = if step == stored_step {
+                stored_fps
+            } else {
+                step.max(0) as u32 * FRAMERATE_STEP
+            };
+            max_framerate_label(fps)
+        },
+    };
+    let new_step = max_fps.draw(p, ctx);
+    if new_step != stored_step {
+        state.options.max_fps = (new_step.max(0) as u32 * FRAMERATE_STEP)
+            .clamp(crate::gui::MAX_FPS_MIN, crate::gui::MAX_FPS_UNLIMITED);
         crate::gui::save_options(&state.options);
     }
 
@@ -955,16 +1174,25 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     header(p, Y_QUALITY_HEADER, HEADER_PAD_TOP, QUALITY_HEADER);
 
+    #[cfg(feature = "render_lod")]
+    let (x, y) = cell(0.0, Y_LOD_ROW_0);
+    #[cfg(not(feature = "render_lod"))]
     let (x, y) = cell(0.0, Y_QUALITY_ROW_0);
     let render_distance = Slider {
         id: RENDER_DISTANCE_SLIDER_ID,
         x,
         y,
+        #[cfg(feature = "render_lod")]
+        w: BIG_W,
+        #[cfg(not(feature = "render_lod"))]
         w: COLUMN_W,
         h: WIDGET_HEIGHT,
         min: RENDER_DISTANCE_MIN,
         max: RENDER_DISTANCE_MAX,
         value: state.options.render_distance as i32,
+        #[cfg(feature = "render_lod")]
+        label: lod_render_distance_label,
+        #[cfg(not(feature = "render_lod"))]
         label: render_distance_label,
     };
     let new_render_distance = render_distance
@@ -974,6 +1202,9 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         state.options.render_distance = new_render_distance;
         crate::gui::save_options(&state.options);
     }
+
+    #[cfg(feature = "render_lod")]
+    draw_lod_group(p, ctx, state, &cell, &header);
 
     let clouds_label = format!("{CLOUDS}: {}", state.options.clouds.caption());
     let (x, y) = cell(1.0, Y_QUALITY_ROW_0);
@@ -1067,6 +1298,11 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             BIG_W,
             WIDGET_HEIGHT,
             crate::gui::shaderpacks::SHADER_PACKS,
+        );
+        #[cfg(feature = "tutorial")]
+        crate::gui::tutorial::mark(
+            crate::gui::tutorial::Spot::ShaderButton,
+            crate::gui::hud_layout::Rect::new(x, y, BIG_W, WIDGET_HEIGHT),
         );
         if packs.draw(p, ctx) {
             state.shaderpacks.refresh();
@@ -1324,7 +1560,7 @@ pub(in crate::gui) fn draw_bind_tooltip(
     }
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+#[cfg(feature = "asset_download")]
 fn draw_clear_assets(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     crate::gui::screens::dim_background(p, ctx.vw, ctx.vh);
     let buttons = [CLEAR_ASSETS_NO.to_owned(), CLEAR_ASSETS_YES.to_owned()];
@@ -1339,8 +1575,16 @@ fn draw_clear_assets(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     );
     match chosen {
         Some(1) => {
+            #[cfg(target_arch = "wasm32")]
             if let Err(e) = crate::client::assets::clear_web_cache() {
                 crate::log_warn!("assets", "could not clear the stored archive: {e}");
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Err(e) = crate::client::assets::clear_native_cache() {
+                    crate::log_warn!("assets", "the cached assets were not all cleared: {e}");
+                }
+                state.quit = true;
             }
             state.confirm_clear_assets = false;
         }
@@ -1400,6 +1644,20 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     );
     if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &caption).draw(p, ctx) {
         state.options.main_hand_left = !state.options.main_hand_left;
+        crate::gui::save_options(&state.options);
+    }
+
+    let (x, y) = cell(0.0, Y_GAME_ROW_1);
+    let caption = format!(
+        "{SPRINT_MODE}: {}",
+        if state.options.toggle_sprint {
+            SPRINT_MODE_TOGGLE
+        } else {
+            SPRINT_MODE_HOLD
+        }
+    );
+    if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &caption).draw(p, ctx) {
+        state.options.toggle_sprint = !state.options.toggle_sprint;
         crate::gui::save_options(&state.options);
     }
 
@@ -1728,11 +1986,24 @@ mod tests {
         assert_eq!(Y_DISPLAY_ROW_1, 38.0);
         assert_eq!(Y_DISPLAY_ROW_2, 63.0);
         assert_eq!(Y_DISPLAY_ROW_3, 88.0);
-        assert_eq!(Y_QUALITY_HEADER, 113.0);
-        assert_eq!(Y_QUALITY_ROW_0, 144.0);
+        const LOD_GROUP: f32 = if cfg!(feature = "render_lod") {
+            31.0 + 23.0 + 3.0 * ROW_H
+        } else {
+            0.0
+        };
+        #[cfg(feature = "render_lod")]
+        {
+            assert_eq!(Y_LOD_HEADER, 113.0);
+            assert_eq!(Y_LOD_HINT, 144.0);
+            assert_eq!(Y_LOD_ROW_0, 167.0);
+            assert_eq!(Y_LOD_ROW_1, 192.0);
+            assert_eq!(Y_LOD_ROW_2, 217.0);
+        }
+        assert_eq!(Y_QUALITY_HEADER, 113.0 + LOD_GROUP);
+        assert_eq!(Y_QUALITY_ROW_0, 144.0 + LOD_GROUP);
         const EXTRA_ROWS: f32 = cfg!(feature = "builtin_shaders") as u32 as f32
             + cfg!(feature = "shader_support") as u32 as f32;
-        assert_eq!(Y_RESET_ROW, 244.0 + EXTRA_ROWS * ROW_H);
+        assert_eq!(Y_RESET_ROW, 244.0 + EXTRA_ROWS * ROW_H + LOD_GROUP);
         assert_eq!(VIDEO_CONTENT_H, Y_RESET_ROW + ROW_H);
     }
 
@@ -1757,6 +2028,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(all(
+        feature = "render_lod",
+        any(feature = "builtin_shaders", feature = "shader_support")
+    )))]
     fn a_tall_window_has_nothing_to_scroll() {
         let (_, _, _, list_h) = LAYOUT.content_rect(854.0, 480.0);
         assert_eq!(list_h, 414.0);
@@ -1782,6 +2057,13 @@ mod tests {
     fn label_matches_the_option_stringifier() {
         assert_eq!(gui_scale_label(0), "GUI Scale: Auto");
         assert_eq!(gui_scale_label(3), "GUI Scale: 3");
+    }
+
+    #[test]
+    fn max_framerate_label_matches_vanilla() {
+        assert_eq!(max_framerate_label(10), "Max Framerate: 10 fps");
+        assert_eq!(max_framerate_label(144), "Max Framerate: 144 fps");
+        assert_eq!(max_framerate_label(260), "Max Framerate: Unlimited");
     }
 
     #[test]

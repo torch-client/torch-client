@@ -42,6 +42,14 @@ impl QuadMesh {
         self.quad(corners, [[0.0, 0.0]; 4], normal);
     }
 
+    pub fn positions(&self) -> &[[f32; 3]] {
+        &self.positions
+    }
+
+    pub fn uvs(&self) -> &[[f32; 2]] {
+        &self.uvs
+    }
+
     pub fn is_empty(&self) -> bool {
         self.positions.is_empty()
     }

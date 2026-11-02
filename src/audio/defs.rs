@@ -71,6 +71,12 @@ impl Defs {
         Ok(Defs { events })
     }
 
+    pub fn key(&self, event: &str) -> Option<&str> {
+        self.events
+            .get_key_value(event)
+            .map(|(key, _)| key.as_str())
+    }
+
     pub fn len(&self) -> usize {
         self.events.len()
     }
@@ -88,10 +94,18 @@ impl Defs {
         keys
     }
 
+    #[cfg(test)]
     pub fn pick(&self, event: &str, roll: &mut impl FnMut(u32) -> u32) -> Option<&Entry> {
-        let mut name = event;
+        self.resolve(event, roll).map(|(_, entry)| entry)
+    }
+
+    pub fn resolve(
+        &self,
+        event: &str,
+        roll: &mut impl FnMut(u32) -> u32,
+    ) -> Option<(&str, &Entry)> {
+        let (key, mut event) = self.events.get_key_value(event)?;
         for _ in 0..MAX_INDIRECTION {
-            let event = self.events.get(name)?;
             let mut remaining = roll(event.total_weight.max(1)) as i64;
             let mut chosen = event.entries.last()?;
             for entry in &event.entries {
@@ -102,8 +116,8 @@ impl Defs {
                 }
             }
             match chosen.kind {
-                EntryKind::File => return Some(chosen),
-                EntryKind::Event => name = &chosen.target,
+                EntryKind::File => return Some((key, chosen)),
+                EntryKind::Event => event = self.events.get(&*chosen.target)?,
             }
         }
         None

@@ -1,9 +1,10 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use wasm_bindgen::{JsCast, JsValue, prelude::Closure};
+use wasm_bindgen::{JsCast, prelude::Closure};
 
 use super::msg::{FromWorker, ToWorker};
+use crate::platform::describe_js as describe;
 use crate::{log_error, log_info, log_warn};
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -31,7 +32,17 @@ thread_local! {
 struct Handle {
     worker: web_sys::Worker,
     _message: Closure<dyn FnMut(web_sys::MessageEvent)>,
-    _error: Closure<dyn FnMut(web_sys::ErrorEvent)>,
+    _error: Closure<dyn FnMut(web_sys::Event)>,
+}
+
+fn worker_url() -> String {
+    let glue = js_sys::Reflect::get(&js_sys::global(), &"torchGlue".into())
+        .ok()
+        .and_then(|v| v.as_string());
+    match glue {
+        Some(glue) => format!("./worker.js?{}", glue.trim_start_matches("./")),
+        None => "./worker.js".to_string(),
+    }
 }
 
 pub fn spawn(assets: &[u8]) -> bool {
@@ -40,7 +51,7 @@ pub fn spawn(assets: &[u8]) -> bool {
     }
     let options = web_sys::WorkerOptions::new();
     options.set_type(web_sys::WorkerType::Module);
-    let worker = match web_sys::Worker::new_with_options("./worker.js", &options) {
+    let worker = match web_sys::Worker::new_with_options(&worker_url(), &options) {
         Ok(worker) => worker,
         Err(e) => {
             log_warn!(
@@ -56,12 +67,15 @@ pub fn spawn(assets: &[u8]) -> bool {
         Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |e: web_sys::MessageEvent| {
             on_message(e)
         });
-    let error = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(|e: web_sys::ErrorEvent| {
+    let error = Closure::<dyn FnMut(web_sys::Event)>::new(|e: web_sys::Event| {
         deactivate();
+        let message = js_sys::Reflect::get(&e, &"message".into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .unwrap_or_else(|| "the script did not load".to_string());
         log_error!(
             "mesh",
-            "the mesh worker failed ({}); meshing falls back to the frame",
-            e.message()
+            "the mesh worker failed ({message}); meshing falls back to the frame"
         );
     });
     worker.set_onmessage(Some(message.as_ref().unchecked_ref()));
@@ -191,17 +205,6 @@ fn apply(msg: FromWorker) {
             }
         }
     }
-}
-
-fn describe(value: &JsValue) -> String {
-    value
-        .as_string()
-        .or_else(|| {
-            js_sys::Reflect::get(value, &"message".into())
-                .ok()?
-                .as_string()
-        })
-        .unwrap_or_else(|| format!("{value:?}"))
 }
 
 fn supersede(

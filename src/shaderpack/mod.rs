@@ -2,6 +2,8 @@ pub(crate) const ROOT: &str = "shaders";
 
 pub(crate) const SOURCE_EXTENSIONS: &[&str] = &[".glsl", ".vsh", ".fsh", ".gsh", ".csh"];
 
+pub(crate) static FAILED: crate::util::pack::Failed = crate::util::pack::Failed::new();
+
 pub(crate) mod backend;
 pub(crate) mod blockids;
 pub(crate) mod customimages;

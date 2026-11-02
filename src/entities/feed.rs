@@ -60,6 +60,7 @@ pub struct TickInput {
     pub head_targets: [Option<[f64; 3]>; 2],
     pub shared: std::sync::Arc<ExtrasShared>,
     pub eating: bool,
+    pub driven: bool,
 }
 
 impl TickInput {
@@ -107,6 +108,7 @@ impl TickInput {
             head_targets: [None; 2],
             shared: std::sync::Arc::new(ExtrasShared::default()),
             eating: false,
+            driven: false,
         }
     }
 }
@@ -140,6 +142,14 @@ const MAX_SWELL: i32 = 30;
 
 const EAT_ANIMATION_TICKS: i32 = 40;
 
+pub(crate) fn stand_anim_step(stand: f32, standing: bool) -> f32 {
+    if standing {
+        (stand + (1.0 - stand) * 0.4 + 0.05).min(1.0)
+    } else {
+        (stand + (0.8 * stand * stand * stand - stand) * 0.6 - 0.05).max(0.0)
+    }
+}
+
 const PADDLE_STEP: f32 = std::f32::consts::FRAC_PI_8;
 
 const WIGGLE_TICKS: i32 = 5;
@@ -172,34 +182,15 @@ pub fn dragon_phase_is_sitting(phase: i32) -> bool {
 
 const SHULKER_TELEPORT_TICKS: i32 = 6;
 
-fn interpolation_for(kind: EntityKind, is_living: bool) -> Option<Interpolation> {
+pub(crate) fn interpolation_for(kind: EntityKind, is_living: bool) -> Option<Interpolation> {
     if matches!(kind, EntityKind::Shulker) {
         return None;
     }
     let interpolated = is_living
+        || crate::play::riding::Hull::of(kind).is_some()
         || matches!(
             kind,
-            EntityKind::OakBoat
-                | EntityKind::SpruceBoat
-                | EntityKind::BirchBoat
-                | EntityKind::JungleBoat
-                | EntityKind::AcaciaBoat
-                | EntityKind::CherryBoat
-                | EntityKind::DarkOakBoat
-                | EntityKind::PaleOakBoat
-                | EntityKind::MangroveBoat
-                | EntityKind::OakChestBoat
-                | EntityKind::SpruceChestBoat
-                | EntityKind::BirchChestBoat
-                | EntityKind::JungleChestBoat
-                | EntityKind::AcaciaChestBoat
-                | EntityKind::CherryChestBoat
-                | EntityKind::DarkOakChestBoat
-                | EntityKind::PaleOakChestBoat
-                | EntityKind::MangroveChestBoat
-                | EntityKind::BambooRaft
-                | EntityKind::BambooChestRaft
-                | EntityKind::Minecart
+            EntityKind::Minecart
                 | EntityKind::ChestMinecart
                 | EntityKind::CommandBlockMinecart
                 | EntityKind::FurnaceMinecart
@@ -239,6 +230,9 @@ struct KindAnim {
     swell_counter: i32,
     paddle: [f32; 2],
     paddle_old: [f32; 2],
+    bubble_multiplier: f32,
+    bubble_angle: f32,
+    bubble_angle_old: f32,
     eat_ticks: i32,
     shaking: bool,
     shake_anim: f32,
@@ -335,6 +329,9 @@ impl KindAnim {
         swell_counter: 0,
         paddle: [0.0; 2],
         paddle_old: [0.0; 2],
+        bubble_multiplier: 0.0,
+        bubble_angle: 0.0,
+        bubble_angle_old: 0.0,
         eat_ticks: 0,
         shaking: false,
         shake_anim: 0.0,
@@ -521,6 +518,9 @@ impl EntityAnim {
                     swell_counter: 0,
                     paddle: [0.0; 2],
                     paddle_old: [0.0; 2],
+                    bubble_multiplier: 0.0,
+                    bubble_angle: 0.0,
+                    bubble_angle_old: 0.0,
                     eat_ticks: 0,
                     shaking: false,
                     shake_anim: 0.0,
@@ -703,7 +703,14 @@ impl EntityAnim {
             self.started = true;
         }
 
-        let correction = self.handle_movement_packets(&input);
+        let correction = if input.driven {
+            if let Some(interp) = self.core.interp.as_mut() {
+                interp.cancel();
+            }
+            None
+        } else {
+            self.handle_movement_packets(input)
+        };
 
         if let Some((pos, y_rot, x_rot)) = correction {
             self.set_pos(pos, input.is_passenger);
@@ -726,6 +733,16 @@ impl EntityAnim {
             k.paddle_old = k.paddle;
         }
         self.core.step_interpolation();
+
+        if input.driven {
+            self.set_pos(input.pos, input.is_passenger);
+            self.core.y_rot = input.y_rot;
+            self.core.x_rot = input.x_rot;
+            if self.is_living {
+                self.core.body_rot = input.y_rot;
+                self.core.rotate_head(input.y_rot, false);
+            }
+        }
 
         if self.motion != Motion::Server && input.simulate {
             if input.shared.in_ground {
@@ -769,11 +786,7 @@ impl EntityAnim {
                 k.peek = (k.peek + 0.05).clamp(0.0, input.peek_target);
             }
 
-            if input.shared.rearing {
-                k.jump = (k.jump + (1.0 - k.jump) * 0.4 + 0.05).min(1.0);
-            } else {
-                k.jump = (k.jump + (0.8 * k.jump * k.jump * k.jump - k.jump) * 0.6 - 0.05).max(0.0);
-            }
+            k.jump = stand_anim_step(k.jump, input.shared.rearing);
 
             for (i, paddling) in [input.paddling_left, input.paddling_right]
                 .into_iter()
@@ -785,6 +798,15 @@ impl EntityAnim {
                     k.paddle[i] = 0.0;
                 }
             }
+
+            let step = if input.shared.bubble_time > 0.0 {
+                0.05
+            } else {
+                -0.1
+            };
+            k.bubble_multiplier = (k.bubble_multiplier + step).clamp(0.0, 1.0);
+            k.bubble_angle_old = k.bubble_angle;
+            k.bubble_angle = 10.0 * (0.5 * self.ticks as f64).sin() as f32 * k.bubble_multiplier;
 
             if k.eat_ticks > 0 {
                 k.eat_ticks -= 1;
@@ -837,7 +859,7 @@ impl EntityAnim {
             ];
             crate::entities::models::humanoid::elytra::tick_angles(
                 &mut k.elytra,
-                input.pose == Pose::FallFlying,
+                input.shared.fall_flying,
                 input.pose == Pose::Crouching,
                 step,
             );
@@ -1124,6 +1146,12 @@ impl EntityAnim {
         }
 
         self.ticks = self.ticks.wrapping_add(1);
+        let swing_ticks = if self.core.swing_left() {
+            0
+        } else {
+            input.shared.main_hand.swing_ticks
+        };
+        self.core.set_swing_duration(swing_ticks);
         self.core.tick_counters(input.dead);
 
         if self.is_living {
@@ -1217,7 +1245,7 @@ impl EntityAnim {
         self.with_kind(|k| k.wiggle_ticks = 0);
     }
 
-    pub fn position(&self, partial: f32) -> [f32; 3] {
+    pub fn position(&self, partial: f32) -> [f64; 3] {
         self.core.position(partial)
     }
 
@@ -1230,6 +1258,10 @@ impl EntityAnim {
 
     pub fn bounding_box_height(&self) -> f32 {
         self.sampled.bounding_box_height
+    }
+
+    pub fn eye_height(&self) -> f32 {
+        self.sampled.eye_height
     }
 
     pub fn is_invisible(&self) -> bool {
@@ -1265,6 +1297,8 @@ impl EntityAnim {
         let x_rot = lerp(partial, self.core.x_rot_old, self.core.x_rot);
         let mut extras = Extras::with_shared(self.sampled.shared.clone());
         extras.eating = self.sampled.eating;
+        extras.vehicle_hurt = extras.hurt_time - partial;
+        extras.vehicle_damage = (extras.damage - partial).max(0.0);
         extras.parrot_pose = if self.sampled.shared.sitting {
             2
         } else if self.sampled.on_ground {
@@ -1288,6 +1322,7 @@ impl EntityAnim {
             } else {
                 0.0
             };
+            extras.bubble_angle = lerp(partial, k.bubble_angle_old, k.bubble_angle);
             extras.eating |= k.eat_ticks > 0;
             extras.render_offset = self.render_offset(partial);
 
@@ -1470,6 +1505,7 @@ impl EntityAnim {
             swing_left: self.core.swing_left(),
             extras,
             carrier: None,
+            frozen_light: None,
         }
     }
 }

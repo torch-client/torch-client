@@ -171,28 +171,61 @@ impl ItemStackData {
     }
 }
 
-impl AzBuf for ItemStack {
-    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+impl ItemStack {
+    pub fn read_strict(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        Self::read_counted(buf, true)
+    }
+
+    fn read_counted(buf: &mut Cursor<&[u8]>, strict: bool) -> Result<Self, BufReadError> {
         let count = i32::azalea_read_var(buf)?;
         if count <= 0 {
-            Ok(ItemStack::Empty)
-        } else {
-            let kind = ItemKind::azalea_read(buf)?;
-            let component_patch = match DataComponentPatch::azalea_read(buf) {
-                Ok(patch) => patch,
-                Err(e) => {
-                    tracing::warn!(
-                        "dropping unparseable item component patch for {kind:?} (keeping count/kind): {e}"
-                    );
-                    DataComponentPatch::default()
-                }
-            };
-            Ok(ItemStack::from(ItemStackData {
-                count,
-                kind,
-                component_patch,
-            }))
+            return Ok(ItemStack::Empty);
         }
+        let kind = ItemKind::azalea_read(buf)?;
+        let component_patch = match DataComponentPatch::azalea_read(buf) {
+            Ok(patch) => patch,
+            Err(e) if strict => return Err(e),
+            Err(e) => {
+                tracing::warn!(
+                    "dropping unparseable item component patch for {kind:?} (keeping count/kind): {e}"
+                );
+                DataComponentPatch::default()
+            }
+        };
+        Ok(ItemStack::from(ItemStackData {
+            count,
+            kind,
+            component_patch,
+        }))
+    }
+
+    pub fn read_template(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        let kind = ItemKind::azalea_read(buf)?;
+        let count = i32::azalea_read_var(buf)?;
+        let component_patch = DataComponentPatch::azalea_read(buf)?;
+        Ok(ItemStack::from(ItemStackData {
+            count,
+            kind,
+            component_patch,
+        }))
+    }
+
+    pub fn write_template(&self, buf: &mut impl Write) -> io::Result<()> {
+        let ItemStack::Present(i) = self else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "an ItemStackTemplate cannot be empty",
+            ));
+        };
+        i.kind.azalea_write(buf)?;
+        i.count.azalea_write_var(buf)?;
+        i.component_patch.azalea_write(buf)
+    }
+}
+
+impl AzBuf for ItemStack {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        Self::read_counted(buf, false)
     }
     fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
         match self {
@@ -286,6 +319,12 @@ impl DataComponentPatch {
             )
         })
     }
+    pub fn serializable(&self) -> impl Iterator<Item = (DataComponentKind, Option<SerializeComponent<'_>>)> + '_ {
+        self.components
+            .iter()
+            .map(|(&kind, c)| (kind, c.as_ref().map(|value| SerializeComponent { kind, value })))
+    }
+
     pub unsafe fn unchecked_insert_component(
         &mut self,
         kind: DataComponentKind,
@@ -295,6 +334,17 @@ impl DataComponentPatch {
         if let Some(Some(mut existing)) = existing {
             unsafe { existing.drop_as(kind) };
         }
+    }
+}
+
+pub struct SerializeComponent<'a> {
+    kind: DataComponentKind,
+    value: &'a DataComponentUnion,
+}
+
+impl Serialize for SerializeComponent<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        unsafe { self.value.serialize_as(serializer, self.kind) }
     }
 }
 

@@ -126,7 +126,7 @@ pub fn tick(bot: &azalea::Client, shared: &Arc<crate::session::SharedMutex>) {
     let (centre, centre_chunk) = {
         let s = shared.lock().unwrap();
         let p = s.session.player_pos;
-        let centre = [p[0] as i32, p[1] as i32, p[2] as i32];
+        let centre = p.map(|v| v.floor() as i32);
         (
             centre,
             ChunkPos::new(centre[0].div_euclid(16), centre[2].div_euclid(16)),

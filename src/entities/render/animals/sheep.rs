@@ -4,25 +4,22 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::sheep;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 
 use super::dye;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Sheep,
-        RenderSpec::new("sheep", sheep::layer, adult_texture, sheep::setup_anim)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Sheep,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Sheep],
+        RenderSpec::new("sheep", sheep::layer, adult_texture, sheep::setup_anim),
         RenderSpec::new(
             "sheep_baby",
             sheep::baby_layer,
             baby_texture,
             sheep::setup_anim,
-        )
-        .with_visible(|st| st.extras.is_baby),
+        ),
     );
     registry.add(
         EntityKind::Sheep,

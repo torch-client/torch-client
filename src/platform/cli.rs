@@ -433,12 +433,16 @@ fn delete(scope: Scope, assume_yes: bool) -> i32 {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     match scope {
-        Scope::Config => files.extend(
-            crate::platform::storage::ALL
-                .iter()
-                .map(|slot| slot.path())
-                .filter(|path| path.exists()),
-        ),
+        Scope::Config => {
+            files.extend(
+                crate::platform::storage::ALL
+                    .iter()
+                    .map(|slot| slot.path())
+                    .filter(|path| path.exists()),
+            );
+            #[cfg(lua_mods)]
+            dirs.push(config.join(crate::modules::script::MOD_DATA));
+        }
         Scope::Assets => match asset_store() {
             Some(store) => dirs.push(store),
             None => {

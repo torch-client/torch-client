@@ -22,6 +22,7 @@ pub struct Attributes {
     pub entity_interaction_range: AttributeInstance,
 
     pub step_height: AttributeInstance,
+    pub scale: AttributeInstance,
 }
 
 impl Attributes {
@@ -39,6 +40,7 @@ impl Attributes {
             Attribute::StepHeight => &mut self.step_height,
             Attribute::BlockBreakSpeed => &mut self.block_break_speed,
             Attribute::SubmergedMiningSpeed => &mut self.submerged_mining_speed,
+            Attribute::Scale => &mut self.scale,
             _ => return None,
         };
         Some(value)

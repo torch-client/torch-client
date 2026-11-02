@@ -996,7 +996,7 @@ fn table() -> &'static Table {
 
 pub struct Tints {
     ratios: Vec<BiomeRatio>,
-    #[cfg(feature = "shader_support")]
+    #[cfg(any(feature = "shader_support", lua_mods))]
     absolute: Vec<BiomeTint>,
     plains: BiomeTint,
 }
@@ -1045,7 +1045,7 @@ impl Tints {
             .collect();
         Some(Tints {
             ratios,
-            #[cfg(feature = "shader_support")]
+            #[cfg(any(feature = "shader_support", lua_mods))]
             absolute,
             plains,
         })
@@ -1142,6 +1142,27 @@ pub fn pack_water(idx: u8) -> [f32; 3] {
 #[cfg(feature = "shader_support")]
 pub fn pack_dry_foliage(idx: u8) -> [f32; 3] {
     pack_colour(idx, |t| t.dry_foliage)
+}
+
+#[cfg(lua_mods)]
+#[derive(Clone, Copy)]
+pub enum TintSource {
+    Grass,
+    Foliage,
+    Water,
+}
+
+#[cfg(lua_mods)]
+pub fn biome_rgb(idx: u8, source: TintSource) -> Option<u32> {
+    with_tints(|t| {
+        let tint = t?.absolute.get(idx as usize)?;
+        let [r, g, b] = match source {
+            TintSource::Grass => tint.grass,
+            TintSource::Foliage => tint.foliage,
+            TintSource::Water => tint.water,
+        };
+        Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
+    })
 }
 
 pub fn grass_ratio(idx: u8) -> [f32; 3] {

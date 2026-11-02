@@ -164,11 +164,11 @@ mod tests {
         }
 
         for material in [
-            "minecraft:copper",
-            "minecraft:iron",
-            "minecraft:gold",
-            "minecraft:diamond",
-            "minecraft:netherite",
+            "minecraft:copper_nautilus_armor",
+            "minecraft:iron_nautilus_armor",
+            "minecraft:golden_nautilus_armor",
+            "minecraft:diamond_nautilus_armor",
+            "minecraft:netherite_nautilus_armor",
         ] {
             let mut st = EntityState::new(0, EntityKind::Nautilus);
             st.extras.shared_mut().body_armor = Some(material);
@@ -271,7 +271,8 @@ mod tests {
                     st.extras.playing_dead_factor = if flag { 1.0 } else { 0.0 };
                     st.extras.on_ground_factor = if flag { 1.0 } else { 0.0 };
                     st.extras.moving_factor = if flag { 1.0 } else { 0.0 };
-                    st.extras.shared_mut().body_armor = flag.then_some("minecraft:copper");
+                    st.extras.shared_mut().body_armor =
+                        flag.then_some("minecraft:copper_nautilus_armor");
                     for pose in [
                         crate::entities::Pose::Standing,
                         crate::entities::Pose::Croaking,

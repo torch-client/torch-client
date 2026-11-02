@@ -24,9 +24,9 @@ const SPYGLASS_ARM_ROT_X: f32 = 1.919_862_2;
 const SPYGLASS_ARM_CROUCH_ROT_X: f32 = 0.261_799_4;
 
 const HIGHEST_SHIELD_BLOCKING_ANGLE: f32 = -1.396_263_4;
-const LOWEST_SHIELD_BLOCKING_ANGLE: f32 = 0.436_332_32;
+pub(crate) const LOWEST_SHIELD_BLOCKING_ANGLE: f32 = 0.436_332_32;
 
-const HORIZONTAL_SHIELD_MOVEMENT_LIMIT: f32 = 0.523_598_8;
+pub(crate) const HORIZONTAL_SHIELD_MOVEMENT_LIMIT: f32 = 0.523_598_8;
 
 const TOOT_HORN_XROT_BASE: f32 = 1.483_529_8;
 const TOOT_HORN_YROT_BASE: f32 = 0.523_598_8;
@@ -491,27 +491,64 @@ fn pose_blocking_arm(arm: &mut PartState, head: &PartState, right: bool) {
         );
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ArmInputs {
+    pub ticks_using_item: f32,
+    pub max_crossbow_charge: f32,
+    pub crouching: bool,
+    pub fall_flying: bool,
+    pub swim_amount: f32,
+    pub charging: [Option<crate::items::kinetic::Kinetic>; 2],
+}
+
+impl ArmInputs {
+    fn of(st: &EntityState) -> ArmInputs {
+        ArmInputs {
+            ticks_using_item: st.extras.ticks_using_item,
+            max_crossbow_charge: st.extras.max_crossbow_charge,
+            crouching: st.extras.crouching,
+            fall_flying: st.extras.fall_flying,
+            swim_amount: st.extras.swim_amount,
+            charging: [None; 2],
+        }
+    }
+}
+
 fn spear_third_person_hand_use(
     arm: &mut PartState,
     head: &PartState,
-    st: &EntityState,
+    inputs: &ArmInputs,
     holding_in_right_arm: bool,
 ) {
     let invert = if holding_in_right_arm { 1.0 } else { -1.0 };
     arm.y_rot = -0.1 * invert + head.y_rot;
     arm.x_rot = -FRAC_PI_2 + head.x_rot + 0.8;
-    if st.extras.fall_flying || st.extras.swim_amount > 0.0 {
+    if inputs.fall_flying || inputs.swim_amount > 0.0 {
         arm.x_rot -= 0.959_931_1;
     }
     arm.y_rot = DEG_TO_RAD * (RAD_TO_DEG * arm.y_rot).clamp(-60.0, 60.0);
     arm.x_rot = DEG_TO_RAD * (RAD_TO_DEG * arm.x_rot).clamp(-120.0, 30.0);
+    let Some(kinetic) = inputs.charging[usize::from(!holding_in_right_arm)] else {
+        return;
+    };
+    if inputs.ticks_using_item <= 0.0 {
+        return;
+    }
+    let p = kinetic.use_params(inputs.ticks_using_item);
+    arm.y_rot += -invert * p.sway_fast * DEG_TO_RAD * p.sway_intensity;
+    arm.z_rot += -invert * p.sway_slow * DEG_TO_RAD * p.sway_intensity * 0.5;
+    arm.x_rot += DEG_TO_RAD
+        * (-40.0 * p.raise_start + 30.0 * p.raise_middle - 20.0 * p.raise_end
+            + 20.0 * p.lower
+            + 10.0 * p.raise_back
+            + 0.6 * p.sway_slow * p.sway_intensity);
 }
 
-fn pose_arm(
+pub(crate) fn pose_arm(
     arm: &mut PartState,
     other: &mut PartState,
     head: &PartState,
-    st: &EntityState,
+    inputs: &ArmInputs,
     pose: ArmPose,
     right: bool,
 ) {
@@ -541,8 +578,8 @@ fn pose_arm(
             animate_crossbow_charge(
                 arm,
                 other,
-                st.extras.max_crossbow_charge,
-                st.extras.ticks_using_item,
+                inputs.max_crossbow_charge,
+                inputs.ticks_using_item,
                 right,
             );
         }
@@ -552,7 +589,7 @@ fn pose_arm(
         ArmPose::Spyglass => {
             arm.x_rot = (head.x_rot
                 - SPYGLASS_ARM_ROT_X
-                - if st.extras.crouching {
+                - if inputs.crouching {
                     SPYGLASS_ARM_CROUCH_ROT_X
                 } else {
                     0.0
@@ -569,50 +606,71 @@ fn pose_arm(
             arm.y_rot = 0.0;
         }
         ArmPose::Spear => {
-            spear_third_person_hand_use(arm, head, st, right);
+            spear_third_person_hand_use(arm, head, inputs, right);
         }
     }
 }
 
 pub fn setup_attack_animation(l: &mut Limbs, st: &EntityState, poses: ArmPoses) {
-    let attack_time = st.attack_time;
-    if attack_time <= 0.0 {
+    if st.attack_time <= 0.0 {
         return;
     }
-    l.body.y_rot = (attack_time.sqrt() * TAU).sin() * 0.2;
-    if st.swing_left {
-        l.body.y_rot *= -1.0;
-    }
-    let age_scale = st.age_scale;
-    l.right_arm.z = l.body.y_rot.sin() * 5.0 * age_scale;
-    l.right_arm.x = -l.body.y_rot.cos() * 5.0 * age_scale;
-    l.left_arm.z = -l.body.y_rot.sin() * 5.0 * age_scale;
-    l.left_arm.x = l.body.y_rot.cos() * 5.0 * age_scale;
-    l.right_arm.y_rot += l.body.y_rot;
-    l.left_arm.y_rot += l.body.y_rot;
-    l.left_arm.x_rot += l.body.y_rot;
-
     let stab = if st.swing_left {
         poses.left
     } else {
         poses.right
     } == ArmPose::Spear;
-    let body_yaw = l.body.y_rot;
+    let head_x_rot = l.head.x_rot;
+    attack_swing(
+        &mut l.body,
+        &mut l.right_arm,
+        &mut l.left_arm,
+        head_x_rot,
+        st.attack_time,
+        st.swing_left,
+        st.age_scale,
+        stab,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attack_swing(
+    body: &mut PartState,
+    right_arm: &mut PartState,
+    left_arm: &mut PartState,
+    head_x_rot: f32,
+    attack_time: f32,
+    swing_left: bool,
+    age_scale: f32,
+    stab: bool,
+) {
+    body.y_rot = (attack_time.sqrt() * TAU).sin() * 0.2;
+    if swing_left {
+        body.y_rot *= -1.0;
+    }
+    right_arm.z = body.y_rot.sin() * 5.0 * age_scale;
+    right_arm.x = -body.y_rot.cos() * 5.0 * age_scale;
+    left_arm.z = -body.y_rot.sin() * 5.0 * age_scale;
+    left_arm.x = body.y_rot.cos() * 5.0 * age_scale;
+    right_arm.y_rot += body.y_rot;
+    left_arm.y_rot += body.y_rot;
+    left_arm.x_rot += body.y_rot;
+
+    let body_yaw = body.y_rot;
     if stab {
-        l.right_arm.y_rot -= body_yaw;
-        l.left_arm.y_rot -= body_yaw;
-        l.left_arm.x_rot -= body_yaw;
+        right_arm.y_rot -= body_yaw;
+        left_arm.y_rot -= body_yaw;
+        left_arm.x_rot -= body_yaw;
         let prepare = in_out_sine(progress(attack_time, 0.0, 0.05));
         let attack = in_quad(progress(attack_time, 0.05, 0.2));
         let retract = in_out_expo(progress(attack_time, 0.4, 1.0));
-        let arm = l.arm(st.swing_left);
+        let arm = if swing_left { left_arm } else { right_arm };
         arm.x_rot += (90.0 * prepare - 120.0 * attack + 30.0 * retract) * DEG_TO_RAD;
     } else {
         let swing = out_quart(attack_time);
         let arc = (swing * PI).sin();
-        let head_x_rot = l.head.x_rot;
         let aim = (attack_time * PI).sin() * -(head_x_rot - 0.7) * 0.75;
-        let arm = l.arm(st.swing_left);
+        let arm = if swing_left { left_arm } else { right_arm };
         arm.x_rot -= arc * 1.2 + aim;
         arm.y_rot += body_yaw * 2.0;
         arm.z_rot += (attack_time * PI).sin() * -0.4;
@@ -671,43 +729,17 @@ pub fn pose_humanoid_with(
         right_handed == two_handed
     };
     let head = l.head;
+    let inputs = ArmInputs::of(st);
+    let (right, left) = (&mut l.right_arm, &mut l.left_arm);
     if right_first {
-        pose_arm(
-            &mut l.right_arm,
-            &mut l.left_arm,
-            &head,
-            st,
-            poses.right,
-            true,
-        );
+        pose_arm(right, left, &head, &inputs, poses.right, true);
         if !poses.right.affects_offhand_pose() {
-            pose_arm(
-                &mut l.left_arm,
-                &mut l.right_arm,
-                &head,
-                st,
-                poses.left,
-                false,
-            );
+            pose_arm(left, right, &head, &inputs, poses.left, false);
         }
     } else {
-        pose_arm(
-            &mut l.left_arm,
-            &mut l.right_arm,
-            &head,
-            st,
-            poses.left,
-            false,
-        );
+        pose_arm(left, right, &head, &inputs, poses.left, false);
         if !poses.left.affects_offhand_pose() {
-            pose_arm(
-                &mut l.right_arm,
-                &mut l.left_arm,
-                &head,
-                st,
-                poses.right,
-                true,
-            );
+            pose_arm(right, left, &head, &inputs, poses.right, true);
         }
     }
 
@@ -747,35 +779,13 @@ pub fn pose_humanoid_with(
             0.0
         };
         if !st.extras.using_item {
-            let reach = quadratic_arm_update(swim_pos) / quadratic_arm_update(14.0);
-            if swim_pos < 14.0 {
-                l.left_arm.x_rot = rot_lerp_rad(left_swim, l.left_arm.x_rot, 0.0);
-                l.right_arm.x_rot = lerp(right_swim, l.right_arm.x_rot, 0.0);
-                l.left_arm.y_rot = rot_lerp_rad(left_swim, l.left_arm.y_rot, PI);
-                l.right_arm.y_rot = lerp(right_swim, l.right_arm.y_rot, PI);
-                l.left_arm.z_rot =
-                    rot_lerp_rad(left_swim, l.left_arm.z_rot, PI + 1.870_796_4 * reach);
-                l.right_arm.z_rot = lerp(right_swim, l.right_arm.z_rot, PI - 1.870_796_4 * reach);
-            } else if swim_pos < 22.0 {
-                let t = (swim_pos - 14.0) / 8.0;
-                l.left_arm.x_rot = rot_lerp_rad(left_swim, l.left_arm.x_rot, FRAC_PI_2 * t);
-                l.right_arm.x_rot = lerp(right_swim, l.right_arm.x_rot, FRAC_PI_2 * t);
-                l.left_arm.y_rot = rot_lerp_rad(left_swim, l.left_arm.y_rot, PI);
-                l.right_arm.y_rot = lerp(right_swim, l.right_arm.y_rot, PI);
-                l.left_arm.z_rot =
-                    rot_lerp_rad(left_swim, l.left_arm.z_rot, 5.012_389 - 1.870_796_4 * t);
-                l.right_arm.z_rot =
-                    lerp(right_swim, l.right_arm.z_rot, 1.270_796_3 + 1.870_796_4 * t);
-            } else if swim_pos < 26.0 {
-                let t = (swim_pos - 22.0) / 4.0;
-                l.left_arm.x_rot =
-                    rot_lerp_rad(left_swim, l.left_arm.x_rot, FRAC_PI_2 - FRAC_PI_2 * t);
-                l.right_arm.x_rot = lerp(right_swim, l.right_arm.x_rot, FRAC_PI_2 - FRAC_PI_2 * t);
-                l.left_arm.y_rot = rot_lerp_rad(left_swim, l.left_arm.y_rot, PI);
-                l.right_arm.y_rot = lerp(right_swim, l.right_arm.y_rot, PI);
-                l.left_arm.z_rot = rot_lerp_rad(left_swim, l.left_arm.z_rot, PI);
-                l.right_arm.z_rot = lerp(right_swim, l.right_arm.z_rot, PI);
-            }
+            swim_arms(
+                &mut l.right_arm,
+                &mut l.left_arm,
+                swim_pos,
+                right_swim,
+                left_swim,
+            );
         }
         l.left_leg.x_rot = lerp(
             swim_amount,
@@ -787,6 +797,40 @@ pub fn pose_humanoid_with(
             l.right_leg.x_rot,
             0.3 * (pos * 0.333_333_34).cos(),
         );
+    }
+}
+
+pub(crate) fn swim_arms(
+    right_arm: &mut PartState,
+    left_arm: &mut PartState,
+    swim_pos: f32,
+    right_swim: f32,
+    left_swim: f32,
+) {
+    let reach = quadratic_arm_update(swim_pos) / quadratic_arm_update(14.0);
+    if swim_pos < 14.0 {
+        left_arm.x_rot = rot_lerp_rad(left_swim, left_arm.x_rot, 0.0);
+        right_arm.x_rot = lerp(right_swim, right_arm.x_rot, 0.0);
+        left_arm.y_rot = rot_lerp_rad(left_swim, left_arm.y_rot, PI);
+        right_arm.y_rot = lerp(right_swim, right_arm.y_rot, PI);
+        left_arm.z_rot = rot_lerp_rad(left_swim, left_arm.z_rot, PI + 1.870_796_4 * reach);
+        right_arm.z_rot = lerp(right_swim, right_arm.z_rot, PI - 1.870_796_4 * reach);
+    } else if swim_pos < 22.0 {
+        let t = (swim_pos - 14.0) / 8.0;
+        left_arm.x_rot = rot_lerp_rad(left_swim, left_arm.x_rot, FRAC_PI_2 * t);
+        right_arm.x_rot = lerp(right_swim, right_arm.x_rot, FRAC_PI_2 * t);
+        left_arm.y_rot = rot_lerp_rad(left_swim, left_arm.y_rot, PI);
+        right_arm.y_rot = lerp(right_swim, right_arm.y_rot, PI);
+        left_arm.z_rot = rot_lerp_rad(left_swim, left_arm.z_rot, 5.012_389 - 1.870_796_4 * t);
+        right_arm.z_rot = lerp(right_swim, right_arm.z_rot, 1.270_796_3 + 1.870_796_4 * t);
+    } else if swim_pos < 26.0 {
+        let t = (swim_pos - 22.0) / 4.0;
+        left_arm.x_rot = rot_lerp_rad(left_swim, left_arm.x_rot, FRAC_PI_2 - FRAC_PI_2 * t);
+        right_arm.x_rot = lerp(right_swim, right_arm.x_rot, FRAC_PI_2 - FRAC_PI_2 * t);
+        left_arm.y_rot = rot_lerp_rad(left_swim, left_arm.y_rot, PI);
+        right_arm.y_rot = lerp(right_swim, right_arm.y_rot, PI);
+        left_arm.z_rot = rot_lerp_rad(left_swim, left_arm.z_rot, PI);
+        right_arm.z_rot = lerp(right_swim, right_arm.z_rot, PI);
     }
 }
 

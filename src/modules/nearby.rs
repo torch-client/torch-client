@@ -1,5 +1,3 @@
-use std::sync::Mutex;
-
 use azalea::Client;
 use azalea::ecs::entity::Entity as AzEntity;
 use azalea::ecs::query::{QueryState, Without};
@@ -31,7 +29,8 @@ type Everyone = QueryState<
     Without<LocalEntity>,
 >;
 
-static CACHE: Mutex<Option<(WorldId, Everyone)>> = Mutex::new(None);
+static CACHE: crate::session::SideMutex<Option<(WorldId, Everyone)>> =
+    crate::session::SideMutex::new(None);
 
 pub fn each(bot: &Client, mut visit: impl FnMut(Seen<'_>)) {
     let world_name = {
@@ -42,26 +41,8 @@ pub fn each(bot: &Client, mut visit: impl FnMut(Seen<'_>)) {
     };
 
     let mut cache = CACHE.lock().unwrap();
-    {
-        let ecs = bot.ecs.read();
-        let stale = cache.as_ref().is_none_or(|(id, _)| *id != ecs.id());
-        drop(ecs);
-        if stale {
-            let mut ecs = bot.ecs.write();
-            let state = ecs.query_filtered::<(
-                AzEntity,
-                &MinecraftEntityId,
-                &EntityKindComponent,
-                &Physics,
-                &WorldName,
-                Option<&Health>,
-            ), Without<LocalEntity>>();
-            *cache = Some((ecs.id(), state));
-        }
-    }
-
+    let query = crate::play::entity_feed::cached_query(bot, &mut *cache);
     let ecs = bot.ecs.read();
-    let (_, query) = cache.as_mut().expect("filled above");
     for (entity, id, kind, physics, name, health) in query.iter(&ecs) {
         if *name != world_name {
             continue;

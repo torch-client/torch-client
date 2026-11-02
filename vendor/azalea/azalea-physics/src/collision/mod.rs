@@ -25,7 +25,10 @@ use azalea_world::{ChunkStorage, World};
 use bevy_ecs::{entity::Entity, world::Mut};
 pub use blocks::BlockWithShape;
 pub use discrete_voxel_shape::*;
-use entity_collisions::{CollidableEntityQuery, get_entity_collisions};
+use entity_collisions::{
+    CollidableEntityQuery, VehicleCollisions, get_entity_collisions,
+    get_entity_collisions_matching,
+};
 pub use shape::*;
 pub use sturdy::{is_face_sturdy, is_solid};
 use tracing::warn;
@@ -53,6 +56,7 @@ impl MoveCtx<'_, '_, '_, '_> {
             descending: self.physics_state.is_some_and(|state| state.trying_to_crouch),
             entity_bottom: self.position.y,
             fall_distance: self.physics.fall_distance,
+            stands_on_lava: self.stands_on_lava,
         }
     }
 }
@@ -60,13 +64,23 @@ impl MoveCtx<'_, '_, '_, '_> {
 fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
     let powder_snow = ctx.powder_snow();
     let entity_bounding_box = ctx.physics.bounding_box;
-    let entity_collisions = get_entity_collisions(
-        ctx.world,
-        &entity_bounding_box.expand_towards(movement),
-        Some(ctx.source_entity),
-        ctx.aabb_query,
-        ctx.collidable_entity_query,
-    );
+    let swept = entity_bounding_box.expand_towards(movement);
+    let entity_collisions = match &ctx.vehicle_collisions {
+        Some(vehicle) => get_entity_collisions_matching(
+            ctx.world,
+            &swept,
+            Some(ctx.source_entity),
+            ctx.aabb_query,
+            &|entity| vehicle.collides_with(entity),
+        ),
+        None => get_entity_collisions(
+            ctx.world,
+            &swept,
+            Some(ctx.source_entity),
+            ctx.aabb_query,
+            ctx.collidable_entity_query,
+        ),
+    };
     let world = ctx.world;
     let collided_delta = if movement.length_squared() == 0.0 {
         movement
@@ -86,7 +100,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
 
     let on_ground = ctx.physics.on_ground() || y_collision && movement.y < 0.;
 
-    let max_up_step = 0.6;
+    let max_up_step = f64::from(get_max_up_step(ctx.attributes));
     if max_up_step > 0. && on_ground && (x_collision || z_collision) {
         let mut step_to_delta = collide_bounding_box(
             movement.with_y(max_up_step),
@@ -142,11 +156,13 @@ pub struct MoveCtx<'world, 'state, 'a, 'b> {
     pub source_entity: Entity,
     pub aabb_query: &'a AabbQuery<'world, 'state, 'b>,
     pub collidable_entity_query: &'a CollidableEntityQuery<'world, 'state>,
+    pub vehicle_collisions: Option<VehicleCollisions<'a, 'world, 'state>>,
     pub physics_state: Option<&'a ClientMovementState>,
     pub attributes: &'a Attributes,
     pub abilities: Option<&'a PlayerAbilities>,
     pub active_effects: Option<&'a ActiveEffects>,
     pub powder_snow_walkable: bool,
+    pub stands_on_lava: bool,
     pub fall_flying: bool,
 
     pub direction: LookDirection,
@@ -267,7 +283,12 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
         }
     }
 
-    let speed_factor = block_speed_factor_for(world, ***position, ctx.attributes);
+    let flying = ctx.fall_flying || ctx.abilities.is_some_and(|a| a.flying);
+    let speed_factor = if flying {
+        1.0
+    } else {
+        block_speed_factor_for(world, ***position, ctx.attributes)
+    };
     if speed_factor != 1.0 {
         physics.velocity.x *= f64::from(speed_factor);
         physics.velocity.z *= f64::from(speed_factor);
@@ -298,7 +319,7 @@ fn is_horizontal_collision_minor(
     f64::acos(dot / f64::sqrt(wanted_sqr * moved_sqr)) < MINOR_ANGLE
 }
 
-fn block_speed_factor_for(world: &World, position: Vec3, attributes: &Attributes) -> f32 {
+pub fn block_speed_factor_for(world: &World, position: Vec3, attributes: &Attributes) -> f32 {
     let here = BlockKind::from(world.get_block_state(BlockPos::from(position)).unwrap_or_default());
     let factor = block_speed_factor(here);
 

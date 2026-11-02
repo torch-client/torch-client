@@ -69,14 +69,16 @@ fn shafts_enabled() -> bool {
 
 #[cfg(all(feature = "builtin_shaders", not(target_arch = "wasm32")))]
 fn follow_camera(
-    camera: Query<&GlobalTransform, With<WorldCamera>>,
+    camera: Query<&Transform, (With<WorldCamera>, Without<SunShaftVolume>)>,
     mut volume: Query<&mut Transform, With<SunShaftVolume>>,
 ) {
     let Ok(camera) = camera.single() else { return };
     let Ok(mut transform) = volume.single_mut() else {
         return;
     };
-    transform.translation = camera.translation();
+    if transform.translation != camera.translation {
+        transform.translation = camera.translation;
+    }
 }
 
 #[cfg(feature = "builtin_shaders")]
@@ -200,7 +202,10 @@ impl Plugin for PostPlugin {
         #[cfg(all(feature = "builtin_shaders", not(target_arch = "wasm32")))]
         app.add_systems(
             Update,
-            (setup_shafts, follow_camera)
+            (
+                setup_shafts,
+                follow_camera.after(super::frame_view::FrameViewSystems),
+            )
                 .run_if(shafts_enabled)
                 .run_if(super::terrain::builtin_shaders_enabled),
         );

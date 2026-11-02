@@ -14,6 +14,7 @@ pub(super) struct Pack {
     pub(super) cache: include::Cache,
     pub(super) images: CustomTextures,
     pub(super) alpha_tests: std::collections::HashMap<String, Option<AlphaTest>>,
+    pub(super) blends: std::collections::HashMap<String, super::Blend>,
     pub(super) folder: String,
     pub(super) custom_images: Vec<crate::shaderpack::customimages::CustomImage>,
     pub(super) buffers: Vec<crate::shaderpack::customimages::BufferObject>,

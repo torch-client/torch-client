@@ -1,7 +1,7 @@
 pub mod patching;
 pub mod simulation;
 
-use std::{cmp, time::Duration};
+use std::cmp;
 
 use azalea_block::{BlockState, BlockTrait};
 use azalea_client::{
@@ -27,7 +27,6 @@ use crate::{
     },
     pathfinder::{
         ExecutingPath, GotoEvent, Pathfinder, PathfinderSystems,
-        astar::PathfinderTimeout,
         custom_state::CustomPathfinderState,
         debug::debug_render_path_with_particles,
         execute::simulation::SimulatingPathState,
@@ -77,6 +76,7 @@ pub fn tick_execute_path(
         Option<&Mining>,
         &WorldHolder,
         &Inventory,
+        Option<&Pathfinder>,
     )>,
     mut look_at_events: MessageWriter<LookAtEvent>,
     mut sprint_events: MessageWriter<StartSprintEvent>,
@@ -84,10 +84,14 @@ pub fn tick_execute_path(
     mut jump_events: MessageWriter<JumpEvent>,
     mut start_mining_events: MessageWriter<StartMiningBlockEvent>,
 ) {
-    for (entity, mut executing_path, position, physics, mining, world_holder, inventory) in
+    for (entity, mut executing_path, position, physics, mining, world_holder, inventory, pathfinder) in
         &mut query
     {
         executing_path.ticks_since_last_node_reached += 1;
+
+        let can_mine = pathfinder
+            .and_then(|p| p.opts.as_ref())
+            .is_none_or(|opts| opts.allow_mining);
 
         if let Some(edge) = executing_path.path.front() {
             let mut ctx = ExecuteCtx {
@@ -97,9 +101,9 @@ pub fn tick_execute_path(
                 start: executing_path.last_reached_node,
                 physics,
                 is_currently_mining: mining.is_some(),
-                can_mine: true,
+                can_mine,
                 world: world_holder.shared.clone(),
-                menu: inventory.inventory_menu.clone(),
+                menu: &inventory.inventory_menu,
 
                 commands: &mut commands,
                 look_at_events: &mut look_at_events,
@@ -139,15 +143,8 @@ pub fn check_node_reached(
 
         'skip: loop {
 
-            for (i, edge) in executing_path
-                .path
-                .clone()
-                .into_iter()
-                .enumerate()
-                .take(60)
-                .rev()
-            {
-                let movement = edge.movement;
+            for i in (0..executing_path.path.len().min(60)).rev() {
+                let movement = executing_path.path[i].movement.clone();
                 let is_reached_ctx = IsReachedCtx {
                     target: movement.target,
                     start: executing_path.last_reached_node,
@@ -387,11 +384,12 @@ pub fn recalculate_near_end_of_path(
     mut commands: Commands,
 ) {
     for (entity, mut pathfinder, mut executing_path) in &mut query {
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let Some(mut opts) = pathfinder.opts.clone() else {
             continue;
         };
 
-        if (executing_path.path.len() == 50 || executing_path.path.len() < 5)
+        if executing_path.path.len() <= 50
             && !pathfinder.is_calculating
             && executing_path.is_path_partial
             && executing_path.queued_path.is_none()
@@ -404,13 +402,17 @@ pub fn recalculate_near_end_of_path(
                         executing_path.is_path_partial
                     );
 
-                    opts.min_timeout = if executing_path.path.len() == 50 {
-                        PathfinderTimeout::Time(Duration::from_secs(5))
-                    } else {
-                        PathfinderTimeout::Time(Duration::from_secs(1))
-                    };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if executing_path.path.len() >= 5 {
+                        opts.min_timeout = opts.max_timeout;
+                    }
 
-                    goto_events.write(GotoEvent { entity, goal, opts });
+                    goto_events.write(GotoEvent {
+                        entity,
+                        goal,
+                        opts,
+                        continuation: true,
+                    });
                     pathfinder.is_calculating = true;
 
                     if executing_path.path.is_empty() {
@@ -460,7 +462,12 @@ pub fn recalculate_if_has_goal_but_no_path(
             && let Some(opts) = pathfinder.opts.clone()
         {
             debug!("Recalculating path because it has a goal but no ExecutingPath");
-            goto_events.write(GotoEvent { entity, goal, opts });
+            goto_events.write(GotoEvent {
+                entity,
+                goal,
+                opts,
+                continuation: false,
+            });
             pathfinder.is_calculating = true;
         }
     }

@@ -6,7 +6,7 @@ use super::{
     theme,
 };
 use crate::gui::painter::{ClipGuard, Painter};
-use crate::modules::registry::{Category, Id, module};
+use crate::modules::registry::{Category, ModuleIx, module};
 use crate::modules::store;
 
 const PAD: f32 = 4.0;
@@ -288,6 +288,8 @@ impl ClickGuiState {
         &mut self,
         p: &mut Painter,
         ui: &Ui,
+        title: &str,
+        content: f32,
         active: bool,
     ) -> (f32, f32, f32, f32, f32) {
         let look = self.look;
@@ -298,7 +300,7 @@ impl ClickGuiState {
         let nw = x + w - 2.0 * PAD - FIELD_H - nx;
         self.label(
             p,
-            "Config",
+            title,
             nx,
             text_y(y + PAD, FIELD_H),
             nw,
@@ -307,7 +309,6 @@ impl ClickGuiState {
         self.close_button(p, ui, active);
         let head = PAD + FIELD_H;
         let (ix, iy, iw, ih) = (x + PAD, y + head + PAD, w - 2.0 * PAD, h - head - 2.0 * PAD);
-        let content = self.config_content_h();
         self.swipe(ui, Window::Config, Window::Config, ix, iy, iw, ih);
         let scroll = self.scroll(Window::Config, ui, active, content, ih);
         (ix, iy, iw, ih, scroll)
@@ -420,11 +421,19 @@ impl ClickGuiState {
         }
     }
 
-    pub(super) fn open_sheet(&mut self, id: Id) {
+    pub(super) fn open_sheet(&mut self, id: ModuleIx) {
         self.expanded = Some(id);
         self.dropdown = None;
         self.owner.drop_field();
         self.modules.sheet.scroll = 0.0;
+    }
+
+    pub(super) fn toggle_settings(&mut self, id: ModuleIx) {
+        if self.expanded == Some(id) {
+            self.close_sheet();
+        } else {
+            self.open_sheet(id);
+        }
     }
 
     pub(super) fn close_sheet(&mut self) {
@@ -552,7 +561,7 @@ impl ClickGuiState {
         x: f32,
         y: f32,
         w: f32,
-        id: Id,
+        id: ModuleIx,
         outlined: bool,
         active: bool,
     ) {
@@ -624,7 +633,7 @@ impl ClickGuiState {
         y: f32,
         w: f32,
         h: f32,
-        id: Id,
+        id: ModuleIx,
         active: bool,
     ) {
         let look = self.look;

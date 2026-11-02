@@ -20,7 +20,8 @@ pub fn register(registry: &mut Registry) {
             creaking::setup_anim,
         )
         .with_visible(eyes_glowing)
-        .with_blend(Blend::Additive),
+        .with_blend(Blend::Additive)
+        .ignoring_invisibility(),
     );
 }
 

@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
+use crate::gui::packdrop::{self, Drops, Search};
 use crate::gui::painter::Painter;
-use crate::gui::widgets::{Button, Slider};
+use crate::gui::widgets::{Button, Slider, TextBox};
 use crate::gui::{GuiState, Screen, ScreenCtx};
-use crate::platform::storage;
+use crate::platform::{packfs, storage};
+use crate::session::SharedMutex;
 use crate::shaderpack::lang::{self, Lang};
 use crate::shaderpack::options::{Kind, Opt, Options, Values};
 use crate::shaderpack::properties::{self, Element, Properties, ROOT_SCREEN};
@@ -12,13 +16,19 @@ use super::options::{
     BIG_W, COLUMN_STEP, COLUMN_W, GRID_LEFT_OFFSET, LAYOUT, ROW_H, ROW_INSET, draw_title,
     row_visible, scroll_masked,
 };
-use super::widgets::{FOOTER_GAP, FOOTER_W, WIDGET_HEIGHT, centered_row_x};
+use super::widgets::{FOOTER_GAP, WIDGET_HEIGHT};
 
 const PACKS_TITLE: &str = "Shader Packs";
 pub(in crate::gui) const SHADER_PACKS: &str = "Shader Packs...";
 const NONE_ROW: &str = "(none)";
+#[cfg(not(target_arch = "wasm32"))]
 const NO_PACKS: &str = "No packs in the shaders folder";
-const SETTINGS: &str = "Settings...";
+#[cfg(target_arch = "wasm32")]
+const NO_PACKS: &str = "Drop a pack on the page, or choose one below";
+const SETTINGS_ICON: char = '🛠';
+const SETTINGS_ICON_STR: &str = "🛠";
+const SETTINGS_FALLBACK: &str = "...";
+const SETTINGS_GAP: f32 = 2.0;
 const RESET: &str = "Reset";
 const DONE: &str = "Done";
 const OPEN_FOLDER: &str = "Open Shader Pack Folder";
@@ -98,6 +108,8 @@ pub struct State {
     list_scroll: f32,
     list_scroll_drag: Option<f32>,
     error: Option<String>,
+    search: TextBox,
+    pub(in crate::gui) drops: Drops,
     revision: u64,
 }
 
@@ -123,6 +135,8 @@ impl Default for State {
             list_scroll: 0.0,
             list_scroll_drag: None,
             error,
+            search: TextBox::default(),
+            drops: Drops::default(),
             revision: 0,
         }
     }
@@ -134,8 +148,18 @@ impl State {
     }
 
     pub fn refresh(&mut self) {
-        self.packs = discover::list();
+        self.rescan();
         self.list_scroll = 0.0;
+        self.search = packdrop::search_box();
+        self.drops.clear();
+    }
+
+    fn rescan(&mut self) {
+        self.packs = discover::list();
+    }
+
+    pub fn cancel_prompt(&mut self) -> bool {
+        self.drops.cancel()
     }
 
     pub fn open_options(&mut self) {
@@ -159,7 +183,7 @@ fn load(name: &str) -> Result<Loaded, String> {
     let texts: Vec<String> = crate::shaderpack::include::option_texts(&source);
     let options = crate::shaderpack::options::discover(texts.iter().map(String::as_str));
 
-    let values = match std::fs::read_to_string(values_path(name)) {
+    let values = match packfs::read_to_string(values_path(name)) {
         Ok(text) => Values::load(&text, &options),
         Err(_) => Values::default(),
     };
@@ -219,10 +243,10 @@ fn values_path(name: &str) -> std::path::PathBuf {
 fn save(loaded: &Loaded) {
     let at = values_path(&loaded.name);
     if loaded.values.is_empty() {
-        let _ = std::fs::remove_file(&at);
+        let _ = packfs::remove_file(&at);
         return;
     }
-    if let Err(e) = std::fs::write(&at, loaded.values.save()) {
+    if let Err(e) = packfs::write(&at, loaded.values.save()) {
         crate::log_warn!("shaders", "could not save {}: {e}", at.display());
     }
 }
@@ -299,35 +323,69 @@ fn collect_profile(
 const ON_VALUE: &str = "true";
 const OFF_VALUE: &str = "false";
 
-pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
-    draw_title(p, ctx, PACKS_TITLE);
+pub fn draw_packs(
+    p: &mut Painter,
+    state: &mut GuiState,
+    ctx: &ScreenCtx,
+    shared: &Arc<SharedMutex>,
+) {
+    let packs = &mut state.shaderpacks;
+    if let Some(copied) = packs
+        .drops
+        .draw(p, ctx, shared, &discover::dir(), discover::is_pack_dir)
+    {
+        if copied {
+            packs.rescan();
+        }
+        return;
+    }
+    packdrop::header(p, ctx, PACKS_TITLE, &mut packs.search);
 
-    let (list_x, list_y, list_w, full_h) = LAYOUT.content_rect(ctx.vw, ctx.vh);
+    let (list_x, list_y, list_w, full_h) = packdrop::LAYOUT.content_rect(ctx.vw, ctx.vh);
     let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
 
+    let failed: Vec<String> = crate::shaderpack::FAILED
+        .get()
+        .into_iter()
+        .filter(|name| {
+            state
+                .shaderpacks
+                .loaded
+                .as_ref()
+                .is_some_and(|l| &l.name == name)
+        })
+        .collect();
     let message = match (&state.shaderpacks.error, &state.shaderpacks.loaded) {
-        (Some(error), _) => Some((error.clone(), MESSAGE_ERROR)),
+        (Some(error), _) => Some((error.clone(), packdrop::MESSAGE_ERROR)),
+        _ if !failed.is_empty() => {
+            packdrop::failed_message(&failed).map(|m| (m, packdrop::MESSAGE_ERROR))
+        }
         (None, Some(loaded)) if !loaded.unmet.is_empty() => Some((
             format!("{}: runs without {}", loaded.name, loaded.unmet.join(", ")),
-            MESSAGE_WARNING,
+            packdrop::MESSAGE_WARNING,
         )),
         _ => None,
     };
-    let mut message_lines: Vec<std::ops::Range<usize>> = Vec::new();
-    if let Some((text, _)) = &message {
-        p.atlas.font.wrap_ranges(
-            text,
-            (list_w - 2.0 * MESSAGE_MARGIN).max(1.0),
-            &mut message_lines,
-        );
-    }
-    let message_h = if message_lines.is_empty() {
-        0.0
-    } else {
-        message_lines.len() as f32 * crate::text::LINE_HEIGHT + MESSAGE_MARGIN
-    };
-    let list_h = (full_h - message_h).max(LIST_ROW_H);
-    let rows = state.shaderpacks.packs.len() + 1;
+    let message = message
+        .as_ref()
+        .map(|(text, color)| (text.as_str(), *color));
+    let list_h = packdrop::message(
+        p,
+        ctx,
+        (list_x, list_y, list_w, full_h),
+        LIST_ROW_H,
+        message,
+    );
+
+    let search = Search::of(&state.shaderpacks.search);
+    let show_none = search.matches(NONE_ROW);
+    let shown: Vec<&Pack> = state
+        .shaderpacks
+        .packs
+        .iter()
+        .filter(|pack| search.matches(&pack.name.to_lowercase()))
+        .collect();
+    let rows = shown.len() + usize::from(show_none);
     let content_h = rows as f32 * LIST_ROW_H;
 
     let input = scroll_masked(
@@ -341,20 +399,44 @@ pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     );
     let top = (list_y - state.shaderpacks.list_scroll).floor();
     let list_ctx = &ctx.with_input(&input);
+    #[cfg(feature = "tutorial")]
+    crate::gui::tutorial::mark(
+        crate::gui::tutorial::Spot::ShaderList,
+        crate::gui::hud_layout::Rect::new(list_x, list_y, list_w, list_h),
+    );
 
     let clip = p.push_clip(list_x, list_y, list_w, list_h);
 
-    let loaded_name = state.shaderpacks.loaded.as_ref().map(|l| l.name.clone());
+    let loaded = state.shaderpacks.loaded.as_ref();
+    let loaded_name = loaded.map(|l| l.name.clone());
+    let loaded_bare = loaded.is_some_and(|l| l.options.is_empty());
     let mut pick: Option<Option<String>> = None;
+    let mut open_settings = false;
 
-    let selected = loaded_name.is_none();
-    if row(p, list_ctx, left, top, 0, NONE_ROW, selected) {
+    if show_none
+        && row(
+            p,
+            list_ctx,
+            left,
+            top,
+            0,
+            NONE_ROW,
+            loaded_name.is_none(),
+            None,
+        )
+        .is_some()
+    {
         pick = Some(None);
     }
-    for (index, pack) in state.shaderpacks.packs.iter().enumerate() {
+    for (index, pack) in shown.iter().enumerate() {
         let selected = loaded_name.as_deref() == Some(pack.name.as_str());
-        if row(p, list_ctx, left, top, index + 1, &pack.name, selected) {
-            pick = Some(Some(pack.name.clone()));
+        let settings = Some(!(selected && loaded_bare));
+        let at = index + usize::from(show_none);
+        if let Some(click) = row(p, list_ctx, left, top, at, &pack.name, selected, settings) {
+            open_settings = click == RowClick::Settings;
+            if !(open_settings && selected) {
+                pick = Some(Some(pack.name.clone()));
+            }
         }
     }
     if state.shaderpacks.packs.is_empty() {
@@ -382,44 +464,52 @@ pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             },
         }
     }
-
-    if let Some((text, color)) = &message {
-        let mut y = list_y + list_h + MESSAGE_MARGIN / 2.0;
-        for range in &message_lines {
-            let line: String = text
-                .chars()
-                .skip(range.start)
-                .take(range.end - range.start)
-                .collect();
-            p.text_centered(line.trim_end(), ctx.vw / 2.0, y, *color, true);
-            y += crate::text::LINE_HEIGHT;
-        }
+    if open_settings
+        && state
+            .shaderpacks
+            .loaded
+            .as_ref()
+            .is_some_and(|l| !l.options.is_empty())
+    {
+        state.shaderpacks.open_options();
+        state.nav = Some(Screen::ShaderOptions);
     }
 
-    let footer_y = LAYOUT.footer_y(ctx.vh);
-    let has_options = state
-        .shaderpacks
-        .loaded
-        .as_ref()
-        .is_some_and(|l| !l.options.is_empty());
-    let count = if has_options { 3.0 } else { 2.0 };
-    let mut x = centered_row_x(ctx.vw, count * FOOTER_W + (count - 1.0) * FOOTER_GAP);
-    if Button::new(x, footer_y, FOOTER_W, WIDGET_HEIGHT, OPEN_FOLDER).draw(p, ctx) {
-        crate::platform::url::open_folder(&discover::dir());
+    let footer = packdrop::footer(p, ctx, 2);
+    if footer.reload {
+        state.shaderpacks.rescan();
     }
-    x += FOOTER_W + FOOTER_GAP;
-    if has_options {
-        if Button::new(x, footer_y, FOOTER_W, WIDGET_HEIGHT, SETTINGS).draw(p, ctx) {
-            state.shaderpacks.open_options();
-            state.nav = Some(Screen::ShaderOptions);
-        }
-        x += FOOTER_W + FOOTER_GAP;
+    let mut x = footer.x;
+    #[cfg(feature = "tutorial")]
+    {
+        let reload_x = x - WIDGET_HEIGHT - FOOTER_GAP;
+        crate::gui::tutorial::mark(
+            crate::gui::tutorial::Spot::ShaderFolder,
+            crate::gui::hud_layout::Rect::new(
+                reload_x,
+                footer.y,
+                x + footer.w - reload_x,
+                WIDGET_HEIGHT,
+            ),
+        );
     }
-    if Button::new(x, footer_y, FOOTER_W, WIDGET_HEIGHT, DONE).draw(p, ctx) {
+    let folder_hovered = packdrop::open_folder(p, ctx, &footer, x, OPEN_FOLDER, &discover::dir());
+    x += footer.w + FOOTER_GAP;
+    if Button::new(x, footer.y, footer.w, WIDGET_HEIGHT, DONE).draw(p, ctx) {
         state.nav = Some(Screen::VideoSettings);
+    }
+    if folder_hovered {
+        packdrop::folder_tooltip(p, ctx);
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowClick {
+    Pick,
+    Settings,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn row(
     p: &mut Painter,
     ctx: &ScreenCtx,
@@ -428,14 +518,36 @@ fn row(
     index: usize,
     label: &str,
     selected: bool,
-) -> bool {
+    settings: Option<bool>,
+) -> Option<RowClick> {
     let y = top + index as f32 * LIST_ROW_H;
+    let h = LIST_ROW_H - 2.0;
     let caption = if selected {
         format!("> {label}")
     } else {
         label.to_owned()
     };
-    Button::new(left, y, BIG_W, LIST_ROW_H - 2.0, &caption).draw(p, ctx)
+    let Some(active) = settings else {
+        return Button::new(left, y, BIG_W, h, &caption)
+            .draw(p, ctx)
+            .then_some(RowClick::Pick);
+    };
+    let pick = Button::new(left, y, BIG_W - h - SETTINGS_GAP, h, &caption).draw(p, ctx);
+    let icon = if p.atlas.font.glyph(SETTINGS_ICON).is_some() {
+        SETTINGS_ICON_STR
+    } else {
+        SETTINGS_FALLBACK
+    };
+    let open = Button {
+        active,
+        ..Button::new(left + BIG_W - h, y, h, h, icon)
+    }
+    .draw(p, ctx);
+    match (pick, open) {
+        (true, _) => Some(RowClick::Pick),
+        (_, true) => Some(RowClick::Settings),
+        _ => None,
+    }
 }
 
 pub fn draw_options(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
@@ -747,7 +859,3 @@ fn draw_comment(p: &mut Painter, ctx: &ScreenCtx, text: &str) {
         super::options::draw_bind_tooltip(p, &lines, mouse.x, mouse.y, ctx.vw);
     }
 }
-
-const MESSAGE_ERROR: u32 = 0xFF_5555;
-const MESSAGE_WARNING: u32 = 0xFF_FF55;
-const MESSAGE_MARGIN: f32 = 8.0;

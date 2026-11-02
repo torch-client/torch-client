@@ -4,20 +4,17 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::llama;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 
 const KINDS: [EntityKind; 2] = [EntityKind::Llama, EntityKind::TraderLlama];
 
 pub fn register(registry: &mut Registry) {
-    registry.add_many(
+    add_adult_and_baby(
+        registry,
         &KINDS,
-        RenderSpec::new("llama", llama::layer, texture, llama::setup_anim)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add_many(
-        &KINDS,
-        RenderSpec::new("llama_baby", llama::baby_layer, texture, llama::setup_anim)
-            .with_visible(|st| st.extras.is_baby),
+        RenderSpec::new("llama", llama::layer, texture, llama::setup_anim),
+        RenderSpec::new("llama_baby", llama::baby_layer, texture, llama::setup_anim),
     );
     registry.add_many(
         &KINDS,
@@ -27,7 +24,8 @@ pub fn register(registry: &mut Registry) {
             decor_texture,
             llama::setup_anim,
         )
-        .with_visible(|st| !st.extras.is_baby && decor_texture_name(st).is_some()),
+        .with_visible(|st| !st.extras.is_baby && decor_texture_name(st).is_some())
+        .ignoring_invisibility(),
     );
     registry.add_many(
         &KINDS,
@@ -37,7 +35,8 @@ pub fn register(registry: &mut Registry) {
             decor_texture,
             llama::setup_anim,
         )
-        .with_visible(|st| st.extras.is_baby && st.kind == EntityKind::TraderLlama),
+        .with_visible(|st| st.extras.is_baby && st.kind == EntityKind::TraderLlama)
+        .ignoring_invisibility(),
     );
 }
 

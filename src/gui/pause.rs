@@ -8,11 +8,17 @@ const RETURN_TO_GAME: &str = "Back to Game";
 
 const ADVANCEMENTS: &str = "Advancements";
 
+const STATISTICS: &str = "Statistics";
+
 const OPTIONS: &str = "Options...";
+
+const REPORT_BUGS: &str = "Report Bugs";
 
 const DISCONNECT: &str = "Disconnect";
 
 const BUTTON_WIDTH_FULL: f32 = 204.0;
+
+const BUTTON_WIDTH_HALF: f32 = 98.0;
 
 const BUTTON_PADDING: f32 = 4.0;
 
@@ -20,7 +26,9 @@ const MENU_PADDING_TOP: f32 = 50.0;
 
 const TITLE_Y: f32 = 40.0;
 
-const GRID_W: f32 = BUTTON_WIDTH_FULL + 2.0 * BUTTON_PADDING;
+const COLUMN_W: f32 = BUTTON_WIDTH_HALF + 2.0 * BUTTON_PADDING;
+
+const GRID_W: f32 = 2.0 * COLUMN_W;
 
 const BUTTON_TOPS: [f32; 4] = [
     MENU_PADDING_TOP,
@@ -45,33 +53,39 @@ pub fn side_strip_right(vw: f32, vh: f32) -> f32 {
 
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let (gx, gy) = grid_origin(ctx.vw, ctx.vh);
-    let x = gx + BUTTON_PADDING;
 
     p.text_centered(TITLE, ctx.vw / 2.0, TITLE_Y, 0xFFFFFF, true);
 
-    let mut button = |i: usize, label: &'static str| {
+    let mut button = |row: usize, column: usize, width: f32, label: &'static str| {
         Button::new(
-            x,
-            gy + BUTTON_TOPS[i],
-            BUTTON_WIDTH_FULL,
+            gx + column as f32 * COLUMN_W + BUTTON_PADDING,
+            gy + BUTTON_TOPS[row],
+            width,
             WIDGET_HEIGHT,
             label,
         )
         .draw(p, ctx)
     };
 
-    if button(0, RETURN_TO_GAME) {
+    if button(0, 0, BUTTON_WIDTH_FULL, RETURN_TO_GAME) {
         state.nav = Some(Screen::None);
     }
-    if button(1, ADVANCEMENTS) {
+    if button(1, 0, BUTTON_WIDTH_HALF, ADVANCEMENTS) {
         state.advancements.parent = Screen::Pause;
         state.nav = Some(Screen::Advancements);
     }
-    if button(2, OPTIONS) {
+    if button(1, 1, BUTTON_WIDTH_HALF, STATISTICS) {
+        state.nav = Some(Screen::Statistics);
+    }
+    if button(2, 0, BUTTON_WIDTH_HALF, OPTIONS) {
         state.options_parent = Screen::Pause;
         state.nav = Some(Screen::Options);
     }
-    if button(3, DISCONNECT) {
+    if button(2, 1, BUTTON_WIDTH_HALF, REPORT_BUGS) {
+        state.credits_parent = Screen::Pause;
+        state.nav = Some(Screen::Credits);
+    }
+    if button(3, 0, BUTTON_WIDTH_FULL, DISCONNECT) {
         state.disconnect = true;
         state.nav = Some(Screen::Title);
     }
@@ -86,6 +100,10 @@ mod tests {
         assert_eq!(BUTTON_TOPS, [50.0, 74.0, 98.0, 122.0]);
         assert_eq!(GRID_H, 142.0);
         assert_eq!(GRID_W, 212.0);
+        assert_eq!(
+            BUTTON_PADDING + BUTTON_WIDTH_FULL,
+            COLUMN_W + BUTTON_PADDING + BUTTON_WIDTH_HALF
+        );
     }
 
     #[test]

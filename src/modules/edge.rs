@@ -101,7 +101,7 @@ mod tests {
     fn a_profile_change_is_an_edge_too() {
         let s = Store::from_registry();
         let e = Edge::new(Id::Flight);
-        s.set_profile(Mode::Rage);
+        s.set_profile(Mode::Blatant);
         s.set_enabled(Id::Flight, true);
         assert_eq!(e.poll(&s), Phase::Started);
         s.set_profile(Mode::Normal);

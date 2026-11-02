@@ -283,13 +283,14 @@ fn jitter(half: f32) -> f32 {
     (roll(0.0, half * 2.0) - half).to_radians() * NOMINAL_RANGE
 }
 
-fn face_point(step: (i32, i32), pos: BlockPos, sideways: f32, up: f32) -> [f32; 3] {
-    let (sx, sz) = (step.0 as f32, step.1 as f32);
+fn face_point(step: (i32, i32), pos: BlockPos, sideways: f32, up: f32) -> [f64; 3] {
+    let (sx, sz) = (f64::from(step.0), f64::from(step.1));
+    let (sideways, up) = (f64::from(sideways), f64::from(up));
     let (px, pz) = (-sz, sx);
     [
-        pos.x as f32 + 0.5 - sx * 0.5 + px * sideways,
-        pos.y as f32 + 0.5 + up,
-        pos.z as f32 + 0.5 - sz * 0.5 + pz * sideways,
+        f64::from(pos.x) + 0.5 - sx * 0.5 + px * sideways,
+        f64::from(pos.y) + 0.5 + up,
+        f64::from(pos.z) + 0.5 - sz * 0.5 + pz * sideways,
     ]
 }
 
@@ -392,7 +393,7 @@ mod tests {
                 assert!(p[2] >= 7.0 && p[2] <= 8.0, "{step:?} {at:?} z {p:?}");
                 let face = if step.0 != 0 { p[0] } else { p[2] };
                 let centre = if step.0 != 0 { 4.5 } else { 7.5 };
-                let near = centre - axis_sign(step) as f32 * 0.5;
+                let near = centre - axis_sign(step) as f64 * 0.5;
                 assert!((face - near).abs() < 1e-6, "{step:?} {at:?} {p:?}");
             }
         }

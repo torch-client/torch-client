@@ -32,12 +32,36 @@ impl FluidState {
         self.amount == 0
     }
 
+    pub fn height_under(&self, above: &FluidState) -> f32 {
+        if !self.is_empty() && above.kind == self.kind {
+            1.0
+        } else {
+            self.height()
+        }
+    }
+
+    pub fn is_source(&self) -> bool {
+        self.amount == 8 && !self.falling
+    }
+
     pub fn affects_flow(&self, other: &FluidState) -> bool {
         other.amount == 0 || self.is_same_kind(other)
     }
 
     pub fn is_same_kind(&self, other: &FluidState) -> bool {
         (other.kind == self.kind) || (self.amount == 0 && other.amount == 0)
+    }
+
+    fn from_liquid_block(kind: FluidKind, level: u8) -> Self {
+        Self {
+            kind,
+            amount: if level >= 8 {
+                8
+            } else {
+                to_or_from_legacy_fluid_level(level)
+            },
+            falling: level >= 8,
+        }
     }
 }
 
@@ -71,23 +95,19 @@ impl From<BlockState> for FluidState {
                 let level = state
                     .property::<crate::properties::WaterLevel>()
                     .expect("water block should always have WaterLevel");
-                return Self {
-                    kind: FluidKind::Water,
-                    amount: to_or_from_legacy_fluid_level(level as u8),
-                    falling: false,
-                };
+                return Self::from_liquid_block(FluidKind::Water, level as u8);
             }
             BlockKind::Lava => {
                 let level = state
                     .property::<crate::properties::LavaLevel>()
                     .expect("lava block should always have LavaLevel");
-                return Self {
-                    kind: FluidKind::Lava,
-                    amount: to_or_from_legacy_fluid_level(level as u8),
-                    falling: false,
-                };
+                return Self::from_liquid_block(FluidKind::Lava, level as u8);
             }
-            BlockKind::BubbleColumn => {
+            BlockKind::BubbleColumn
+            | BlockKind::Kelp
+            | BlockKind::KelpPlant
+            | BlockKind::Seagrass
+            | BlockKind::TallSeagrass => {
                 return Self::new_source_block(FluidKind::Water, false);
             }
             _ => {}

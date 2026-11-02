@@ -78,8 +78,13 @@ const SERVER_ICON_GRID: ReservedGrid = ReservedGrid::new(
     SERVER_ICON_PX,
     SERVER_ICON_PX,
     SERVER_ICON_COLUMNS,
-    ICON_SLOTS,
+    ICON_SLOTS + PUPPET_SLOTS,
 );
+
+pub const PUPPET_SKIN_SLOT: usize = ICON_SLOTS;
+pub const PUPPET_ARMOR_SLOT: usize = ICON_SLOTS + 1;
+pub const PUPPET_SLOTS: usize = 5;
+
 const BANNER_ICON_GRID: ReservedGrid = ReservedGrid::new(
     BANNER_ICON_PX,
     BANNER_ICON_PX,
@@ -260,6 +265,13 @@ impl GuiAtlas {
         [px / self.width as f32, py / self.height as f32]
     }
 
+    pub fn glint_uv(&self) -> Option<[f32; 4]> {
+        let r = self.sprite(GLINT_SPRITE)?.region;
+        let [u0, v0] = self.uv(r.x as f32, r.y as f32);
+        let [du, dv] = self.uv(r.w as f32, r.h as f32);
+        Some([u0, v0, du, dv])
+    }
+
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
@@ -406,6 +418,11 @@ const SHEETS: &[Sheet] = &[
         h: 166,
     },
     Sheet {
+        key: crate::gui::gamemode_switcher::SHEET,
+        w: 125,
+        h: 75,
+    },
+    Sheet {
         key: "book",
         w: 192,
         h: 192,
@@ -468,6 +485,8 @@ struct Extra {
     nearest: bool,
     scaling: Scaling,
 }
+
+pub const GLINT_SPRITE: &str = "enchanted_glint";
 
 const EXTRAS: &[Extra] = &[
     Extra {
@@ -552,11 +571,29 @@ const EXTRAS: &[Extra] = &[
         scaling: Scaling::Stretch,
     },
     Extra {
+        key: GLINT_SPRITE,
+        path: "misc/enchanted_glint_item.png",
+        alt_path: None,
+        size: (128, 128),
+        crop_h: None,
+        nearest: true,
+        scaling: Scaling::Stretch,
+    },
+    Extra {
         key: "fire_overlay",
         path: "block/fire_1.png",
         alt_path: None,
         size: (16, 512),
         crop_h: Some(16),
+        nearest: true,
+        scaling: Scaling::Stretch,
+    },
+    Extra {
+        key: "portal_overlay",
+        path: "block/nether_portal.png",
+        alt_path: None,
+        size: (16, 512),
+        crop_h: None,
         nearest: true,
         scaling: Scaling::Stretch,
     },

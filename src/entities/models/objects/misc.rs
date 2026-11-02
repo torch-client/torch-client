@@ -125,15 +125,7 @@ pub fn evoker_fangs_setup_anim(model: &BakedModel, parts: &mut [PartState], st: 
 }
 
 pub fn leash_knot_layer() -> LayerDef {
-    let mut mesh = MeshDef::new();
-    mesh.root().child(
-        "knot",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-3.0, -8.0, -3.0, 6.0, 8.0, 6.0),
-        PartPose::ZERO,
-    );
-    LayerDef::create(mesh, 32, 32)
+    LayerDef::single_box("knot", (0, 0), [-3.0, -8.0, -3.0, 6.0, 8.0, 6.0], (32, 32))
 }
 
 pub fn shield_layer() -> LayerDef {

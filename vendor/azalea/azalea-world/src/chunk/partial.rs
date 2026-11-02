@@ -178,6 +178,13 @@ impl PartialChunkStorage {
         }
     }
 
+    pub fn forget_held(&mut self, pos: &ChunkPos) {
+        let index = self.index_from_chunk_pos(pos);
+        if self.chunks[index].as_ref().is_some_and(|s| s.pos == *pos) {
+            self.chunks[index] = None;
+        }
+    }
+
     pub fn loaded(&self) -> impl Iterator<Item = (ChunkPos, &Arc<RwLock<Chunk>>)> {
         self.chunks
             .iter()

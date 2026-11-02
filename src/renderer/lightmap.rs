@@ -45,7 +45,7 @@ impl State {
     }
 }
 
-pub fn levels_at(eye: [f32; 3]) -> (u8, u8) {
+pub fn levels_at(eye: [f64; 3]) -> (u8, u8) {
     levels_in(&crate::client::worldsync::light_map().read(), cell_of(eye))
 }
 
@@ -53,7 +53,7 @@ pub fn levels_in(light: &LightMap, pos: [i32; 3]) -> (u8, u8) {
     resolved_levels(light.at(pos[0], pos[1], pos[2]))
 }
 
-pub fn cell_of(p: [f32; 3]) -> [i32; 3] {
+pub fn cell_of(p: [f64; 3]) -> [i32; 3] {
     p.map(|c| c.floor() as i32)
 }
 
@@ -155,7 +155,7 @@ impl LightCells {
     }
 }
 
-pub fn entity_light(state: &State, eye: [f32; 3], on_fire: bool) -> CellLight {
+pub fn entity_light(state: &State, eye: [f64; 3], on_fire: bool) -> CellLight {
     entity_light_in(
         state,
         &crate::client::worldsync::light_map().read(),
@@ -164,7 +164,7 @@ pub fn entity_light(state: &State, eye: [f32; 3], on_fire: bool) -> CellLight {
     )
 }
 
-pub fn entity_light_in(state: &State, light: &LightMap, eye: [f32; 3], on_fire: bool) -> CellLight {
+pub fn entity_light_in(state: &State, light: &LightMap, eye: [f64; 3], on_fire: bool) -> CellLight {
     let (block, sky) = levels_in(light, cell_of(eye));
     cell_light(state, fire_block_light(block, on_fire), sky)
 }

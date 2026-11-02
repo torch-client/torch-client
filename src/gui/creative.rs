@@ -417,6 +417,7 @@ fn list_stack(it: &ListItem, count: u8) -> SlotStack {
         max_damage,
         enchantments: it.enchantments(),
         potion: it.potion(),
+        glint: crate::items::glint::default_foil(id),
         ..Default::default()
     }
 }
@@ -429,6 +430,7 @@ pub fn draw(
     p: &mut Painter,
     st: &mut CreativeState,
     slot_state: &mut SlotState,
+    puppet: &crate::gui::puppet::Worn,
     ctx: &ScreenCtx,
     snap: &Snapshot,
     out: &mut Vec<InvAction>,
@@ -512,6 +514,13 @@ pub fn draw(
 
     let mut hovered = None;
     let hovered_slot = if st.tab == TAB_INVENTORY {
+        puppet.draw(
+            p,
+            [left + 73.0, top + 6.0, left + 105.0, top + 49.0],
+            20.0,
+            0.0625,
+            ctx.mouse(),
+        );
         draw_inventory_tab(
             p,
             ctx,
@@ -767,7 +776,8 @@ fn draw_item_grid(
         };
         let x = left + GRID_X + (cell % COLS) as f32 * PITCH;
         let y = top + GRID_Y + (cell / COLS) as f32 * PITCH;
-        p.item_icon(&it.model_key(), x, y);
+        let glint = crate::items::glint::default_foil(it.base_id());
+        p.item_icon_glint(&it.model_key(), x, y, glint);
         if hover_cell == Some(cell) {
             p.slot_highlight(x, y);
             *hovered = Some(list_stack(&it, 1));

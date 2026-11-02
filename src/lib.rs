@@ -6,7 +6,6 @@ mod blockentities;
 mod blocks;
 mod client;
 mod diag;
-mod direction;
 #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
 mod eagler;
 mod entities;
@@ -112,7 +111,7 @@ pub(crate) fn textures_dir() -> PathBuf {
 #[cfg(any(
     feature = "online_mode",
     feature = "eagler",
-    explore_modrinth,
+    all(explore_modrinth, not(target_arch = "wasm32")),
     all(feature = "asset_download", not(target_arch = "wasm32"))
 ))]
 use rustls as tls;
@@ -120,7 +119,7 @@ use rustls as tls;
 #[cfg(any(
     feature = "online_mode",
     feature = "eagler",
-    explore_modrinth,
+    all(explore_modrinth, not(target_arch = "wasm32")),
     all(feature = "asset_download", not(target_arch = "wasm32"))
 ))]
 pub(crate) fn install_crypto_provider() {
@@ -152,7 +151,7 @@ pub(crate) fn android_tls_config() -> Option<rustls::ClientConfig> {
 #[cfg(not(any(
     feature = "online_mode",
     feature = "eagler",
-    explore_modrinth,
+    all(explore_modrinth, not(target_arch = "wasm32")),
     all(feature = "asset_download", not(target_arch = "wasm32"))
 )))]
 pub(crate) fn install_crypto_provider() {}
@@ -354,6 +353,25 @@ fn authenticate(args: &platform::cli::Args) -> Option<String> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn create_drop_folders() {
+    #[allow(unused_mut)]
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    #[cfg(lua_mods)]
+    dirs.push(modules::script::folder());
+    #[cfg(lua_mods)]
+    dirs.push(platform::storage::dir().join(modules::script::MOD_DATA));
+    #[cfg(resource_packs)]
+    dirs.push(resourcepacks::dir());
+    #[cfg(feature = "shader_support")]
+    dirs.push(shaderpack::discover::dir());
+    for dir in dirs {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log_warn!("storage", "could not create {}: {e}", dir.display());
+        }
+    }
+}
+
 fn run(args: platform::cli::Args) -> eyre::Result<()> {
     diag::alloc::label_thread(diag::alloc::Site::Render);
     diag::alloc::init_task_pools();
@@ -382,6 +400,12 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
     } else {
         log_info!("net", "joining as {}", client::bot::username());
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    create_drop_folders();
+
+    #[cfg(lua_mods)]
+    modules::script::init();
 
     {
         let threads = std::env::var("MC_POOL_THREADS")
@@ -445,6 +469,8 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
     step("starting workers");
     client::worldsync::start_light_thread();
     client::worldsync::install_block_change_hook();
+    #[cfg(feature = "render_lod")]
+    client::lod::cache::install();
     if crate::diag::trace_enabled()
         && azalea_protocol::packet_trace::set_sent_packet_hook(Box::new(|p| {
             if let Some(name) = p.name {

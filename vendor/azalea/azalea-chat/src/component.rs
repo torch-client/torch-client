@@ -56,17 +56,6 @@ impl FormattedText {
         Ok(None)
     }
 
-    #[cfg(feature = "simdnbt")]
-    fn parse_separator_nbt(nbt: &simdnbt::borrow::NbtCompound) -> Option<FormattedText> {
-        use simdnbt::FromNbtTag;
-
-        if let Some(separator) = nbt.get("separator") {
-            FormattedText::from_nbt_tag(separator)
-        } else {
-            None
-        }
-    }
-
     pub fn to_custom_format<F, S, C>(
         &self,
         mut style_formatter: F,
@@ -469,34 +458,18 @@ impl FormattedText {
                 component =
                     FormattedText::Translatable(TranslatableComponent::new(translate, Vec::new()));
             }
-        } else if let Some(score) = compound.compound("score") {
-            if score.get("name").is_none() || score.get("objective").is_none() {
-                trace!("A score component needs at least a name and an objective");
-                return None;
-            }
-            return None;
-        } else if compound.get("selector").is_some() {
-            trace!("selector text components aren't supported");
-            return None;
-        } else if compound.get("keybind").is_some() {
-            trace!("keybind text components aren't supported");
-            return None;
-        } else if compound.get("object").is_some() {
-            trace!("object text components aren't supported");
-            return None;
         } else if let Some(tag) = compound.get("") {
             return FormattedText::from_nbt_tag(tag);
         } else {
-            let _nbt = compound.get("nbt")?;
-            let _separator = FormattedText::parse_separator_nbt(&compound)?;
-
-            let _interpret = match compound.get("interpret") {
-                Some(v) => v.byte().unwrap_or_default() != 0,
-                None => false,
+            let named = |key: &str| {
+                compound
+                    .get(key)
+                    .and_then(|t| t.string())
+                    .map(|s| s.to_string())
             };
-            if let Some(_block) = compound.get("block") {}
-            trace!("nbt text components aren't yet supported");
-            return None;
+            let text = named("keybind").or_else(|| named("selector")).unwrap_or_default();
+            trace!("unresolved text component kind, drawn as {text:?}");
+            component = FormattedText::Text(TextComponent::new(text));
         }
         if let Some(extra) = compound.get("extra") {
             if let Some(items) = extra.list() {
@@ -549,9 +522,13 @@ impl AzBuf for FormattedText {
             nbt.as_ref().map(|n| n.as_tag().to_owned())
         );
         match nbt {
-            Some(nbt) => FormattedText::from_nbt_tag(nbt.as_tag()).ok_or(BufReadError::Custom(
-                "couldn't convert nbt to chat message".to_owned(),
-            )),
+            Some(nbt) => Ok(FormattedText::from_nbt_tag(nbt.as_tag()).unwrap_or_else(|| {
+                tracing::warn!(
+                    "couldn't convert nbt to chat message, drawn empty: {:?}",
+                    nbt.as_tag().to_owned()
+                );
+                FormattedText::default()
+            })),
             _ => Ok(FormattedText::default()),
         }
     }

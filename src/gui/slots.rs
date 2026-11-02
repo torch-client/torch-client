@@ -995,7 +995,7 @@ impl MenuModel {
     }
 
     fn same_item(a: &SlotStack, b: &SlotStack) -> bool {
-        !a.is_empty() && !b.is_empty() && a.item == b.item && a.potion == b.potion
+        !a.is_empty() && !b.is_empty() && a.item == b.item && a.potion == b.potion && a.raw == b.raw
     }
 
     pub fn pickup(&mut self, slot: usize, right: bool) {
@@ -1805,7 +1805,7 @@ pub fn draw_menu_slot(
     match drag.slot_preview(layout, i, snap, cursor) {
         Some((preview, capped)) => {
             let color = if capped { CAPPED_COUNT_COLOR } else { 0xFFFFFF };
-            p.item_icon(&preview.model_key(), x, y);
+            p.item_icon_glint(&preview.model_key(), x, y, preview.glint);
             p.item_decorations_colored(x, y, preview.count, 0, 0, color);
         }
         None => draw_slot(
@@ -1841,7 +1841,7 @@ pub fn draw_stack(p: &mut Painter, stack: &SlotStack, x: f32, y: f32) {
     if stack.is_empty() {
         return;
     }
-    p.item_icon(&stack.model_key(), x, y);
+    p.item_icon_glint(&stack.model_key(), x, y, stack.glint);
     p.item_decorations(x, y, stack.count, stack.damage, stack.max_damage);
     p.item_cooldown(x, y, stack.cooldown);
 }

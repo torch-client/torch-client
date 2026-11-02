@@ -49,6 +49,7 @@ pub struct BitList {
     pub groups: &'static [&'static str],
     pub colored: bool,
     pub presets: &'static [Preset],
+    pub inline: bool,
     build: fn() -> Built,
     table: OnceLock<Table>,
     generation: AtomicU32,
@@ -73,6 +74,7 @@ impl BitList {
             groups,
             colored,
             presets,
+            inline: false,
             build,
             table: OnceLock::new(),
             generation: AtomicU32::new(0),
@@ -81,70 +83,87 @@ impl BitList {
         }
     }
 
+    #[cfg(lua_mods)]
+    pub fn dynamic(
+        key: &'static str,
+        title: &'static str,
+        width: f32,
+        groups: &'static [&'static str],
+        presets: &'static [Preset],
+        built: Built,
+    ) -> &'static BitList {
+        let mut list = BitList::new(key, title, width, groups, false, presets, unbuilt);
+        list.inline = true;
+        let table = list.make_table(built);
+        let _ = list.table.set(table);
+        Box::leak(Box::new(list))
+    }
+
     fn table(&self) -> &Table {
-        self.table.get_or_init(|| {
-            let (entries, keys) = (self.build)();
-            debug_assert!(entries.len() < NO_ROW as usize);
-            assert!(
-                self.groups.len() <= MAX_GROUPS,
-                "{} has {} groups, MAX_GROUPS is {MAX_GROUPS}",
-                self.key,
-                self.groups.len()
-            );
-            assert!(
-                entries
-                    .iter()
-                    .all(|e| (e.group as usize) < self.groups.len()),
-                "{} has a row outside its groups",
-                self.key
-            );
+        self.table.get_or_init(|| self.make_table((self.build)()))
+    }
 
-            let mut tagged: Vec<(u32, Entry)> = entries
-                .into_iter()
-                .enumerate()
-                .map(|(i, e)| (i as u32, e))
-                .collect();
-            tagged.sort_by(|a, b| {
-                a.1.group
-                    .cmp(&b.1.group)
-                    .then_with(|| a.1.label.cmp(&b.1.label))
-            });
-            let mut rank = vec![NO_ROW; tagged.len()];
-            for (new, (old, _)) in tagged.iter().enumerate() {
-                rank[*old as usize] = new as u16;
+    fn make_table(&self, (entries, keys): Built) -> Table {
+        debug_assert!(entries.len() < NO_ROW as usize);
+        assert!(
+            self.groups.len() <= MAX_GROUPS,
+            "{} has {} groups, MAX_GROUPS is {MAX_GROUPS}",
+            self.key,
+            self.groups.len()
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|e| (e.group as usize) < self.groups.len()),
+            "{} has a row outside its groups",
+            self.key
+        );
+
+        let mut tagged: Vec<(u32, Entry)> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| (i as u32, e))
+            .collect();
+        tagged.sort_by(|a, b| {
+            a.1.group
+                .cmp(&b.1.group)
+                .then_with(|| a.1.label.cmp(&b.1.label))
+        });
+        let mut rank = vec![NO_ROW; tagged.len()];
+        for (new, (old, _)) in tagged.iter().enumerate() {
+            rank[*old as usize] = new as u16;
+        }
+
+        let mut starts = [0u32; MAX_GROUPS + 1];
+        for (i, (_, e)) in tagged.iter().enumerate() {
+            for s in starts.iter_mut().skip(e.group as usize + 1) {
+                *s = (i + 1) as u32;
             }
+        }
+        starts[MAX_GROUPS] = tagged.len() as u32;
 
-            let mut starts = [0u32; MAX_GROUPS + 1];
-            for (i, (_, e)) in tagged.iter().enumerate() {
-                for s in starts.iter_mut().skip(e.group as usize + 1) {
-                    *s = (i + 1) as u32;
-                }
+        let defaults: Box<[u32]> = tagged.iter().map(|(_, e)| pack(e.on, e.color)).collect();
+        let rows = defaults.iter().map(|d| AtomicU32::new(*d)).collect();
+        let labels = tagged.into_iter().map(|(_, e)| e.label).collect();
+
+        let index: Box<[u16]> = if keys.is_empty() {
+            Box::default()
+        } else {
+            let max = keys.iter().map(|(k, _)| *k).max().unwrap_or(0) as usize;
+            let mut ix = vec![NO_ROW; max + 1];
+            for (k, e) in keys {
+                ix[k as usize] = rank[e as usize];
             }
-            starts[MAX_GROUPS] = tagged.len() as u32;
+            ix.into_boxed_slice()
+        };
 
-            let defaults: Box<[u32]> = tagged.iter().map(|(_, e)| pack(e.on, e.color)).collect();
-            let rows = defaults.iter().map(|d| AtomicU32::new(*d)).collect();
-            let labels = tagged.into_iter().map(|(_, e)| e.label).collect();
-
-            let index: Box<[u16]> = if keys.is_empty() {
-                Box::default()
-            } else {
-                let max = keys.iter().map(|(k, _)| *k).max().unwrap_or(0) as usize;
-                let mut ix = vec![NO_ROW; max + 1];
-                for (k, e) in keys {
-                    ix[k as usize] = rank[e as usize];
-                }
-                ix.into_boxed_slice()
-            };
-
-            Table {
-                labels,
-                rows,
-                defaults,
-                starts,
-                index,
-            }
-        })
+        Table {
+            labels,
+            rows,
+            defaults,
+            starts,
+            index,
+        }
     }
 
     pub fn count(&self) -> usize {
@@ -243,6 +262,19 @@ impl BitList {
 
     fn bump(&self) {
         self.generation.fetch_add(1, Relaxed);
+        #[cfg(lua_mods)]
+        if self.inline {
+            super::script::note_setting();
+        }
+    }
+
+    #[cfg(lua_mods)]
+    pub fn set_only(&self, on: impl Fn(&str) -> bool) {
+        let t = self.table();
+        for i in 0..t.rows.len() {
+            self.write(i, on(&t.labels[i]));
+        }
+        self.bump();
     }
 
     pub fn touched(&self) -> bool {
@@ -261,14 +293,20 @@ impl BitList {
     }
 }
 
+#[cfg(lua_mods)]
+fn unbuilt() -> Built {
+    unreachable!("a dynamic BitList's table is set when it is made")
+}
+
 pub fn widest() -> f32 {
     ALL.iter().map(|l| l.width).fold(0.0, f32::max)
 }
 
-pub static ALL: [&BitList; 5] = [
+pub static ALL: [&BitList; 6] = [
     &super::esp::blocks::XRAY,
     &super::esp::blocks::ORES,
     &super::esp::blocks::STORAGE,
+    &super::esp::blocks::SCAFFOLD,
     &super::entities::LIST,
     &super::items::LIST,
 ];

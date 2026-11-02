@@ -5,11 +5,13 @@ cd "$(dirname "$0")/.."
 
 HARDEN=0
 OPT=0
+CHROMEBOOK=0
 kept=()
 for arg in "$@"; do
   case "$arg" in
     --harden) HARDEN=1 ;;
     --opt) OPT=1 ;;
+    --chromebook) CHROMEBOOK=1 ;;
     *) kept+=("$arg") ;;
   esac
 done
@@ -123,11 +125,16 @@ mark "verify"
 
 echo "==> js"
 python3 tools/js_strip.py "$DIST/torch-client.js" $(find "$DIST/snippets" -name '*.js' 2>/dev/null)
+
+GLUE_HASH="$(sha256sum "$DIST/torch-client.js" | cut -c1-12)"
+GLUE="torch-client.$GLUE_HASH.js"
+mv "$DIST/torch-client.js" "$DIST/$GLUE"
+echo "    $GLUE"
 mark "js"
 
 echo "==> gzip"
 gzip -9 -f "$WASM_OUT"
-for f in "$DIST/torch-client.js" "$DIST/assets.bin"; do
+for f in "$DIST/$GLUE" "$DIST/assets.bin"; do
   if [[ -f "$f" ]]; then
     gzip -9 -k -f "$f"
   fi
@@ -142,7 +149,11 @@ echo "    $MODULE"
 mark "name"
 
 echo "==> page"
-python3 tools/minify_page.py web/index.html "$DIST/index.html"
+page_args=()
+if (( CHROMEBOOK )); then
+  page_args+=(--chromebook)
+fi
+python3 tools/minify_page.py ${page_args[@]+"${page_args[@]}"} web/index.html "$DIST/index.html"
 
 sed -i "s/torch-client_bg\.wasm\.gz/$MODULE/" "$DIST/index.html"
 
@@ -151,7 +162,42 @@ if ! grep -q "$MODULE" "$DIST/index.html"; then
   exit 1
 fi
 
-cp web/worker.js "$DIST/worker.js"
+sed -i "s|\./torch-client\.js|./$GLUE|g" "$DIST/index.html"
+
+if grep -q '\./torch-client\.js' "$DIST/index.html" || ! grep -q "$GLUE" "$DIST/index.html"; then
+  echo "the page does not import $GLUE; the glue imports in web/index.html changed" >&2
+  exit 1
+fi
+
+sed "s|\./torch-client\.js|./$GLUE|" web/worker.js > "$DIST/worker.js"
+
+if ! grep -q "$GLUE" "$DIST/worker.js"; then
+  echo "the worker does not import $GLUE; the glue import in web/worker.js changed" >&2
+  exit 1
+fi
+
+if (( CHROMEBOOK )); then
+  cp web/chromebook/manifest.webmanifest web/chromebook/icon-*.png "$DIST/"
+  cached=(index.html "$GLUE" "$MODULE" worker.js manifest.webmanifest icon-192.png icon-512.png icon-maskable-512.png)
+  if [[ -f "$DIST/assets.bin" ]]; then
+    cached+=(assets.bin)
+  fi
+  while IFS= read -r f; do
+    cached+=("${f#"$DIST/"}")
+  done < <(find "$DIST/snippets" -name '*.js' 2>/dev/null | sort)
+  cache_name="torch-$( (cd "$DIST" && cat "${cached[@]}") | sha256sum | cut -c1-12)"
+  files_list=""
+  for f in "${cached[@]}"; do
+    [[ "$f" == index.html ]] && f=""
+    files_list+="${files_list:+, }\"./$f\""
+  done
+  sed -e "s|\"@CACHE@\"|\"$cache_name\"|" -e "s|\"@FILES@\"|$files_list|" web/chromebook/sw.js > "$DIST/sw.js"
+  if grep -q '@CACHE@\|@FILES@' "$DIST/sw.js"; then
+    echo "a placeholder survived in sw.js; the CACHE or FILES line in web/chromebook/sw.js changed" >&2
+    exit 1
+  fi
+  echo "    sw.js caches ${#cached[@]} files as $cache_name"
+fi
 
 mark "page"
 
@@ -160,12 +206,31 @@ cat > "$DIST/_headers" <<HEADERS
 /$MODULE
   Cache-Control: public, max-age=31536000, immutable
 
+/$GLUE
+  Cache-Control: public, max-age=31536000, immutable
+
 /index.html
+  Cache-Control: no-cache
+
+/worker.js
+  Cache-Control: no-cache
+
+/snippets/*
   Cache-Control: no-cache
 
 /
   Cache-Control: no-cache
 HEADERS
+if (( CHROMEBOOK )); then
+  cat >> "$DIST/_headers" <<'HEADERS'
+
+/sw.js
+  Cache-Control: no-cache
+
+/manifest.webmanifest
+  Cache-Control: no-cache
+HEADERS
+fi
 mark "headers"
 
 rm -rf "$SITE.previous"

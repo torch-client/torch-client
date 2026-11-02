@@ -1,0 +1,51 @@
+[package]
+edition = "2024"
+rust-version = "1.85"
+name = "mlua-sys"
+version = "0.10.0"
+authors = ["Aleksandr Orlenko <zxteam@pm.me>"]
+build = "build/main.rs"
+links = "lua"
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Low level (FFI) bindings to Luau, with the Luau sources vendored and a wasm32-unknown-unknown build"
+readme = "README.md"
+license = "MIT"
+publish = false
+
+[features]
+external = []
+lua51 = []
+lua52 = []
+lua53 = []
+lua54 = []
+lua55 = []
+luajit = []
+luajit52 = ["luajit"]
+luau = []
+luau-codegen = ["luau"]
+luau-vector4 = ["luau"]
+module = []
+vendored = []
+
+[lib]
+name = "mlua_sys"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+[build-dependencies]
+cc = { version = "1.2", features = ["parallel"] }
+
+[lints.rust.unexpected_cfgs]
+level = "allow"
+priority = 0
+check-cfg = ["cfg(raw_dylib)"]

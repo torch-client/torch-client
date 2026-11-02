@@ -4,30 +4,23 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::turtle;
 use crate::entities::registry::Registry;
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Turtle,
-        RenderSpec::new("turtle", turtle::layer, texture, turtle::setup_anim)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Turtle,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Turtle],
+        RenderSpec::new("turtle", turtle::layer, texture, turtle::setup_anim),
         RenderSpec::new(
             "turtle_baby",
             turtle::baby_layer,
             texture,
             turtle::setup_anim,
-        )
-        .with_visible(|st| st.extras.is_baby),
+        ),
     );
 }
 
 fn texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/turtle/turtle_baby".into()
-    } else {
-        "entity/turtle/turtle".into()
-    }
+    aged_texture(st, "entity/turtle/turtle", "entity/turtle/turtle_baby")
 }

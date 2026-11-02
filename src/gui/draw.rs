@@ -10,26 +10,30 @@ use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
     Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
 };
-use bevy::render::render_resource::binding_types::{sampler, texture_2d};
+use std::num::NonZeroU64;
+
+use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendState,
     CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, IndexFormat, LoadOp,
     Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipelineDescriptor, SamplerBindingType, ShaderStages, SpecializedRenderPipeline,
-    SpecializedRenderPipelines, StoreOp, TextureFormat, TextureSampleType, TextureViewId,
-    VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+    RenderPipelineDescriptor, Sampler, SamplerBindingType, ShaderStages, SpecializedRenderPipeline,
+    SpecializedRenderPipelines, StoreOp, TextureFormat, TextureSampleType, TextureView,
+    TextureViewId, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::texture::{GpuImage, OutputColorAttachment};
 use bevy::render::view::{ExtractedWindows, ViewTargetAttachments};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
-use bevy::shader::Shader;
+use bevy::shader::{Shader, ShaderDefVal};
 use bevy::window::WindowRef;
 
-use super::pool::{GUI_VERTEX_STRIDE, GuiPool, GuiTextures};
+use super::pool::{GLINT_UNIFORM_SIZE, GUI_VERTEX_STRIDE, GuiPool, GuiTextures};
 use crate::renderer::ssaa::SceneImage;
 
 pub const UNIHEX_UV_BIAS: f32 = 2.0;
+
+pub const GLINT_UV_BIAS: f32 = 2.0;
 
 fn gui_vertex_layout() -> VertexBufferLayout {
     VertexBufferLayout {
@@ -62,6 +66,12 @@ pub struct GuiBindGroup {
 }
 
 #[derive(Resource, Default)]
+pub struct GuiImageViews(pub std::collections::HashMap<u64, (TextureView, Sampler)>);
+
+#[derive(Resource, Default)]
+struct GuiImageGroups(std::collections::HashMap<u64, (TextureViewId, BindGroup)>);
+
+#[derive(Resource, Default)]
 struct SceneBlitBindGroup(Option<(TextureViewId, BindGroup)>);
 
 #[derive(Resource)]
@@ -91,6 +101,7 @@ fn two_texture_layout() -> BindGroupLayoutDescriptor {
             sampler(SamplerBindingType::Filtering),
             texture_2d(TextureSampleType::Float { filterable: true }),
             sampler(SamplerBindingType::Filtering),
+            uniform_buffer_sized(false, NonZeroU64::new(GLINT_UNIFORM_SIZE)),
         ),
     );
     BindGroupLayoutDescriptor::new("gui", &entries)
@@ -111,38 +122,44 @@ impl SpecializedRenderPipeline for GuiPipeline {
     type Key = GuiPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
-        let (label, shader, layout, vertex_entry, fragment_entry, buffers, blend) = match key.kind {
-            GuiPipelineKind::Gui => (
-                "gui",
-                &self.shaders.gui,
-                self.gui_layout.clone(),
-                "vertex",
-                "fragment",
-                vec![gui_vertex_layout()],
-                Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-            ),
-            GuiPipelineKind::Blit => (
-                "gui_scene_blit",
-                &self.shaders.blit,
-                self.blit_layout.clone(),
-                "blit_vertex",
-                "blit_fragment",
-                Vec::new(),
-                None,
-            ),
-        };
+        let (label, shader, layout, vertex_entry, fragment_entry, buffers, blend, defs) =
+            match key.kind {
+                GuiPipelineKind::Gui => (
+                    "gui",
+                    &self.shaders.gui,
+                    self.gui_layout.clone(),
+                    "vertex",
+                    "fragment",
+                    vec![gui_vertex_layout()],
+                    Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    vec![ShaderDefVal::UInt(
+                        "GLINT_ROTATION_BITS".into(),
+                        crate::items::glint::ROTATION.to_bits(),
+                    )],
+                ),
+                GuiPipelineKind::Blit => (
+                    "gui_scene_blit",
+                    &self.shaders.blit,
+                    self.blit_layout.clone(),
+                    "blit_vertex",
+                    "blit_fragment",
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                ),
+            };
         RenderPipelineDescriptor {
             label: Some(label.into()),
             layout: vec![layout],
             vertex: VertexState {
                 shader: shader.clone(),
-                shader_defs: Vec::new(),
+                shader_defs: defs.clone(),
                 entry_point: Some(vertex_entry.into()),
                 buffers,
             },
             fragment: Some(FragmentState {
                 shader: shader.clone(),
-                shader_defs: Vec::new(),
+                shader_defs: defs,
                 entry_point: Some(fragment_entry.into()),
                 targets: vec![Some(ColorTargetState {
                     format: key.format,
@@ -172,6 +189,7 @@ fn prepare_gui_bind_group(
     pipeline: Res<GuiPipeline>,
     textures: Option<Res<GuiTextures>>,
     images: Res<RenderAssets<GpuImage>>,
+    pool: Res<GuiPool>,
     mut bind_group: ResMut<GuiBindGroup>,
 ) {
     let Some(textures) = textures else { return };
@@ -179,6 +197,7 @@ fn prepare_gui_bind_group(
     else {
         return;
     };
+    let Some(glint) = &pool.glint else { return };
 
     let key = (atlas.texture_view.id(), unihex.texture_view.id());
     if bind_group.key == Some(key) && bind_group.group.is_some() {
@@ -194,9 +213,49 @@ fn prepare_gui_bind_group(
             &atlas.sampler,
             &unihex.texture_view,
             &unihex.sampler,
+            glint.as_entire_binding(),
         )),
     ));
     bind_group.key = Some(key);
+}
+
+#[allow(clippy::too_many_arguments, reason = "one system, flat arguments")]
+fn prepare_gui_image_groups(
+    device: Res<RenderDevice>,
+    pipeline_cache: Res<PipelineCache>,
+    pipeline: Res<GuiPipeline>,
+    textures: Option<Res<GuiTextures>>,
+    images: Res<RenderAssets<GpuImage>>,
+    pool: Res<GuiPool>,
+    views: Res<GuiImageViews>,
+    mut groups: ResMut<GuiImageGroups>,
+) {
+    groups.0.retain(|key, _| views.0.contains_key(key));
+    if views.0.is_empty() {
+        return;
+    }
+    let Some(unihex) = textures.as_ref().and_then(|t| images.get(&t.unihex)) else {
+        return;
+    };
+    let Some(glint) = &pool.glint else { return };
+    let layout = pipeline_cache.get_bind_group_layout(&pipeline.gui_layout);
+    for (&key, (view, sampler)) in &views.0 {
+        if groups.0.get(&key).is_some_and(|(id, _)| *id == view.id()) {
+            continue;
+        }
+        let group = device.create_bind_group(
+            "gui_image",
+            &layout,
+            &BindGroupEntries::sequential((
+                view,
+                sampler,
+                &unihex.texture_view,
+                &unihex.sampler,
+                glint.as_entire_binding(),
+            )),
+        );
+        groups.0.insert(key, (view.id(), group));
+    }
 }
 
 #[allow(clippy::too_many_arguments, reason = "one system, flat arguments")]
@@ -404,6 +463,7 @@ impl Node for GuiNode {
         let pipeline_cache = world.resource::<PipelineCache>();
         let pool = world.resource::<GuiPool>();
         let gui_group = world.resource::<GuiBindGroup>().group.as_ref();
+        let image_groups = world.resource::<GuiImageGroups>();
         let blit_group = world
             .resource::<SceneBlitBindGroup>()
             .0
@@ -440,9 +500,21 @@ impl Node for GuiNode {
                 render_pass.set_bind_group(0, group, &[]);
                 render_pass.set_vertex_buffer(0, vertices.slice(..));
                 render_pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+                let atlas = crate::gui::painter::ATLAS_TEXTURE;
+                let mut bound = atlas;
                 for range in &pool.ranges {
                     if range.window != pass.window || range.index_count == 0 {
                         continue;
+                    }
+                    if range.texture != bound {
+                        let next = if range.texture == atlas {
+                            Some(group)
+                        } else {
+                            image_groups.0.get(&range.texture).map(|(_, g)| g)
+                        };
+                        let Some(next) = next else { continue };
+                        render_pass.set_bind_group(0, next, &[]);
+                        bound = range.texture;
                     }
                     render_pass.draw_indexed(
                         range.first_index..range.first_index + range.index_count,
@@ -488,6 +560,8 @@ pub fn build(app: &mut App) {
     render_app
         .init_resource::<GuiPool>()
         .init_resource::<GuiBindGroup>()
+        .init_resource::<GuiImageViews>()
+        .init_resource::<GuiImageGroups>()
         .init_resource::<SceneBlitBindGroup>()
         .init_resource::<GuiPlan>()
         .init_resource::<SpecializedRenderPipelines<GuiPipeline>>()
@@ -500,6 +574,7 @@ pub fn build(app: &mut App) {
                     .in_set(RenderSystems::ManageViews)
                     .after(bevy::render::view::prepare_view_targets),
                 prepare_gui_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                prepare_gui_image_groups.in_set(RenderSystems::PrepareBindGroups),
                 present_gui_windows
                     .in_set(RenderSystems::Render)
                     .after(bevy::render::renderer::render_system),

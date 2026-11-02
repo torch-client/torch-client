@@ -2398,7 +2398,7 @@ impl DefaultableComponent for Consumable {
                 animation: ItemUseAnimation::Drink,
                 has_consume_particles: false,
                 on_consume_effects: vec![ConsumeEffect::PlaySound {
-                    sound: SoundEvent::ItemOminousBottleDispose,
+                    sound: azalea_registry::Holder::Reference(SoundEvent::ItemOminousBottleDispose),
                 }],
                 sound: azalea_registry::Holder::Reference(SoundEvent::EntityGenericDrink),
                 ..Consumable::new()
@@ -2974,8 +2974,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:black_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -2989,8 +2989,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:black_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3000,8 +3000,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:blue_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3015,8 +3015,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:blue_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3026,8 +3026,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:brown_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3041,8 +3041,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:brown_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3054,43 +3054,43 @@ impl DefaultableComponent for Equippable {
             },
             ItemKind::ChainmailBoots => Equippable {
                 asset_id: Some("minecraft:chainmail".into()),
-                equip_sound: SoundEvent::ItemArmorEquipChain,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipChain),
                 slot: EquipmentSlot::Feet,
                 ..Equippable::new()
             },
             ItemKind::ChainmailChestplate => Equippable {
                 asset_id: Some("minecraft:chainmail".into()),
-                equip_sound: SoundEvent::ItemArmorEquipChain,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipChain),
                 slot: EquipmentSlot::Chest,
                 ..Equippable::new()
             },
             ItemKind::ChainmailHelmet => Equippable {
                 asset_id: Some("minecraft:chainmail".into()),
-                equip_sound: SoundEvent::ItemArmorEquipChain,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipChain),
                 slot: EquipmentSlot::Head,
                 ..Equippable::new()
             },
             ItemKind::ChainmailLeggings => Equippable {
                 asset_id: Some("minecraft:chainmail".into()),
-                equip_sound: SoundEvent::ItemArmorEquipChain,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipChain),
                 slot: EquipmentSlot::Legs,
                 ..Equippable::new()
             },
             ItemKind::CopperBoots => Equippable {
                 asset_id: Some("minecraft:copper".into()),
-                equip_sound: SoundEvent::ItemArmorEquipCopper,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipCopper),
                 slot: EquipmentSlot::Feet,
                 ..Equippable::new()
             },
             ItemKind::CopperChestplate => Equippable {
                 asset_id: Some("minecraft:copper".into()),
-                equip_sound: SoundEvent::ItemArmorEquipCopper,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipCopper),
                 slot: EquipmentSlot::Chest,
                 ..Equippable::new()
             },
             ItemKind::CopperHelmet => Equippable {
                 asset_id: Some("minecraft:copper".into()),
-                equip_sound: SoundEvent::ItemArmorEquipCopper,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipCopper),
                 slot: EquipmentSlot::Head,
                 ..Equippable::new()
             },
@@ -3104,14 +3104,14 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:copper".into()),
                 can_be_sheared: true,
                 damage_on_hurt: false,
-                equip_sound: SoundEvent::EntityHorseArmor,
-                shearing_sound: SoundEvent::ItemHorseArmorUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHorseArmor),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemHorseArmorUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
             ItemKind::CopperLeggings => Equippable {
                 asset_id: Some("minecraft:copper".into()),
-                equip_sound: SoundEvent::ItemArmorEquipCopper,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipCopper),
                 slot: EquipmentSlot::Legs,
                 ..Equippable::new()
             },
@@ -3126,8 +3126,8 @@ impl DefaultableComponent for Equippable {
                 can_be_sheared: true,
                 damage_on_hurt: false,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::ItemArmorEquipNautilus,
-                shearing_sound: SoundEvent::ItemArmorUnequipNautilus,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipNautilus),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorUnequipNautilus),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3142,8 +3142,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:cyan_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3157,26 +3157,26 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:cyan_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
             ItemKind::DiamondBoots => Equippable {
                 asset_id: Some("minecraft:diamond".into()),
-                equip_sound: SoundEvent::ItemArmorEquipDiamond,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipDiamond),
                 slot: EquipmentSlot::Feet,
                 ..Equippable::new()
             },
             ItemKind::DiamondChestplate => Equippable {
                 asset_id: Some("minecraft:diamond".into()),
-                equip_sound: SoundEvent::ItemArmorEquipDiamond,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipDiamond),
                 slot: EquipmentSlot::Chest,
                 ..Equippable::new()
             },
             ItemKind::DiamondHelmet => Equippable {
                 asset_id: Some("minecraft:diamond".into()),
-                equip_sound: SoundEvent::ItemArmorEquipDiamond,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipDiamond),
                 slot: EquipmentSlot::Head,
                 ..Equippable::new()
             },
@@ -3190,14 +3190,14 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:diamond".into()),
                 can_be_sheared: true,
                 damage_on_hurt: false,
-                equip_sound: SoundEvent::EntityHorseArmor,
-                shearing_sound: SoundEvent::ItemHorseArmorUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHorseArmor),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemHorseArmorUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
             ItemKind::DiamondLeggings => Equippable {
                 asset_id: Some("minecraft:diamond".into()),
-                equip_sound: SoundEvent::ItemArmorEquipDiamond,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipDiamond),
                 slot: EquipmentSlot::Legs,
                 ..Equippable::new()
             },
@@ -3212,8 +3212,8 @@ impl DefaultableComponent for Equippable {
                 can_be_sheared: true,
                 damage_on_hurt: false,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::ItemArmorEquipNautilus,
-                shearing_sound: SoundEvent::ItemArmorUnequipNautilus,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipNautilus),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorUnequipNautilus),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3225,25 +3225,25 @@ impl DefaultableComponent for Equippable {
             ItemKind::Elytra => Equippable {
                 asset_id: Some("minecraft:elytra".into()),
                 damage_on_hurt: false,
-                equip_sound: SoundEvent::ItemArmorEquipElytra,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipElytra),
                 slot: EquipmentSlot::Chest,
                 ..Equippable::new()
             },
             ItemKind::GoldenBoots => Equippable {
                 asset_id: Some("minecraft:gold".into()),
-                equip_sound: SoundEvent::ItemArmorEquipGold,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipGold),
                 slot: EquipmentSlot::Feet,
                 ..Equippable::new()
             },
             ItemKind::GoldenChestplate => Equippable {
                 asset_id: Some("minecraft:gold".into()),
-                equip_sound: SoundEvent::ItemArmorEquipGold,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipGold),
                 slot: EquipmentSlot::Chest,
                 ..Equippable::new()
             },
             ItemKind::GoldenHelmet => Equippable {
                 asset_id: Some("minecraft:gold".into()),
-                equip_sound: SoundEvent::ItemArmorEquipGold,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipGold),
                 slot: EquipmentSlot::Head,
                 ..Equippable::new()
             },
@@ -3257,14 +3257,14 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:gold".into()),
                 can_be_sheared: true,
                 damage_on_hurt: false,
-                equip_sound: SoundEvent::EntityHorseArmor,
-                shearing_sound: SoundEvent::ItemHorseArmorUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHorseArmor),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemHorseArmorUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
             ItemKind::GoldenLeggings => Equippable {
                 asset_id: Some("minecraft:gold".into()),
-                equip_sound: SoundEvent::ItemArmorEquipGold,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipGold),
                 slot: EquipmentSlot::Legs,
                 ..Equippable::new()
             },
@@ -3279,8 +3279,8 @@ impl DefaultableComponent for Equippable {
                 can_be_sheared: true,
                 damage_on_hurt: false,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::ItemArmorEquipNautilus,
-                shearing_sound: SoundEvent::ItemArmorUnequipNautilus,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipNautilus),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorUnequipNautilus),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3290,8 +3290,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:gray_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3305,8 +3305,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:gray_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3316,8 +3316,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:green_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3331,26 +3331,26 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:green_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
             ItemKind::IronBoots => Equippable {
                 asset_id: Some("minecraft:iron".into()),
-                equip_sound: SoundEvent::ItemArmorEquipIron,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipIron),
                 slot: EquipmentSlot::Feet,
                 ..Equippable::new()
             },
             ItemKind::IronChestplate => Equippable {
                 asset_id: Some("minecraft:iron".into()),
-                equip_sound: SoundEvent::ItemArmorEquipIron,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipIron),
                 slot: EquipmentSlot::Chest,
                 ..Equippable::new()
             },
             ItemKind::IronHelmet => Equippable {
                 asset_id: Some("minecraft:iron".into()),
-                equip_sound: SoundEvent::ItemArmorEquipIron,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipIron),
                 slot: EquipmentSlot::Head,
                 ..Equippable::new()
             },
@@ -3364,14 +3364,14 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:iron".into()),
                 can_be_sheared: true,
                 damage_on_hurt: false,
-                equip_sound: SoundEvent::EntityHorseArmor,
-                shearing_sound: SoundEvent::ItemHorseArmorUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHorseArmor),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemHorseArmorUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
             ItemKind::IronLeggings => Equippable {
                 asset_id: Some("minecraft:iron".into()),
-                equip_sound: SoundEvent::ItemArmorEquipIron,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipIron),
                 slot: EquipmentSlot::Legs,
                 ..Equippable::new()
             },
@@ -3386,26 +3386,26 @@ impl DefaultableComponent for Equippable {
                 can_be_sheared: true,
                 damage_on_hurt: false,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::ItemArmorEquipNautilus,
-                shearing_sound: SoundEvent::ItemArmorUnequipNautilus,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipNautilus),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorUnequipNautilus),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
             ItemKind::LeatherBoots => Equippable {
                 asset_id: Some("minecraft:leather".into()),
-                equip_sound: SoundEvent::ItemArmorEquipLeather,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipLeather),
                 slot: EquipmentSlot::Feet,
                 ..Equippable::new()
             },
             ItemKind::LeatherChestplate => Equippable {
                 asset_id: Some("minecraft:leather".into()),
-                equip_sound: SoundEvent::ItemArmorEquipLeather,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipLeather),
                 slot: EquipmentSlot::Chest,
                 ..Equippable::new()
             },
             ItemKind::LeatherHelmet => Equippable {
                 asset_id: Some("minecraft:leather".into()),
-                equip_sound: SoundEvent::ItemArmorEquipLeather,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipLeather),
                 slot: EquipmentSlot::Head,
                 ..Equippable::new()
             },
@@ -3419,14 +3419,14 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:leather".into()),
                 can_be_sheared: true,
                 damage_on_hurt: false,
-                equip_sound: SoundEvent::EntityHorseArmor,
-                shearing_sound: SoundEvent::ItemHorseArmorUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHorseArmor),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemHorseArmorUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
             ItemKind::LeatherLeggings => Equippable {
                 asset_id: Some("minecraft:leather".into()),
-                equip_sound: SoundEvent::ItemArmorEquipLeather,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipLeather),
                 slot: EquipmentSlot::Legs,
                 ..Equippable::new()
             },
@@ -3436,8 +3436,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:light_blue_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3451,8 +3451,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:light_blue_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3462,8 +3462,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:light_gray_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3477,8 +3477,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:light_gray_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3488,8 +3488,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:lime_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3503,8 +3503,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:lime_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3514,8 +3514,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:magenta_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3529,26 +3529,26 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:magenta_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
             ItemKind::NetheriteBoots => Equippable {
                 asset_id: Some("minecraft:netherite".into()),
-                equip_sound: SoundEvent::ItemArmorEquipNetherite,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipNetherite),
                 slot: EquipmentSlot::Feet,
                 ..Equippable::new()
             },
             ItemKind::NetheriteChestplate => Equippable {
                 asset_id: Some("minecraft:netherite".into()),
-                equip_sound: SoundEvent::ItemArmorEquipNetherite,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipNetherite),
                 slot: EquipmentSlot::Chest,
                 ..Equippable::new()
             },
             ItemKind::NetheriteHelmet => Equippable {
                 asset_id: Some("minecraft:netherite".into()),
-                equip_sound: SoundEvent::ItemArmorEquipNetherite,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipNetherite),
                 slot: EquipmentSlot::Head,
                 ..Equippable::new()
             },
@@ -3562,14 +3562,14 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:netherite".into()),
                 can_be_sheared: true,
                 damage_on_hurt: false,
-                equip_sound: SoundEvent::EntityHorseArmor,
-                shearing_sound: SoundEvent::ItemHorseArmorUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHorseArmor),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemHorseArmorUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
             ItemKind::NetheriteLeggings => Equippable {
                 asset_id: Some("minecraft:netherite".into()),
-                equip_sound: SoundEvent::ItemArmorEquipNetherite,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipNetherite),
                 slot: EquipmentSlot::Legs,
                 ..Equippable::new()
             },
@@ -3584,8 +3584,8 @@ impl DefaultableComponent for Equippable {
                 can_be_sheared: true,
                 damage_on_hurt: false,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::ItemArmorEquipNautilus,
-                shearing_sound: SoundEvent::ItemArmorUnequipNautilus,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipNautilus),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorUnequipNautilus),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3595,8 +3595,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:orange_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3610,8 +3610,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:orange_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3626,8 +3626,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:pink_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3641,8 +3641,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:pink_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3657,8 +3657,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:purple_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3672,8 +3672,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:purple_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3683,8 +3683,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:red_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3698,8 +3698,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:red_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3713,8 +3713,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:saddle".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHorseSaddle,
-                shearing_sound: SoundEvent::ItemSaddleUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHorseSaddle),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemSaddleUnequip),
                 slot: EquipmentSlot::Saddle,
                 ..Equippable::new()
             },
@@ -3730,7 +3730,7 @@ impl DefaultableComponent for Equippable {
             },
             ItemKind::TurtleHelmet => Equippable {
                 asset_id: Some("minecraft:turtle_scute".into()),
-                equip_sound: SoundEvent::ItemArmorEquipTurtle,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipTurtle),
                 slot: EquipmentSlot::Head,
                 ..Equippable::new()
             },
@@ -3740,8 +3740,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:white_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3755,8 +3755,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:white_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3771,8 +3771,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:armadillo_scute".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::ItemArmorEquipWolf,
-                shearing_sound: SoundEvent::ItemArmorUnequipWolf,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipWolf),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorUnequipWolf),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3782,8 +3782,8 @@ impl DefaultableComponent for Equippable {
                 }),
                 asset_id: Some("minecraft:yellow_carpet".into()),
                 can_be_sheared: true,
-                equip_sound: SoundEvent::EntityLlamaSwag,
-                shearing_sound: SoundEvent::ItemLlamaCarpetUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityLlamaSwag),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemLlamaCarpetUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -3797,8 +3797,8 @@ impl DefaultableComponent for Equippable {
                 asset_id: Some("minecraft:yellow_harness".into()),
                 can_be_sheared: true,
                 equip_on_interact: true,
-                equip_sound: SoundEvent::EntityHappyGhastEquip,
-                shearing_sound: SoundEvent::EntityHappyGhastUnequip,
+                equip_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastEquip),
+                shearing_sound: azalea_registry::Holder::Reference(SoundEvent::EntityHappyGhastUnequip),
                 slot: EquipmentSlot::Body,
                 ..Equippable::new()
             },
@@ -4765,7 +4765,9 @@ impl DefaultableComponent for Recipes {
             ItemKind::KnowledgeBook => vec![],
             _ => return None,
         };
-        Some(Recipes { recipes: value })
+        Some(Recipes {
+            recipes: simdnbt::owned::NbtTag::List(simdnbt::owned::NbtList::String(value)),
+        })
     }
 }
 impl DefaultableComponent for RepairCost {

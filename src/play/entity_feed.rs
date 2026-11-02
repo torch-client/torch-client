@@ -16,15 +16,19 @@ use crate::entities;
 
 pub(crate) mod entity_event {
     pub const JUMP: u8 = 1;
+    pub const KINETIC_HIT: u8 = 2;
     pub const START_ATTACKING: u8 = 4;
     pub const SHAKE_WETNESS: u8 = 8;
     pub const EAT_GRASS: u8 = 10;
     pub const OFFER_FLOWER: u8 = 11;
     pub const SQUID_ANIM_SYNCH: u8 = 19;
+    pub const REDUCED_DEBUG_INFO: u8 = 22;
+    pub const FULL_DEBUG_INFO: u8 = 23;
     pub const PERMISSION_LEVEL_ALL: u8 = 24;
     pub const PERMISSION_LEVEL_OWNERS: u8 = 28;
     pub const ARMORSTAND_WOBBLE: u8 = 32;
     pub const STOP_OFFER_FLOWER: u8 = 34;
+    pub const PROTECTED_FROM_DEATH: u8 = 35;
     pub const RAVAGER_STUNNED: u8 = 39;
     pub const CANCEL_SHAKE_WETNESS: u8 = 56;
     pub const START_RAM: u8 = 58;
@@ -68,26 +72,6 @@ fn is_living(kind: azalea_registry::builtin::EntityKind) -> bool {
             | EntityKind::ShulkerBullet
             | EntityKind::LlamaSpit
             | EntityKind::FireworkRocket
-            | EntityKind::AcaciaBoat
-            | EntityKind::BambooRaft
-            | EntityKind::BirchBoat
-            | EntityKind::CherryBoat
-            | EntityKind::DarkOakBoat
-            | EntityKind::JungleBoat
-            | EntityKind::MangroveBoat
-            | EntityKind::OakBoat
-            | EntityKind::PaleOakBoat
-            | EntityKind::SpruceBoat
-            | EntityKind::AcaciaChestBoat
-            | EntityKind::BambooChestRaft
-            | EntityKind::BirchChestBoat
-            | EntityKind::CherryChestBoat
-            | EntityKind::DarkOakChestBoat
-            | EntityKind::JungleChestBoat
-            | EntityKind::MangroveChestBoat
-            | EntityKind::OakChestBoat
-            | EntityKind::PaleOakChestBoat
-            | EntityKind::SpruceChestBoat
             | EntityKind::Minecart
             | EntityKind::ChestMinecart
             | EntityKind::CommandBlockMinecart
@@ -108,7 +92,7 @@ fn is_living(kind: azalea_registry::builtin::EntityKind) -> bool {
             | EntityKind::LightningBolt
             | EntityKind::EvokerFangs
             | EntityKind::OminousItemSpawner
-    )
+    ) && crate::play::riding::Hull::of(kind).is_none()
 }
 
 struct EntityView<'w>(azalea::ecs::world::EntityRef<'w>);
@@ -303,24 +287,34 @@ fn par_for_each_mut<T: Send>(items: &mut [T], f: impl Fn(&mut T) + Send + Sync) 
 
 fn max_fed_entities() -> usize {
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *MAX.get_or_init(|| {
-        std::env::var("MC_MAX_FED")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(10_000)
-    })
+    *MAX.get_or_init(|| entities::env_entity_cap("MC_MAX_FED", 10_000))
 }
 
 fn max_simulated_entities() -> usize {
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *MAX.get_or_init(|| {
-        std::env::var("MC_MAX_SIMULATED")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(12_000)
-    })
+    *MAX.get_or_init(|| entities::env_entity_cap("MC_MAX_SIMULATED", 12_000))
+}
+
+pub(crate) fn cached_query<'c, D, F>(
+    bot: &Client,
+    cache: &'c mut Option<(
+        azalea::ecs::world::WorldId,
+        azalea::ecs::query::QueryState<D, F>,
+    )>,
+) -> &'c mut azalea::ecs::query::QueryState<D, F>
+where
+    D: azalea::ecs::query::QueryData,
+    F: azalea::ecs::query::QueryFilter,
+{
+    let stale = {
+        let ecs = bot.ecs.read();
+        cache.as_ref().is_none_or(|(id, _)| *id != ecs.id())
+    };
+    if stale {
+        let mut ecs = bot.ecs.write();
+        *cache = Some((ecs.id(), ecs.query_filtered::<D, F>()));
+    }
+    &mut cache.as_mut().expect("filled above").1
 }
 
 fn nearby_entities(bot: &Client, origin: AzVec3, cap: usize) -> Vec<(AzEntity, AzVec3, i32)> {
@@ -339,7 +333,8 @@ fn nearby_entities(bot: &Client, origin: AzVec3, cap: usize) -> Vec<(AzEntity, A
         ),
         (Without<LocalEntity>, Without<metadata::Player>),
     >;
-    static CACHE: std::sync::Mutex<Option<(WorldId, NearbyQuery)>> = std::sync::Mutex::new(None);
+    static CACHE: crate::session::SideMutex<Option<(WorldId, NearbyQuery)>> =
+        crate::session::SideMutex::new(None);
 
     let world_name = {
         let Ok(name) = bot.component::<WorldName>() else {
@@ -349,21 +344,8 @@ fn nearby_entities(bot: &Client, origin: AzVec3, cap: usize) -> Vec<(AzEntity, A
     };
 
     let mut cache = CACHE.lock().unwrap();
-    {
-        let ecs = bot.ecs.read();
-        let stale = cache.as_ref().is_none_or(|(id, _)| *id != ecs.id());
-        drop(ecs);
-        if stale {
-            let mut ecs = bot.ecs.write();
-            let state = ecs.query_filtered::<
-                (AzEntity, &WorldName, &Position, &MinecraftEntityId),
-                (Without<LocalEntity>, Without<metadata::Player>),
-            >();
-            *cache = Some((ecs.id(), state));
-        }
-    }
+    let query = cached_query(bot, &mut *cache);
     let ecs = bot.ecs.read();
-    let (_, query) = cache.as_mut().expect("filled above");
     let mut all: Vec<(AzEntity, AzVec3, i32)> = query
         .iter(&ecs)
         .filter(|(_, name, _, _)| **name == world_name)
@@ -403,6 +385,7 @@ pub(crate) fn collect_entities(
     let Ok(origin) = bot.position() else {
         return std::sync::Arc::default();
     };
+    let driven = crate::play::riding::driven_pose();
 
     let heads_guard = head_yaws().lock().unwrap();
     let equip_guard = equipment().lock().unwrap();
@@ -446,12 +429,16 @@ pub(crate) fn collect_entities(
     let ecs = bot.ecs.read();
     let mut accepted: Vec<(azalea::ecs::world::EntityRef<'_>, i32, EntityKind, AzVec3)> =
         Vec::with_capacity(refs.len().min(feed_cap));
+    let taken = crate::play::item_pickup::taken().lock().unwrap();
     for &(entity, pos, id) in refs.iter() {
         let Ok(entity_ref) = ecs.get_entity(entity) else {
             continue;
         };
         let view = EntityView(entity_ref);
         live_ids.insert(id);
+        if taken.contains(&id) {
+            continue;
+        }
         if pos.distance_squared_to(origin) > ENTITY_RANGE * ENTITY_RANGE {
             continue;
         }
@@ -464,6 +451,7 @@ pub(crate) fn collect_entities(
         seen.insert(id);
         accepted.push((entity_ref, id, kind, pos));
     }
+    drop(taken);
 
     let mut meta_cache_guard = meta_cache().lock().unwrap();
     let mut meta_dirty_guard = crate::client::tracking::meta_dirty().lock().unwrap();
@@ -813,6 +801,7 @@ pub(crate) fn collect_entities(
         shared.chestplate = worn.chestplate;
         shared.leggings = worn.leggings;
         shared.boots = worn.boots;
+        shared.armor_foil = worn.armor_foil;
         shared.body_armor = worn.body_armor;
         if living {
             shared.left_handed = flag::<metadata::LeftHanded>(eref);
@@ -992,6 +981,7 @@ pub(crate) fn collect_entities(
             head_targets: [None; 2],
             shared: std::sync::Arc::new(shared),
             eating,
+            driven: false,
         };
 
         let deferred = EntityDeferred {
@@ -1137,7 +1127,15 @@ pub(crate) fn collect_entities(
             input.is_in_water = matches!(feet, Some(FluidKind::Water));
             input.is_in_lava = matches!(feet, Some(FluidKind::Lava));
             let on_land = !matches!(feet, Some(FluidKind::Water));
-            let under_water = matches!(eyes, Some(FluidKind::Water));
+            let under_water = match (crate::play::riding::Hull::of(*kind), level) {
+                (Some(_), Some(g)) => {
+                    let [x, y, z] = input.pos;
+                    let hull = EntityDimensions::from(*kind)
+                        .make_bounding_box(azalea_core::position::Vec3::new(x, y, z));
+                    crate::play::riding::hull_under_water(g, &hull)
+                }
+                _ => matches!(eyes, Some(FluidKind::Water)),
+            };
             let variant_moved = variant.as_ref().is_some_and(|v| *v != input.shared.variant);
             if variant_moved
                 || input.shared.on_land != on_land
@@ -1195,6 +1193,19 @@ pub(crate) fn collect_entities(
     }
     drop(meta_cache_guard);
     drop(meta_dirty_guard);
+
+    if let Some(d) = driven
+        && let Some(p) = pending.iter_mut().find(|p| p.id == d.id)
+    {
+        p.input.driven = true;
+        p.input.pos = [d.pos.x, d.pos.y, d.pos.z];
+        p.input.y_rot = d.y_rot;
+        p.input.x_rot = d.x_rot;
+        if let Some([left, right]) = d.paddles {
+            p.input.paddling_left = left;
+            p.input.paddling_right = right;
+        }
+    }
 
     drop(_world_timer);
     let _anim_timer = crate::diag::timed(crate::diag::Phase::Anim);
@@ -1280,6 +1291,10 @@ pub(crate) fn collect_entities(
         .lock()
         .unwrap()
         .retain(|id, _| live_ids.contains(id));
+    crate::play::item_pickup::taken()
+        .lock()
+        .unwrap()
+        .retain(|id| live_ids.contains(id));
     passengers()
         .lock()
         .unwrap()

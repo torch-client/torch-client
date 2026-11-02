@@ -1,4 +1,4 @@
-use crate::direction::Direction;
+use crate::blocks::direction::Direction;
 use crate::renderer::Occupancy;
 
 pub mod coords {

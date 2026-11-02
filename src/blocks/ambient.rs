@@ -297,7 +297,7 @@ fn leaf_particle(name: &str) -> Option<(Leaf, f32)> {
     }
 }
 
-fn is_falling(name: &str) -> bool {
+pub(crate) fn is_falling(name: &str) -> bool {
     matches!(
         name,
         "sand"

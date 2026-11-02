@@ -277,7 +277,9 @@ impl GamePacketHandler<'_> {
                 }
 
                 *world_holder.partial.write() = PartialWorld::new(
-                    azalea_world::chunk::calculate_chunk_storage_range(p.chunk_radius),
+                    azalea_world::chunk::calculate_chunk_storage_range(
+                        azalea_world::retain::note_server_radius(p.chunk_radius),
+                    ),
                     Some(self.player),
                 );
                 {
@@ -336,7 +338,7 @@ impl GamePacketHandler<'_> {
                 .write()
                 .chunks
                 .update_view_radius(azalea_world::chunk::calculate_chunk_storage_range(
-                    p.radius,
+                    azalea_world::retain::note_server_radius(p.radius),
                 ));
         });
     }
@@ -424,6 +426,9 @@ impl GamePacketHandler<'_> {
             p.relative
                 .apply(&p.change, &mut position, &mut direction, &mut physics);
             physics.set_old_pos(*position);
+            commands
+                .entity(self.player)
+                .insert(crate::movement::ServerSetLook);
 
             commands.trigger(SendGamePacketEvent::new(
                 self.player,
@@ -785,6 +790,10 @@ impl GamePacketHandler<'_> {
                     warn!("Got teleport entity packet for unknown entity id {}", p.id);
                     return;
                 };
+                if entity == self.player {
+                    debug!("Ignoring teleport entity packet for the local player");
+                    return;
+                }
 
                 let relative = p.relative.clone();
                 let change = p.change.clone();
@@ -1012,12 +1021,18 @@ impl GamePacketHandler<'_> {
         #[allow(clippy::single_match)]
         match p.event {
             EventType::ChangeGameMode => {
-                as_system::<Query<&mut GameMode>>(self.ecs, |mut query| {
-                    let mut game_mode = query.get_mut(self.player).unwrap();
-                    if let Some(new_game_mode) = GameMode::from_id(p.param as u8) {
-                        *game_mode = new_game_mode;
-                    }
-                });
+                as_system::<Query<(&mut GameMode, &mut PreviousGameMode)>>(
+                    self.ecs,
+                    |mut query| {
+                        let (mut game_mode, mut previous) = query.get_mut(self.player).unwrap();
+                        if let Some(new_game_mode) = GameMode::from_id(p.param as u8) {
+                            if new_game_mode != *game_mode {
+                                previous.0 = Some(*game_mode);
+                            }
+                            *game_mode = new_game_mode;
+                        }
+                    },
+                );
             }
             _ => {}
         }
@@ -1205,6 +1220,10 @@ impl GamePacketHandler<'_> {
 
     pub fn forget_level_chunk(&mut self, p: &ClientboundForgetLevelChunk) {
         debug!("Got forget level chunk packet {p:?}");
+
+        if azalea_world::retain::keeps_forgotten(p.pos) {
+            return;
+        }
 
         as_system::<Query<&WorldHolder>>(self.ecs, |mut query| {
             let local_player = query.get_mut(self.player).unwrap();
@@ -1571,7 +1590,39 @@ impl GamePacketHandler<'_> {
     pub fn projectile_power(&mut self, _p: &ClientboundProjectilePower) {}
     pub fn custom_report_details(&mut self, _p: &ClientboundCustomReportDetails) {}
     pub fn server_links(&mut self, _p: &ClientboundServerLinks) {}
-    pub fn player_rotation(&mut self, _p: &ClientboundPlayerRotation) {}
+    pub fn player_rotation(&mut self, p: &ClientboundPlayerRotation) {
+        debug!("Got player rotation packet {p:?}");
+
+        as_system::<(Query<&mut LookDirection>, Commands)>(
+            self.ecs,
+            |(mut query, mut commands)| {
+                let Ok(mut direction) = query.get_mut(self.player) else {
+                    return;
+                };
+                let y_rot = if p.relative_y {
+                    direction.y_rot() + p.y_rot
+                } else {
+                    p.y_rot
+                };
+                let x_rot = if p.relative_x {
+                    direction.x_rot() + p.x_rot
+                } else {
+                    p.x_rot
+                };
+                *direction = LookDirection::new(y_rot, x_rot);
+                commands
+                    .entity(self.player)
+                    .insert(crate::movement::ServerSetLook);
+                commands.trigger(SendGamePacketEvent::new(
+                    self.player,
+                    ServerboundMovePlayerRot {
+                        look_direction: *direction,
+                        flags: MoveFlags::default(),
+                    },
+                ));
+            },
+        );
+    }
     pub fn recipe_book_add(&mut self, _p: &ClientboundRecipeBookAdd) {}
     pub fn recipe_book_remove(&mut self, _p: &ClientboundRecipeBookRemove) {}
     pub fn recipe_book_settings(&mut self, _p: &ClientboundRecipeBookSettings) {}
@@ -1643,6 +1694,14 @@ fn move_entity(
         debug!("Got move entity packet for entity with missing components {entity_id}");
         return;
     };
+
+    if entity == player_entity {
+        if let Some(new_delta) = p.delta {
+            let new_position = physics.vec_delta_codec.decode(&new_delta);
+            physics.vec_delta_codec.set_base(new_position);
+        }
+        return;
+    }
 
     if !should_apply_entity_update(
         &mut commands,

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::platform::packfs::{self, Kind};
 use crate::util::zip;
 
 pub(crate) enum Source {
@@ -8,7 +10,7 @@ pub(crate) enum Source {
         root: PathBuf,
     },
     Archive {
-        bytes: Vec<u8>,
+        bytes: Arc<Vec<u8>>,
         entries: Vec<zip::Entry>,
         index: HashMap<String, usize>,
     },
@@ -19,19 +21,15 @@ pub(crate) struct Pack {
     pub(crate) name: String,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn scan(dir: &Path) -> Vec<Pack> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = packfs::entries(dir) else {
         return Vec::new();
     };
 
     let mut packs: Vec<Pack> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let file_type = entry.file_type().ok()?;
-            let name = entry.file_name().into_string().ok()?;
-
-            if file_type.is_file() && !is_zip(&name) {
+        .into_iter()
+        .filter_map(|(name, kind)| {
+            if kind == Kind::File && !is_zip(&name) {
                 return None;
             }
 
@@ -47,7 +45,6 @@ pub(crate) fn scan(dir: &Path) -> Vec<Pack> {
     packs
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn is_zip(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes.len() > 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".zip")
@@ -56,19 +53,24 @@ fn is_zip(name: &str) -> bool {
 impl Source {
     pub(crate) fn open(path: &Path, root: &str) -> Result<Source, String> {
         let missing = || format!("the pack has no {root} directory");
-        if path.is_dir() {
+        if packfs::is_dir(path) {
             let root = path.join(root);
-            if !root.is_dir() {
+            if !packfs::is_dir(&root) {
                 return Err(missing());
             }
-            let root = std::fs::canonicalize(&root).map_err(|e| e.to_string())?;
+            let root = packfs::canonicalize(&root).map_err(|e| e.to_string())?;
             return Ok(Source::Directory { root });
         }
 
-        Source::from_zip(std::fs::read(path).map_err(|e| e.to_string())?, root)
+        Source::from_shared_zip(packfs::shared(path).map_err(|e| e.to_string())?, root)
     }
 
+    #[cfg(resource_packs)]
     pub(crate) fn from_zip(bytes: Vec<u8>, root: &str) -> Result<Source, String> {
+        Source::from_shared_zip(Arc::new(bytes), root)
+    }
+
+    fn from_shared_zip(bytes: Arc<Vec<u8>>, root: &str) -> Result<Source, String> {
         let missing = || format!("the pack has no {root} directory");
         let entries = zip::entries(&bytes)?;
         let prefix = if root.is_empty() {
@@ -97,7 +99,7 @@ impl Source {
 
     pub(crate) fn read(&self, path: &str) -> Option<Vec<u8>> {
         match self {
-            Source::Directory { root } => std::fs::read(confined(root, path)?).ok(),
+            Source::Directory { root } => packfs::read(confined(root, path)?).ok(),
             Source::Archive {
                 bytes,
                 entries,
@@ -131,7 +133,9 @@ impl Source {
 
     pub(crate) fn contains(&self, path: &str) -> bool {
         match self {
-            Source::Directory { root } => confined(root, path).is_some_and(|at| at.is_file()),
+            Source::Directory { root } => {
+                confined(root, path).is_some_and(|at| packfs::is_file(&at))
+            }
             Source::Archive { index, .. } => index.contains_key(path),
         }
     }
@@ -140,7 +144,9 @@ impl Source {
     pub(crate) fn into_zip(self) -> Option<Vec<u8>> {
         match self {
             Source::Directory { .. } => None,
-            Source::Archive { bytes, .. } => Some(bytes),
+            Source::Archive { bytes, .. } => {
+                Some(Arc::try_unwrap(bytes).unwrap_or_else(|shared| shared.to_vec()))
+            }
         }
     }
 }
@@ -160,18 +166,14 @@ fn archive_root<'a>(names: impl Iterator<Item = &'a str>, root: &str) -> Option<
 }
 
 fn walk(at: &Path, prefix: &str, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(at) else {
+    let Ok(entries) = packfs::entries(at) else {
         return;
     };
-    for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
+    for (name, kind) in entries {
         let path = format!("{prefix}/{name}");
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() => walk(&entry.path(), &path, out),
-            Ok(_) => out.push(path),
-            Err(_) => {}
+        match kind {
+            Kind::Dir => walk(&at.join(&name), &path, out),
+            _ => out.push(path),
         }
     }
 }
@@ -194,8 +196,97 @@ fn resolve(root: &Path, path: &str) -> Option<PathBuf> {
 }
 
 fn confined(root: &Path, path: &str) -> Option<PathBuf> {
-    let real = std::fs::canonicalize(resolve(root, path)?).ok()?;
+    let real = packfs::canonicalize(resolve(root, path)?).ok()?;
     real.starts_with(root).then_some(real)
+}
+
+#[cfg(any(resource_packs, feature = "shader_support"))]
+pub(crate) struct Failed(std::sync::Mutex<Vec<String>>);
+
+#[cfg(any(resource_packs, feature = "shader_support"))]
+impl Failed {
+    pub(crate) const fn new() -> Failed {
+        Failed(std::sync::Mutex::new(Vec::new()))
+    }
+
+    pub(crate) fn set(&self, names: Vec<String>) {
+        if let Ok(mut failed) = self.0.lock() {
+            *failed = names;
+        }
+    }
+
+    pub(crate) fn get(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|failed| failed.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(any(resource_packs, feature = "shader_support"))]
+#[derive(Default)]
+pub(crate) struct Dropped {
+    pub(crate) copied: bool,
+    pub(crate) failed: bool,
+    pub(crate) rejected: Vec<String>,
+}
+
+#[cfg(any(resource_packs, feature = "shader_support"))]
+pub(crate) fn copy_in(paths: &[PathBuf], target: &Path, is_pack_dir: fn(&Path) -> bool) -> Dropped {
+    let mut out = Dropped::default();
+    if let Err(e) = packfs::create_dir_all(target) {
+        crate::log_warn!("packs", "could not create {}: {e}", target.display());
+        out.failed = true;
+        return out;
+    }
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let is_pack = match packfs::kind(path) {
+            Some(Kind::Dir) => is_pack_dir(path),
+            Some(Kind::File) => name.ends_with(".zip"),
+            _ => false,
+        };
+        if !is_pack {
+            crate::log_warn!("packs", "{} does not seem like a pack", path.display());
+            out.rejected.push(name);
+            continue;
+        }
+        out.copied = true;
+        if let Err(e) = copy_tree(path, &target.join(&name)) {
+            crate::log_warn!(
+                "packs",
+                "could not copy {} into {}: {e}",
+                path.display(),
+                target.display()
+            );
+            out.failed = true;
+        }
+    }
+    out
+}
+
+#[cfg(any(resource_packs, feature = "shader_support", lua_mods))]
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    if packfs::exists(to) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} already exists", to.display()),
+        ));
+    }
+    if packfs::kind(from) != Some(Kind::Dir) {
+        return packfs::copy(from, to).map(drop);
+    }
+    packfs::create_dir(to)?;
+    let mut first = None;
+    for (name, _) in packfs::entries(from)? {
+        if let Err(e) = copy_tree(&from.join(&name), &to.join(&name)) {
+            first.get_or_insert(e);
+        }
+    }
+    first.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]

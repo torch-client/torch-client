@@ -91,7 +91,7 @@ fn transform(st: &BeState) -> Transform {
 
 pub fn facing_y_rot(facing: Option<Direction>) -> f32 {
     facing.map_or(0.0, |facing| {
-        crate::direction::Direction::from(facing).to_y_rot()
+        crate::blocks::direction::Direction::from(facing).to_y_rot()
     })
 }
 

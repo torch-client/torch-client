@@ -57,6 +57,13 @@ impl ItemMeshes {
             .is_some_and(|root| super::icons::depends_on_display_context(&root, 0))
     }
 
+    pub fn swap_animation_scale(&self, id: &str) -> f32 {
+        self.assets
+            .json(&format!("items/{}.json", id))
+            .and_then(|doc| doc.get("swap_animation_scale").and_then(|v| v.as_f32()))
+            .unwrap_or(1.0)
+    }
+
     pub fn depends_on_using_item(&self, id: &str) -> bool {
         let id = match crate::items::potions::parse_tint_key(id) {
             Some((item, _)) => item,

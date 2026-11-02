@@ -110,7 +110,11 @@ pub fn read_packets(ecs: &mut World) {
                         state,
                         &mut queued_packet_events,
                     ) {
-                        error!("Error reading packet: {e}");
+                        let head = &raw_packet[..raw_packet.len().min(16)];
+                        error!(
+                            "Error reading packet: {e} ({state:?}, {} bytes, starts {head:02x?})",
+                            raw_packet.len()
+                        );
                     }
                 }
                 Ok(None) => {

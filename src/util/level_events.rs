@@ -1,6 +1,7 @@
 use bevy::math::Vec3;
 
 use crate::session::LevelEventEmit;
+use crate::util::block_centre;
 use crate::util::particles::{Emitter, rel, spawn_block_break};
 use azalea::entity::particle::Particle as P;
 use azalea::entity::particle::{BlockParticle, PowerParticle, SpellParticle};
@@ -93,9 +94,9 @@ fn global(event: &LevelEventEmit, ctx: &Emitter) {
         1038 => ("block.end_portal.spawn", 1.0),
         _ => return,
     };
-    let to_event = (center(event.pos) - ctx.eye).normalize_or_zero();
+    let to_event = (block_centre(event.pos) - ctx.eye).normalize_or_zero();
     let at = ctx.eye + to_event * 2.0;
-    play(name, Bus::Hostile, [at.x, at.y, at.z], volume, 1.0);
+    play(name, Bus::Hostile, at.to_array(), volume, 1.0);
 }
 
 fn effects(event: &LevelEventEmit, ctx: &mut Emitter) {
@@ -204,17 +205,24 @@ fn effects(event: &LevelEventEmit, ctx: &mut Emitter) {
             break_block(ctx, cell, state);
         }
         2002 | 2007 => {
-            let kind = if event.id == 2007 {
-                P::InstantEffect(SpellParticle::default())
-            } else {
-                P::Effect(SpellParticle::default())
-            };
+            let rgb = [data >> 16, data >> 8, data].map(|c| (c & 255) as f32);
             for _ in 0..100 {
                 let speed = ctx.rng.next_f64() * 4.0;
                 let angle = ctx.rng.next_f64() * std::f64::consts::TAU;
                 let vx = angle.cos() * speed;
                 let vy = 0.01 + ctx.rng.next_f64() * 0.5;
                 let vz = angle.sin() * speed;
+                let brightness = 0.75 + ctx.rng.next_f32() * 0.25;
+                let [r, g, b] = rgb.map(|c| (c * brightness) as u8);
+                let option = SpellParticle {
+                    color: azalea_core::color::RgbColor::new(r, g, b),
+                    power: speed as f32,
+                };
+                let kind = if event.id == 2007 {
+                    P::InstantEffect(option)
+                } else {
+                    P::Effect(option)
+                };
                 ctx.emit(
                     &kind,
                     rel(
@@ -232,10 +240,9 @@ fn effects(event: &LevelEventEmit, ctx: &mut Emitter) {
             let mut angle = 0.0f64;
             while angle < std::f64::consts::TAU {
                 let (sin, cos) = angle.sin_cos();
-                let at = Vec3::new(
-                    cell[0] as f32 + 0.5 + (cos * 5.0) as f32,
-                    cell[1] as f32 - 0.4,
-                    cell[2] as f32 + 0.5 + (sin * 5.0) as f32,
+                let at = rel(
+                    cell,
+                    [0.5 + (cos * 5.0) as f32, -0.4, 0.5 + (sin * 5.0) as f32],
                 );
                 for speed in [-5.0f64, -7.0] {
                     ctx.emit(
@@ -615,7 +622,7 @@ fn sculk_charge(ctx: &mut Emitter, cell: [i32; 3], data: u32) {
             );
             ctx.emit(
                 &P::SculkChargePop,
-                rel(cell, [0.5, 0.5, 0.5]) + dir * spread,
+                rel(cell, [0.5, 0.5, 0.5]) + (dir * spread).as_dvec3(),
                 dir * 0.07,
                 false,
             );
@@ -702,21 +709,12 @@ fn gaussian_vel(ctx: &mut Emitter, scale: f32) -> Vec3 {
     )
 }
 
-fn center(cell: [i32; 3]) -> Vec3 {
-    Vec3::new(
-        cell[0] as f32 + 0.5,
-        cell[1] as f32 + 0.5,
-        cell[2] as f32 + 0.5,
-    )
-}
-
 fn sound(cell: [i32; 3], event: &str, bus: Bus, volume: f32, pitch: f32) {
-    let at = center(cell);
-    play(event, bus, [at.x, at.y, at.z], volume, pitch);
+    play(event, bus, block_centre(cell).to_array(), volume, pitch);
 }
 
 #[cfg_attr(not(feature = "audio"), allow(unused_variables))]
-fn play(event: &str, bus: Bus, at: [f32; 3], volume: f32, pitch: f32) {
+fn play(event: &str, bus: Bus, at: [f64; 3], volume: f32, pitch: f32) {
     #[cfg(feature = "audio")]
     crate::audio::play_at(event, bus.category(), at, volume, pitch);
 }

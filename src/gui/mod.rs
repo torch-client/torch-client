@@ -28,15 +28,24 @@ pub mod draw;
 #[cfg(explore_modrinth)]
 pub mod explore_packs;
 pub mod focus;
+pub mod gamemode_switcher;
 pub mod health;
 pub mod hud;
 #[cfg(feature = "hud_editor")]
 pub mod hud_editor;
 pub mod hud_layout;
 pub mod keybinds;
+#[cfg(feature = "asset_download")]
+pub mod language;
+#[cfg(lua_mods)]
+pub mod lua_list;
 pub mod menu;
+#[cfg(lua_mods)]
+pub mod mod_images;
 pub mod multiplayer;
 pub mod options;
+#[cfg(any(resource_packs, feature = "shader_support"))]
+pub mod packdrop;
 pub mod painter;
 pub mod pause;
 pub mod ping;
@@ -46,6 +55,7 @@ pub mod pool;
 #[cfg(test)]
 pub mod preview;
 pub mod profile;
+pub mod puppet;
 pub mod recipe_book;
 pub mod recipe_book_ghost;
 pub mod render;
@@ -59,9 +69,12 @@ pub mod serverpack;
 pub mod shaderpacks;
 pub mod sign_edit;
 pub mod signedchat;
+#[cfg(eagler_skins)]
+pub mod skinpick;
 pub mod sleep;
 pub mod slots;
 pub mod spectator_menu;
+pub mod stats;
 pub mod suggestions;
 pub mod tablist;
 pub mod title;
@@ -92,6 +105,8 @@ pub enum Screen {
     Accounts,
     EditProfile,
     Credits,
+    #[cfg(feature = "asset_download")]
+    Language,
     #[cfg(feature = "online_mode")]
     AddAccount,
     #[cfg(feature = "online_mode")]
@@ -120,6 +135,7 @@ pub enum Screen {
     ShaderOptions,
     Dialog,
     Advancements,
+    Statistics,
 
     Inventory,
     Creative,
@@ -139,12 +155,16 @@ pub enum Screen {
     WinGame,
     CodeOfConduct,
     Reconfiguring,
+    GameModeSwitcher,
 
     #[cfg(feature = "click_gui")]
     ClickGui,
 
     #[cfg(feature = "hud_editor")]
     HudEditor,
+
+    #[cfg(lua_mods)]
+    LuaList,
 }
 
 impl Screen {
@@ -175,7 +195,7 @@ impl Screen {
             return true;
         }
         #[cfg(feature = "asset_download")]
-        if self == Screen::AssetDownload {
+        if matches!(self, Screen::AssetDownload | Screen::Language) {
             return true;
         }
         #[cfg(feature = "online_mode")]
@@ -192,7 +212,14 @@ impl Screen {
     }
 
     pub fn is_local_overlay(self) -> bool {
-        if matches!(self, Screen::Dialog | Screen::Advancements) {
+        if matches!(
+            self,
+            Screen::Dialog | Screen::Advancements | Screen::Statistics | Screen::GameModeSwitcher
+        ) {
+            return true;
+        }
+        #[cfg(lua_mods)]
+        if self == Screen::LuaList {
             return true;
         }
         #[cfg(feature = "hud_editor")]
@@ -236,12 +263,16 @@ impl Screen {
         )
     }
 
+    pub fn chat_open(self) -> bool {
+        matches!(self, Screen::Chat | Screen::Sleep)
+    }
+
     pub fn tab_navigates(self) -> bool {
         if self.is_options() {
             return true;
         }
         #[cfg(feature = "asset_download")]
-        if self == Screen::AssetDownload {
+        if matches!(self, Screen::AssetDownload | Screen::Language) {
             return true;
         }
         #[cfg(feature = "online_mode")]
@@ -268,6 +299,7 @@ impl Screen {
                 | Screen::ServerPackPrompt
                 | Screen::Dialog
                 | Screen::Advancements
+                | Screen::Statistics
                 | Screen::CodeOfConduct
                 | Screen::Reconfiguring
         )
@@ -305,24 +337,66 @@ impl TouchMovement {
         }
     }
 
-    pub fn from_serialized_name(name: &str) -> Option<TouchMovement> {
-        TouchMovement::ALL
-            .into_iter()
-            .find(|m| m.serialized_name() == name)
-    }
-
-    pub fn next(self) -> TouchMovement {
-        let i = TouchMovement::ALL
-            .iter()
-            .position(|m| *m == self)
-            .unwrap_or(0);
-        TouchMovement::ALL[(i + 1) % TouchMovement::ALL.len()]
-    }
-
     pub fn has_stick(self) -> bool {
         !matches!(self, TouchMovement::Buttons)
     }
 }
+
+crate::util::named_cycle::named_cycle!(TouchMovement);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LodQuality {
+    Lowest,
+    Low,
+    #[default]
+    Medium,
+    High,
+    Extreme,
+}
+
+impl LodQuality {
+    pub const ALL: [LodQuality; 5] = [
+        LodQuality::Lowest,
+        LodQuality::Low,
+        LodQuality::Medium,
+        LodQuality::High,
+        LodQuality::Extreme,
+    ];
+
+    pub fn caption(self) -> &'static str {
+        match self {
+            LodQuality::Lowest => "Lowest",
+            LodQuality::Low => "Low",
+            LodQuality::Medium => "Medium",
+            LodQuality::High => "High",
+            LodQuality::Extreme => "Extreme",
+        }
+    }
+
+    pub fn serialized_name(self) -> &'static str {
+        match self {
+            LodQuality::Lowest => "lowest",
+            LodQuality::Low => "low",
+            LodQuality::Medium => "medium",
+            LodQuality::High => "high",
+            LodQuality::Extreme => "extreme",
+        }
+    }
+
+    pub fn curve(self) -> (f64, i32) {
+        match self {
+            LodQuality::Lowest => (2.0, 4),
+            LodQuality::Low => (2.0, 8),
+            LodQuality::Medium => (2.0, 12),
+            LodQuality::High => (2.2, 16),
+            LodQuality::Extreme => (2.2, 20),
+        }
+    }
+}
+
+crate::util::named_cycle::named_cycle!(LodQuality);
+
+pub const LOD_DISTANCE_DEFAULT: u32 = 256;
 
 #[derive(Clone, Copy, Debug)]
 pub struct GuiOptions {
@@ -340,6 +414,7 @@ pub struct GuiOptions {
     pub max_fps: u32,
     pub vsync: bool,
     pub auto_jump: bool,
+    pub toggle_sprint: bool,
     pub main_hand_left: bool,
     #[cfg(feature = "skins")]
     pub skin_parts: u8,
@@ -348,6 +423,8 @@ pub struct GuiOptions {
     pub shaders_enabled: bool,
     pub player_shadows: bool,
     pub touch_movement: TouchMovement,
+    pub lod_distance: u32,
+    pub lod_quality: LodQuality,
     pub allow_signed_chat: bool,
     pub toast_advancement: bool,
     pub toast_recipe: bool,
@@ -366,6 +443,8 @@ pub const TOAST_TIME_MIN: i32 = 5;
 pub const TOAST_TIME_MAX: i32 = 100;
 
 pub const AUTO_JUMP_DEFAULT: bool = cfg!(feature = "mobile_ui");
+
+pub const TOGGLE_SPRINT_DEFAULT: bool = cfg!(target_arch = "wasm32");
 
 pub const FPS_COUNTER_DEFAULT: bool = true;
 
@@ -402,8 +481,20 @@ pub const MODEL_PART_KEYS: [(&str, u8); 7] = [
 
 impl Default for GuiOptions {
     fn default() -> Self {
-        let stored = load_options();
-        let value = |key: &str| stored.as_ref().and_then(|json| json.get(key).cloned());
+        let chosen = load_options().map(chosen_from_stored).unwrap_or_default();
+        let options = GuiOptions::from_stored(Some(&serde_json::Value::Object(chosen.clone())));
+        *CHOSEN.lock().unwrap_or_else(|e| e.into_inner()) = chosen;
+        options
+    }
+}
+
+impl GuiOptions {
+    pub fn defaults() -> Self {
+        GuiOptions::from_stored(None)
+    }
+
+    fn from_stored(stored: Option<&serde_json::Value>) -> Self {
+        let value = |key: &str| stored.and_then(|json| json.get(key).cloned());
         let effect_scale = |key: &str, default: u32| {
             value(key)
                 .and_then(|v| v.as_u64())
@@ -467,6 +558,9 @@ impl Default for GuiOptions {
             auto_jump: value("autoJump")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(AUTO_JUMP_DEFAULT),
+            toggle_sprint: value("toggleSprint")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(TOGGLE_SPRINT_DEFAULT),
             main_hand_left: value("mainHand").and_then(|v| v.as_str().map(|s| s == "left"))
                 == Some(true),
             #[cfg(feature = "skins")]
@@ -494,6 +588,13 @@ impl Default for GuiOptions {
                 .unwrap_or(false),
             touch_movement: value("touchMovement")
                 .and_then(|v| v.as_str().and_then(TouchMovement::from_serialized_name))
+                .unwrap_or_default(),
+            lod_distance: value("lodDistance")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .unwrap_or(LOD_DISTANCE_DEFAULT),
+            lod_quality: value("lodQuality")
+                .and_then(|v| v.as_str().and_then(LodQuality::from_serialized_name))
                 .unwrap_or_default(),
             allow_signed_chat: value("allowSignedChat")
                 .and_then(|v| v.as_bool())
@@ -533,7 +634,73 @@ fn load_options() -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+const OPTIONS_FORMAT_KEY: &str = "optionsFormat";
+const OPTIONS_FORMAT: u64 = 2;
+
+const FORMAT_1_DEFAULTS: &[(&str, bool)] = &[("toggleSprint", true)];
+
+static CHOSEN: std::sync::LazyLock<std::sync::Mutex<serde_json::Map<String, serde_json::Value>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn chosen_from_stored(stored: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    let serde_json::Value::Object(mut map) = stored else {
+        return serde_json::Map::new();
+    };
+    let format = map
+        .remove(OPTIONS_FORMAT_KEY)
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1);
+    if format >= OPTIONS_FORMAT {
+        return map;
+    }
+    let defaults = options_json(&GuiOptions::defaults());
+    map.retain(|key, value| {
+        let old_default = FORMAT_1_DEFAULTS
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| serde_json::Value::Bool(*v))
+            .or_else(|| defaults.get(key.as_str()).cloned());
+        old_default.as_ref() != Some(value)
+    });
+    map
+}
+
+pub fn reset_options(options: &mut GuiOptions, is_key: impl Fn(&str) -> bool) {
+    let defaults = options_json(&GuiOptions::defaults());
+    let mut json = options_json(options);
+    if let (Some(map), Some(defaults)) = (json.as_object_mut(), defaults.as_object()) {
+        for (key, value) in map.iter_mut() {
+            if is_key(key) {
+                if let Some(default) = defaults.get(key) {
+                    *value = default.clone();
+                }
+            }
+        }
+    }
+    *options = GuiOptions::from_stored(Some(&json));
+    CHOSEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|key, _| !is_key(key));
+}
+
 pub fn save_options(options: &GuiOptions) {
+    let current = options_json(options);
+    let defaults = options_json(&GuiOptions::defaults());
+    let mut chosen = CHOSEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(current) = current.as_object() {
+        for (key, value) in current {
+            if chosen.contains_key(key) || defaults.get(key) != Some(value) {
+                chosen.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let mut file = chosen.clone();
+    file.insert(OPTIONS_FORMAT_KEY.to_owned(), OPTIONS_FORMAT.into());
+    crate::platform::storage::OPTIONS.store(&serde_json::Value::Object(file).to_string());
+}
+
+fn options_json(options: &GuiOptions) -> serde_json::Value {
     let mut json = serde_json::json!({
         "guiScale": options.gui_scale,
         "fov": options.fov,
@@ -549,12 +716,15 @@ pub fn save_options(options: &GuiOptions) {
         "maxFps": options.max_fps,
         "vsync": options.vsync,
         "autoJump": options.auto_jump,
+        "toggleSprint": options.toggle_sprint,
         "mainHand": if options.main_hand_left { "left" } else { "right" },
         "fpsCounter": options.fps_counter,
         "shaders": options.shaders_enabled,
         "shaderQuality": options.shader_quality.serialized_name(),
         "playerShadows": options.player_shadows,
         "touchMovement": options.touch_movement.serialized_name(),
+        "lodDistance": options.lod_distance,
+        "lodQuality": options.lod_quality.serialized_name(),
         "allowSignedChat": options.allow_signed_chat,
         "toastAdvancement": options.toast_advancement,
         "toastRecipe": options.toast_recipe,
@@ -581,13 +751,14 @@ pub fn save_options(options: &GuiOptions) {
             );
         }
     }
-    crate::platform::storage::OPTIONS.store(&json.to_string());
+    json
 }
 
 #[derive(Resource, Default)]
 pub struct GuiState {
     pub screen: Screen,
     pub creative: creative::CreativeState,
+    pub puppet: puppet::Worn,
     pub chat: chat::ChatState,
     pub sign_edit: sign_edit::SignEditState,
     pub command_block: command_block::CommandBlockState,
@@ -610,6 +781,8 @@ pub struct GuiState {
     pub clickgui: clickgui::ClickGuiState,
     #[cfg(feature = "click_gui")]
     pub clickgui_parent: Screen,
+    #[cfg(lua_mods)]
+    pub lua_list: lua_list::LuaListState,
     pub hud_state: hud_layout::HudState,
     #[cfg(feature = "tutorial")]
     pub tutorial: tutorial::Tutorial,
@@ -623,6 +796,9 @@ pub struct GuiState {
     pub win: winscreen::WinState,
     pub config_phase: configphase::State,
     pub advancements: advancements::AdvancementsUi,
+    pub stats: stats::StatsUi,
+    pub credits_parent: Screen,
+    pub gamemode_switcher: gamemode_switcher::SwitcherState,
     pub quit: bool,
     pub disconnect: bool,
     pub menu: multiplayer::MenuState,
@@ -631,10 +807,12 @@ pub struct GuiState {
     pub video_scroll_drag: Option<f32>,
     pub game_scroll: f32,
     pub game_scroll_drag: Option<f32>,
-    #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+    #[cfg(feature = "asset_download")]
     pub confirm_clear_assets: bool,
     #[cfg(feature = "asset_download")]
     pub storage_nothing_missing: bool,
+    #[cfg(feature = "asset_download")]
+    pub language: language::State,
     #[cfg(feature = "shader_support")]
     pub shaderpacks: shaderpacks::State,
     #[cfg(resource_packs)]
@@ -658,8 +836,15 @@ impl GuiState {
         self.screen == Screen::Container(ContainerKind::Anvil) && self.container.anvil.editable()
     }
 
+    pub fn screen_is_menu(&self) -> bool {
+        if self.screen == Screen::Credits {
+            return self.credits_parent.is_menu();
+        }
+        self.screen.is_menu()
+    }
+
     pub fn in_menu(&self) -> bool {
-        if self.screen.is_menu() || (self.screen.is_options() && self.options_parent.is_menu()) {
+        if self.screen_is_menu() || (self.screen.is_options() && self.options_parent.is_menu()) {
             return true;
         }
         if self.screen == Screen::Dialog && self.dialog.parent().is_menu() {
@@ -702,13 +887,12 @@ pub struct Snapshot {
     pub hardcore: bool,
     pub health_epoch: u32,
     pub jump_charge: Option<f32>,
+    pub jump_cooldown: bool,
     pub air_supply: i32,
     pub eye_in_water: bool,
     pub chat_incoming: Vec<crate::session::ChatEntry>,
     pub toast_incoming: Vec<toast::ToastEvent>,
     pub chat_error: Option<String>,
-    pub enforces_secure_chat: bool,
-    pub chat_signing: bool,
     pub container_title: std::sync::Arc<[crate::text::Span]>,
     pub container_id: i32,
     pub container_data: crate::session::ContainerData,
@@ -723,7 +907,7 @@ pub struct Snapshot {
     pub xp_level: u32,
     pub xp_recent_gain: bool,
     pub waypoints: std::sync::Arc<Vec<crate::session::WaypointInfo>>,
-    pub eye_pos: [f32; 3],
+    pub eye_pos: [f64; 3],
     pub camera_yaw: f32,
     pub camera_pitch: f32,
     pub sleep_timer: u32,

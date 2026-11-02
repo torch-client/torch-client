@@ -24,7 +24,8 @@ use crate::renderer::terrain_pool::{
     STREAM_CUTOUT, STREAM_SOLID, STREAM_WATER, TerrainTier, TerrainView,
 };
 use record::{
-    clear_op, color_attachment, copy_whole, depth_attachment, draw_pools, load_attachments,
+    clear_op, color_attachment, copy_depth, copy_whole, depth_attachment, draw_pools,
+    load_attachments,
 };
 
 #[derive(RenderLabel, Debug, Hash, PartialEq, Eq, Clone)]
@@ -311,10 +312,10 @@ impl ViewNode for PackFrameNode {
                     filter(render_context, 1);
                 }
                 if water && shadow.copy_depth {
-                    copy_whole(
-                        render_context.command_encoder(),
-                        &shadow_targets.depth.texture,
-                        &shadow_targets.depth_opaque.texture,
+                    copy_depth(
+                        render_context,
+                        &shadow_targets.depth,
+                        &shadow_targets.depth_opaque,
                     );
                 }
                 let attachments: Vec<Option<RenderPassColorAttachment>> = shadow
@@ -431,19 +432,11 @@ impl ViewNode for PackFrameNode {
         let span = recorder.time_span(render_context.command_encoder(), "shaderpack/entities");
         entity_segment(render_context, Segment::World);
         if let Some(no_hand) = &targets.depth_no_hand {
-            copy_whole(
-                render_context.command_encoder(),
-                &targets.depth.texture,
-                &no_hand.texture,
-            );
+            copy_depth(render_context, &targets.depth, no_hand);
         }
         entity_segment(render_context, Segment::HandSolid);
         if plan.copy_depth {
-            copy_whole(
-                render_context.command_encoder(),
-                &targets.depth.texture,
-                &targets.depth_opaque.texture,
-            );
+            copy_depth(render_context, &targets.depth, &targets.depth_opaque);
         }
 
         span.end(render_context.command_encoder());

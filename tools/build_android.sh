@@ -143,11 +143,13 @@ KEYSTORE="${ANDROID_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
   echo "  -alias androiddebugkey -keyalg RSA -validity 10000 -dname 'CN=Android Debug'" >&2
   exit 1
 }
+KS_PASS_ARG=pass:android; [ -n "${ANDROID_KS_PASS:-}" ] && KS_PASS_ARG=env:ANDROID_KS_PASS
+KEY_PASS_ARG=pass:android; [ -n "${ANDROID_KEY_PASS:-}" ] && KEY_PASS_ARG=env:ANDROID_KEY_PASS
 "$BUILD_TOOLS/apksigner" sign \
   --ks "$KEYSTORE" \
-  --ks-pass pass:android \
-  --key-pass pass:android \
-  --ks-key-alias androiddebugkey \
+  --ks-pass "$KS_PASS_ARG" \
+  --key-pass "$KEY_PASS_ARG" \
+  --ks-key-alias "${ANDROID_KEY_ALIAS:-androiddebugkey}" \
   --out dist/torch-client.apk \
   "$STAGE/aligned.apk"
 

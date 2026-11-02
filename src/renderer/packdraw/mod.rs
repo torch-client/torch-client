@@ -11,6 +11,8 @@ mod entities;
 mod formats;
 mod frame;
 mod fullscreen;
+#[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+mod glcopy;
 mod images;
 mod inputs;
 mod install;
@@ -19,6 +21,8 @@ mod node;
 mod packatlas;
 mod pipelines;
 mod plan;
+#[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+pub(crate) mod rawviews;
 mod sources;
 mod targets;
 mod uniforms;
@@ -187,12 +191,17 @@ fn drop_failed_pack(
             "shaders",
             "the GPU rejected the shader pack, drawing the built-in terrain: {message}"
         );
+        if let Some(name) = crate::platform::storage::SHADER_PACK.load() {
+            crate::shaderpack::FAILED.set(vec![name.trim().to_owned()]);
+        }
     }
     GPU_FAILED.store(false, Ordering::Release);
 }
 
+pub(crate) const RAW_VIEWS: bool = !cfg!(all(target_arch = "wasm32", not(feature = "webgpu")));
+
 pub(crate) fn allow_display_view(image: &mut Image) {
-    if image.texture_descriptor.format == TextureFormat::Rgba8UnormSrgb {
+    if RAW_VIEWS && image.texture_descriptor.format == TextureFormat::Rgba8UnormSrgb {
         image.texture_descriptor.view_formats = &[TextureFormat::Rgba8Unorm];
     }
 }

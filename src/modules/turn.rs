@@ -25,7 +25,7 @@ pub fn look_toward(
     pitch: f32,
     dt: f32,
     d: (f32, f32),
-    aim: [f32; 3],
+    aim: [f64; 3],
     rate: f32,
 ) -> (f32, f32) {
     let partial = crate::renderer::systems::partial_ticks(s);

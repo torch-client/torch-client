@@ -198,6 +198,37 @@ fn build_with(on: fn(&str) -> bool, color: fn(&str) -> u32) -> Built {
     (entries, keys.clone())
 }
 
+#[cfg(lua_mods)]
+pub(crate) fn mod_list(
+    key: &'static str,
+    title: &'static str,
+    on: impl Fn(&str) -> bool,
+) -> &'static BitList {
+    let (names, _) = shared();
+    let entries = names
+        .iter()
+        .map(|n| Entry {
+            group: group_of(n),
+            label: Cow::Borrowed(*n),
+            on: on(n),
+            color: 0,
+        })
+        .collect();
+    BitList::dynamic(
+        key,
+        title,
+        XRAY.width,
+        &GROUPS,
+        PRESETS,
+        (entries, Vec::new()),
+    )
+}
+
+#[cfg(lua_mods)]
+pub(crate) fn is_row(id: &str) -> bool {
+    shared().0.binary_search(&id).is_ok()
+}
+
 fn build_xray() -> Built {
     build_with(is_ore, color_of)
 }
@@ -216,6 +247,20 @@ pub static XRAY: BitList = BitList::new(
 
 pub static ORES: BitList =
     BitList::new("ore_esp", "Ores", 214.0, &GROUPS, true, PRESETS, build_ores);
+
+fn build_scaffold() -> Built {
+    build_with(|_| false, |_| 0)
+}
+
+pub static SCAFFOLD: BitList = BitList::new(
+    "scaffold_blocks",
+    "Filter blocks",
+    214.0,
+    &GROUPS,
+    false,
+    PRESETS,
+    build_scaffold,
+);
 
 pub static STORAGE: BitList = BitList::new(
     "storage_esp",

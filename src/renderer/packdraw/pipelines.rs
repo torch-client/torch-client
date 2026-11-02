@@ -18,14 +18,14 @@ use super::entities::{entity_instance_layout, entity_vertex_layout};
 use super::formats::{image_format, wgpu_format};
 use super::frame::{PackRender, Stage};
 use super::fullscreen::{opaque_target, stores_display};
-use super::install::{Installed, Module};
+use super::install::{Installed, InstalledProgram, Module};
 use super::sources::TextureSource;
 use super::targets::DEPTH_FORMAT;
 use super::usage::depth_index;
 use super::{GPU_LABEL, pipeline_label};
 use crate::renderer::terrain_pool::TerrainView;
 use crate::renderer::terrain_pool::draw::{PackTakeover, TerrainPipeline, packed_vertex_layout};
-use crate::shaderpack::directives::SampleKind;
+use crate::shaderpack::directives::{SampleKind, TargetFormat};
 use crate::shaderpack::pipeline::Binding;
 use crate::shaderpack::programs::Geometry;
 use crate::shaderpack::transform::ImageAccess;
@@ -442,46 +442,45 @@ fn entity_topology(kind: EntityKind) -> PrimitiveTopology {
     }
 }
 
-fn shadow_color_targets(installed: &Installed, buffers: &[u8]) -> Vec<Option<ColorTargetState>> {
-    buffers
+fn shadow_color_targets(
+    installed: &Installed,
+    program: &InstalledProgram,
+) -> Vec<Option<ColorTargetState>> {
+    program
+        .draw_buffers
         .iter()
         .map(|buffer| {
-            opaque_target(wgpu_format(
-                installed.targets.shadow[*buffer as usize].format,
-            ))
+            let format = installed.targets.shadow[*buffer as usize].format;
+            target(format, program.blend.for_buffer(*buffer, None, true))
         })
         .collect()
-}
-
-fn color_targets(
-    installed: &Installed,
-    buffers: &[u8],
-    blend: bool,
-) -> Vec<Option<ColorTargetState>> {
-    blended_targets(
-        installed,
-        buffers,
-        blend.then_some(BlendState::ALPHA_BLENDING),
-    )
 }
 
 fn blended_targets(
     installed: &Installed,
-    buffers: &[u8],
-    blend: Option<BlendState>,
+    program: &InstalledProgram,
+    default: Option<BlendState>,
+    per_buffer: bool,
 ) -> Vec<Option<ColorTargetState>> {
-    buffers
+    program
+        .draw_buffers
         .iter()
         .map(|buffer| {
             let format = installed.targets.settings[*buffer as usize].format;
-            let blend = blend.filter(|_| format.sample_kind() == SampleKind::Float);
-            Some(ColorTargetState {
-                format: wgpu_format(format),
-                blend,
-                write_mask: ColorWrites::ALL,
-            })
+            target(
+                format,
+                program.blend.for_buffer(*buffer, default, per_buffer),
+            )
         })
         .collect()
+}
+
+fn target(format: TargetFormat, blend: Option<BlendState>) -> Option<ColorTargetState> {
+    Some(ColorTargetState {
+        format: wgpu_format(format),
+        blend: blend.filter(|_| format.sample_kind() == SampleKind::Float),
+        write_mask: ColorWrites::ALL,
+    })
 }
 
 pub(crate) fn prepare_pipelines(
@@ -551,7 +550,12 @@ fn build_pipelines(
             primitive: pack_triangles(PrimitiveTopology::TriangleList, Some(Face::Back)),
             depth: Some((true, CompareFunction::Less)),
             fragment: program.fragment_for(super::compile::geometry_alpha(geometry, false)),
-            targets: color_targets(installed, &program.draw_buffers, geometry.translucent()),
+            targets: blended_targets(
+                installed,
+                program,
+                geometry.translucent().then_some(BlendState::ALPHA_BLENDING),
+                true,
+            ),
         }))
     });
     let screen = (0..installed.programs.len())
@@ -568,7 +572,7 @@ fn build_pipelines(
                 primitive: PrimitiveState::default(),
                 depth: None,
                 fragment: &program.fragment,
-                targets: color_targets(installed, &program.draw_buffers, false),
+                targets: blended_targets(installed, program, None, false),
             }))
         })
         .collect();
@@ -586,7 +590,7 @@ fn build_pipelines(
                 primitive: PrimitiveState::default(),
                 depth: Some((true, CompareFunction::Less)),
                 fragment: program.fragment_for(super::compile::geometry_alpha(geometry, true)),
-                targets: shadow_color_targets(installed, &program.draw_buffers),
+                targets: shadow_color_targets(installed, program),
             })
         };
         (
@@ -615,9 +619,9 @@ fn build_pipelines(
                 depth: state.depth,
                 fragment: program.fragment_for(kind.alpha_tests()[usize::from(second)]),
                 targets: if kind == EntityKind::ShadowCaster {
-                    shadow_color_targets(installed, &program.draw_buffers)
+                    shadow_color_targets(installed, program)
                 } else {
-                    blended_targets(installed, &program.draw_buffers, state.blend)
+                    blended_targets(installed, program, state.blend, true)
                 },
             })
         };

@@ -86,6 +86,11 @@ impl LightMap {
         )
     }
 
+    #[cfg(feature = "render_lod")]
+    pub fn is_lit(&self, col: ColumnPos) -> bool {
+        self.lit.contains(&col)
+    }
+
     pub fn resolve(&self, sec: SectionPos) -> SectionSample {
         if let Some(layers) = self.sections.get(&sec) {
             return SectionSample::Layers(layers.clone());

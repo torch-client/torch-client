@@ -4,26 +4,22 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::wolf;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 
 use super::dye;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Wolf,
-        RenderSpec::new("wolf", wolf::layer, texture, wolf::setup_anim)
-            .with_visible(|st| !st.extras.is_baby)
-            .with_tint(wet_shade),
-    );
-    registry.add(
-        EntityKind::Wolf,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Wolf],
+        RenderSpec::new("wolf", wolf::layer, texture, wolf::setup_anim).with_tint(wet_shade),
         RenderSpec::new(
             "wolf_baby",
             wolf::baby_layer,
             texture,
             wolf::baby_setup_anim,
         )
-        .with_visible(|st| st.extras.is_baby)
         .with_tint(wet_shade),
     );
     registry.add(
@@ -34,7 +30,8 @@ pub fn register(registry: &mut Registry) {
             armor_texture,
             wolf::setup_anim,
         )
-        .with_visible(|st| !st.extras.is_baby && st.extras.body_armor.is_some()),
+        .with_visible(|st| !st.extras.is_baby && st.extras.body_armor.is_some())
+        .ignoring_invisibility(),
     );
     registry.add(
         EntityKind::Wolf,

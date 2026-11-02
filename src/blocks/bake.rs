@@ -25,13 +25,15 @@ pub fn tile_uv_rect(tile: u32, atlas_rows: u32) -> [f32; 4] {
 }
 
 fn tile_of(sprites: &Sprites, path: &str) -> Option<u32> {
-    sprites.tile(path.rsplit('/').next()?)
+    sprites.tile(sprite_key(path))
+}
+
+fn sprite_key(path: &str) -> &str {
+    path.strip_prefix("block/").unwrap_or(path)
 }
 
 fn texture_is_opaque(sprites: &Sprites, path: &str) -> bool {
-    path.rsplit('/')
-        .next()
-        .is_some_and(|stem| sprites.is_opaque(stem))
+    sprites.is_opaque(sprite_key(path))
 }
 
 #[derive(Clone, Debug)]

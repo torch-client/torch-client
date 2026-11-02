@@ -1,4 +1,5 @@
 use super::registry::Kind;
+use crate::gui::keybinds::Bound;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Value {
@@ -6,6 +7,7 @@ pub enum Value {
     Num(f32),
     Range(f32, f32),
     Choice(u8),
+    Key(Bound),
 }
 
 impl Value {
@@ -15,7 +17,8 @@ impl Value {
             Kind::Slider { value, .. } => Value::Num(value),
             Kind::Range { low, high, .. } => Value::Range(low, high),
             Kind::Enum { index, .. } => Value::Choice(index),
-            Kind::List { .. } | Kind::Text { .. } => return None,
+            Kind::Key { default } => Value::Key(default),
+            Kind::List { .. } | Kind::Text { .. } | Kind::Button { .. } => return None,
         })
     }
 
@@ -25,6 +28,7 @@ impl Value {
             Value::Num(x) => x.to_bits() as u64,
             Value::Choice(c) => c as u64,
             Value::Range(lo, hi) => (lo.to_bits() as u64) << 32 | hi.to_bits() as u64,
+            Value::Key(b) => b.to_bits() as u64,
         }
     }
 
@@ -37,7 +41,8 @@ impl Value {
                 Value::Range(lo, hi)
             }
             Kind::Enum { .. } => Value::Choice(choice(bits)),
-            Kind::List { .. } | Kind::Text { .. } => return None,
+            Kind::Key { .. } => Value::Key(Bound::from_bits(bits as u32)),
+            Kind::List { .. } | Kind::Text { .. } | Kind::Button { .. } => return None,
         })
     }
 }
@@ -98,6 +103,18 @@ mod tests {
                     high: 0.0,
                     decimals: 0,
                     log: false,
+                },
+            ),
+            (
+                Value::Key(Bound::Key(bevy::prelude::KeyCode::KeyJ)),
+                Kind::Key {
+                    default: Bound::Unbound,
+                },
+            ),
+            (
+                Value::Key(Bound::Mouse(bevy::prelude::MouseButton::Back)),
+                Kind::Key {
+                    default: Bound::Unbound,
                 },
             ),
         ];

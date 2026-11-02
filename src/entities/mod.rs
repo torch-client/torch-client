@@ -1,5 +1,6 @@
 pub mod bake;
 pub mod blockmodel;
+pub mod elder_guardian;
 pub mod feed;
 pub mod fishing_line;
 pub mod flame;
@@ -17,6 +18,7 @@ use bevy::platform::collections::HashMap;
 
 use azalea_registry::builtin::EntityKind;
 use bevy::asset::RenderAssetUsages;
+use bevy::math::DVec3;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 
@@ -27,6 +29,7 @@ pub use crate::renderer::entity_material::LightMode;
 use crate::renderer::entity_material::{
     ALPHA_CUTOUT, EntityMaterial, Lit, SharedMaterials, diffuse_lights,
 };
+use crate::renderer::{FrameView, RenderOrigin};
 use geom::{BakedModel, LayerDef, PartState, PosedPart};
 
 pub const MODEL_Y_OFFSET: f32 = -1.501;
@@ -187,6 +190,10 @@ pub fn no_tint(_st: &EntityState) -> [f32; 4] {
     [1.0, 1.0, 1.0, 1.0]
 }
 
+pub fn no_glint(_st: &EntityState) -> bool {
+    false
+}
+
 pub(crate) fn hurt_overlay_alpha(has_red_overlay: bool) -> f32 {
     if has_red_overlay { 0.698 } else { 1.0 }
 }
@@ -203,19 +210,26 @@ fn overlay_alpha(st: &EntityState) -> f32 {
 pub struct CameraView {
     pub orientation: Quat,
     pub position: Vec3,
+    pub world: DVec3,
     pub yaw: f32,
     pub pitch: f32,
 }
 
 impl CameraView {
-    pub fn new(orientation: Quat, position: Vec3) -> CameraView {
+    pub fn of(view: &FrameView) -> CameraView {
+        let orientation = view.camera_rotation;
         let (yaw, pitch, _) = orientation.to_euler(EulerRot::YXZ);
         CameraView {
             orientation,
-            position,
+            position: view.camera_render,
+            world: view.camera_world,
             yaw,
             pitch,
         }
+    }
+
+    pub fn distance_squared_to(&self, pos: [f64; 3]) -> f32 {
+        Vec3::from_array(crate::util::offset_f32(self.world.to_array(), pos)).length_squared()
     }
 
     pub fn yaw_rotation(&self) -> Quat {
@@ -228,6 +242,7 @@ impl Default for CameraView {
         CameraView {
             orientation: Quat::IDENTITY,
             position: Vec3::ZERO,
+            world: DVec3::ZERO,
             yaw: 0.0,
             pitch: 0.0,
         }
@@ -245,7 +260,7 @@ fn within_view_range(st: &EntityState, camera: &CameraView) -> bool {
         return true;
     };
     let limit = display.view_range * VIEW_RANGE_BLOCKS;
-    Vec3::from(st.pos).distance_squared(camera.position) <= limit * limit
+    camera.distance_squared_to(st.pos) <= limit * limit
 }
 
 pub fn display_orientation(
@@ -471,6 +486,7 @@ pub struct RenderSpec {
     pub tint: fn(&EntityState) -> [f32; 4],
     pub respects_invisibility: bool,
     pub light: Option<LightMode>,
+    pub armor_glint: fn(&EntityState) -> bool,
 }
 
 impl RenderSpec {
@@ -557,6 +573,7 @@ impl RenderSpec {
             tint: no_tint,
             respects_invisibility: true,
             light: None,
+            armor_glint: no_glint,
         }
     }
 
@@ -590,6 +607,11 @@ impl RenderSpec {
 
     pub fn with_tint(mut self, tint: fn(&EntityState) -> [f32; 4]) -> RenderSpec {
         self.tint = tint;
+        self
+    }
+
+    pub fn with_armor_glint(mut self, foil: fn(&EntityState) -> bool) -> RenderSpec {
+        self.armor_glint = foil;
         self
     }
 
@@ -646,6 +668,8 @@ pub struct EntityAssets {
     block_meshes: HashMap<BlockRef, Option<Handle<Mesh>>>,
     built_meshes: HashMap<(usize, String), Handle<Mesh>>,
     materials: SharedMaterials<MaterialKey, MAX_SHARED_MATERIALS>,
+    glint_texture: Option<Handle<Image>>,
+    armor_glint_texture: Option<Handle<Image>>,
     lights: crate::renderer::lightmap::LightCells,
 }
 
@@ -660,10 +684,17 @@ struct MaterialKey {
     dirs: [[u32; 3]; 2],
     overlay_alpha: u32,
     overlay_white: bool,
+    glint: [u32; 4],
 }
 
 impl MaterialKey {
-    fn new(texture: Option<&Handle<Image>>, spec: &RenderSpec, lit: Lit, levels: (u8, u8)) -> Self {
+    fn new(
+        texture: Option<&Handle<Image>>,
+        spec: &RenderSpec,
+        lit: Lit,
+        levels: (u8, u8),
+        glint: Vec4,
+    ) -> Self {
         MaterialKey {
             texture: texture.map(Handle::id),
             mode: spec.effective_light_mode() as u32,
@@ -674,6 +705,7 @@ impl MaterialKey {
             dirs: lit.dirs.map(|d| d.to_array().map(f32::to_bits)),
             overlay_alpha: lit.overlay_alpha.to_bits(),
             overlay_white: lit.overlay_white,
+            glint: glint.to_array().map(f32::to_bits),
         }
     }
 }
@@ -682,13 +714,15 @@ const MAX_SHARED_MATERIALS: usize = 4096;
 
 fn max_rendered_entities() -> usize {
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *MAX.get_or_init(|| {
-        std::env::var("MC_MAX_ENTITIES")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(10_000)
-    })
+    *MAX.get_or_init(|| env_entity_cap("MC_MAX_ENTITIES", 10_000))
+}
+
+pub(crate) fn env_entity_cap(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
 }
 
 impl EntityAssets {
@@ -707,11 +741,30 @@ impl EntityAssets {
         spec: &RenderSpec,
         lit: Lit,
         levels: (u8, u8),
+        glint: Vec4,
         materials: &mut Assets<EntityMaterial>,
     ) -> Handle<EntityMaterial> {
-        let key = MaterialKey::new(texture.as_ref(), spec, lit, levels);
-        self.materials
-            .get(key, lit, materials, || entity_material(texture, spec, lit))
+        let key = MaterialKey::new(texture.as_ref(), spec, lit, levels, glint);
+        let glint_texture = if glint.z <= 0.0 {
+            None
+        } else if crate::renderer::glint::is_armor(glint) {
+            self.armor_glint_texture.clone()
+        } else {
+            self.glint_texture.clone()
+        };
+        self.materials.get(key, lit, materials, || {
+            entity_material(texture, spec, lit).with_glint(glint, glint_texture)
+        })
+    }
+
+    fn item_glint(&self, glint: bool, texture: &Handle<Image>, images: &Assets<Image>) -> Vec4 {
+        let glint = glint && self.glint_texture.is_some();
+        crate::renderer::glint::scale(glint, Some(texture), images)
+    }
+
+    fn armor_glint(&self, spec: &RenderSpec, st: &EntityState) -> Vec4 {
+        let foil = self.armor_glint_texture.is_some() && (spec.armor_glint)(st);
+        crate::renderer::glint::armor_scale(foil)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -721,12 +774,13 @@ impl EntityAssets {
         spec: &RenderSpec,
         lit: Lit,
         levels: (u8, u8),
+        glint: Vec4,
         entity_images: &mut EntityImages,
         images: &mut Assets<Image>,
         materials: &mut Assets<EntityMaterial>,
     ) -> Option<(Handle<EntityMaterial>, Handle<Image>)> {
         let texture = entity_images.get(path, images)?;
-        let material = self.material(Some(texture.clone()), spec, lit, levels, materials);
+        let material = self.material(Some(texture.clone()), spec, lit, levels, glint, materials);
         Some((material, texture))
     }
 
@@ -753,7 +807,14 @@ impl EntityAssets {
         materials: &mut Assets<EntityMaterial>,
     ) -> Option<(Handle<EntityMaterial>, Handle<Image>)> {
         let atlas = self.block_atlas(chunk_material, standard)?;
-        let material = self.material(Some(atlas.clone()), spec, lit, levels, materials);
+        let material = self.material(
+            Some(atlas.clone()),
+            spec,
+            lit,
+            levels,
+            Vec4::ZERO,
+            materials,
+        );
         Some((material, atlas))
     }
 
@@ -912,7 +973,7 @@ pub(crate) fn load_entity_image(path: &str, images: &mut Assets<Image>) -> Optio
     Some(handle)
 }
 
-fn decode_entity_texture(path: &str) -> Option<image::RgbaImage> {
+pub(crate) fn decode_entity_texture(path: &str) -> Option<image::RgbaImage> {
     let (path, frame) = match path.rsplit_once('#') {
         Some((sheet, frame)) => (sheet, frame.parse::<u32>().ok()),
         None => (path, None),
@@ -956,7 +1017,14 @@ fn entity_material(texture: Option<Handle<Image>>, spec: &RenderSpec, lit: Lit) 
     )
 }
 
+pub(crate) fn light_levels(st: &EntityState) -> (u8, u8) {
+    entity_levels(&crate::client::worldsync::light_map().read(), st)
+}
+
 fn entity_levels(light: &crate::lighting::level::LightMap, st: &EntityState) -> (u8, u8) {
+    if let Some(levels) = st.frozen_light {
+        return levels;
+    }
     if matches!(
         st.kind,
         EntityKind::FallingBlock | EntityKind::Tnt | EntityKind::BlockDisplay
@@ -969,16 +1037,14 @@ fn entity_levels(light: &crate::lighting::level::LightMap, st: &EntityState) -> 
         return (((packed >> 4) & 15) as u8, ((packed >> 20) & 15) as u8);
     }
     use crate::renderer::lightmap::{cell_of, levels_in};
-    let (block, sky) = levels_in(
-        light,
-        cell_of([st.pos[0], st.pos[1] + st.eye_height, st.pos[2]]),
-    );
+    let eye = [st.pos[0], st.pos[1] + f64::from(st.eye_height), st.pos[2]];
+    let (block, sky) = levels_in(light, cell_of(eye));
     (block_light_level(st, block), sky)
 }
 
 fn block_model_levels(light: &crate::lighting::level::LightMap, st: &EntityState) -> (u8, u8) {
     let x = st.pos[0].floor() as i32;
-    let y = (st.pos[1] + st.bounding_box_height).floor() as i32;
+    let y = (st.pos[1] + f64::from(st.bounding_box_height)).floor() as i32;
     let z = st.pos[2].floor() as i32;
     let cells = [
         (x, y, z),
@@ -1206,6 +1272,7 @@ struct LayerRig {
     material: Option<Handle<EntityMaterial>>,
     tex: Option<Handle<Image>>,
     lit: Lit,
+    glint: Vec4,
     states: Vec<PartState>,
 }
 
@@ -1267,11 +1334,20 @@ impl Plugin for EntityPlugin {
         app.init_resource::<flame::FlameAssets>()
             .init_resource::<EntityImages>()
             .init_resource::<fishing_line::FishingLines>()
+            .init_resource::<elder_guardian::ElderGuardianCurse>()
             .add_systems(
                 Update,
-                (flame::sync_flames, fishing_line::sync_fishing_lines)
+                (
+                    flame::sync_flames,
+                    fishing_line::sync_fishing_lines,
+                    elder_guardian::sync_elder_guardian,
+                )
                     .after(crate::renderer::FrameViewSystems)
                     .run_if(in_state(crate::renderer::AppState::InGame)),
+            )
+            .add_systems(
+                OnExit(crate::renderer::AppState::InGame),
+                elder_guardian::clear_elder_guardian,
             );
     }
 }
@@ -1288,19 +1364,15 @@ fn sync_entities(
     mut materials: ResMut<Assets<EntityMaterial>>,
     standard_materials: Res<Assets<StandardMaterial>>,
     mut item_assets: ResMut<crate::renderer::item_assets::ItemAssets>,
-    (map_textures, chunk_material, lightmap, carried): (
+    (map_textures, chunk_material, lightmap, carried, origin, glint_texture, armor_glint_texture): (
         Res<crate::renderer::maps::MapTextures>,
         Res<crate::renderer::systems::ChunkMaterial>,
         Res<crate::renderer::systems::LightmapState>,
         Res<CarriedEntities>,
+        Res<RenderOrigin>,
+        Option<Res<crate::renderer::glint::GlintTexture>>,
+        Option<Res<crate::renderer::glint::ArmorGlintTexture>>,
     ),
-    camera_q: Query<
-        &GlobalTransform,
-        (
-            With<crate::renderer::systems::WorldCamera>,
-            Without<EntityRigNode>,
-        ),
-    >,
     mut nodes: Query<(&mut Transform, &mut Visibility), With<EntityRigNode>>,
     mut globals: Query<&mut GlobalTransform, With<EntityRigNode>>,
     mut mats: Query<&mut MeshMaterial3d<EntityMaterial>>,
@@ -1308,17 +1380,24 @@ fn sync_entities(
         Local<u32>,
         Local<Vec<EntityState>>,
         Local<HashMap<i32, (EntityKind, Option<Carried>)>>,
-        Local<Vec<usize>>,
+        Local<Vec<((i32, i32), usize)>>,
     ),
 ) {
     crate::prof_span!("render:sync_entities");
     *variant_tick = variant_tick.wrapping_add(1);
     let recompute_variants = *variant_tick % 4 == 0;
-    let camera = camera_q
-        .iter()
-        .next()
-        .map(|t| CameraView::new(t.rotation(), t.translation()))
-        .unwrap_or_default();
+    let origin = *origin;
+    let camera = CameraView::of(&view);
+    if assets.glint_texture.is_none()
+        && let Some(glint) = &glint_texture
+    {
+        assets.glint_texture = Some(glint.0.clone());
+    }
+    if assets.armor_glint_texture.is_none()
+        && let Some(glint) = &armor_glint_texture
+    {
+        assets.armor_glint_texture = Some(glint.0.clone());
+    }
 
     let cap = max_rendered_entities();
     let anims = &*view.entities;
@@ -1328,17 +1407,24 @@ fn sync_entities(
     if anims.len() <= cap {
         frame.extend(anims.iter().map(|e| e.sample(partial)));
     } else {
-        let eye = camera.position;
-        let key = |i: usize| {
-            let d = (Vec3::from(anims[i].position(partial)) - eye).length();
-            ((d * 0.5) as i32, anims[i].id)
-        };
         let idx = &mut *idx;
         idx.clear();
-        idx.extend(0..anims.len());
-        idx.select_nth_unstable_by_key(cap, |&i| key(i));
+        idx.extend(anims.iter().enumerate().map(|(i, anim)| {
+            let d = camera.distance_squared_to(anim.position(partial)).sqrt();
+            (((d * 0.5) as i32, anim.id), i)
+        }));
+        idx.select_nth_unstable_by_key(cap, |&(key, _)| key);
         idx.truncate(cap);
-        frame.extend(idx.iter().map(|&i| anims[i].sample(partial)));
+        frame.extend(idx.iter().map(|&(_, i)| anims[i].sample(partial)));
+    }
+    if !view.item_pickups.is_empty() {
+        frame.retain(|st| {
+            !view
+                .item_pickups
+                .iter()
+                .any(|p| p.replaces() == Some(st.id))
+        });
+        frame.extend(view.item_pickups.iter().map(|p| p.sample(partial)));
     }
 
     let seen = &mut *seen;
@@ -1430,12 +1516,14 @@ fn sync_entities(
                 (Geom::Model(model), RigBody::Baked(baked)) => {
                     if recompute_variants {
                         let texture = (model.texture)(st);
-                        if texture != layer.texture {
+                        let glint = assets.armor_glint(spec, st);
+                        if texture != layer.texture || glint != layer.glint {
                             if let Some((material, tex)) = assets.layer_material(
                                 &texture,
                                 spec,
                                 lit,
                                 levels,
+                                glint,
                                 &mut entity_images,
                                 &mut images,
                                 &mut materials,
@@ -1451,6 +1539,7 @@ fn sync_entities(
                                 layer.tex = Some(tex);
                                 layer.lit = lit;
                                 layer.texture = texture;
+                                layer.glint = glint;
                             }
                         }
                     }
@@ -1496,22 +1585,26 @@ fn sync_entities(
                                     )
                                 });
                             let built = built.map(|(mesh, texture, display, bounds)| {
+                                let glint =
+                                    assets.item_glint(st.extras.item.glint, &texture, &images);
                                 let material = assets.material(
                                     Some(texture.clone()),
                                     spec,
                                     lit,
                                     levels,
+                                    glint,
                                     &mut materials,
                                 );
-                                (mesh, material, texture, display, bounds)
+                                (mesh, material, texture, display, bounds, glint)
                             });
                             match built {
-                                Some((mesh, material, texture, display, bounds)) => {
+                                Some((mesh, material, texture, display, bounds, glint)) => {
                                     single.display = item_display_transform(&display);
                                     single.bounds = Some(display_bounds(bounds, &single.display));
                                     layer.material = Some(material.clone());
                                     layer.tex = Some(texture);
                                     layer.lit = lit;
+                                    layer.glint = glint;
                                     insert_copies(&mut commands, &single.copies, &mesh, &material);
                                 }
                                 None => {
@@ -1519,6 +1612,25 @@ fn sync_entities(
                                     single.bounds = None;
                                     clear_copies(&mut commands, &single.copies);
                                 }
+                            }
+                        } else if single.bounds.is_some()
+                            && (st.extras.item.glint || layer.glint.z > 0.0)
+                            && let Some(texture) = layer.tex.clone()
+                        {
+                            let glint = assets.item_glint(st.extras.item.glint, &texture, &images);
+                            if glint != layer.glint {
+                                let material = assets.material(
+                                    Some(texture),
+                                    spec,
+                                    lit,
+                                    levels,
+                                    glint,
+                                    &mut materials,
+                                );
+                                point_copies(&single.copies, &material, &mut mats);
+                                layer.material = Some(material);
+                                layer.lit = lit;
+                                layer.glint = glint;
                             }
                         }
                     }
@@ -1634,6 +1746,7 @@ fn sync_entities(
                                 spec,
                                 lit,
                                 levels,
+                                layer.glint,
                                 &mut materials,
                             );
                             set_layer_material(layer, &material, &mut mats);
@@ -1647,6 +1760,7 @@ fn sync_entities(
                 layer,
                 &root,
                 st,
+                origin,
                 &placement,
                 &copy_locals,
                 &mut nodes,
@@ -1661,22 +1775,25 @@ fn set_layer_material(
     material: &Handle<EntityMaterial>,
     mats: &mut Query<&mut MeshMaterial3d<EntityMaterial>>,
 ) {
-    let mut point_at = |entity: Entity| {
-        if let Ok(mut slot) = mats.get_mut(entity) {
+    match &layer.body {
+        RigBody::Baked(baked) => point_copies(&[baked.node], material, mats),
+        RigBody::Single(single) => point_copies(&single.copies, material, mats),
+    }
+    layer.material = Some(material.clone());
+}
+
+fn point_copies(
+    nodes: &[Entity],
+    material: &Handle<EntityMaterial>,
+    mats: &mut Query<&mut MeshMaterial3d<EntityMaterial>>,
+) {
+    for &node in nodes {
+        if let Ok(mut slot) = mats.get_mut(node) {
             if slot.0 != *material {
                 slot.0 = material.clone();
             }
         }
-    };
-    match &layer.body {
-        RigBody::Baked(baked) => point_at(baked.node),
-        RigBody::Single(single) => {
-            for &copy in &single.copies {
-                point_at(copy);
-            }
-        }
     }
-    layer.material = Some(material.clone());
 }
 
 fn insert_copies(
@@ -1753,11 +1870,13 @@ fn spawn_layer(
                 overlay_alpha: overlay_alpha(st),
                 ..lit
             };
+            let glint = assets.armor_glint(spec, st);
             let (material, tex) = match assets.layer_material(
                 &texture,
                 spec,
                 lit,
                 levels,
+                glint,
                 entity_images,
                 images,
                 materials,
@@ -1766,9 +1885,11 @@ fn spawn_layer(
                 None => (None, None),
             };
             let states = assets.spec(idx, model).model.rest_pose();
-            spawn_model_rig(
+            let mut rig = spawn_model_rig(
                 commands, idx, states, spec.name, texture, lit, material, tex, meshes,
-            )
+            );
+            rig.glint = glint;
+            rig
         }
         _ => {
             let copies = match &spec.geom {
@@ -1829,6 +1950,7 @@ fn spawn_model_rig(
         material,
         tex,
         lit,
+        glint: Vec4::ZERO,
         states,
     }
 }
@@ -1868,6 +1990,7 @@ fn spawn_single_rig(
             material: None,
             tex: None,
             lit: Lit::full_bright(),
+            glint: Vec4::ZERO,
             states: Vec::new(),
         };
     }
@@ -1914,6 +2037,7 @@ fn spawn_single_rig(
         material: None,
         tex: None,
         lit: Lit::full_bright(),
+        glint: Vec4::ZERO,
         states: Vec::new(),
     }
 }
@@ -1963,13 +2087,13 @@ fn shown(show: bool) -> Visibility {
     }
 }
 
-fn pose_root(st: &EntityState, root: &RootPose) -> Transform {
+fn pose_root(st: &EntityState, root: &RootPose, origin: RenderOrigin) -> Transform {
     let own = Transform {
         translation: root.world_offset,
         rotation: root.rotation,
         scale: Vec3::splat(root.scale),
     };
-    let anchor = Transform::from_translation(Vec3::from(st.pos));
+    let anchor = Transform::from_translation(origin.to_render_array(st.pos));
     match st.carrier {
         Some(carrier) => anchor.mul_transform(carrier.pose).mul_transform(own),
         None => anchor.mul_transform(own),
@@ -1980,6 +2104,7 @@ fn apply_layer(
     layer: &LayerRig,
     root: &RootPose,
     st: &EntityState,
+    origin: RenderOrigin,
     placement: &Transform,
     copy_locals: &[Transform],
     nodes: &mut Query<(&mut Transform, &mut Visibility), With<EntityRigNode>>,
@@ -1987,7 +2112,7 @@ fn apply_layer(
 ) {
     if let RigBody::Baked(baked) = &layer.body {
         if let Ok((mut t, _)) = nodes.get_mut(baked.node) {
-            let composed = pose_root(st, root).mul_transform(Transform {
+            let composed = pose_root(st, root, origin).mul_transform(Transform {
                 translation: root.extra_offset,
                 rotation: root.extra_rotation,
                 scale: Vec3::ONE,
@@ -2005,7 +2130,7 @@ fn apply_layer(
         };
         let want = match copy_locals.first() {
             Some(local) => {
-                let composed = pose_root(st, root)
+                let composed = pose_root(st, root, origin)
                     .mul_transform(Transform {
                         translation: root.extra_offset,
                         rotation: root.extra_rotation,
@@ -2027,7 +2152,7 @@ fn apply_layer(
     }
 
     if let Ok((mut t, _)) = nodes.get_mut(layer.pose_root) {
-        set_transform(&mut t, pose_root(st, root));
+        set_transform(&mut t, pose_root(st, root, origin));
     }
     if let Ok((mut t, _)) = nodes.get_mut(layer.extra) {
         let scale = t.scale;

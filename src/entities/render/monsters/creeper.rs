@@ -22,7 +22,8 @@ pub fn register(registry: &mut Registry) {
         )
         .with_root(root)
         .with_visible(is_powered)
-        .with_blend(Blend::Additive),
+        .with_blend(Blend::Additive)
+        .ignoring_invisibility(),
     );
 }
 

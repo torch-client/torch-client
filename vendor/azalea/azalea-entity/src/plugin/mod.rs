@@ -114,10 +114,19 @@ pub fn update_fluid_on_eyes(
 }
 
 pub fn update_on_climbable(
-    mut query: Query<(&mut OnClimbable, &Position, &WorldName, &GameMode), With<LocalEntity>>,
+    mut query: Query<
+        (
+            &mut OnClimbable,
+            &Position,
+            &WorldName,
+            &GameMode,
+            Option<&crate::metadata::FallFlying>,
+        ),
+        With<LocalEntity>,
+    >,
     worlds: Res<Worlds>,
 ) {
-    for (mut on_climbable, position, world_name, &game_mode) in query.iter_mut() {
+    for (mut on_climbable, position, world_name, &game_mode, fall_flying) in query.iter_mut() {
         if game_mode == GameMode::Spectator {
             continue;
         }
@@ -132,6 +141,13 @@ pub fn update_on_climbable(
         let block_state_at_feet = world.get_block_state(block_pos).unwrap_or_default();
         let block_at_feet = Box::<dyn BlockTrait>::from(block_state_at_feet);
         let registry_block_at_feet = block_at_feet.as_block_kind();
+
+        if fall_flying.is_some_and(|f| **f)
+            && tags::blocks::CAN_GLIDE_THROUGH.contains(&registry_block_at_feet)
+        {
+            **on_climbable = false;
+            continue;
+        }
 
         **on_climbable = tags::blocks::CLIMBABLE.contains(&registry_block_at_feet)
             || (tags::blocks::TRAPDOORS.contains(&registry_block_at_feet)
@@ -194,12 +210,13 @@ pub fn update_bounding_box(
 #[allow(clippy::type_complexity)]
 pub fn update_dimensions(
     mut query: Query<
-        (&mut EntityDimensions, &EntityKindComponent, &Pose),
-        Or<(Changed<EntityKindComponent>, Changed<Pose>)>,
+        (&mut EntityDimensions, &EntityKindComponent, &Pose, Option<&crate::Attributes>),
+        Or<(Changed<EntityKindComponent>, Changed<Pose>, Changed<crate::Attributes>)>,
     >,
 ) {
-    for (mut dimensions, kind, pose) in query.iter_mut() {
-        *dimensions = calculate_dimensions(**kind, *pose);
+    for (mut dimensions, kind, pose, attributes) in query.iter_mut() {
+        let scale = attributes.map_or(1.0, |a| a.scale.calculate() as f32);
+        *dimensions = calculate_dimensions(**kind, *pose).scale(scale);
     }
 }
 

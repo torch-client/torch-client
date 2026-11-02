@@ -23,6 +23,7 @@ pub struct GuiRange {
     pub first_index: u32,
     pub index_count: u32,
     pub base_vertex: i32,
+    pub texture: u64,
 }
 
 #[derive(Default)]
@@ -30,7 +31,18 @@ pub struct GuiFrame {
     pub vertices: Vec<GuiVertex>,
     pub indices: Vec<u32>,
     pub ranges: Vec<GuiRange>,
+    pub glint: GlintUniform,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
+pub struct GlintUniform {
+    pub region: [f32; 4],
+    pub params: [f32; 4],
+}
+
+pub const GLINT_UNIFORM_SIZE: u64 = 32;
+const _: () = assert!(size_of::<GlintUniform>() as u64 == GLINT_UNIFORM_SIZE);
 
 #[derive(Resource, Default)]
 pub struct GuiFrames(pub Mutex<GuiFrame>);
@@ -44,6 +56,7 @@ impl GuiFrames {
         uvs: &[[f32; 2]],
         colors: &[[f32; 4]],
         indices: &[u32],
+        textures: &[(u32, u64)],
         vw: f32,
         vh: f32,
     ) {
@@ -61,12 +74,28 @@ impl GuiFrames {
             });
         }
         frame.indices.extend_from_slice(indices);
-        frame.ranges.push(GuiRange {
-            window,
-            first_index,
-            index_count: indices.len() as u32,
-            base_vertex,
-        });
+        let total = indices.len() as u32;
+        let mut start = 0;
+        let atlas = crate::gui::painter::ATLAS_TEXTURE;
+        let mut texture = atlas;
+        for (at, next) in textures.iter().copied().chain([(total, atlas)]) {
+            let at = at.min(total);
+            if at > start {
+                frame.ranges.push(GuiRange {
+                    window,
+                    first_index: first_index + start,
+                    index_count: at - start,
+                    base_vertex,
+                    texture,
+                });
+                start = at;
+            }
+            texture = next;
+        }
+    }
+
+    pub fn set_glint(&self, glint: GlintUniform) {
+        self.0.lock().glint = glint;
     }
 }
 
@@ -83,6 +112,7 @@ pub struct GuiPool {
     pub vertex_capacity: usize,
     pub index_capacity: usize,
     pub ranges: Vec<GuiRange>,
+    pub glint: Option<Buffer>,
 }
 
 const INITIAL_VERTICES: usize = 16384;
@@ -137,6 +167,18 @@ pub fn extract_gui(
             queue.write_buffer(indices, 0, bytemuck::cast_slice(&frame.indices));
             pool.ranges.extend_from_slice(&frame.ranges);
         }
+    }
+
+    let glint = pool.glint.get_or_insert_with(|| {
+        device.create_buffer(&BufferDescriptor {
+            label: Some("gui_glint"),
+            size: GLINT_UNIFORM_SIZE,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    });
+    if render {
+        queue.write_buffer(glint, 0, bytemuck::bytes_of(&frame.glint));
     }
 
     frame.vertices.clear();

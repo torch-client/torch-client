@@ -12,7 +12,6 @@ use crate::gui::render::GuiAssets;
 use crate::renderer::AppState;
 use crate::renderer::entity_material::{EntityMaterial, EntityParams, LightMode, Lit};
 use crate::renderer::frame_view::{FrameView, FrameViewSystems};
-use crate::renderer::systems::WorldCamera;
 use crate::text::{Font, LINE_HEIGHT, Span};
 
 pub struct WorldTextPlugin;
@@ -111,7 +110,7 @@ fn sync_text_displays(
     assets: Option<Res<WorldTextAssets>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<EntityMaterial>>,
-    camera: Query<&Transform, With<WorldCamera>>,
+    origin: Res<crate::renderer::RenderOrigin>,
     mut layouts: Local<Layouts>,
     mut drawn: Local<bool>,
 ) {
@@ -125,9 +124,8 @@ fn sync_text_displays(
             return;
         }
     };
-    let Ok(cam_tf) = camera.single() else { return };
-    let camera = CameraView::new(cam_tf.rotation, cam_tf.translation);
-    let eye = camera.position;
+    let origin = *origin;
+    let camera = CameraView::of(&view);
     let frame = (time.elapsed_secs() * 20.0) as u32;
 
     let partial = view.partial;
@@ -140,10 +138,12 @@ fn sync_text_displays(
         if display.text.is_empty() {
             continue;
         }
-        let pos = Vec3::from(anim.position(partial));
-        if pos.distance(eye) > display.view_range * VIEW_RANGE_BLOCKS {
+        let world = anim.position(partial);
+        let limit = display.view_range * VIEW_RANGE_BLOCKS;
+        if camera.distance_squared_to(world) > limit * limit {
             continue;
         }
+        let pos = origin.to_render_array(world);
         if painted.is_none() {
             let Some(taken) = take_buffers(&mut meshes, &assets, &gui.atlas, frame) else {
                 return;
@@ -205,6 +205,7 @@ fn take_buffers<'a>(
                 Some(Indices::U32(v)) => v,
                 _ => Vec::new(),
             },
+            textures: Vec::new(),
         };
         normals[i] = f32x3(mesh.remove_attribute(Mesh::ATTRIBUTE_NORMAL));
     }
@@ -319,6 +320,7 @@ fn setup(
         let material = materials.add(EntityMaterial {
             texture: Some(gui.image.clone()),
             params: EntityParams::new(LightMode::Text, 0.0, Lit::full_bright()),
+            glint_texture: None,
             alpha_mode: AlphaMode::Blend,
             depth_bias: 0,
             see_through,

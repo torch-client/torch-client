@@ -329,8 +329,14 @@ mod tests {
             2
         );
         assert_eq!(preprocess("#endif\nx\n", &mut table).unwrap(), "\nx\n");
+    }
 
-        table.define("SHADOW_DISTANCE", "\"far\"");
-        assert!(preprocess("#if SHADOW_DISTANCE > 1\nx\n#endif\n", &mut table).is_err());
+    #[test]
+    fn an_unreadable_condition_reads_as_jcpp_reads_it() {
+        let pastel = "#if (in(biome, BIOME_SOUL_SAND_VALLEY)\nx\n#endif\n";
+        assert_eq!(run(pastel, &[]), "\n\n\n");
+        assert_eq!(run("#if 1 || (2 ,\nx\n#endif\n", &[]), "\nx\n\n");
+        assert_eq!(run("#if !(,\nx\n#endif\n", &[]), "\nx\n\n");
+        assert_eq!(run("#if S > 1\nx\n#endif\n", &[("S", "\"far\"")]), "\n\n\n");
     }
 }

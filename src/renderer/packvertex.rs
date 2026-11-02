@@ -84,6 +84,33 @@ impl BlockIds {
     pub fn of(&self, state: u16) -> u16 {
         self.ids.get(state as usize).copied().unwrap_or(UNMAPPED)
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(2 + self.ids.len() * 2);
+        bytes.push(self.lighting.old_lighting as u8);
+        bytes.push(self.lighting.separate_ao as u8);
+        bytes.extend(self.ids.iter().flat_map(|id| id.to_le_bytes()));
+        bytes
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn decode(bytes: &[u8]) -> Option<BlockIds> {
+        let (flags, ids) = bytes.split_first_chunk::<2>()?;
+        if ids.len() % 2 != 0 {
+            return None;
+        }
+        Some(BlockIds {
+            ids: ids
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect(),
+            lighting: PackLighting {
+                old_lighting: flags[0] != 0,
+                separate_ao: flags[1] != 0,
+            },
+        })
+    }
 }
 
 static CURRENT: RwLock<Option<Arc<BlockIds>>> = RwLock::new(None);

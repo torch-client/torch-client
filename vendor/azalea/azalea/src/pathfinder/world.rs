@@ -17,7 +17,10 @@ use azalea_core::{
 };
 use azalea_physics::collision::BlockWithShape;
 use azalea_registry::builtin::BlockKind;
-use azalea_world::{World, palette::PalettedContainer};
+use azalea_world::{
+    World,
+    palette::{Palette, PalettedContainer},
+};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
@@ -102,6 +105,7 @@ impl Default for CachedSections {
 pub struct CachedSection {
     pub pos: SmallChunkSectionPos,
     pub bitsets: Box<SectionBitsets>,
+    pub loaded: bool,
 }
 impl Debug for CachedSection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,6 +121,46 @@ pub struct SectionBitsets {
     pub solid: FastFixedBitSet<4096>,
     pub standable: FastFixedBitSet<4096>,
     pub water: FastFixedBitSet<4096>,
+}
+
+const PASSABLE: u8 = 1;
+const SOLID: u8 = 2;
+const STANDABLE: u8 = 4;
+const WATER: u8 = 8;
+
+fn block_flags(state: BlockState) -> u8 {
+    let mut flags = 0;
+    if is_block_state_passable(state) {
+        flags |= PASSABLE;
+    }
+    if is_block_state_solid(state) {
+        flags |= SOLID;
+    }
+    if is_block_state_standable(state) {
+        flags |= STANDABLE;
+    }
+    if is_block_state_water(state) {
+        flags |= WATER;
+    }
+    flags
+}
+
+impl SectionBitsets {
+    #[inline]
+    fn apply(&mut self, i: usize, flags: u8) {
+        if flags & PASSABLE != 0 {
+            self.passable.set(i);
+        }
+        if flags & SOLID != 0 {
+            self.solid.set(i);
+        }
+        if flags & STANDABLE != 0 {
+            self.standable.set(i);
+        }
+        if flags & WATER != 0 {
+            self.water.set(i);
+        }
+    }
 }
 
 impl CachedWorld {
@@ -211,45 +255,49 @@ impl CachedWorld {
     }
 
     fn calculate_bitsets_for_section(&self, section_pos: SmallChunkSectionPos) -> CachedSection {
-        let bitsets = self
-            .with_section(section_pos, |section| {
-                let mut bitsets = SectionBitsets {
-                    passable: FastFixedBitSet::<4096>::new(),
-                    solid: FastFixedBitSet::<4096>::new(),
-                    standable: FastFixedBitSet::<4096>::new(),
-                    water: FastFixedBitSet::<4096>::new(),
-                };
+        let bitsets = self.with_section(section_pos, |section| {
+            let mut bitsets = Box::new(SectionBitsets {
+                passable: FastFixedBitSet::<4096>::new(),
+                solid: FastFixedBitSet::<4096>::new(),
+                standable: FastFixedBitSet::<4096>::new(),
+                water: FastFixedBitSet::<4096>::new(),
+            });
 
-                for i in 0..4096 {
-                    let block_state = section.get_at_index(i);
-                    if is_block_state_passable(block_state) {
-                        bitsets.passable.set(i);
-                    }
-                    if is_block_state_solid(block_state) {
-                        bitsets.solid.set(i);
-                    }
-                    if is_block_state_standable(block_state) {
-                        bitsets.standable.set(i);
-                    }
-                    if is_block_state_water(block_state) {
-                        bitsets.water.set(i);
+            match &section.palette {
+                Palette::SingleValue(state) => {
+                    let flags = block_flags(*state);
+                    if flags != 0 {
+                        for i in 0..4096 {
+                            bitsets.apply(i, flags);
+                        }
                     }
                 }
-                Box::new(bitsets)
-            })
-            .unwrap_or_default();
+                Palette::Linear(values) | Palette::Hashmap(values) => {
+                    let flags: Vec<u8> = values.iter().map(|s| block_flags(*s)).collect();
+                    let default_flags = block_flags(BlockState::default());
+                    section.storage.for_each(|i, id| {
+                        let f = flags.get(id as usize).copied().unwrap_or(default_flags);
+                        bitsets.apply(i, f);
+                    });
+                }
+                Palette::Global => {
+                    section.storage.for_each(|i, id| {
+                        let state = BlockState::try_from(id as u32).unwrap_or_default();
+                        bitsets.apply(i, block_flags(state));
+                    });
+                }
+            }
+            bitsets
+        });
 
         CachedSection {
             pos: section_pos,
-            bitsets,
+            loaded: bitsets.is_some(),
+            bitsets: bitsets.unwrap_or_default(),
         }
     }
 
-    fn check_bitset_for_block(
-        &self,
-        pos: BlockPos,
-        cb: impl FnOnce(&SectionBitsets, usize) -> bool,
-    ) -> bool {
+    fn with_cached_section<T>(&self, pos: BlockPos, cb: impl FnOnce(&CachedSection, usize) -> T) -> T {
         let (section_pos, section_block_pos) = (
             SmallChunkSectionPos::from(pos),
             ChunkSectionBlockPos::from(pos),
@@ -257,13 +305,21 @@ impl CachedWorld {
         let index = u16::from(section_block_pos) as usize;
         let cached_blocks = unsafe { &mut *self.cached_blocks.get() };
         if let Some(cached) = cached_blocks.get_mut(section_pos) {
-            return cb(&cached.bitsets, index);
+            return cb(cached, index);
         }
 
         let cached = self.calculate_bitsets_for_section(section_pos);
-        let passable = cb(&cached.bitsets, index);
+        let r = cb(&cached, index);
         cached_blocks.insert(cached);
-        passable
+        r
+    }
+
+    fn check_bitset_for_block(
+        &self,
+        pos: BlockPos,
+        cb: impl FnOnce(&SectionBitsets, usize) -> bool,
+    ) -> bool {
+        self.with_cached_section(pos, |cached, index| cb(&cached.bitsets, index))
     }
 
     pub fn is_block_passable(&self, pos: RelBlockPos) -> bool {
@@ -310,6 +366,16 @@ impl CachedWorld {
     }
 
     pub fn cost_for_breaking_block(&self, pos: RelBlockPos, mining_cache: &MiningCache) -> f32 {
+        if !mining_cache.can_mine() {
+            return self.with_cached_section(pos.apply(self.origin), |cached, index| {
+                if cached.bitsets.passable.index(index) || !cached.loaded {
+                    0.
+                } else {
+                    f32::INFINITY
+                }
+            });
+        }
+
         let cached_mining_costs = self.cached_mining_costs();
 
         let hash_index = calculate_cached_mining_costs_index(pos);

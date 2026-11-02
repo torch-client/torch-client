@@ -168,6 +168,36 @@ fn player_names(s: &State) -> Vec<String> {
     names
 }
 
+#[cfg(lua_mods)]
+#[derive(Clone, Debug)]
+pub struct Profile {
+    pub uuid: u128,
+    pub name: String,
+    pub listed: bool,
+    pub gamemode: Gamemode,
+    pub display: Option<String>,
+}
+
+#[cfg(lua_mods)]
+fn profiles(s: &State) -> Vec<Profile> {
+    let mut out: Vec<Profile> = s
+        .players
+        .iter()
+        .map(|(&uuid, e)| Profile {
+            uuid,
+            name: e.name.clone(),
+            listed: e.listed,
+            gamemode: e.gamemode,
+            display: e
+                .display_name
+                .as_ref()
+                .map(|d| d.iter().map(|s| s.text.as_str()).collect()),
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name).then(a.uuid.cmp(&b.uuid)));
+    out
+}
+
 pub(crate) fn reset() {
     *state().lock().unwrap() = State::default();
     #[cfg(feature = "skins")]
@@ -214,6 +244,10 @@ pub(crate) fn packet(shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) 
                             .get("textures")
                             .map(|p| crate::client::skins::parse_textures(&p.value))
                             .unwrap_or_default();
+                        #[cfg(eagler_skins)]
+                        if refs.body.is_none() {
+                            crate::eagler::skins::request(uuid);
+                        }
                         crate::client::skins::remember(uuid, refs);
                     }
                 }
@@ -328,6 +362,11 @@ pub(crate) fn packet(shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) 
     let list = list_dirty.then(|| build(&s));
     let sidebar = sidebar_dirty.then(|| build_sidebar(&s));
     let names = names_changed.then(|| player_names(&s));
+    #[cfg(lua_mods)]
+    let profiles = (names_changed
+        || matches!(packet, ClientboundGamePacket::PlayerInfoUpdate(p)
+            if p.actions.update_listed || p.actions.update_game_mode || p.actions.update_display_name))
+    .then(|| profiles(&s));
     drop(s);
 
     let mut shared = shared.lock().unwrap();
@@ -339,6 +378,10 @@ pub(crate) fn packet(shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) 
     }
     if let Some(names) = names {
         shared.session.player_names = names;
+    }
+    #[cfg(lua_mods)]
+    if let Some(profiles) = profiles {
+        shared.session.player_profiles = Arc::new(profiles);
     }
 }
 

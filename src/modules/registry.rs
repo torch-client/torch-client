@@ -6,11 +6,48 @@ use super::esp::Shape;
 use super::flight::AntiKick;
 use super::list::BitList;
 use super::nametags::{Health, Sizing};
+use super::scaffold::{BlockFilter, ScaffoldMode, Tower};
+use crate::gui::keybinds::Bound;
 
+#[derive(Clone, Copy)]
 pub struct SettingDef {
     pub name: &'static str,
     pub tip: &'static str,
     pub kind: Kind,
+    pub show: Show,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(lua_mods), allow(dead_code))]
+pub enum Show {
+    Always,
+    On(u8),
+    Is(u8, u32),
+    Any(&'static [Show]),
+    All(&'static [Show]),
+}
+
+impl Show {
+    pub const fn is(slot: u16, options: &[u8]) -> Show {
+        let mut mask = 0u32;
+        let mut i = 0;
+        while i < options.len() {
+            mask |= 1 << options[i];
+            i += 1;
+        }
+        Show::Is(offset_of(slot), mask)
+    }
+}
+
+const fn offset_of(slot: u16) -> u8 {
+    let mut i = 0;
+    while i < COUNT {
+        if slot >= BASE[i] && slot < BASE[i + 1] {
+            return (slot - BASE[i]) as u8;
+        }
+        i += 1;
+    }
+    panic!("not a built-in setting slot")
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +81,15 @@ pub enum Kind {
         default: &'static str,
         expand: bool,
         hint: &'static str,
+    },
+    #[cfg_attr(not(lua_mods), allow(dead_code))]
+    Key {
+        default: Bound,
+    },
+    #[cfg_attr(not(lua_mods), allow(dead_code))]
+    Button {
+        text: &'static str,
+        key: &'static str,
     },
 }
 
@@ -99,12 +145,12 @@ pub mod handle {
 pub enum Mode {
     Legit = 0,
     Normal = 1,
-    Rage = 2,
+    Blatant = 2,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 3] = [Mode::Legit, Mode::Normal, Mode::Rage];
-    pub const NAMES: [&'static str; 3] = ["Legit", "Normal", "Rage"];
+    pub const ALL: [Mode; 3] = [Mode::Legit, Mode::Normal, Mode::Blatant];
+    pub const NAMES: [&'static str; 3] = ["Legit", "Normal", "Blatant"];
 
     pub fn step(self, by: i8) -> Mode {
         let i = (self as i8 + by).clamp(0, Self::ALL.len() as i8 - 1);
@@ -135,31 +181,158 @@ impl Category {
     }
 
     pub fn modules(self) -> impl Iterator<Item = &'static ModuleDef> {
-        MODULES.iter().filter(move |m| m.category == self)
+        modules().filter(move |m| m.category == self)
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ModuleIx(pub u16);
+
+impl From<Id> for ModuleIx {
+    #[inline(always)]
+    fn from(id: Id) -> ModuleIx {
+        ModuleIx(id as u16)
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct ModuleDef {
-    pub id: Id,
+    pub id: ModuleIx,
     pub name: &'static str,
     pub desc: &'static str,
     pub category: Category,
     pub mode: Mode,
+    first: u16,
+    len: u16,
+    #[cfg(lua_mods)]
+    own: &'static [SettingDef],
 }
 
 impl ModuleDef {
     pub fn slots(&self) -> Range<usize> {
-        let i = self.id as usize;
-        BASE[i] as usize..BASE[i + 1] as usize
+        self.first as usize..(self.first + self.len) as usize
     }
 
     pub fn settings(&self) -> &'static [SettingDef] {
+        #[cfg(lua_mods)]
+        if self.id.0 as usize >= COUNT {
+            return self.own;
+        }
         &SETTINGS[self.slots()]
     }
 }
 
-pub fn module(id: Id) -> &'static ModuleDef {
-    &MODULES[id as usize]
+pub fn module(id: impl Into<ModuleIx>) -> &'static ModuleDef {
+    let i = id.into().0 as usize;
+    #[cfg(lua_mods)]
+    if i >= COUNT {
+        return &scripts().modules[i - COUNT];
+    }
+    &MODULES[i]
+}
+
+pub fn modules() -> impl Iterator<Item = &'static ModuleDef> {
+    #[cfg(lua_mods)]
+    let extra = scripts().modules;
+    #[cfg(not(lua_mods))]
+    let extra: &'static [ModuleDef] = &[];
+    MODULES.iter().chain(extra)
+}
+
+pub fn module_count() -> usize {
+    #[cfg(lua_mods)]
+    return COUNT + scripts().modules.len();
+    #[cfg(not(lua_mods))]
+    COUNT
+}
+
+pub fn setting(slot: usize) -> Option<&'static SettingDef> {
+    if slot < SETTING_COUNT {
+        return Some(&SETTINGS[slot]);
+    }
+    #[cfg(lua_mods)]
+    return scripts().settings.get(slot - SETTING_COUNT);
+    #[cfg(not(lua_mods))]
+    None
+}
+
+#[cfg(lua_mods)]
+pub(super) struct Extra {
+    pub name: &'static str,
+    pub desc: &'static str,
+    pub category: Category,
+    pub mode: Mode,
+    pub settings: Vec<SettingDef>,
+}
+
+#[cfg(lua_mods)]
+pub(super) struct Scripts {
+    pub modules: &'static [ModuleDef],
+    pub settings: &'static [SettingDef],
+}
+
+#[cfg(lua_mods)]
+static SCRIPTS: std::sync::RwLock<&'static Scripts> = std::sync::RwLock::new(&Scripts {
+    modules: &[],
+    settings: &[],
+});
+
+#[cfg(lua_mods)]
+static GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(lua_mods)]
+pub(super) fn scripts() -> &'static Scripts {
+    *SCRIPTS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(lua_mods)]
+pub fn generation() -> u32 {
+    GENERATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[cfg(lua_mods)]
+pub(super) fn install(extra: Vec<Extra>) {
+    let total: usize = extra.iter().map(|e| e.settings.len()).sum();
+    assert!(
+        COUNT + extra.len() <= u16::MAX as usize,
+        "script modules overflow ModuleIx"
+    );
+    assert!(
+        SETTING_COUNT + total <= u16::MAX as usize,
+        "script settings overflow a slot"
+    );
+
+    let settings: &'static [SettingDef] = extra
+        .iter()
+        .flat_map(|e| e.settings.iter().copied())
+        .collect::<Vec<_>>()
+        .leak();
+    let mut modules = Vec::with_capacity(extra.len());
+    let mut at = 0;
+    for (k, e) in extra.iter().enumerate() {
+        let len = e.settings.len();
+        modules.push(ModuleDef {
+            id: ModuleIx((COUNT + k) as u16),
+            name: e.name,
+            desc: e.desc,
+            category: e.category,
+            mode: e.mode,
+            first: (SETTING_COUNT + at) as u16,
+            len: len as u16,
+            own: &settings[at..at + len],
+        });
+        at += len;
+    }
+    let table: &'static Scripts = Box::leak(Box::new(Scripts {
+        modules: modules.leak(),
+        settings,
+    }));
+    *SCRIPTS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = table;
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
 }
 
 macro_rules! one {
@@ -177,6 +350,15 @@ macro_rules! kind {
     };
     ($v:ident { $($b:tt)* }) => {
         Kind::$v { $($b)* }
+    };
+}
+
+macro_rules! show {
+    () => {
+        Show::Always
+    };
+    ($e:expr) => {
+        $e
     };
 }
 
@@ -198,7 +380,7 @@ macro_rules! handles {
 macro_rules! modules {
     ($(
         $id:ident / $index:ident: $cat:ident, $mode:ident, $desc:literal {
-            $($konst:ident: $sname:literal, $tip:literal, $v:ident $(<$t:ty>)? { $($body:tt)* };)*
+            $($konst:ident: $sname:literal, $tip:literal, $v:ident $(<$t:ty>)? { $($body:tt)* } $(if $show:expr)?;)*
         }
     )*) => {
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -213,18 +395,27 @@ macro_rules! modules {
 
         pub static MODULES: [ModuleDef; COUNT] = [$(
             ModuleDef {
-                id: Id::$id,
+                id: ModuleIx(Id::$id as u16),
                 name: stringify!($id),
                 desc: $desc,
                 category: Category::$cat,
                 mode: Mode::$mode,
+                first: BASE[Id::$id as usize],
+                len: LENS[Id::$id as usize],
+                #[cfg(lua_mods)]
+                own: &[],
             },
         )*];
 
         const LENS: [u16; COUNT] = [$(0 $(+ one!($konst))*),*];
 
         pub static SETTINGS: [SettingDef; SETTING_COUNT] = [$($(
-            SettingDef { name: $sname, tip: $tip, kind: kind!($v $(<$t>)? { $($body)* }) },
+            SettingDef {
+                name: $sname,
+                tip: $tip,
+                kind: kind!($v $(<$t>)? { $($body)* }),
+                show: show!($($show)?),
+            },
         )*)*];
 
         $(
@@ -253,6 +444,22 @@ pub const SETTING_COUNT: usize = BASE[COUNT] as usize;
 const fn slot(id: Id, n: u16) -> u16 {
     BASE[id as usize] + n
 }
+
+const SMART: Show = Show::is(auto_totem::MODE.0, &[TotemMode::Smart as u8]);
+
+const SCAFFOLD_LEGIT: Show = Show::is(scaffold::MODE.0, &[ScaffoldMode::Legit as u8]);
+const SCAFFOLD_BRIDGE: Show = Show::is(
+    scaffold::MODE.0,
+    &[
+        ScaffoldMode::GodBridge as u8,
+        ScaffoldMode::TellyBridge as u8,
+    ],
+);
+const SCAFFOLD_TELLY: Show = Show::is(scaffold::MODE.0, &[ScaffoldMode::TellyBridge as u8]);
+const SCAFFOLD_FILTERED: Show = Show::is(
+    scaffold::BLOCKS.0,
+    &[BlockFilter::Blacklist as u8, BlockFilter::Whitelist as u8],
+);
 
 modules! {
     TriggerBot / trigger_bot: Combat, Normal,
@@ -346,16 +553,16 @@ modules! {
             Enum<TotemMode> { default: TotemMode::Always };
         HEALTH: "Health",
             "Smart: equip at or under this much health, absorption included. 2 is one heart",
-            Slider { min: 0.0, max: 36.0, value: 10.0, decimals: 0 };
+            Slider { min: 0.0, max: 36.0, value: 10.0, decimals: 0 } if SMART;
         ELYTRA: "Elytra",
             "Smart: equip while gliding",
-            Toggle { on: true };
+            Toggle { on: true } if SMART;
         FALL: "Fall",
             "Smart: equip when the landing below would deal at least your health in fall damage",
-            Toggle { on: true };
+            Toggle { on: true } if SMART;
         EXPLOSION: "Explosion",
             "Smart: equip when crystals, lit TNT and swelling creepers in range could deal at least your health",
-            Toggle { on: true };
+            Toggle { on: true } if SMART;
         DELAY: "Delay",
             "Milliseconds after a move before the next one, rolled fresh inside this range",
             Range { min: 0.0, max: 500.0, low: 0.0, high: 100.0, decimals: 0, log: false };
@@ -435,6 +642,9 @@ modules! {
             Slider { min: 0.05, max: 2.0, value: 0.15, decimals: 2 };
     }
 
+    Fullbright / fullbright: Render, Legit,
+        "Draws the world at full light, overriding the Lighting option" {}
+
     Freecam / freecam: World, Legit,
         "Detaches the camera and leaves your body where it stands" {
         SPEED: "Speed",
@@ -463,7 +673,62 @@ modules! {
             Toggle { on: false };
     }
 
-    Flight / flight: Movement, Rage,
+    Scaffold / scaffold: World, Blatant,
+        "Places blocks under you as you walk off edges" {
+        MODE: "Mode",
+            "Legit only sneaks at edges. GodBridge places under you with a look the camera does not show. TellyBridge jumps and fills your starting layer from the air",
+            Enum<ScaffoldMode> { default: ScaffoldMode::GodBridge };
+        DELAY: "Delay",
+            "Ticks to wait after a placement before the next",
+            Slider { min: 0.0, max: 10.0, value: 0.0, decimals: 0 };
+        AUTO_BLOCK: "AutoBlock",
+            "Select the hotbar slot with the most usable blocks when you are not holding any, and go back on disable",
+            Toggle { on: true };
+        EXPAND: "Expand",
+            "How close in blocks you must be to a side of your block before the hole beside it is filled. 0 never",
+            Slider { min: 0.0, max: 0.5, value: 0.3, decimals: 2 };
+        TOWER: "Tower",
+            "How you climb while jump is held: Jump and Step jump every ground tick, Motion launches at 0.42 and pulls down past a block, Smooth jumps every third ground tick",
+            Enum<Tower> { default: Tower::Off };
+        BLOCKS: "Blocks",
+            "Which blocks may be used: any, all but the filter, or only the filter",
+            Enum<BlockFilter> { default: BlockFilter::All };
+        FILTER: "Filter blocks",
+            "The blocks Blacklist leaves out or Whitelist allows",
+            List { list: &super::esp::blocks::SCAFFOLD } if SCAFFOLD_FILTERED;
+        PITCH_CHECK: "Pitch check",
+            "Only work while you look down at least Pitch angle",
+            Toggle { on: false };
+        PITCH_ANGLE: "Pitch angle",
+            "Degrees below level your camera must look",
+            Slider { min: 0.0, max: 90.0, value: 60.0, decimals: 0 } if Show::On(offset_of(scaffold::PITCH_CHECK.0));
+        BLOCK_COUNT: "Block count",
+            "Show how many of the held block you carry, under the crosshair",
+            Toggle { on: false };
+        SNEAK_DELAY: "Sneak delay",
+            "Milliseconds the edge sneak is held after the edge, rolled fresh inside this range for each sneak",
+            Range { min: 0.0, max: 1000.0, low: 90.0, high: 210.0, decimals: 0, log: false } if SCAFFOLD_LEGIT;
+        REQUIRE_SNEAK: "Require sneak",
+            "Only sneak at edges while you hold sneak, and lift your sneak away from them",
+            Toggle { on: false } if SCAFFOLD_LEGIT;
+        ACTIVATION: "Activation blocks",
+            "Blocks you must place by hand under you before it takes over. 0 starts at once",
+            Slider { min: 0.0, max: 10.0, value: 0.0, decimals: 0 } if SCAFFOLD_BRIDGE;
+        REQUIRE_RIGHT_CLICK: "Require right click",
+            "Only bridge while the use key is held",
+            Toggle { on: false } if SCAFFOLD_TELLY;
+        Y_INCREASE: "Y increase",
+            "Blocks a jump may climb above the starting layer before placing stops, one more or less now and then",
+            Slider { min: 0.0, max: 10.0, value: 3.0, decimals: 0 } if SCAFFOLD_TELLY;
+        TURN: "Turn speed",
+            "Degrees per tick the sent look may turn, rolled fresh inside this range every tick",
+            Range { min: 1.0, max: 90.0, low: 30.0, high: 55.0, decimals: 0, log: false };
+        REACH: "Reach",
+            "Blocks from your eye a click may reach. The server allows your block reach, 4.5 in survival, plus 1",
+            Slider { min: 2.0, max: 6.0, value: 4.4, decimals: 1 };
+    }
+
+    Flight / flight: Movement, Blatant,
         "Flies without the server having granted it, at creative speed" {
         SPEED: "Speed",
             "Flying speed, where 0.05 is what creative mode gives you and sprinting doubles it",
@@ -482,18 +747,34 @@ modules! {
     Sneak / sneak: Movement, Legit,
         "Holds sneak on whether or not the key is pressed" {}
 
-    NoFall / no_fall: Movement, Rage,
+    NoFall / no_fall: Movement, Blatant,
         "Reports you as standing on the ground while you fall, so the server charges no fall damage" {
         PAUSE_ON_MACE: "Pause on mace",
             "Take the fall while holding a mace, whose smash attack is paid for with the distance fallen",
             Toggle { on: true };
     }
 
-    VClip / vclip: Movement, Rage,
+    VClip / vclip: Movement, Blatant,
         "Moves you straight up or down by a set number of blocks, then switches itself off" {
         DISTANCE: "Distance",
             "Whole blocks to move, negative for down. Past 20 a vanilla server puts you back",
             Slider { min: -50.0, max: 50.0, value: 5.0, decimals: 0 };
+    }
+
+    Velocity / velocity: Movement, Blatant,
+        "Ignores knockback, cobwebs and water drag" {
+        KNOCKBACK: "Attack knockback",
+            "Drop the motion the server sends when you are hit, which also covers wind charges, fishing rods and launch pads",
+            Toggle { on: true };
+        EXPLOSIONS: "Explosion knockback",
+            "Drop the push from TNT, creepers, crystals and beds, which some servers also use for hits",
+            Toggle { on: true };
+        NO_WEB: "No web",
+            "Walk and fall through cobwebs at full speed",
+            Toggle { on: true };
+        NO_WATER_DRAG: "No water drag",
+            "Move through water at land speed, as three levels of Depth Strider would on the bottom",
+            Toggle { on: false };
     }
 
     AutoSell / auto_sell: Misc, Normal,
@@ -513,7 +794,14 @@ modules! {
             Text { max_len: 64, default: "", expand: true, hint: "Type a phrase" };
     }
 
-    Spam / spam: Misc, Rage,
+    Commands / commands: Misc, Legit,
+        "Runs chat lines that start with the prefix as client commands instead of sending them" {
+        PREFIX: "Prefix",
+            "What a line starts with to be run here rather than sent. Never /",
+            Text { max_len: 4, default: ".", expand: false, hint: "." };
+    }
+
+    Spam / spam: Misc, Blatant,
         "Sends a message over and over, a delay apart, with random text around it if you like" {
         MESSAGE: "Message",
             "Sent every time. A leading / runs it as a command",
@@ -533,6 +821,18 @@ modules! {
         SUFFIX_LENGTH: "Suffix length",
             "How many random characters go after, rolled inside this range",
             Range { min: 1.0, max: 16.0, low: 4.0, high: 8.0, decimals: 0, log: false };
+    }
+
+    Speed / speed: Movement, Blatant, "Modifies your movement speed" {
+        SPEED: "Speed",
+            "Blocks per second",
+            Slider { min: 0.0, max: 20.0, value: 5.6, decimals: 1 };
+        IN_LIQUIDS: "In liquids",
+            "Toggle to apply while in water or lava",
+            Toggle { on: false };
+        ONLY_ON_GROUND: "Only on ground",
+            "Only apply while standing on a block",
+            Toggle { on: false };
     }
 
 }
@@ -556,6 +856,7 @@ mod tests {
         assert_eq!(name(auto_sell::COMMAND.0), "Command");
         assert_eq!(name(spam::SUFFIX_LENGTH.0), "Suffix length");
         assert_eq!(name(vclip::DISTANCE.0), "Distance");
+        assert_eq!(name(commands::PREFIX.0), "Prefix");
         for m in &MODULES {
             assert!(std::ptr::eq(module(m.id), m));
         }

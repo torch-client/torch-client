@@ -487,26 +487,35 @@ fn sha1_hash(hash: &str) -> Option<String> {
 #[cfg(resource_packs)]
 fn download(requests: Vec<(u64, String, Option<String>)>) -> Batch {
     let (tx, rx) = std::sync::mpsc::channel();
-    let spawned = std::thread::Builder::new()
+    #[cfg(target_arch = "wasm32")]
+    crate::platform::executor::spawn_detached(fetch_all(requests, tx));
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Err(e) = std::thread::Builder::new()
         .name("server-pack".into())
-        .spawn(move || {
-            let results = requests
-                .into_iter()
-                .map(|(serial, url, hash)| (serial, fetch(&url, hash.as_deref())))
-                .collect();
-            let _ = tx.send(results);
-        });
-    if let Err(e) = spawned {
+        .spawn(move || crate::platform::executor::block_on(fetch_all(requests, tx)))
+    {
         crate::log_warn!("resourcepacks", "could not start a download thread: {e}");
     }
     rx
 }
 
 #[cfg(resource_packs)]
-fn fetch(url: &str, hash: Option<&str>) -> Fetched {
+async fn fetch_all(
+    requests: Vec<(u64, String, Option<String>)>,
+    tx: std::sync::mpsc::Sender<Vec<(u64, Fetched)>>,
+) {
+    let mut results = Vec::with_capacity(requests.len());
+    for (serial, url, hash) in requests {
+        results.push((serial, fetch(&url, hash.as_deref()).await));
+    }
+    let _ = tx.send(results);
+}
+
+#[cfg(resource_packs)]
+async fn fetch(url: &str, hash: Option<&str>) -> Fetched {
     use crate::platform::http;
     let mut under_cap = |got: u64, _total: u64| got <= MAX_PACK_SIZE;
-    let bytes = match crate::platform::executor::block_on(http::get_bytes(url, 1, &mut under_cap)) {
+    let bytes = match http::get_bytes(url, 1, &mut under_cap).await {
         Ok(http::Fetched::Body(bytes)) => bytes,
         Ok(http::Fetched::Cancelled) => {
             crate::log_warn!(

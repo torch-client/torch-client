@@ -100,9 +100,32 @@ pub(crate) fn sample(bot: &Client, eye: [f64; 3]) -> Option<BiomeLayer> {
     Some(probe.blend.resolve(&bases))
 }
 
-fn resample(bot: &Client, probe: &mut Probe, integral: [i32; 3]) -> Option<()> {
+pub(crate) fn quart_biome(
+    chunk: &azalea_world::Chunk,
+    min_y: i32,
+    biomes: &[u8],
+    q: [i32; 3],
+) -> u8 {
     use azalea_registry::DataRegistry;
 
+    let section = ((q[1] * 4 - min_y) >> 4) as usize;
+    match chunk.sections.get(section) {
+        Some(section) => {
+            let biome = section.get_biome(ChunkSectionBiomePos {
+                x: (q[0] & 3) as u8,
+                y: (q[1] & 3) as u8,
+                z: (q[2] & 3) as u8,
+            });
+            biomes
+                .get(biome.protocol_id() as usize)
+                .copied()
+                .unwrap_or(UNRESOLVED)
+        }
+        None => UNRESOLVED,
+    }
+}
+
+fn resample(bot: &Client, probe: &mut Probe, integral: [i32; 3]) -> Option<()> {
     let world = bot.world().ok()?;
     let world = world.read();
     let biomes = crate::client::worker::biome_table(&world.registries);
@@ -135,23 +158,7 @@ fn resample(bot: &Client, probe: &mut Probe, integral: [i32; 3]) -> Option<()> {
             for y in 0..BREADTH {
                 let qy = (integral[1] - RADIUS + y as i32).clamp(quart_lo, quart_hi);
                 let row = match chunk.as_ref() {
-                    Some(chunk) => {
-                        let section = ((qy * 4 - min_y) >> 4) as usize;
-                        match chunk.sections.get(section) {
-                            Some(section) => {
-                                let biome = section.get_biome(ChunkSectionBiomePos {
-                                    x: (qx & 3) as u8,
-                                    y: (qy & 3) as u8,
-                                    z: (qz & 3) as u8,
-                                });
-                                biomes
-                                    .get(biome.protocol_id() as usize)
-                                    .copied()
-                                    .unwrap_or(UNRESOLVED)
-                            }
-                            None => UNRESOLVED,
-                        }
-                    }
+                    Some(chunk) => quart_biome(chunk, min_y, &biomes, [qx, qy, qz]),
                     None => UNRESOLVED,
                 };
                 if x as i32 == RADIUS && y as i32 == RADIUS && z as i32 == RADIUS {

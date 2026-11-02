@@ -5,6 +5,8 @@ use crate::renderer::terrain_pool::{ORIGIN_ROW, SlotMeta};
 const SLOT_WORDS: usize = std::mem::size_of::<SlotMeta>() / 16;
 const _: () = assert!(std::mem::offset_of!(SlotMeta, origin) == 2 * 16);
 
+const TERRAIN_PARAMS_BINDING: u32 = SLOT_TABLE_BINDING - 1;
+
 pub(crate) fn terrain_prelude(direct: bool) -> String {
     let origin = if direct {
         format!(
@@ -30,10 +32,16 @@ pub(crate) fn terrain_prelude(direct: bool) -> String {
          layout(location = 2) in vec4 iris_RawLight;\n\
          layout(location = 3) in vec4 iris_RawColor;\n\
          {origin}\
+         layout(std140, set = {TERRAIN_SET}, binding = {TERRAIN_PARAMS_BINDING}) uniform IrisTerrainParams {{\n    \
+             vec4 iris_TerrainMisc;\n    \
+             vec4 iris_TerrainFogColor;\n    \
+             vec4 iris_TerrainFogRamps;\n    \
+             ivec4 iris_RenderOrigin;\n\
+         }};\n\
          ivec3 iris_Origin;\n\
          vec3 iris_position() {{\n    \
              vec3 camera_block = floor(iris_CameraPosition.xyz);\n    \
-             return vec3(iris_Origin - ivec3(camera_block)) - (iris_CameraPosition.xyz - camera_block)\n        \
+             return vec3(iris_Origin - iris_RenderOrigin.xyz - ivec3(camera_block)) - (iris_CameraPosition.xyz - camera_block)\n        \
                  + vec3(iris_RawPosition.xyz) / 256.0;\n\
          }}\n\
          vec2 iris_uv0() {{ return iris_RawUV0; }}\n\
@@ -230,6 +238,12 @@ mod tests {
                 assert!(
                     wgsl.contains(&format!(
                         "@group({TERRAIN_SET}) @binding({SLOT_TABLE_BINDING})"
+                    )),
+                    "{wgsl}"
+                );
+                assert!(
+                    wgsl.contains(&format!(
+                        "@group({TERRAIN_SET}) @binding({TERRAIN_PARAMS_BINDING})"
                     )),
                     "{wgsl}"
                 );

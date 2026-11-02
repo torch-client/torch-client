@@ -143,6 +143,8 @@ struct Entry {
     data: Arc<BlockEntityData>,
     anim: Anim,
     private: sim::Private,
+    #[cfg(lua_mods)]
+    raw: Option<Arc<Nbt>>,
 }
 
 impl Entry {
@@ -152,8 +154,17 @@ impl Entry {
             anim: Anim::new(kind, &data),
             data,
             private: sim::Private::None,
+            #[cfg(lua_mods)]
+            raw: None,
         }
     }
+}
+
+#[cfg(lua_mods)]
+pub fn raw_at(pos: [i32; 3]) -> Option<(String, Arc<Nbt>)> {
+    let store = store();
+    let entry = store.entries.get(&pos)?;
+    Some((entry.kind.to_string(), entry.raw.clone()?))
 }
 
 #[derive(Default)]
@@ -251,6 +262,10 @@ impl Store {
 
     fn insert(&mut self, pos: [i32; 3], kind: BlockEntityKind, tag: &Nbt) {
         self.put(pos, kind, decode(kind, tag));
+        #[cfg(lua_mods)]
+        if let Some(entry) = self.entries.get_mut(&pos) {
+            entry.raw = Some(Arc::new(tag.clone()));
+        }
     }
 
     fn put(&mut self, pos: [i32; 3], kind: BlockEntityKind, data: BlockEntityData) {

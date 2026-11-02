@@ -10,6 +10,7 @@ use crate::renderer::Sprites;
 
 pub mod ambient;
 pub mod bake;
+pub mod direction;
 pub mod facing;
 pub mod rand;
 pub mod rotation;

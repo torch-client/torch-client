@@ -31,12 +31,23 @@ pub trait PalletedContainerKind:
     }
 
     fn bits_per_entry_to_palette_kind(bits_per_entry: u8) -> PaletteKind;
+
+    fn storage_bits(bits_per_entry: u8) -> u8;
 }
 impl PalletedContainerKind for BlockState {
     type SectionPos = ChunkSectionBlockPos;
 
     fn size_bits() -> usize {
         4
+    }
+
+    fn storage_bits(bits_per_entry: u8) -> u8 {
+        match bits_per_entry {
+            0 => 0,
+            1..=4 => 4,
+            5..=8 => bits_per_entry,
+            _ => (u32::BITS - u32::from(BlockState::MAX_STATE).leading_zeros()) as u8,
+        }
     }
 
     fn bits_per_entry_to_palette_kind(bits_per_entry: u8) -> PaletteKind {
@@ -53,6 +64,10 @@ impl PalletedContainerKind for Biome {
 
     fn size_bits() -> usize {
         2
+    }
+
+    fn storage_bits(bits_per_entry: u8) -> u8 {
+        bits_per_entry
     }
 
     fn bits_per_entry_to_palette_kind(bits_per_entry: u8) -> PaletteKind {
@@ -109,7 +124,13 @@ impl<S: PalletedContainerKind> PalettedContainer<S> {
     }
 
     pub fn read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let bits_per_entry = u8::azalea_read(buf)?;
+        let sent = u8::azalea_read(buf)?;
+        let bits_per_entry = S::storage_bits(sent);
+        if bits_per_entry > 32 {
+            return Err(BufReadError::Custom(format!(
+                "a paletted container claimed {sent} bits per entry"
+            )));
+        }
         let palette_type = S::bits_per_entry_to_palette_kind(bits_per_entry);
         let palette = palette_type.read(buf)?;
         let size = S::size();
@@ -163,6 +184,19 @@ impl<S: PalletedContainerKind> PalettedContainer<S> {
     pub fn get_at_index(&self, index: usize) -> S {
         let paletted_value = self.storage.get(index);
         self.palette.value_for(paletted_value as usize)
+    }
+
+    pub fn unpack_into(&self, out: &mut [S]) {
+        let out = &mut out[..S::size()];
+        match &self.palette {
+            Palette::SingleValue(v) => out.fill(*v),
+            Palette::Linear(values) | Palette::Hashmap(values) => self
+                .storage
+                .for_each(|i, id| out[i] = values.get(id as usize).copied().unwrap_or_default()),
+            Palette::Global => self
+                .storage
+                .for_each(|i, id| out[i] = S::try_from(id as u32).unwrap_or_default()),
+        }
     }
 
     pub fn get(&self, pos: S::SectionPos) -> S {

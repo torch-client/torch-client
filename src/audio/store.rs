@@ -22,12 +22,7 @@ pub(crate) fn installed(index_id: &str) -> bool {
 
 pub(crate) fn save(index_id: &str, pack: &[u8], defs: &str) -> Result<(), String> {
     let write = |path: PathBuf, bytes: &[u8]| -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let part = path.with_extension("part");
-        std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
-        std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
+        crate::client::assets::write_whole(&path, bytes)?;
         crate::log_info!("audio", "wrote {} ({} bytes)", path.display(), bytes.len());
         Ok(())
     };

@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use azalea::Client;
 
-use super::{aim_assist, auto_mace, auto_mine, sneak};
-use crate::session::SharedState;
+use super::{aim_assist, auto_mace, auto_mine, scaffold, sneak};
+use crate::session::{SharedMutex, SharedState};
 
 pub fn shapes_look() -> bool {
     aim_assist::enabled() || auto_mine::enabled() || auto_mace::drives_camera()
@@ -44,7 +46,24 @@ pub fn move_flags(s: &SharedState, keys: u8) -> u8 {
     flags
 }
 
-pub fn sent_look(bot: &Client, yaw: f32, pitch: f32, flags: u8) -> (f32, f32, u8) {
+pub fn script_flags(base: u8) -> u8 {
+    #[cfg(lua_mods)]
+    return (base | super::script::moves()) & !super::script::releases();
+    #[cfg(not(lua_mods))]
+    base
+}
+
+pub fn sent_look(
+    bot: &Client,
+    shared: &Arc<SharedMutex>,
+    yaw: f32,
+    pitch: f32,
+    flags: u8,
+) -> (f32, f32, u8) {
+    let (look, flags) = scaffold::steer(bot, shared, yaw, pitch, flags);
+    if let Some(l) = look {
+        return (l.yaw, l.pitch, flags);
+    }
     if auto_mace::enabled() {
         auto_mace::steer(bot, yaw, pitch, flags)
     } else {

@@ -314,6 +314,17 @@ pub(crate) mod archive {
         MOUNTED.read().selected.clone()
     }
 
+    #[cfg(all(resource_packs, target_arch = "wasm32"))]
+    pub(crate) fn mounted() -> Vec<Arc<OwnedLayer>> {
+        let mounted = MOUNTED.read();
+        mounted
+            .server
+            .iter()
+            .chain(&mounted.selected)
+            .cloned()
+            .collect()
+    }
+
     #[cfg(resource_packs)]
     pub(crate) fn packs_active() -> bool {
         ANY.load(Ordering::Relaxed)

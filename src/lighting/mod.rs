@@ -58,7 +58,7 @@ impl ColumnPos {
     }
 }
 
-pub use crate::direction::Direction;
+pub use crate::blocks::direction::Direction;
 
 pub const MAX_LEVEL: u8 = 15;
 

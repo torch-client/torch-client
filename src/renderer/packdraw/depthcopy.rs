@@ -26,9 +26,10 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 );
 
 pub(super) fn supported(device: &RenderDevice) -> bool {
-    device
-        .features()
-        .contains(wgpu::Features::FLOAT32_FILTERABLE)
+    !cfg!(all(target_arch = "wasm32", not(feature = "webgpu")))
+        && device
+            .features()
+            .contains(wgpu::Features::FLOAT32_FILTERABLE)
 }
 
 pub(super) struct DepthCopy {

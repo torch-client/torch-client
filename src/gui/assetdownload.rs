@@ -124,7 +124,27 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
         Stage::Done if top_up => {
             crate::client::assets::adopt_sounds();
-            leave(state);
+            if !crate::client::assets::needs_restart() {
+                leave(state);
+                return;
+            }
+            p.text_centered("The assets are ready", cx, mid - 14.0, 0x7FDF7F, false);
+            p.text_centered(
+                "Restart the client to use them",
+                cx,
+                mid - 14.0 + LINE,
+                0xA0A0A8,
+                false,
+            );
+            if button(
+                p,
+                ctx,
+                (cx - BUTTON_W * 0.5).floor(),
+                mid + 20.0,
+                leave_label(),
+            ) {
+                leave(state);
+            }
         }
         Stage::Done => {
             prepare();

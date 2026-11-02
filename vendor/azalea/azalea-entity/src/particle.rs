@@ -1,7 +1,7 @@
 use azalea_block::BlockState;
 use azalea_buf::AzBuf;
 use azalea_core::{
-    color::RgbColor,
+    color::{ArgbColor, RgbColor},
     entity_id::MinecraftEntityId,
     position::{BlockPos, Vec3},
 };
@@ -300,7 +300,7 @@ pub struct TrailParticle {
 
 #[derive(AzBuf, Clone, Debug, Default, PartialEq)]
 pub struct ColorParticle {
-    pub color: RgbColor,
+    pub color: ArgbColor,
 }
 
 #[derive(AzBuf, Clone, Debug, Default, PartialEq)]

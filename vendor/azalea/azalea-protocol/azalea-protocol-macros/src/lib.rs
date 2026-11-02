@@ -341,8 +341,28 @@ pub fn declare_state_packets(input: TokenStream) -> TokenStream {
         });
     }
 
+    let clientbound_names: Vec<syn::LitStr> = input
+        .clientbound
+        .packets
+        .iter()
+        .map(|p| syn::LitStr::new(&p.to_string(), p.span()))
+        .collect();
+    let serverbound_names: Vec<syn::LitStr> = input
+        .serverbound
+        .packets
+        .iter()
+        .map(|p| syn::LitStr::new(&p.to_string(), p.span()))
+        .collect();
+
     let mut contents = quote! {
         #mod_and_use_statements_contents
+
+        impl #clientbound_state_name {
+            pub const NAMES: &'static [&'static str] = &[#(#clientbound_names),*];
+        }
+        impl #serverbound_state_name {
+            pub const NAMES: &'static [&'static str] = &[#(#serverbound_names),*];
+        }
 
         #[derive(Clone, Debug, PartialEq)]
         pub enum #clientbound_state_name

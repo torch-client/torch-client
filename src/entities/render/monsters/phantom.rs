@@ -21,7 +21,8 @@ pub fn register(registry: &mut Registry) {
             phantom::setup_anim,
         )
         .with_root(root)
-        .with_blend(Blend::Additive),
+        .with_blend(Blend::Additive)
+        .ignoring_invisibility(),
     );
 }
 

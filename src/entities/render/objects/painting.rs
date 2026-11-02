@@ -1,5 +1,5 @@
 use azalea_registry::builtin::EntityKind;
-use bevy::math::{Quat, Vec3};
+use bevy::math::{DVec3, Quat, Vec3};
 use bevy::prelude::Mesh;
 
 use crate::entities::quads::QuadMesh;
@@ -53,12 +53,13 @@ fn size_offset(size: u32) -> f32 {
 fn painting_root(st: &EntityState) -> RootPose {
     let dir = st.extras.hanging_direction;
     let (w, h) = variant(st).map_or((1, 1), |v| (v.width, v.height));
-    let pos = Vec3::from(st.pos);
-    let centre = pos.floor() + Vec3::splat(0.5) - Vec3::from(dir.normal()) * SHIFT_TO_BLOCK_WALL
+    let pos = DVec3::from_array(st.pos);
+    let to_block = (pos.floor() - pos).as_vec3();
+    let offset = to_block + Vec3::splat(0.5) - Vec3::from(dir.normal()) * SHIFT_TO_BLOCK_WALL
         + Vec3::from(dir.counter_clockwise().normal()) * size_offset(w)
         + Vec3::Y * size_offset(h);
     RootPose {
-        world_offset: centre - pos,
+        world_offset: offset,
         rotation: Quat::from_rotation_y((180.0 - dir.to_y_rot()).to_radians()),
         ..RootPose::default()
     }

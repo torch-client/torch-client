@@ -160,11 +160,17 @@ fn plain_base(st: &BeState) -> (Vec3, Quat) {
 }
 
 fn plain_body_transform(st: &BeState) -> Transform {
-    let (translation, rotation) = plain_base(st);
+    body_transform(
+        plain_base(st),
+        Vec3::new(PLAIN_RENDER_SCALE, -PLAIN_RENDER_SCALE, -PLAIN_RENDER_SCALE),
+    )
+}
+
+fn body_transform((translation, rotation): (Vec3, Quat), scale: Vec3) -> Transform {
     Transform {
         translation,
         rotation,
-        scale: Vec3::new(PLAIN_RENDER_SCALE, -PLAIN_RENDER_SCALE, -PLAIN_RENDER_SCALE),
+        scale,
     }
 }
 
@@ -175,12 +181,7 @@ fn hanging_base(st: &BeState) -> (Vec3, Quat) {
 }
 
 fn hanging_body_transform(st: &BeState) -> Transform {
-    let (translation, rotation) = hanging_base(st);
-    Transform {
-        translation,
-        rotation,
-        scale: Vec3::new(1.0, -1.0, -1.0),
-    }
+    body_transform(hanging_base(st), Vec3::new(1.0, -1.0, -1.0))
 }
 
 fn sign_data(st: &BeState) -> Option<&SignData> {

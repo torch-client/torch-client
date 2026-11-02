@@ -3,6 +3,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::gui::packdrop;
 use crate::gui::painter::{ClipGuard, Painter};
 use crate::gui::render::GuiInput;
 use crate::gui::widgets::{
@@ -16,7 +17,7 @@ use crate::resourcepacks::{self, Compat, Info};
 use crate::text::{LINE_HEIGHT, Span};
 use crate::util::bytes::Bytes;
 
-use super::options::{SCROLLBAR_W, draw_scrollbar, row_visible, scroll_input, scroll_masked};
+use super::options::{SCROLLBAR_W, draw_scrollbar, row_visible, scroll_input_in, scroll_masked};
 use super::resourcepacks::{
     BAR_ROW_W, DESCRIPTION, HEADER_H, ICON, LIST_GAP, LIST_W, PADDING, ROW_H, ROW_W, TEXT_W,
     entry_text, header, icon_key, plain,
@@ -30,7 +31,6 @@ const BROWSE_TAB: usize = 1;
 const PACKS: &str = "Packs Folder";
 const RESULTS: &str = "Modrinth";
 const DETAILS: &str = "Details";
-const SEARCH_HINT: &str = "Search...";
 const DELETE: &str = "Delete";
 const DOWNLOAD: &str = "Download";
 const DOWNLOADING: &str = "Downloading...";
@@ -44,13 +44,13 @@ const NO_RESULTS: &str = "No packs found";
 const NOTHING_SELECTED: &str = "Select a pack";
 const LOADING_BODY: &str = "Loading description...";
 
-const BROWSE_LAYOUT: HeaderFooter = HeaderFooter::new(TAB_BAR_H + 54.0, HeaderFooter::DEFAULT_H);
+const BROWSE_LAYOUT: HeaderFooter =
+    HeaderFooter::new(FILTER_Y + WIDGET_HEIGHT + 4.0, HeaderFooter::DEFAULT_H);
 const INSTALLED_LAYOUT: HeaderFooter = HeaderFooter::new(TAB_BAR_H + 6.0, HeaderFooter::DEFAULT_H);
 const SEARCH_Y: f32 = TAB_BAR_H + 6.0;
-const FILTER_Y: f32 = SEARCH_Y + 24.0;
+const FILTER_Y: f32 = SEARCH_Y + packdrop::SEARCH_H + 4.0;
 const FULL_W: f32 = 2.0 * (LIST_W + LIST_GAP);
 const FILTER_GAP: f32 = 5.0;
-const SEARCH_MAX_LEN: usize = 100;
 const DETAIL_TEXT_W: f32 = ROW_W - 2.0 * PADDING - SCROLLBAR_W;
 const SIZE_GAP: f32 = 4.0;
 
@@ -95,14 +95,26 @@ struct Inbox {
     packs: Option<Vec<LocalPack>>,
 }
 
-fn spawn(inbox: &Arc<Mutex<Inbox>>, job: impl FnOnce(&Mutex<Inbox>) + Send + 'static) {
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn<F>(inbox: &Arc<Mutex<Inbox>>, job: impl FnOnce(Arc<Mutex<Inbox>>) -> F + Send + 'static)
+where
+    F: Future<Output = ()>,
+{
     let inbox = inbox.clone();
-    if let Err(e) = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("modrinth".into())
-        .spawn(move || job(&inbox))
-    {
+        .spawn(move || crate::platform::executor::block_on(job(inbox)));
+    if let Err(e) = spawned {
         crate::log_warn!("modrinth", "could not start a request thread: {e}");
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn<F>(inbox: &Arc<Mutex<Inbox>>, job: impl FnOnce(Arc<Mutex<Inbox>>) -> F + 'static)
+where
+    F: Future<Output = ()> + 'static,
+{
+    crate::platform::executor::spawn_detached(job(inbox.clone()));
 }
 
 #[derive(Clone, PartialEq, Default)]
@@ -168,7 +180,7 @@ impl Default for State {
             pack_selected: None,
             pack_detail: None,
             installed_panes: Panes::default(),
-            search: TextBox::bordered(SEARCH_MAX_LEN, SEARCH_HINT),
+            search: packdrop::search_box(),
             filters: Filters::default(),
             seen: Filters::default(),
             changed_at: Instant::now(),
@@ -199,12 +211,12 @@ impl State {
     pub fn open(&mut self) {
         if !self.tags_requested {
             self.tags_requested = true;
-            spawn(&self.inbox, |inbox| {
-                let tags = modrinth::tags();
+            spawn(&self.inbox, |inbox| async move {
+                let tags = modrinth::tags().await;
                 inbox.lock().unwrap().tags = Some(tags);
             });
-            spawn(&self.inbox, |inbox| {
-                let installed = modrinth::installed_projects();
+            spawn(&self.inbox, |inbox| async move {
+                let installed = modrinth::installed_projects().await;
                 inbox.lock().unwrap().installed = Some(installed);
             });
         }
@@ -220,7 +232,7 @@ impl State {
 
     fn scan(&mut self) {
         self.scanning = true;
-        spawn(&self.inbox, |inbox| {
+        spawn(&self.inbox, |inbox| async move {
             let downloaded = modrinth::downloaded();
             let packs = resourcepacks::list()
                 .into_iter()
@@ -315,9 +327,9 @@ impl State {
         if wanted.is_empty() {
             return;
         }
-        spawn(&self.inbox, move |inbox| {
+        spawn(&self.inbox, move |inbox| async move {
             for (id, url) in wanted {
-                if let Some(pixels) = modrinth::icon(&url) {
+                if let Some(pixels) = modrinth::icon(&url).await {
                     inbox.lock().unwrap().icons.push((id, Arc::new(pixels)));
                 }
             }
@@ -366,8 +378,8 @@ impl State {
         let Some((_, query)) = &self.sent else { return };
         self.loading = true;
         let (query, offset, generation) = (query.clone(), self.hits.len(), self.generation);
-        spawn(&self.inbox, move |inbox| {
-            let page = modrinth::search(&query, offset);
+        spawn(&self.inbox, move |inbox| async move {
+            let page = modrinth::search(&query, offset).await;
             inbox.lock().unwrap().pages.push((generation, page));
         });
     }
@@ -381,8 +393,8 @@ impl State {
             return;
         }
         self.bodies.insert(id.clone(), None);
-        spawn(&self.inbox, move |inbox| {
-            let body = modrinth::body(&id);
+        spawn(&self.inbox, move |inbox| async move {
+            let body = modrinth::body(&id).await;
             inbox.lock().unwrap().bodies.push((id, body));
         });
     }
@@ -394,8 +406,8 @@ impl State {
             .map(|(_, q)| q.versions.clone())
             .unwrap_or_default();
         self.downloads.insert(id.clone(), Download::Running);
-        spawn(&self.inbox, move |inbox| {
-            let result = modrinth::download(&id, &versions);
+        spawn(&self.inbox, move |inbox| async move {
+            let result = modrinth::download(&id, &versions).await;
             inbox.lock().unwrap().downloads.push((id, result));
         });
     }
@@ -492,8 +504,15 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     if st.tab == BROWSE_TAB {
         let x0 = (ctx.vw / 2.0 - FULL_W / 2.0).floor();
-        st.search
-            .update(p, ctx, x0, SEARCH_Y, FULL_W, WIDGET_HEIGHT);
+        let search_x = centered_row_x(ctx.vw, packdrop::SEARCH_W);
+        st.search.update(
+            p,
+            ctx,
+            search_x,
+            SEARCH_Y,
+            packdrop::SEARCH_W,
+            packdrop::SEARCH_H,
+        );
         st.filters.text.clone_from(&st.search.text);
         filter_row(p, ctx, st, x0);
         st.schedule();
@@ -906,12 +925,13 @@ fn detail(
         return;
     };
     let content_h = HEADER_H + ROW_H + shown.lines.len() as f32 * LINE_HEIGHT + PADDING;
-    scroll_input(
+    scroll_input_in(
         &mut panes.scroll[1],
         &mut panes.drag[1],
         ctx,
         left,
         BAR_ROW_W,
+        (left, LIST_W),
         list_y,
         list_h,
         content_h,

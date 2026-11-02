@@ -1,5 +1,7 @@
 mod handshake;
 pub(crate) mod query;
+#[cfg(eagler_skins)]
+pub(crate) mod skins;
 mod socket;
 mod stream;
 
@@ -93,12 +95,24 @@ mod tests {
 }
 
 pub(crate) async fn prepare(address: &str, username: &str) -> eyre::Result<Option<ResolvedAddr>> {
+    #[cfg(eagler_skins)]
+    crate::gui::skinpick::wear(None, 0);
+    #[cfg(eagler_skins)]
+    skins::end();
     let Some(target) = parse(address) else {
         return Ok(None);
     };
     log_info!("net", "eagler: opening a websocket to {}", target.url);
     let mut socket = socket::Socket::connect(&target.url).await?;
-    let profile = handshake::run(&mut socket, username).await?;
+    #[cfg(eagler_skins)]
+    let skin = crate::gui::skinpick::for_account(username);
+    #[cfg(eagler_skins)]
+    let wire = skin.as_ref().map(|s| s.wire.as_slice());
+    #[cfg(not(eagler_skins))]
+    let wire = None;
+    let (profile, version) = handshake::run(&mut socket, username, wire).await?;
+    #[cfg(eagler_skins)]
+    crate::gui::skinpick::wear(skin, profile.uuid.as_u128());
     log_info!(
         "net",
         "eagler: the proxy logged us in as {} ({})",
@@ -106,7 +120,7 @@ pub(crate) async fn prepare(address: &str, username: &str) -> eyre::Result<Optio
         profile.uuid
     );
 
-    stream::prepare(socket, profile);
+    stream::prepare(socket, profile, version);
 
     Ok(Some(ResolvedAddr {
         server: ServerAddr {

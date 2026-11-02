@@ -83,6 +83,7 @@ mod test_support {
             partial: 0.0,
             game_time: 0,
             camera: Default::default(),
+            origin: Default::default(),
             open: 0.0,
             draw_outline: false,
         }

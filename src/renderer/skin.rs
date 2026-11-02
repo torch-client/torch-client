@@ -14,7 +14,7 @@ pub const CAPE_SHEET: [f32; 2] = [64.0, 32.0];
 
 pub const MODEL_TO_BLOCKS: f32 = 1.0 / 16.0;
 
-const DEFAULT_SKIN: &str = "textures/entity/player/wide/steve.png";
+pub(crate) const DEFAULT_SKIN: &str = "textures/entity/player/wide/steve.png";
 
 pub fn box_mesh(
     sheet: [f32; 2],

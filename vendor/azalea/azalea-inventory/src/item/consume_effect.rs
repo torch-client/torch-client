@@ -1,7 +1,7 @@
 use azalea_buf::AzBuf;
-use azalea_core::codec_utils::is_default;
+use azalea_core::{codec_utils::is_default, sound::CustomSound};
 use azalea_registry::{
-    HolderSet,
+    Holder, HolderSet,
     builtin::{ConsumeEffectKind, MobEffect, SoundEvent},
     identifier::Identifier,
 };
@@ -28,7 +28,7 @@ pub enum ConsumeEffect {
         diameter: f32,
     },
     PlaySound {
-        sound: SoundEvent,
+        sound: Holder<SoundEvent, CustomSound>,
     },
 }
 

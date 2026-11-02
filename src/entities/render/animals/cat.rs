@@ -4,6 +4,7 @@ use bevy::prelude::{Quat, Vec3};
 use crate::entities::TexturePath;
 use crate::entities::models::animals::feline;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 use crate::entities::{RenderSpec, RootPose, default_root};
 use crate::util::mth;
@@ -11,22 +12,17 @@ use crate::util::mth;
 use super::dye;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Cat,
-        RenderSpec::new("cat", feline::cat_layer, texture, feline::setup_anim)
-            .with_root(root)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Cat,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Cat],
+        RenderSpec::new("cat", feline::cat_layer, texture, feline::setup_anim).with_root(root),
         RenderSpec::new(
             "cat_baby",
             feline::baby_layer,
             texture,
             feline::baby_setup_anim,
         )
-        .with_root(root)
-        .with_visible(|st| st.extras.is_baby),
+        .with_root(root),
     );
     registry.add(
         EntityKind::Cat,

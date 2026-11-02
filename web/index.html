@@ -73,6 +73,8 @@
 <script type="module">
   import init, { start_web, take_web_assets, asset_cache_key, ships_assets } from "./torch-client.js";
 
+  globalThis.torchGlue = "./torch-client.js";
+
   const status = document.getElementById("status");
   const label = document.getElementById("label");
   const fill = document.getElementById("fill");

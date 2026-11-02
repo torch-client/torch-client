@@ -39,6 +39,35 @@ pub(crate) async fn sleep(duration: std::time::Duration) {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub(crate) async fn yield_to_browser() {
+    use wasm_bindgen::{JsCast, JsValue};
+
+    fn post(resolve: &js_sys::Function) -> Result<(), JsValue> {
+        let get =
+            |target: &JsValue, key: &str| js_sys::Reflect::get(target, &JsValue::from_str(key));
+        let ctor: js_sys::Function = get(&js_sys::global(), "MessageChannel")?.dyn_into()?;
+        let channel = js_sys::Reflect::construct(&ctor, &js_sys::Array::new())?;
+        let (receiver, sender) = (get(&channel, "port1")?, get(&channel, "port2")?);
+        js_sys::Reflect::set(&receiver, &JsValue::from_str("onmessage"), resolve)?;
+        let post_message: js_sys::Function = get(&sender, "postMessage")?.dyn_into()?;
+        post_message.call1(&sender, &JsValue::UNDEFINED)?;
+        Ok(())
+    }
+
+    let mut posted = true;
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if post(&resolve).is_err() {
+            posted = false;
+            let _ = resolve.call0(&JsValue::NULL);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    if !posted {
+        sleep(std::time::Duration::ZERO).await;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 pub(crate) async fn timeout<F: Future>(
     duration: std::time::Duration,
     future: F,

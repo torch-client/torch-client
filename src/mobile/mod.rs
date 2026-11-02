@@ -13,8 +13,8 @@ use crate::gui::hud_layout::{ElementId, Hud, Transforms};
 use crate::gui::painter::Painter;
 use crate::gui::render::effective_gui_scale;
 use crate::gui::{GuiState, Screen, ScreenCtx};
-use crate::renderer::input::{CameraAngles, FreecamState, apply_look};
-use crate::renderer::systems::{Shared, WorldCamera};
+use crate::renderer::input::{CameraAngles, CameraView, apply_look};
+use crate::renderer::systems::Shared;
 use crate::session::{
     Gamemode, MOVE_BACK, MOVE_DESCEND, MOVE_FORWARD, MOVE_JUMP, MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK,
     MOVE_SPRINT,
@@ -122,8 +122,7 @@ fn mobile_input(
     mut gui: ResMut<GuiState>,
     mut gui_input: ResMut<crate::gui::render::GuiInput>,
     mut angles: ResMut<CameraAngles>,
-    freecam: Res<FreecamState>,
-    mut camera: Query<&mut Transform, With<WorldCamera>>,
+    camera_view: Res<CameraView>,
     mut intent: ResMut<crate::renderer::intent::Intent>,
 ) {
     let Ok(window) = windows.single() else { return };
@@ -368,9 +367,8 @@ fn mobile_input(
             look_delta.x * cfg.look_deg_per_unit * sens,
             look_delta.y * cfg.look_deg_per_unit * sens,
             &mut angles,
-            &mut camera,
             &shared,
-            freecam.active,
+            camera_view.free(),
             time.delta_secs(),
         );
     }
@@ -440,6 +438,8 @@ fn close_target(gui: &mut GuiState) -> Screen {
         #[cfg(feature = "shader_support")]
         Screen::ShaderOptions => Screen::ShaderPacks,
         Screen::Advancements => gui.advancements.parent,
+        Screen::Statistics => Screen::Pause,
+        Screen::Credits => gui.credits_parent,
         Screen::WinGame => {
             gui.win.skip();
             Screen::WinGame

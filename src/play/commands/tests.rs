@@ -612,3 +612,34 @@ fn numeric_bounds_are_enforced() {
     let err = parse_argument(&parser, &chars("50"), &mut cursor).unwrap_err();
     assert_eq!(err, "Integer must not be more than 10: found 50");
 }
+
+#[test]
+fn another_lead_parses_like_a_slash() {
+    let dot = Options {
+        lead: '.',
+        ..Options::CHAT
+    };
+    let run = |value: &str, options| {
+        let cursor = value.chars().count();
+        update_command_info(
+            Some(&tree()),
+            value,
+            cursor,
+            &Source::default(),
+            options,
+            None,
+        )
+    };
+    for (slash, led) in [
+        ("/g", ".g"),
+        ("/gamemode ", ".gamemode "),
+        ("/team join x", ".team join x"),
+    ] {
+        let (a, b) = (run(slash, Options::CHAT), run(led, dot));
+        assert!(b.is_command, "{led}");
+        assert_eq!(texts(&a.suggestions), texts(&b.suggestions), "{led}");
+        assert_eq!(a.usage, b.usage, "{led}");
+        assert_eq!(a.ask_server.is_some(), b.ask_server.is_some(), "{led}");
+    }
+    assert!(!run("/g", dot).is_command);
+}

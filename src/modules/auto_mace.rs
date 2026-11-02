@@ -3,17 +3,13 @@ use std::sync::{Arc, Mutex};
 use azalea::Client;
 use azalea::attack::AttackQueued;
 use azalea::ecs::entity::Entity as AzEntity;
-use azalea::entity::dimensions::EntityDimensions;
+use azalea::entity::Physics;
 use azalea::entity::metadata::FallFlying;
-use azalea::entity::{LastSentPosition, Physics};
-use azalea::movement::LastSentLookDirection;
 
 use super::registry::{Id, auto_mace as setting, options};
+use super::sent::{Look, look_at, move_fix, sent_ray, view_vector};
 use super::{Edge, MS_PER_TICK, Phase, roll, store, turn};
-use crate::session::{
-    Gamemode, MOVE_BACK, MOVE_FORWARD, MOVE_LEFT, MOVE_RIGHT, MaceAim, SharedMutex, SharedState,
-    SlotStack,
-};
+use crate::session::{Gamemode, MaceAim, SharedMutex, SharedState, SlotStack};
 use crate::util::mth::wrap_degrees;
 
 options! {
@@ -74,12 +70,6 @@ struct Swung {
     mace: u8,
     restore: Option<u8>,
     queued_at: i64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Look {
-    yaw: f32,
-    pitch: f32,
 }
 
 pub fn enabled() -> bool {
@@ -202,7 +192,7 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
         aim: point,
     });
     shared.lock().unwrap().session.auto_mace = (!silent).then_some(MaceAim {
-        aim: point.map(|v| v as f32),
+        aim: point,
         turn: run.turn,
     });
 
@@ -310,19 +300,6 @@ fn mace_slot(hotbar: &[SlotStack], selected: u8, choice: MaceSlot) -> Option<u8>
     }
 }
 
-fn sent_ray(bot: &Client) -> Option<([f64; 3], [f64; 3])> {
-    let pos = azalea::Vec3::from(&*bot.component::<LastSentPosition>().ok()?);
-    let eye_height = bot.component::<EntityDimensions>().ok()?.eye_height as f64;
-    let look = {
-        let l = bot.component::<LastSentLookDirection>().ok()?;
-        Look {
-            yaw: l.y_rot,
-            pitch: l.x_rot,
-        }
-    };
-    Some(([pos.x, pos.y + eye_height, pos.z], view_vector(look)))
-}
-
 struct Found {
     id: i32,
     entity: AzEntity,
@@ -345,7 +322,7 @@ fn pick(
     found.into_iter().map(|(_, f)| f).find(|f| {
         walls || {
             let to = aim_point(f.min, f.max, eye, aim);
-            super::aim_assist::visible(bot, eye.map(|v| v as f32), to.map(|v| v as f32))
+            super::aim_assist::visible(bot, eye, to)
         }
     })
 }
@@ -448,86 +425,9 @@ fn ray_hits(origin: [f64; 3], dir: [f64; 3], len: f64, min: [f64; 3], max: [f64;
     true
 }
 
-fn view_vector(l: Look) -> [f64; 3] {
-    let (y, p) = ((l.yaw as f64).to_radians(), (l.pitch as f64).to_radians());
-    [-y.sin() * p.cos(), -p.sin(), y.cos() * p.cos()]
-}
-
-fn look_at(eye: [f64; 3], to: [f64; 3]) -> Look {
-    let (dx, dy, dz) = (to[0] - eye[0], to[1] - eye[1], to[2] - eye[2]);
-    let horizontal = (dx * dx + dz * dz).sqrt();
-    Look {
-        yaw: (-dx).atan2(dz).to_degrees() as f32,
-        pitch: (-dy).atan2(horizontal).to_degrees() as f32,
-    }
-}
-
-const DIRS: [u8; 8] = [
-    MOVE_FORWARD,
-    MOVE_FORWARD | MOVE_RIGHT,
-    MOVE_RIGHT,
-    MOVE_BACK | MOVE_RIGHT,
-    MOVE_BACK,
-    MOVE_BACK | MOVE_LEFT,
-    MOVE_LEFT,
-    MOVE_FORWARD | MOVE_LEFT,
-];
-
-fn move_fix(flags: u8, camera_yaw: f32, sent_yaw: f32) -> u8 {
-    const KEYS: u8 = MOVE_FORWARD | MOVE_BACK | MOVE_LEFT | MOVE_RIGHT;
-    let Some(i) = DIRS.iter().position(|&d| d == flags & KEYS) else {
-        return flags;
-    };
-    let heading = wrap_degrees(i as f32 * 45.0 + camera_yaw - sent_yaw);
-    let j = ((heading / 45.0).round() as i32).rem_euclid(8) as usize;
-    flags & !KEYS | DIRS[j]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn looking_at_a_point_faces_it() {
-        for (yaw, pitch) in [(0.0, 0.0), (90.0, 30.0), (-135.0, -45.0), (179.0, 80.0)] {
-            let v = view_vector(Look { yaw, pitch });
-            let eye = [1.0, 64.0, -2.0];
-            let to = [
-                eye[0] + v[0] * 5.0,
-                eye[1] + v[1] * 5.0,
-                eye[2] + v[2] * 5.0,
-            ];
-            let got = look_at(eye, to);
-            assert!(wrap_degrees(got.yaw - yaw).abs() < 1e-3, "{yaw} -> {got:?}");
-            assert!((got.pitch - pitch).abs() < 1e-3, "{pitch} -> {got:?}");
-        }
-    }
-
-    #[test]
-    fn the_view_vector_matches_vanilla() {
-        let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9);
-        assert!(close(
-            view_vector(Look {
-                yaw: 0.0,
-                pitch: 0.0
-            }),
-            [0.0, 0.0, 1.0]
-        ));
-        assert!(close(
-            view_vector(Look {
-                yaw: 90.0,
-                pitch: 0.0
-            }),
-            [-1.0, 0.0, 0.0]
-        ));
-        assert!(close(
-            view_vector(Look {
-                yaw: 0.0,
-                pitch: 90.0
-            }),
-            [0.0, -1.0, 0.0]
-        ));
-    }
 
     const MIN: [f64; 3] = [-0.3, 64.0, -0.3];
     const MAX: [f64; 3] = [0.3, 65.8, 0.3];
@@ -570,24 +470,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn move_fix_keeps_the_heading() {
-        assert_eq!(move_fix(MOVE_FORWARD, 0.0, 90.0), MOVE_LEFT);
-        assert_eq!(move_fix(MOVE_FORWARD, 0.0, 0.0), MOVE_FORWARD);
-        assert_eq!(move_fix(MOVE_FORWARD, 0.0, 180.0), MOVE_BACK);
-        assert_eq!(
-            move_fix(MOVE_RIGHT, 30.0, 30.0 + 45.0),
-            MOVE_FORWARD | MOVE_RIGHT
-        );
-        let jump = crate::session::MOVE_JUMP;
-        assert_eq!(move_fix(MOVE_FORWARD | jump, 0.0, 90.0), MOVE_LEFT | jump);
-        assert_eq!(move_fix(jump, 0.0, 90.0), jump);
-        assert_eq!(
-            move_fix(MOVE_FORWARD | MOVE_BACK, 0.0, 90.0),
-            MOVE_FORWARD | MOVE_BACK
-        );
     }
 
     #[test]

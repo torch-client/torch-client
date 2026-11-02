@@ -1,6 +1,6 @@
 use std::f32::consts::{FRAC_PI_2, PI};
 
-use crate::direction::{Direction, Faces};
+use crate::blocks::direction::{Direction, Faces};
 use crate::entities::geom::{CubeList, LayerDef, MeshDef, PartPose};
 
 pub fn chest_single() -> LayerDef {
@@ -33,48 +33,20 @@ pub fn chest_single() -> LayerDef {
 }
 
 pub fn chest_left() -> LayerDef {
-    let visible = Faces::of(&[
-        Direction::Down,
-        Direction::Up,
-        Direction::North,
-        Direction::South,
-        Direction::East,
-    ]);
-    let mut mesh = MeshDef::new();
-    {
-        let root = mesh.root();
-        root.child(
-            "bottom",
-            CubeList::new()
-                .tex_offs(0, 19)
-                .add_box_faces(0.0, 0.0, 1.0, 15.0, 10.0, 14.0, visible),
-            PartPose::ZERO,
-        );
-        root.child(
-            "lid",
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box_faces(0.0, 0.0, 0.0, 15.0, 5.0, 14.0, visible),
-            PartPose::offset(0.0, 9.0, 1.0),
-        );
-        root.child(
-            "lock",
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box_faces(0.0, -2.0, 14.0, 1.0, 4.0, 1.0, visible),
-            PartPose::offset(0.0, 9.0, 1.0),
-        );
-    }
-    LayerDef::create(mesh, 64, 64)
+    chest_double(Direction::East, 0.0, 0.0)
 }
 
 pub fn chest_right() -> LayerDef {
+    chest_double(Direction::West, 1.0, 15.0)
+}
+
+fn chest_double(side: Direction, x: f32, lock_x: f32) -> LayerDef {
     let visible = Faces::of(&[
         Direction::Down,
         Direction::Up,
         Direction::North,
         Direction::South,
-        Direction::West,
+        side,
     ]);
     let mut mesh = MeshDef::new();
     {
@@ -83,21 +55,21 @@ pub fn chest_right() -> LayerDef {
             "bottom",
             CubeList::new()
                 .tex_offs(0, 19)
-                .add_box_faces(1.0, 0.0, 1.0, 15.0, 10.0, 14.0, visible),
+                .add_box_faces(x, 0.0, 1.0, 15.0, 10.0, 14.0, visible),
             PartPose::ZERO,
         );
         root.child(
             "lid",
             CubeList::new()
                 .tex_offs(0, 0)
-                .add_box_faces(1.0, 0.0, 0.0, 15.0, 5.0, 14.0, visible),
+                .add_box_faces(x, 0.0, 0.0, 15.0, 5.0, 14.0, visible),
             PartPose::offset(0.0, 9.0, 1.0),
         );
         root.child(
             "lock",
             CubeList::new()
                 .tex_offs(0, 0)
-                .add_box_faces(15.0, -2.0, 14.0, 1.0, 4.0, 1.0, visible),
+                .add_box_faces(lock_x, -2.0, 14.0, 1.0, 4.0, 1.0, visible),
             PartPose::offset(0.0, 9.0, 1.0),
         );
     }
@@ -105,39 +77,20 @@ pub fn chest_right() -> LayerDef {
 }
 
 pub fn conduit_shell() -> LayerDef {
-    let mut mesh = MeshDef::new();
-    mesh.root().child(
-        "shell",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-3.0, -3.0, -3.0, 6.0, 6.0, 6.0),
-        PartPose::ZERO,
-    );
-    LayerDef::create(mesh, 32, 16)
+    LayerDef::single_box("shell", (0, 0), [-3.0, -3.0, -3.0, 6.0, 6.0, 6.0], (32, 16))
 }
 
 pub fn conduit_cage() -> LayerDef {
-    let mut mesh = MeshDef::new();
-    mesh.root().child(
-        "shell",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-4.0, -4.0, -4.0, 8.0, 8.0, 8.0),
-        PartPose::ZERO,
-    );
-    LayerDef::create(mesh, 32, 16)
+    LayerDef::single_box("shell", (0, 0), [-4.0, -4.0, -4.0, 8.0, 8.0, 8.0], (32, 16))
 }
 
 pub fn conduit_wind() -> LayerDef {
-    let mut mesh = MeshDef::new();
-    mesh.root().child(
+    LayerDef::single_box(
         "wind",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-8.0, -8.0, -8.0, 16.0, 16.0, 16.0),
-        PartPose::ZERO,
-    );
-    LayerDef::create(mesh, 64, 32)
+        (0, 0),
+        [-8.0, -8.0, -8.0, 16.0, 16.0, 16.0],
+        (64, 32),
+    )
 }
 
 pub fn conduit_eye() -> LayerDef {

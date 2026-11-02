@@ -183,15 +183,7 @@ fn legacy_fog_coord(tokens: &mut Vec<lexer::Token>) {
         .iter()
         .position(lexer::is_version)
         .map_or(0, |version| version + 1);
-    while at < tokens.len()
-        && (tokens[at].is_trivia()
-            || (tokens[at].kind == lexer::Kind::Directive
-                && tokens[at]
-                    .text
-                    .trim_start_matches('#')
-                    .trim_start()
-                    .starts_with("extension")))
-    {
+    while at < tokens.len() && (tokens[at].is_trivia() || lexer::is_extension(&tokens[at])) {
         at += 1;
     }
     tokens.splice(at..at, lexer::lex("varying float iris_FogFragCoord;\n"));

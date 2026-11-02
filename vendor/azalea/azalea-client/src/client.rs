@@ -142,22 +142,28 @@ async fn run_schedule_loop(
     #[cfg(target_arch = "wasm32")]
     const UPDATE_DURATION_TARGET: Duration = Duration::from_micros(1_000_000 / 30);
     const GAME_TICK_DURATION_TARGET: Duration = Duration::from_micros(1_000_000 / 20);
+    const MIN_YIELD: Duration = Duration::from_millis(1);
 
     loop {
         let now = Instant::now();
-        if let Some(last_update) = last_update {
-            let elapsed = now.duration_since(last_update);
-            if elapsed < UPDATE_DURATION_TARGET {
-                crate::sleep(UPDATE_DURATION_TARGET - elapsed).await;
-            }
-        }
+        let next_update = last_update.map(|t| t + UPDATE_DURATION_TARGET);
+        let next_tick = last_tick.map(|t| t + GAME_TICK_DURATION_TARGET);
+        let wake = match (next_update, next_tick) {
+            (Some(u), Some(t)) => Some(u.min(t)),
+            (u, t) => u.or(t),
+        };
+        let pause = wake.map_or(Duration::ZERO, |w| w.saturating_duration_since(now));
+        crate::sleep(pause.max(MIN_YIELD)).await;
+        let now = Instant::now();
         last_update = Some(now);
 
         let mut ecs = ecs.write();
 
         ecs.run_schedule(outer_schedule_label);
         if last_tick
-            .map(|last_tick| last_tick.elapsed() > GAME_TICK_DURATION_TARGET)
+            .map(|last_tick| {
+                now.saturating_duration_since(last_tick) >= GAME_TICK_DURATION_TARGET
+            })
             .unwrap_or(true)
         {
             if let Some(last_tick) = &mut last_tick {

@@ -19,6 +19,13 @@ pub(crate) fn install_block_change_hook() {
             if crate::modules::esp::any_enabled() {
                 crate::modules::esp::mark_dirty();
             }
+            #[cfg(lua_mods)]
+            {
+                crate::modules::script::ghost::block_changed(pos.x, pos.y, pos.z);
+                crate::modules::script::block_changed(pos.x, pos.z);
+            }
+            #[cfg(feature = "render_lod")]
+            crate::client::lod::note_column(pos.x >> 4, pos.z >> 4);
             let (Some(world), Some(q)) = (current_world().lock().unwrap().clone(), CHUNK_Q.get())
             else {
                 return;
@@ -37,7 +44,7 @@ pub(crate) fn install_block_change_hook() {
 
             #[cfg(feature = "audio")]
             {
-                let at = [pos.x as f32 + 0.5, pos.y as f32 + 0.5, pos.z as f32 + 0.5];
+                let at = crate::util::block_centre([pos.x, pos.y, pos.z]).to_array();
                 if crate::audio::audible_at(at) {
                     use azalea::block::BlockTrait;
                     let name = |state| {
@@ -221,11 +228,34 @@ fn ready_after_arrival(
 pub(crate) fn note_chunk_received(bot: &Client, cx: i32, cz: i32) {
     crate::diag::on_chunk_received();
     bump_chunk_generation();
+    #[cfg(lua_mods)]
+    {
+        crate::modules::script::ghost::chunk_changed(cx, cz);
+        crate::modules::script::chunk_arrived(cx, cz);
+    }
     log_debug!("chunks", "received column {cx},{cz}");
     let Ok(world) = bot.world() else { return };
+    if world
+        .read()
+        .chunks
+        .get(&azalea_core::position::ChunkPos::new(cx, cz))
+        .is_none()
+    {
+        log_debug!(
+            "chunks",
+            "column {cx},{cz} is not in the current level; stale arrival ignored"
+        );
+        return;
+    }
+    #[cfg(feature = "render_lod")]
+    crate::client::lod::note_column(cx, cz);
     let mut received = received_chunks().lock().unwrap();
     received.insert((cx, cz));
     let mut meshed = meshed_chunks().lock().unwrap();
+    #[cfg(feature = "render_lod")]
+    if crate::client::lod::cache::reclaim(cx, cz) {
+        meshed.remove(&(cx, cz));
+    }
     let ready = ready_after_arrival(|c| received.contains(&c), |c| meshed.contains(&c), cx, cz);
     let to_worker = crate::client::mesh_worker::active();
     if to_worker {
@@ -296,6 +326,8 @@ pub(crate) fn reload_all_chunks(bot: &Client, shared: &Arc<SharedMutex>) {
 
 pub(crate) fn remesh_all_chunks(bot: &Client) {
     if crate::client::mesh_worker::active() {
+        #[cfg(resource_packs)]
+        crate::client::mesh_worker::forward_packs();
         return;
     }
     let (Ok(world), Some(q)) = (bot.world(), CHUNK_Q.get()) else {
@@ -361,6 +393,8 @@ pub(crate) fn reset_level(shared: &Arc<SharedMutex>) {
         q.reset();
     }
     blockentities::feed::reset();
+    #[cfg(feature = "render_lod")]
+    crate::client::lod::reset();
     reset_maps();
     let mut s = shared.lock().unwrap();
     s.session.map_updates.clear();

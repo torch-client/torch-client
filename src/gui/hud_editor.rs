@@ -244,7 +244,7 @@ impl EditorState {
     }
 
     fn active(&self, id: ElementId) -> bool {
-        id.layer() == self.layer()
+        id.layer() == self.layer() && id.available()
     }
 
     fn clear_hand(&mut self) {
@@ -766,27 +766,6 @@ struct Toolbar {
     hint_y: f32,
 }
 
-pub(crate) fn wrap(p: &Painter, lines: &[&str], w: f32) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in lines {
-        let mut cur = String::new();
-        for word in line.split(' ') {
-            let next = if cur.is_empty() {
-                word.to_owned()
-            } else {
-                format!("{cur} {word}")
-            };
-            if !cur.is_empty() && p.atlas.font.width_str(&next) > w - 4.0 {
-                out.push(std::mem::replace(&mut cur, word.to_owned()));
-            } else {
-                cur = next;
-            }
-        }
-        out.push(cur);
-    }
-    out
-}
-
 impl Toolbar {
     fn new(p: &Painter, vw: f32, vh: f32, layer: Layer, panel: Option<Panel>) -> Toolbar {
         let mut tools = vec![Tool::Done, Tool::Undo];
@@ -809,7 +788,7 @@ impl Toolbar {
             .floor();
         let cols = (((w + 2.0) / (BUTTON_MIN + 2.0)).floor() as usize).max(1);
         let rows = |n: usize| n.div_ceil(cols.min(n).max(1));
-        let hints = wrap(p, hints(layer), w);
+        let hints = crate::gui::widgets::wrap(p, hints(layer), w);
         let button_rows = rows(Layer::ALL.len()) + rows(tools.len());
         let h = button_rows as f32 * (TOOLBAR_H + 2.0) + hints.len() as f32 * 10.0 + GRIP_H;
         let (x, y) = match panel {
@@ -1371,7 +1350,7 @@ fn draw_boxes(p: &mut Painter, st: &EditorState, hot: Option<Grab>, now: f32, vw
         }
         if !st.frames.placeholder[id.index()] {
             let hidden = if shown { "" } else { " (hidden)" };
-            let name = format!("{}{hidden}", id.label());
+            let name = format!("{}{hidden}", id.name());
             let (tx, ty) = match stack {
                 Some(si) => {
                     let right = st.layout.stack(si).is_some_and(|s| s.anchor.col() == 2);
@@ -1424,7 +1403,7 @@ fn draw_status(p: &mut Painter, st: &EditorState, vw: f32) {
                 .map(|r| format!("{:.0} x {:.0}", r.w, r.h)),
             (_, Some(Landing::Into { .. })) => Some("Into stack".to_owned()),
             (_, Some(Landing::Pair { target, .. })) => {
-                Some(format!("New stack with {}", target.label()))
+                Some(format!("New stack with {}", target.name()))
             }
             _ if st.guides.iter().any(Option::is_some) => Some("Snapped".to_owned()),
             _ => None,
@@ -1444,7 +1423,7 @@ fn draw_menu(p: &mut Painter, st: &mut EditorState, ctx: &ScreenCtx, menu: Menu,
     p.outline(r.x, r.y, r.w, r.h, OUTLINE_HOT);
     let row = |i: f32| Rect::new(r.x + 1.0, r.y + 1.0 + i * MENU_ROW, r.w - 2.0, MENU_ROW);
     let title = match menu.grab {
-        Grab::Element(id) => id.label().to_owned(),
+        Grab::Element(id) => id.name().to_owned(),
         Grab::Stack(si) => format!("Stack upwards ({})", st.layout.members(si).len()),
         #[cfg(feature = "mobile_ui")]
         Grab::Area(_) => "Look-only area".to_owned(),
@@ -1690,6 +1669,7 @@ pub fn draw(
         if let Some(spot) = match tool {
             Tool::Done => Some(crate::gui::tutorial::Spot::Done),
             Tool::Reset => Some(crate::gui::tutorial::Spot::Reset),
+            #[cfg(feature = "mobile_ui")]
             Tool::NewArea => Some(crate::gui::tutorial::Spot::NewArea),
             _ => None,
         } {
@@ -1814,7 +1794,7 @@ pub fn draw(
                 MENU_ROW,
             );
             let label = match item {
-                Restore::Element(id) => id.label(),
+                Restore::Element(id) => id.name(),
                 Restore::Home(home) => home.label(),
             };
             if button(p, ctx, row, label) {

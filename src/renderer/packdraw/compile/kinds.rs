@@ -1,3 +1,5 @@
+use bevy::render::render_resource::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+
 use crate::shaderpack::programs::Geometry;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -102,6 +104,110 @@ pub(super) fn alpha_tests(
             ))
         })
         .collect()
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Blend {
+    pub(crate) program: Option<Option<BlendState>>,
+    pub(crate) buffers: Vec<(u8, Option<BlendState>)>,
+}
+
+impl Blend {
+    pub(crate) fn for_buffer(
+        &self,
+        buffer: u8,
+        default: Option<BlendState>,
+        per_buffer: bool,
+    ) -> Option<BlendState> {
+        let program = self.program.unwrap_or(default);
+        if !per_buffer {
+            return program;
+        }
+        self.buffers
+            .iter()
+            .rev()
+            .find(|(b, _)| *b == buffer)
+            .map_or(program, |(_, mode)| *mode)
+    }
+}
+
+pub(super) fn blends(
+    properties: &std::collections::HashMap<String, String>,
+    notes: &mut Vec<String>,
+) -> std::collections::HashMap<String, Blend> {
+    use crate::shaderpack::features::{Feature, supported};
+    let mut out: std::collections::HashMap<String, Blend> = std::collections::HashMap::new();
+    for (key, value) in properties {
+        let Some(pass) = key.strip_prefix("blend.") else {
+            continue;
+        };
+        let mode = if value.trim() == "off" {
+            None
+        } else {
+            let Some(mode) = blend_mode(value) else {
+                notes.push(format!(
+                    "{key} skipped: {value:?} is not four blend factors"
+                ));
+                continue;
+            };
+            Some(mode)
+        };
+        match pass.split_once('.') {
+            Some((program, buffer)) => {
+                if !supported(Feature::PerBufferBlending) {
+                    notes.push(format!(
+                        "{key} skipped: {}",
+                        Feature::PerBufferBlending.absence()
+                    ));
+                    continue;
+                }
+                let Some(index) = crate::shaderpack::directives::target_index(buffer) else {
+                    notes.push(format!("{key} skipped: {buffer:?} names no target"));
+                    continue;
+                };
+                out.entry(program.to_owned())
+                    .or_default()
+                    .buffers
+                    .push((index as u8, mode));
+            }
+            None => out.entry(pass.to_owned()).or_default().program = Some(mode),
+        }
+    }
+    out
+}
+
+fn blend_mode(value: &str) -> Option<BlendState> {
+    let factors: Vec<BlendFactor> = value
+        .split_whitespace()
+        .map(|name| {
+            Some(match name {
+                "ZERO" => BlendFactor::Zero,
+                "ONE" => BlendFactor::One,
+                "SRC_COLOR" => BlendFactor::Src,
+                "ONE_MINUS_SRC_COLOR" => BlendFactor::OneMinusSrc,
+                "DST_COLOR" => BlendFactor::Dst,
+                "ONE_MINUS_DST_COLOR" => BlendFactor::OneMinusDst,
+                "SRC_ALPHA" => BlendFactor::SrcAlpha,
+                "ONE_MINUS_SRC_ALPHA" => BlendFactor::OneMinusSrcAlpha,
+                "DST_ALPHA" => BlendFactor::DstAlpha,
+                "ONE_MINUS_DST_ALPHA" => BlendFactor::OneMinusDstAlpha,
+                "SRC_ALPHA_SATURATE" => BlendFactor::SrcAlphaSaturated,
+                _ => return None,
+            })
+        })
+        .collect::<Option<_>>()?;
+    let [src_color, dst_color, src_alpha, dst_alpha, ..] = factors[..] else {
+        return None;
+    };
+    let add = |src_factor, dst_factor| BlendComponent {
+        src_factor,
+        dst_factor,
+        operation: BlendOperation::Add,
+    };
+    Some(BlendState {
+        color: add(src_color, dst_color),
+        alpha: add(src_alpha, dst_alpha),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -565,5 +671,57 @@ mod tests {
         );
         assert_eq!(tests.get("gbuffers_textured"), Some(&None));
         assert_eq!(tests.len(), 5);
+    }
+
+    #[test]
+    fn blend_keys_are_read_as_iris_reads_them() {
+        let props = std::collections::HashMap::from([
+            (
+                "blend.gbuffers_water".to_owned(),
+                "SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ZERO".to_owned(),
+            ),
+            (
+                "blend.gbuffers_water.colortex2".to_owned(),
+                "off".to_owned(),
+            ),
+            (
+                "blend.gbuffers_water.gaux1".to_owned(),
+                "ONE ONE ONE ONE".to_owned(),
+            ),
+            ("blend.composite".to_owned(), "off".to_owned()),
+            (
+                "blend.gbuffers_hand".to_owned(),
+                "SRC_ALPHA NOT_A_FACTOR ONE ZERO".to_owned(),
+            ),
+        ]);
+        let mut notes = Vec::new();
+        let blends = blends(&props, &mut notes);
+        let water = &blends["gbuffers_water"];
+        let mode = blend_mode("SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ZERO");
+        assert_eq!(water.for_buffer(0, None, true), mode);
+        assert_eq!(
+            water.for_buffer(2, Some(BlendState::ALPHA_BLENDING), true),
+            None
+        );
+        assert_eq!(
+            water.for_buffer(4, None, true),
+            blend_mode("ONE ONE ONE ONE"),
+            "gaux1 is colortex4"
+        );
+        assert_eq!(
+            water.for_buffer(2, None, false),
+            mode,
+            "a composite ignores buffer keys"
+        );
+        assert_eq!(
+            blends["composite"].for_buffer(0, Some(BlendState::ALPHA_BLENDING), false),
+            None
+        );
+        assert!(!blends.contains_key("gbuffers_hand"));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(
+            Blend::default().for_buffer(1, Some(BlendState::ALPHA_BLENDING), true),
+            Some(BlendState::ALPHA_BLENDING)
+        );
     }
 }

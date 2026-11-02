@@ -3,7 +3,10 @@ use std::time::Duration;
 use super::socket::{Frame, Socket};
 use crate::log_debug;
 
+#[cfg(not(target_arch = "wasm32"))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(target_arch = "wasm32")]
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const ICON_TIMEOUT: Duration = Duration::from_millis(1500);
 
@@ -111,7 +114,9 @@ async fn ask(
                 CONNECT_TIMEOUT.as_secs()
             ),
         };
-    socket.send_text(format!("accept:{name}")).await?;
+    socket
+        .send_text(format!("Accept: {}", name.to_uppercase()))
+        .await?;
 
     let json =
         match crate::platform::time::timeout(REPLY_TIMEOUT, reply(&mut socket, url, name)).await {

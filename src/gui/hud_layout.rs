@@ -1,6 +1,8 @@
 #![cfg_attr(not(feature = "hud_editor"), allow(dead_code))]
 
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::{Mutex, PoisonError};
 
 use bevy::math::Vec2;
 
@@ -90,6 +92,61 @@ elements! {
     ChatButton = "chat_button", "Chat button", Controls;
     ModButton = "mod_button", "Modules button", Controls;
     Debug = "debug", "Debug (F3)", Debug;
+    ModPanel0 = "mod_panel_0", "Mod panel", Extras;
+    ModPanel1 = "mod_panel_1", "Mod panel", Extras;
+    ModPanel2 = "mod_panel_2", "Mod panel", Extras;
+    ModPanel3 = "mod_panel_3", "Mod panel", Extras;
+    ModPanel4 = "mod_panel_4", "Mod panel", Extras;
+    ModPanel5 = "mod_panel_5", "Mod panel", Extras;
+    ModPanel6 = "mod_panel_6", "Mod panel", Extras;
+    ModPanel7 = "mod_panel_7", "Mod panel", Extras;
+    ModPanel8 = "mod_panel_8", "Mod panel", Extras;
+    ModPanel9 = "mod_panel_9", "Mod panel", Extras;
+    ModPanel10 = "mod_panel_10", "Mod panel", Extras;
+    ModPanel11 = "mod_panel_11", "Mod panel", Extras;
+    ModPanel12 = "mod_panel_12", "Mod panel", Extras;
+    ModPanel13 = "mod_panel_13", "Mod panel", Extras;
+    ModPanel14 = "mod_panel_14", "Mod panel", Extras;
+    ModPanel15 = "mod_panel_15", "Mod panel", Extras;
+}
+
+pub const MOD_PANELS: usize = 16;
+const _: () =
+    assert!(ElementId::ModPanel15 as usize + 1 == ElementId::ModPanel0 as usize + MOD_PANELS);
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ModPanel {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub w: f32,
+    pub h: f32,
+    pub anchor: Anchor,
+    pub offset: Vec2,
+}
+
+static MOD_PANEL_DEFS: Mutex<[Option<ModPanel>; MOD_PANELS]> = Mutex::new([None; MOD_PANELS]);
+static MOD_PANEL_GEN: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_mod_panels(panels: &[ModPanel]) -> usize {
+    let mut defs = MOD_PANEL_DEFS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    *defs = [None; MOD_PANELS];
+    for (slot, p) in defs.iter_mut().zip(panels) {
+        *slot = Some(*p);
+    }
+    drop(defs);
+    MOD_PANEL_GEN.fetch_add(1, Relaxed);
+    panels.len().saturating_sub(MOD_PANELS)
+}
+
+pub fn mod_panel(i: usize) -> Option<ModPanel> {
+    MOD_PANEL_DEFS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(i)
+        .copied()
+        .flatten()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -127,9 +184,34 @@ impl Layer {
     }
 }
 
-const _: () = assert!(COUNT <= 32);
+const _: () = assert!(COUNT <= 64);
 
 impl ElementId {
+    pub const fn mod_panel_index(self) -> Option<usize> {
+        let (i, first) = (self as usize, ElementId::ModPanel0 as usize);
+        if i >= first && i < first + MOD_PANELS {
+            Some(i - first)
+        } else {
+            None
+        }
+    }
+
+    pub const fn mod_panel_slot(i: usize) -> ElementId {
+        ElementId::ALL[ElementId::ModPanel0 as usize + i]
+    }
+
+    fn panel(self) -> Option<ModPanel> {
+        self.mod_panel_index().and_then(mod_panel)
+    }
+
+    pub fn available(self) -> bool {
+        self.mod_panel_index().is_none() || self.panel().is_some()
+    }
+
+    pub fn name(self) -> &'static str {
+        self.panel().map_or(self.label(), |p| p.label)
+    }
+
     pub const fn default_visibility(self) -> Visibility {
         if matches!(self, ElementId::Gamemode | ElementId::Flying) {
             return Visibility::Removed;
@@ -147,7 +229,8 @@ impl ElementId {
     }
 
     pub const fn stackable(self) -> bool {
-        matches!(self.layer(), Layer::Extras) || matches!(self, ElementId::Effects)
+        (matches!(self.layer(), Layer::Extras) && self.mod_panel_index().is_none())
+            || matches!(self, ElementId::Effects)
     }
 
     pub const fn required(self) -> bool {
@@ -184,6 +267,9 @@ impl ElementId {
 
     #[cfg(feature = "mobile_ui")]
     fn default_free(self, _vw: f32, vh: f32) -> Option<(Anchor, Vec2, f32)> {
+        if let Some(p) = self.panel() {
+            return Some((p.anchor, p.offset, 1.0));
+        }
         match self {
             ElementId::Chat => {
                 let (left, top) = mobile_chat_offset(vh);
@@ -195,7 +281,7 @@ impl ElementId {
 
     #[cfg(not(feature = "mobile_ui"))]
     fn default_free(self, _vw: f32, _vh: f32) -> Option<(Anchor, Vec2, f32)> {
-        None
+        self.panel().map(|p| (p.anchor, p.offset, 1.0))
     }
 
     const fn default_scale(self) -> f32 {
@@ -207,6 +293,9 @@ impl ElementId {
     }
 
     pub fn placeholder(self, vw: f32, vh: f32) -> Rect {
+        if let Some(p) = self.panel() {
+            return Rect::new(0.0, 0.0, p.w, p.h);
+        }
         let center = (vw / 2.0).floor();
         match self {
             ElementId::Effects => Rect::new(vw - 50.0, 1.0, 49.0, 24.0),
@@ -236,16 +325,25 @@ pub fn mobile_chat_offset(vh: f32) -> (f32, f32) {
     (0.0, crate::gui::chat::hud_box(vh).y)
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct Transforms {
     xf: [Option<(f32, f32, f32)>; COUNT],
-    drawn: u32,
+    drawn: u64,
+}
+
+impl Default for Transforms {
+    fn default() -> Self {
+        Transforms {
+            xf: [None; COUNT],
+            drawn: 0,
+        }
+    }
 }
 
 impl Transforms {
     pub const IDENTITY: Transforms = Transforms {
         xf: [None; COUNT],
-        drawn: u32::MAX,
+        drawn: u64::MAX,
     };
 
     pub fn to_local(&self, id: ElementId, p: Vec2) -> Vec2 {
@@ -256,12 +354,12 @@ impl Transforms {
     }
 
     pub fn drawn(&self, id: ElementId) -> bool {
-        self.drawn & (1 << id.index()) != 0
+        self.drawn & (1u64 << id.index()) != 0
     }
 
     fn record(&mut self, id: ElementId, xf: Option<(f32, f32, f32)>) {
         self.xf[id.index()] = xf;
-        self.drawn |= 1 << id.index();
+        self.drawn |= 1u64 << id.index();
     }
 }
 
@@ -355,6 +453,14 @@ impl Anchor {
 
     fn from_key(key: &str) -> Option<Anchor> {
         Anchor::ALL.into_iter().find(|a| a.key() == key)
+    }
+
+    pub fn parse(key: &str) -> Option<Anchor> {
+        Anchor::from_key(key)
+    }
+
+    pub fn names() -> [&'static str; 9] {
+        Anchor::ALL.map(Anchor::key)
     }
 }
 
@@ -490,6 +596,9 @@ pub struct HudLayout {
     pub areas: Vec<Area>,
     #[cfg(feature = "hud_editor")]
     pub panel: Option<Panel>,
+    mod_saved: Vec<(String, serde_json::Value)>,
+    mod_keys: [Option<&'static str>; MOD_PANELS],
+    mod_gen: u32,
 }
 
 #[cfg(feature = "hud_editor")]
@@ -591,6 +700,99 @@ impl HudLayout {
             areas: default_areas(),
             #[cfg(feature = "hud_editor")]
             panel: None,
+            mod_saved: Vec::new(),
+            mod_keys: [None; MOD_PANELS],
+            mod_gen: 0,
+        }
+    }
+
+    pub fn sync_mod_panels(&mut self) {
+        let generation = MOD_PANEL_GEN.load(Relaxed);
+        if generation == self.mod_gen {
+            return;
+        }
+        self.mod_gen = generation;
+        for i in 0..MOD_PANELS {
+            let id = ElementId::mod_panel_slot(i);
+            let new = mod_panel(i).map(|p| p.key);
+            let old = self.mod_keys[i];
+            if new == old {
+                continue;
+            }
+            if let Some(old) = old {
+                let saved = self.element_json(id);
+                self.keep_mod_entry(old, saved);
+            }
+            *self.get_mut(id) = Element {
+                visibility: Visibility::Shown,
+                place: Place::Fixed,
+            };
+            if let Some(key) = new
+                && let Some((_, e)) = self.mod_saved.iter().find(|(k, _)| k == key)
+            {
+                let e = e.clone();
+                self.apply_element_json(id, &e);
+            }
+            self.mod_keys[i] = new;
+        }
+    }
+
+    fn keep_mod_entry(&mut self, key: &str, e: serde_json::Value) {
+        match self.mod_saved.iter_mut().find(|(k, _)| k == key) {
+            Some((_, old)) => *old = e,
+            None => self.mod_saved.push((key.to_string(), e)),
+        }
+    }
+
+    fn element_json(&self, id: ElementId) -> serde_json::Value {
+        let element = self.get(id);
+        let mut e = serde_json::Map::new();
+        e.insert(
+            "enabled".into(),
+            (element.visibility == Visibility::Shown).into(),
+        );
+        e.insert(
+            "removed".into(),
+            (element.visibility == Visibility::Removed).into(),
+        );
+        if let Place::Free {
+            anchor,
+            offset,
+            scale,
+        } = element.place
+        {
+            e.insert("anchor".into(), anchor.key().into());
+            e.insert("x".into(), offset.x.into());
+            e.insert("y".into(), offset.y.into());
+            e.insert("scale".into(), scale.into());
+        }
+        e.into()
+    }
+
+    fn apply_element_json(&mut self, id: ElementId, e: &serde_json::Value) {
+        let num = |k: &str| e.get(k).and_then(|v| v.as_f64()).map(|v| v as f32);
+        let element = self.get_mut(id);
+        if let Some(enabled) = e.get("enabled").and_then(|v| v.as_bool()) {
+            element.visibility = if enabled {
+                Visibility::Shown
+            } else {
+                Visibility::Hidden
+            };
+        }
+        let removed = e.get("removed").and_then(|v| v.as_bool());
+        if removed.unwrap_or(id.default_visibility() == Visibility::Removed) {
+            element.visibility = Visibility::Removed;
+        }
+        let anchor = e
+            .get("anchor")
+            .and_then(|v| v.as_str())
+            .and_then(Anchor::from_key);
+        if let (Some(anchor), Some(x), Some(y)) = (anchor, num("x"), num("y")) {
+            element.place = Place::Free {
+                anchor,
+                offset: Vec2::new(x, y),
+                scale: num("scale").unwrap_or(1.0).clamp(MIN_SCALE, MAX_SCALE),
+            };
         }
     }
 
@@ -886,30 +1088,19 @@ impl HudLayout {
                 .and_then(Anchor::from_key)
         };
         if let Some(elements) = json.get("elements").and_then(|e| e.as_object()) {
-            for id in ElementId::ALL {
-                let Some(e) = elements.get(id.key()) else {
-                    continue;
-                };
-                let element = layout.get_mut(id);
-                if let Some(enabled) = e.get("enabled").and_then(|v| v.as_bool()) {
-                    element.visibility = if enabled {
-                        Visibility::Shown
-                    } else {
-                        Visibility::Hidden
-                    };
-                }
-                let removed = e.get("removed").and_then(|v| v.as_bool());
-                if removed.unwrap_or(id.default_visibility() == Visibility::Removed) {
-                    element.visibility = Visibility::Removed;
-                }
-                if let (Some(anchor), Some(x), Some(y)) = (anchor_of(e), num(e, "x"), num(e, "y")) {
-                    element.place = Place::Free {
-                        anchor,
-                        offset: Vec2::new(x, y),
-                        scale: num(e, "scale").unwrap_or(1.0).clamp(MIN_SCALE, MAX_SCALE),
-                    };
+            for id in ElementId::ALL
+                .into_iter()
+                .filter(|id| id.mod_panel_index().is_none())
+            {
+                if let Some(e) = elements.get(id.key()) {
+                    layout.apply_element_json(id, e);
                 }
             }
+            layout.mod_saved = elements
+                .iter()
+                .filter(|(k, _)| k.starts_with("mod:"))
+                .map(|(k, e)| (k.clone(), e.clone()))
+                .collect();
         }
         let has_stacks = if let Some(stacks) = json.get("stacks").and_then(|s| s.as_array()) {
             for s in stacks {
@@ -999,28 +1190,19 @@ impl HudLayout {
     pub fn save(&self) {
         let mut elements = serde_json::Map::new();
         for id in ElementId::ALL {
-            let element = self.get(id);
-            let mut e = serde_json::Map::new();
-            e.insert(
-                "enabled".into(),
-                (element.visibility == Visibility::Shown).into(),
-            );
-            e.insert(
-                "removed".into(),
-                (element.visibility == Visibility::Removed).into(),
-            );
-            if let Place::Free {
-                anchor,
-                offset,
-                scale,
-            } = element.place
-            {
-                e.insert("anchor".into(), anchor.key().into());
-                e.insert("x".into(), offset.x.into());
-                e.insert("y".into(), offset.y.into());
-                e.insert("scale".into(), scale.into());
+            let key = match id.mod_panel_index() {
+                Some(i) => match self.mod_keys[i] {
+                    Some(key) => key,
+                    None => continue,
+                },
+                None => id.key(),
+            };
+            elements.insert(key.into(), self.element_json(id));
+        }
+        for (key, e) in &self.mod_saved {
+            if !elements.contains_key(key) {
+                elements.insert(key.clone(), e.clone());
             }
-            elements.insert(id.key().into(), e.into());
         }
         let stacks: Vec<serde_json::Value> = self
             .stacks
@@ -1093,7 +1275,6 @@ impl HudState {
 #[cfg(feature = "hud_editor")]
 pub use crate::gui::hud_editor::EditorState as HudState;
 
-#[derive(Default)]
 pub struct Frames {
     pub screen: [Option<Rect>; COUNT],
     pub stacks: Vec<(StackId, Rect)>,
@@ -1103,6 +1284,21 @@ pub struct Frames {
     size: (f32, f32),
     pub transforms: Transforms,
     pub layer: Layer,
+}
+
+impl Default for Frames {
+    fn default() -> Self {
+        Frames {
+            screen: [None; COUNT],
+            stacks: Vec::new(),
+            placeholder: [false; COUNT],
+            natural: [None; COUNT],
+            indices: [None; COUNT],
+            size: (0.0, 0.0),
+            transforms: Transforms::default(),
+            layer: Layer::default(),
+        }
+    }
 }
 
 impl Frames {
@@ -1232,6 +1428,9 @@ impl<'a> Hud<'a> {
     }
 
     pub fn shown(&self, id: ElementId) -> bool {
+        if !id.available() {
+            return false;
+        }
         match self.layout.get(id).visibility {
             Visibility::Shown => true,
             Visibility::Hidden => self.editing && self.frames.layer == id.layer(),
@@ -1442,7 +1641,7 @@ impl<'a> Hud<'a> {
     ) {
         let preview = self.editing && kind != Kind::Follow;
         let active = self.frames.layer == id.layer();
-        let label = ghost.unwrap_or(id.label());
+        let label = ghost.unwrap_or(id.name());
         let start = p.positions.len();
         let index_start = p.indices.len();
         let xf = slot.map(|s| {

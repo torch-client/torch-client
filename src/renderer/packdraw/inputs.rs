@@ -1,7 +1,8 @@
-use bevy::math::{IVec2, Vec3};
+use bevy::math::{DVec3, IVec2, Vec3};
 use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 
+use crate::renderer::RenderOrigin;
 use crate::renderer::environment::Environment;
 use crate::renderer::frame_view::FrameView;
 use crate::renderer::systems::{BlockAtlasHandle, Shared, WorldCamera};
@@ -73,12 +74,10 @@ fn view_vector(x_rot: f32, y_rot: f32) -> Vec3 {
     Vec3::new(y.sin() * x.cos(), -x.sin(), y.cos() * x.cos())
 }
 
-fn in_shallow_water(feet: Vec3, eye_height: f32) -> bool {
+fn in_shallow_water(feet: DVec3, eye_height: f32) -> bool {
     use crate::util::block_model::{EyeFluid, eye_fluid_at};
-    let water = |at: Vec3| {
-        eye_fluid_at(f64::from(at.x), f64::from(at.y), f64::from(at.z)) == Some(EyeFluid::Water)
-    };
-    water(feet) && !water(feet + Vec3::Y * eye_height)
+    let water = |at: DVec3| eye_fluid_at(at.x, at.y, at.z) == Some(EyeFluid::Water);
+    water(feet) && !water(feet + DVec3::Y * f64::from(eye_height))
 }
 
 #[derive(Resource, Clone, Copy, Debug, Default)]
@@ -152,7 +151,7 @@ fn held_block_light(item: &str) -> i32 {
 struct Player {
     riding: bool,
     vehicle_id: i32,
-    vehicle_at: Option<(Vec3, Vec3, f32)>,
+    vehicle_at: Option<(DVec3, Vec3, f32)>,
     vitals: Vitals,
     spectator: bool,
     elytra_flying: bool,
@@ -169,8 +168,8 @@ pub(crate) fn gather_inputs(
     images: Res<Assets<Image>>,
     gui: Res<crate::gui::GuiState>,
     compiled: Option<Res<super::install::CompiledPack>>,
-    third_person: Res<crate::renderer::input::ThirdPersonState>,
-    freecam: Res<crate::renderer::input::FreecamState>,
+    camera_view: Res<crate::renderer::input::CameraView>,
+    origin: Res<RenderOrigin>,
     mut inputs: ResMut<Inputs>,
 ) {
     let item_ids = compiled.as_deref().map(|c| &c.installed.item_ids);
@@ -180,8 +179,8 @@ pub(crate) fn gather_inputs(
         .is_none_or(|c| c.installed.old_hand_light);
     let partial = view.partial;
     let day_ticks = view.day_ticks;
-    let pos = Vec3::from(view.player_lerp);
-    let eye = pos + Vec3::Y * view.eye_height;
+    let pos = DVec3::from_array(view.player_lerp);
+    let eye = DVec3::from_array(view.lerp_eye());
     let body_vector = view_vector(-view.camera_pitch, -view.camera_yaw - 180.0);
     let (effects, held_items, held_light, vitals, elytra_flying, swimming) = {
         let Ok(state) = shared.0.lock();
@@ -244,7 +243,7 @@ pub(crate) fn gather_inputs(
         vehicle_at: vehicle.map(|e| {
             let (y_rot, x_rot) = e.look(1.0);
             (
-                Vec3::from(e.position(partial)),
+                DVec3::from_array(e.position(partial)),
                 view_vector(x_rot, y_rot),
                 azalea::entity::dimensions::EntityDimensions::from(e.kind).eye_height,
             )
@@ -258,10 +257,10 @@ pub(crate) fn gather_inputs(
         .entities
         .iter()
         .find(|e| e.kind == azalea_registry::builtin::EntityKind::LightningBolt)
-        .map(|e| Vec3::from(e.position(partial)));
+        .map(|e| DVec3::from_array(e.position(partial)));
 
     let (camera_at, fog) = match camera.single() {
-        Ok((transform, fog)) => (transform.translation, fog),
+        Ok((transform, fog)) => (origin.to_world(transform.translation), fog),
         Err(_) => (eye, None),
     };
     let fog_color = fog.map_or(Vec3::ZERO, |f| {
@@ -274,20 +273,14 @@ pub(crate) fn gather_inputs(
     });
     let [r, g, b, _] = environment.sky.sky_color.to_rgba_f32();
     let (block, sky) = crate::renderer::lightmap::levels_at(eye.to_array());
-    let eye_in =
-        match crate::util::block_model::eye_fluid_at(eye.x as f64, eye.y as f64, eye.z as f64) {
-            Some(crate::util::block_model::EyeFluid::Water) => EyeIn::Water,
-            Some(crate::util::block_model::EyeFluid::Lava) => EyeIn::Lava,
-            None if crate::util::block_model::powder_snow_at(
-                camera_at.x as f64,
-                camera_at.y as f64,
-                camera_at.z as f64,
-            ) =>
-            {
-                EyeIn::PowderSnow
-            }
-            None => EyeIn::Air,
-        };
+    let eye_in = match crate::util::block_model::eye_fluid_at(eye.x, eye.y, eye.z) {
+        Some(crate::util::block_model::EyeFluid::Water) => EyeIn::Water,
+        Some(crate::util::block_model::EyeFluid::Lava) => EyeIn::Lava,
+        None if crate::util::block_model::powder_snow_at(camera_at.x, camera_at.y, camera_at.z) => {
+            EyeIn::PowderSnow
+        }
+        None => EyeIn::Air,
+    };
     let atlas_size = atlas
         .and_then(|handle| images.get(&handle.0))
         .map_or(IVec2::ZERO, |image| image.size().as_ivec2());
@@ -317,7 +310,7 @@ pub(crate) fn gather_inputs(
             id: player.vehicle_id,
             in_water: in_shallow_water(at, eye_height),
             look,
-            relative: camera_at - at,
+            relative: (camera_at - at).as_vec3(),
         });
 
     *inputs = Inputs {
@@ -342,11 +335,13 @@ pub(crate) fn gather_inputs(
         darkness: effects.2.map_or(0.0, fading),
         biome: row,
         atlas_size,
-        relative_eye: camera_at - eye,
+        relative_eye: (camera_at - eye).as_vec3(),
         hide_gui: gui.hide_gui,
         held_items,
         held_light,
-        lightning: bolt.map_or(bevy::math::Vec4::ZERO, |at| (at - camera_at).extend(1.0)),
+        lightning: bolt.map_or(bevy::math::Vec4::ZERO, |at| {
+            (at - camera_at).as_vec3().extend(1.0)
+        }),
         bedrock_level: min_y,
         height_limit: max_y - min_y,
         logical_height: dimension.logical_height(),
@@ -355,12 +350,12 @@ pub(crate) fn gather_inputs(
         has_skylight: dimension.has_skylight(),
         vitals: player.vitals,
         spectator: player.spectator,
-        first_person: !third_person.active && !freecam.active,
+        first_person: camera_view.first_person(),
         riding: player.riding,
         elytra_flying: player.elytra_flying,
         swimming: player.swimming,
-        feet_in_water: in_shallow_water(pos, eye.y - pos.y),
-        eye_position: eye,
+        feet_in_water: in_shallow_water(pos, view.eye_height),
+        eye_position: eye.as_vec3(),
         vehicle,
     };
 }

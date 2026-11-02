@@ -26,6 +26,7 @@ pub struct TextBox {
     pub browser_keyboard: bool,
     pub max_width: Option<f32>,
     pub strip_formatting: bool,
+    pub raw: bool,
 }
 
 const BORDER_INSET: f32 = 4.0;
@@ -146,7 +147,11 @@ impl TextBox {
     }
 
     fn insert(&mut self, s: &str, limit: Limit<'_>) -> bool {
-        let mut filtered = s.chars().filter(|c| allowed_char(*c)).peekable();
+        let raw = self.raw;
+        let mut filtered = s
+            .chars()
+            .filter(|&c| if raw { code_char(c) } else { allowed_char(c) })
+            .peekable();
         if filtered.peek().is_none() && !s.is_empty() {
             return false;
         }
@@ -356,6 +361,8 @@ impl TextBox {
             let text = clipboard_get();
             let text = if self.strip_formatting {
                 strip_format_codes(&text)
+            } else if self.raw {
+                code_text(&text)
             } else {
                 text
             };
@@ -661,6 +668,24 @@ impl MultiLineTextBox {
         }
     }
 
+    pub fn code(max_len: usize) -> MultiLineTextBox {
+        let mut b = MultiLineTextBox::new(max_len, 0);
+        b.inner.raw = true;
+        b.inner.browser_keyboard = false;
+        b
+    }
+
+    pub fn insert_code(&mut self, s: &str) -> bool {
+        let changed = self.inner.insert(s, None);
+        self.stale |= changed;
+        changed
+    }
+
+    pub fn caret_row(&mut self, font: &Font, width: f32) -> usize {
+        self.relayout(font, width);
+        Self::line_at(&self.lines, self.inner.cursor)
+    }
+
     pub fn text(&self) -> &str {
         &self.inner.text
     }
@@ -695,14 +720,15 @@ impl MultiLineTextBox {
             return self.inner.handle_input(input);
         }
 
-        let mutating = input.paste
-            || input.cut
-            || input.edits.iter().any(|k| {
-                matches!(
-                    k,
-                    EditKey::Char(_) | EditKey::Backspace | EditKey::Delete | EditKey::Enter
-                )
-            });
+        let mutating = self.line_limit > 0
+            && (input.paste
+                || input.cut
+                || input.edits.iter().any(|k| {
+                    matches!(
+                        k,
+                        EditKey::Char(_) | EditKey::Backspace | EditKey::Delete | EditKey::Enter
+                    )
+                }));
         let undo = mutating.then(|| {
             (
                 self.inner.text.clone(),
@@ -805,11 +831,43 @@ impl MultiLineTextBox {
     }
 
     pub fn draw(&mut self, p: &mut Painter, x: f32, y: f32, width: f32, color: u32) {
+        self.draw_rows(p, x, y, width, color, 0, usize::MAX);
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "one widget, flat arguments")]
+    pub fn draw_rows(
+        &mut self,
+        p: &mut Painter,
+        x: f32,
+        y: f32,
+        width: f32,
+        color: u32,
+        first: usize,
+        count: usize,
+    ) {
         self.relayout(&p.atlas.font, width);
+        let end = first.saturating_add(count).min(self.lines.len());
+        if first >= end {
+            return;
+        }
         let (sa, sb) = self.inner.selection_range();
-        for (row, range) in self.lines.iter().enumerate() {
-            let ly = y + row as f32 * LINE_HEIGHT;
-            let line = char_slice(&self.inner.text, range.clone());
+        let cursor = self.inner.cursor;
+        let caret_row = Self::line_at(&self.lines, cursor);
+        let text = self.inner.text.as_str();
+        let (mut at, mut byte) = (0usize, 0usize);
+        let mut seek = |to: usize| {
+            for c in text[byte..].chars().take(to - at) {
+                byte += c.len_utf8();
+            }
+            at = to;
+            byte
+        };
+        for row in first..end {
+            let range = self.lines[row].clone();
+            let b0 = seek(range.start);
+            let b1 = seek(range.end);
+            let line = &text[b0..b1];
+            let ly = y + (row - first) as f32 * LINE_HEIGHT;
             p.text_str(line, x, ly, color, false);
             let (a, b) = (
                 sa.clamp(range.start, range.end),
@@ -822,18 +880,36 @@ impl MultiLineTextBox {
                 let x1 = x0 + p.atlas.font.width_str(mid);
                 draw_selection(p, mid, x0, x1, ly, ly - 1.0, ly + 10.0);
             }
-        }
-
-        if self.inner.focused && blink_on(p.frame) {
-            let row = Self::line_at(&self.lines, self.inner.cursor);
-            let start = self.lines[row].start;
-            let pre = char_slice(&self.inner.text, start..self.inner.cursor);
-            let cx = x + p.atlas.font.width_str(pre);
-            let cy = y + row as f32 * LINE_HEIGHT;
-            let at_end = self.inner.cursor >= self.inner.char_count();
-            draw_caret(p, cx, cy, at_end, color, false, (-1.0, 10.0));
+            if row == caret_row && self.inner.focused && blink_on(p.frame) {
+                let pre = char_slice(line, 0..cursor - range.start);
+                let cx = x + p.atlas.font.width_str(pre);
+                let at_end = row + 1 == self.lines.len() && cursor == range.end;
+                draw_caret(p, cx, ly, at_end, color, false, (-1.0, 10.0));
+            }
         }
     }
+}
+
+pub(crate) fn code_char(c: char) -> bool {
+    ((c as u32) >= 32 || c == '\n') && c != '\u{7f}'
+}
+
+pub(crate) fn code_text(s: &str) -> String {
+    let s = s.strip_prefix('\u{feff}').unwrap_or(s);
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                chars.next_if_eq(&'\n');
+                out.push('\n');
+            }
+            '\t' => out.push_str("    "),
+            c if code_char(c) => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 pub(crate) fn byte_at(s: &str, n: usize) -> usize {
@@ -967,17 +1043,54 @@ pub(in crate::gui) fn centered_row_x(vw: f32, total_w: f32) -> f32 {
     ((vw - total_w) / 2.0).floor()
 }
 
+pub(crate) fn wrap(p: &Painter, lines: &[&str], w: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in lines {
+        let mut cur = String::new();
+        for word in line.split(' ') {
+            let next = if cur.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{cur} {word}")
+            };
+            if !cur.is_empty() && p.atlas.font.width_str(&next) > w - 4.0 {
+                out.push(std::mem::replace(&mut cur, word.to_owned()));
+            } else {
+                cur = next;
+            }
+        }
+        out.push(cur);
+    }
+    out
+}
+
 pub const WIDGET_HEIGHT: f32 = 20.0;
 
 pub const TAB_BAR_H: f32 = 24.0;
 
 pub fn tab_bar(p: &mut Painter, ctx: &ScreenCtx, labels: &[&str], current: usize) -> Option<usize> {
+    tab_bar_with(p, ctx, labels, current, |_| true)
+}
+
+pub fn tab_layout(vw: f32, count: usize) -> (f32, f32) {
     const MAX_W: f32 = 400.0;
     const MARGIN: f32 = 14.0;
     let even = |n: f32| (n / 2.0).ceil() * 2.0;
-    let tabs_w = (MAX_W.min(ctx.vw) - 2.0 * MARGIN).floor();
-    let tab_w = even((tabs_w / labels.len() as f32).floor());
-    let x0 = even(((ctx.vw - tabs_w) / 2.0).floor());
+    let tabs_w = (MAX_W.min(vw) - 2.0 * MARGIN).floor();
+    let tab_w = even((tabs_w / count.max(1) as f32).floor());
+    let x0 = even(((vw - tabs_w) / 2.0).floor());
+    (x0, tab_w)
+}
+
+pub fn tab_bar_with(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    labels: &[&str],
+    current: usize,
+    active: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    const INACTIVE: u32 = 0xA0_A0A0;
+    let (x0, tab_w) = tab_layout(ctx.vw, labels.len());
     let right = x0 + tab_w * labels.len() as f32;
     p.sprite("header_separator", 0.0, TAB_BAR_H - 2.0, x0, 2.0);
     p.sprite(
@@ -992,6 +1105,8 @@ pub fn tab_bar(p: &mut Painter, ctx: &ScreenCtx, labels: &[&str], current: usize
     for (i, label) in labels.iter().enumerate() {
         let x = x0 + i as f32 * tab_w;
         let selected = i == current;
+        let enabled = active(i);
+        let color = if enabled { 0xFF_FFFF } else { INACTIVE };
         let hovered = ctx.hovering(x, 0.0, tab_w, TAB_BAR_H);
         let sprite = match (selected, false) {
             (true, false) => "widget/tab_selected",
@@ -1015,19 +1130,13 @@ pub fn tab_bar(p: &mut Painter, ctx: &ScreenCtx, labels: &[&str], current: usize
                 TAB_BAR_H - 2.0,
                 line_w,
                 1.0,
-                0xFFFF_FFFF,
+                0xFF00_0000 | color,
             );
         }
         let top = if selected { 0.0 } else { 3.0 };
         let y = ((top + TAB_BAR_H - LINE_HEIGHT) / 2.0).floor() + 1.0;
-        p.text_str(
-            label,
-            x + ((tab_w - text_w) / 2.0).floor(),
-            y,
-            0xFF_FFFF,
-            true,
-        );
-        if !selected && hovered && ctx.input.left_click {
+        p.text_str(label, x + ((tab_w - text_w) / 2.0).floor(), y, color, true);
+        if !selected && enabled && hovered && ctx.input.left_click {
             picked = Some(i);
         }
     }
@@ -1133,6 +1242,29 @@ impl<'a> Button<'a> {
         let label = [Span::colored(self.label, LABEL_ACTIVE)];
         draw_button_spans(p, ctx, self.x, self.y, self.w, self.h, &label, self.active)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::gui) fn icon_button(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    icon: &str,
+    (icon_w, icon_h): (f32, f32),
+) -> bool {
+    let pressed = draw_button_spans(p, ctx, x, y, w, h, &[], true);
+    let half = |n: f32| (n / 2.0).floor();
+    p.sprite(
+        icon,
+        x + half(w) - half(icon_w),
+        y + half(h) - half(icon_h),
+        icon_w,
+        icon_h,
+    );
+    pressed
 }
 
 pub(in crate::gui) fn click_in(ctx: &ScreenCtx, x: f32, y: f32, w: f32, h: f32) -> bool {

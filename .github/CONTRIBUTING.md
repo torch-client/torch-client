@@ -38,6 +38,8 @@ tools/build_web.sh --features webgpu
 | `full_font` | on | Draws every Unicode character instead of a missing-glyph box. |
 | `skins` | on | Player skins and capes. Without it, everyone gets one of the built-in default skins. |
 | `online_mode` | on | Microsoft account sign-in, for servers that require it. |
+| `resourcepacks` | on | Vanilla resource packs from folders and zips. Desktop only. |
+| `update_checker` | on | Checks GitHub once a day for a newer release and shows an update line on the title screen. Desktop only. |
 | `builtin_shaders` | off | Built-in shaders: sun shadows, reflective water, waving foliage, height fog and bloom. |
 | `shader_support` | off | Loads Iris/OptiFine-style shader packs from a `shaders/` folder. |
 | `audio` | off | Sound. Desktop only; downloads about 332 MB of sounds. |
@@ -45,7 +47,9 @@ tools/build_web.sh --features webgpu
 | `webgpu` | off | Browser build only. Uses WebGPU instead of WebGL2, with no fallback. |
 | `mobile_ui` | off | On-screen touch controls. The Android build turns this on itself. |
 | `click_gui` | off | A Right Shift menu with a switch and settings for every module. |
-| `hud_editor` | off | A screen for dragging, scaling and hiding HUD elements, saved to `hud.json`. |
+| `lua_mods` | off | Modules written in Luau, loaded from a `mods/` folder and switched from the click GUI, with a Mods tab to reload them. Desktop only. Turns on `click_gui`. |
+| `hud_editor` | on | A screen for dragging, scaling and hiding HUD elements, saved to `hud.json`. |
+| `tutorial` | off | Adds an introductory tutorial. |
 | `profiling` | off | Span profiler. Press F9 in game to save a flamegraph. |
 | `deadlock-detection` | off | Names the threads involved when the client freezes on a lock. |
 | `alloc_diag` | off | Heap usage rows on the F3 screen. |

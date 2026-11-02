@@ -143,6 +143,14 @@ mod imp {
             .map(|b| b.to_vec())
             .map_err(|e| e.to_string())
     }
+
+    #[cfg(lua_mods)]
+    pub(super) fn get_status_blocking(url: &str) -> Result<(u16, Vec<u8>), String> {
+        let resp = client().get(url).send().map_err(|e| chain(&e))?;
+        let status = resp.status().as_u16();
+        let body = resp.bytes().map_err(|e| chain(&e))?;
+        Ok((status, body.to_vec()))
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -230,6 +238,20 @@ mod imp {
         }
         Ok(Fetched::Body(out))
     }
+
+    #[cfg(lua_mods)]
+    pub(super) async fn get_status(url: &str) -> Result<(u16, Vec<u8>), String> {
+        let window = web_sys::window().ok_or("no window")?;
+        let value = JsFuture::from(window.fetch_with_str(url))
+            .await
+            .map_err(|e| err("fetch failed", e))?;
+        let resp: web_sys::Response = value.dyn_into().map_err(|e| err("not a response", e))?;
+        let status = resp.status();
+        let buffer = JsFuture::from(resp.array_buffer().map_err(|e| err("no body", e))?)
+            .await
+            .map_err(|e| err("body failed", e))?;
+        Ok((status, js_sys::Uint8Array::new(&buffer).to_vec()))
+    }
 }
 
 pub(crate) async fn get_string(url: &str) -> Result<String, HttpError> {
@@ -249,7 +271,17 @@ pub(crate) fn get_bytes_blocking(url: &str) -> Result<Vec<u8>, HttpError> {
     imp::get_bytes_blocking(url)
 }
 
-#[cfg(explore_modrinth)]
+#[cfg(all(explore_modrinth, not(target_arch = "wasm32")))]
 pub(crate) fn get_as_blocking(url: &str, user_agent: &str) -> Result<Vec<u8>, String> {
     imp::get_as_blocking(url, user_agent)
+}
+
+#[cfg(all(lua_mods, not(target_arch = "wasm32")))]
+pub(crate) fn get_status_blocking(url: &str) -> Result<(u16, Vec<u8>), String> {
+    imp::get_status_blocking(url)
+}
+
+#[cfg(all(lua_mods, target_arch = "wasm32"))]
+pub(crate) async fn get_status(url: &str) -> Result<(u16, Vec<u8>), String> {
+    imp::get_status(url).await
 }

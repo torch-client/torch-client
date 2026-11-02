@@ -7,6 +7,13 @@ const LAYOUT: HeaderFooter = HeaderFooter::new(HeaderFooter::DEFAULT_H, 42.0);
 
 const GITHUB_URL: &str = "https://github.com/torch-client/torch-client";
 const WEBSITE_URL: &str = "https://torchclient.com";
+const DISCORD_URL: &str = "https://discord.gg/qqXSHEYXaq";
+
+const LINKS: &[(&str, &str)] = &[
+    ("GitHub", GITHUB_URL),
+    ("Website", WEBSITE_URL),
+    ("Discord", DISCORD_URL),
+];
 
 const LINES: &[(&str, u32)] = &[
     ("Torch Client", 0xFFFFFF),
@@ -19,10 +26,10 @@ const LINES: &[(&str, u32)] = &[
 ];
 
 const BUTTON_GAP_Y: f32 = 12.0;
-const HALF_WIDTH: f32 = 98.0;
+const LINK_WIDTH: f32 = 64.0;
+const LINK_GAP: f32 = 4.0;
 
-pub fn draw(p: &mut Painter, ctx: &ScreenCtx) -> Option<Screen> {
-    crate::gui::menu::background(p, ctx.vw, ctx.vh);
+pub fn draw(p: &mut Painter, ctx: &ScreenCtx, parent: Screen) -> Option<Screen> {
     p.text_centered("Credits", ctx.vw / 2.0, LAYOUT.title_y(), 0xFFFFFF, true);
 
     let block_h = LINES.len() as f32 * LINE_HEIGHT + BUTTON_GAP_Y + WIDGET_HEIGHT;
@@ -40,19 +47,12 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx) -> Option<Screen> {
 
     let x = widgets::centered_x(ctx.vw);
     let row = y + BUTTON_GAP_Y;
-    if Button::new(x, row, HALF_WIDTH, WIDGET_HEIGHT, "GitHub").draw(p, ctx) {
-        crate::platform::url::open(GITHUB_URL);
-    }
-    if Button::new(
-        (ctx.vw / 2.0).floor() + 2.0,
-        row,
-        HALF_WIDTH,
-        WIDGET_HEIGHT,
-        "Website",
-    )
-    .draw(p, ctx)
-    {
-        crate::platform::url::open(WEBSITE_URL);
+    let mut link_x = x;
+    for &(label, url) in LINKS {
+        if Button::new(link_x, row, LINK_WIDTH, WIDGET_HEIGHT, label).draw(p, ctx) {
+            crate::platform::url::open(url);
+        }
+        link_x += LINK_WIDTH + LINK_GAP;
     }
 
     let done = Button::new(
@@ -63,5 +63,5 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx) -> Option<Screen> {
         "Done",
     )
     .draw(p, ctx);
-    (done || ctx.input.escape).then_some(Screen::Title)
+    (done || ctx.input.escape).then_some(parent)
 }

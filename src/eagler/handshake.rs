@@ -33,6 +33,7 @@ fn offered_version_name() -> &'static str {
 
 const CLIENT_VERSION: u8 = 0x01;
 const CLIENT_REQUEST_LOGIN: u8 = 0x04;
+const CLIENT_PROFILE_DATA: u8 = 0x07;
 const CLIENT_FINISH_LOGIN: u8 = 0x08;
 const SERVER_VERSION: u8 = 0x02;
 const VERSION_MISMATCH: u8 = 0x03;
@@ -44,7 +45,8 @@ const SERVER_ERROR: u8 = 0xFF;
 pub(super) async fn run(
     socket: &mut Socket,
     username: &str,
-) -> eyre::Result<azalea_auth::game_profile::GameProfile> {
+    skin: Option<&[u8]>,
+) -> eyre::Result<(azalea_auth::game_profile::GameProfile, u16)> {
     send(socket, client_version(username)?).await?;
 
     let mut version = expect(socket, SERVER_VERSION).await?;
@@ -77,10 +79,16 @@ pub(super) async fn run(
     let name = allow.str()?;
     let uuid = uuid::Uuid::from_u64_pair(allow.u64()?, allow.u64()?);
 
+    if let Some(skin) = skin {
+        send(socket, profile_data("skin_v2", skin)?).await?;
+    }
     send(socket, vec![CLIENT_FINISH_LOGIN]).await?;
     expect(socket, SERVER_FINISH_LOGIN).await?;
 
-    Ok(azalea_auth::game_profile::GameProfile::new(uuid, name))
+    Ok((
+        azalea_auth::game_profile::GameProfile::new(uuid, name),
+        eagler,
+    ))
 }
 
 fn client_version(username: &str) -> eyre::Result<Vec<u8>> {
@@ -113,6 +121,15 @@ fn request_login(username: &str, eagler: u16) -> eyre::Result<Vec<u8>> {
     }
     out.push(0);
     out.push(0);
+    Ok(out)
+}
+
+fn profile_data(key: &str, data: &[u8]) -> eyre::Result<Vec<u8>> {
+    let len = u16::try_from(data.len()).map_err(|_| eyre::eyre!("profile data too long"))?;
+    let mut out = vec![CLIENT_PROFILE_DATA, 1, key.len() as u8];
+    out.extend_from_slice(key.as_bytes());
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(data);
     Ok(out)
 }
 

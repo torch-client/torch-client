@@ -517,8 +517,8 @@ const CULL_NBR: [(i32, i32, i32); 6] = [
     (1, 0, 0),
 ];
 
-pub fn build_section_mesh(
-    blocks: &[(i32, i32, i32, RenderedBlock)],
+pub fn build_section_mesh<'a>(
+    blocks: impl IntoIterator<Item = (i32, i32, i32, &'a RenderedBlock)>,
     x_base: i32,
     y_base: i32,
     z_base: i32,
@@ -545,9 +545,9 @@ pub fn build_section_mesh(
 
     for (bx, by, bz, rb) in blocks {
         let (wx, wy, wz) = (
-            (*bx - x_base) as f32,
-            (*by - y_base) as f32,
-            (*bz - z_base) as f32,
+            (bx - x_base) as f32,
+            (by - y_base) as f32,
+            (bz - z_base) as f32,
         );
         #[cfg(feature = "shader_support")]
         if let Some(ids) = &pack_ids {
@@ -566,7 +566,7 @@ pub fn build_section_mesh(
         match &rb.geom {
             BlockGeom::Model(baked) => {
                 let target = if rb.translucent { &mut water } else { &mut buf };
-                emit_baked(wx, wy, wz, rb, baked, occ, *bx, *by, *bz, cardinal, target);
+                emit_baked(wx, wy, wz, rb, baked, occ, bx, by, bz, cardinal, target);
             }
             BlockGeom::Fluid {
                 amount,
@@ -576,7 +576,7 @@ pub fn build_section_mesh(
             } => {
                 let is_water = !*lava;
                 let tint = if is_water {
-                    crate::util::biome_color::water_ratio(occ.biome(*bx, *by, *bz))
+                    crate::util::biome_color::water_ratio(occ.biome(bx, by, bz))
                 } else {
                     crate::util::biome_color::NEUTRAL
                 };
@@ -584,7 +584,7 @@ pub fn build_section_mesh(
                 #[cfg(feature = "shader_support")]
                 if let Some(block) = dest.pack_block.as_mut() {
                     block.tint = if is_water {
-                        crate::util::biome_color::pack_water(occ.biome(*bx, *by, *bz))
+                        crate::util::biome_color::pack_water(occ.biome(bx, by, bz))
                     } else {
                         [1.0; 3]
                     };
@@ -595,7 +595,7 @@ pub fn build_section_mesh(
                     MATERIAL_LAVA
                 };
                 emit_fluid(
-                    wx, wy, wz, material, *amount, *still, *flow, atlas_rows, occ, *bx, *by, *bz,
+                    wx, wy, wz, material, *amount, *still, *flow, atlas_rows, occ, bx, by, bz,
                     tint, dest,
                 );
             }
@@ -606,9 +606,9 @@ pub fn build_section_mesh(
             if let (Some(block), Some(id)) = (water.pack_block.as_mut(), water_pack_id) {
                 block.id = id;
                 block.emission = 0;
-                block.tint = crate::util::biome_color::pack_water(occ.biome(*bx, *by, *bz));
+                block.tint = crate::util::biome_color::pack_water(occ.biome(bx, by, bz));
             }
-            let tint = crate::util::biome_color::water_ratio(occ.biome(*bx, *by, *bz));
+            let tint = crate::util::biome_color::water_ratio(occ.biome(bx, by, bz));
             emit_fluid(
                 wx,
                 wy,
@@ -619,9 +619,9 @@ pub fn build_section_mesh(
                 water_flow,
                 atlas_rows,
                 occ,
-                *bx,
-                *by,
-                *bz,
+                bx,
+                by,
+                bz,
                 tint,
                 &mut water,
             );
@@ -1098,8 +1098,7 @@ mod tests {
         let rb = crate::util::block_model::block_visual(BlockState::from(BlockKind::Stone));
         occ.set_solid(0, 0, 0);
         occ.set_full_cube(0, 0, 0);
-        let blocks = vec![(0, 0, 0, rb)];
-        let (buf, _) = build_section_mesh(&blocks, 0, 0, 0, ONE_ROW, &occ);
+        let (buf, _) = build_section_mesh([(0, 0, 0, &rb)], 0, 0, 0, ONE_ROW, &occ);
         assert!(!buf.verts.is_empty(), "the block emitted no faces at all");
         for v in &buf.verts {
             assert_eq!(
@@ -1130,7 +1129,7 @@ mod tests {
         let rb = crate::util::block_model::block_visual(BlockState::from(BlockKind::Stone));
         occ.set_solid(0, 0, 0);
         occ.set_full_cube(0, 0, 0);
-        let (buf, _) = build_section_mesh(&[(0, 0, 0, rb)], 0, 0, 0, ONE_ROW, &occ);
+        let (buf, _) = build_section_mesh([(0, 0, 0, &rb)], 0, 0, 0, ONE_ROW, &occ);
         assert_eq!(buf.faces[0], [1, 1, 1, 1, 1, 1, 0]);
         assert_eq!(buf.faces[1], [0; FACE_GROUPS]);
         for (group, quad) in quads_by_group(&buf.idx, &buf.faces[0]) {
@@ -1147,7 +1146,7 @@ mod tests {
         crate::blocks::tests::atlas_once();
         let occ = Occupancy::new(0, 0, -2, 20);
         let rb = crate::util::block_model::block_visual(BlockState::from(BlockKind::Poppy));
-        let (buf, _) = build_section_mesh(&[(0, 0, 0, rb)], 0, 0, 0, ONE_ROW, &occ);
+        let (buf, _) = build_section_mesh([(0, 0, 0, &rb)], 0, 0, 0, ONE_ROW, &occ);
         let quads = (buf.idx.len() + buf.cutout_idx.len()) / 6;
         assert!(quads > 0, "the plant emitted no quads");
         assert_eq!(

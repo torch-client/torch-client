@@ -87,7 +87,8 @@ fn animation(st: &BeState) -> f32 {
 }
 
 fn wall_transform(st: &BeState) -> Transform {
-    let facing = crate::direction::Direction::from(st.state.facing.unwrap_or(Direction::South));
+    let facing =
+        crate::blocks::direction::Direction::from(st.state.facing.unwrap_or(Direction::South));
     Transform {
         translation: Vec3::new(
             0.5 - facing.step_x() * 0.25,

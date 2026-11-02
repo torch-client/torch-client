@@ -18,7 +18,7 @@ use tokio_util::{
     bytes::Buf,
     codec::{BytesCodec, FramedRead},
 };
-use tracing::trace;
+use tracing::{debug, info, trace};
 
 use crate::packets::ProtocolPacket;
 
@@ -323,14 +323,30 @@ pub fn read_raw_packet_from_buffer<R>(
 where
     R: AsyncRead + Unpin + Send + Sync,
 {
-    let Some(mut buf) = frame_splitter(buffer).map_err(ReadPacketError::from)? else {
-        return Ok(None);
-    };
+    let buf = loop {
+        let Some(mut buf) = frame_splitter(buffer).map_err(ReadPacketError::from)? else {
+            return Ok(None);
+        };
 
-    if let Some(compression_threshold) = compression_threshold {
-        buf = compression_decoder(&mut Cursor::new(&buf[..]), compression_threshold)
-            .map_err(ReadPacketError::from)?;
-    }
+        if let Some(compression_threshold) = compression_threshold {
+            buf = compression_decoder(&mut Cursor::new(&buf[..]), compression_threshold)
+                .map_err(ReadPacketError::from)?;
+            if buf.is_empty() {
+                static SAID: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    info!(
+                        "the server sent an empty compressed packet; skipped, as vanilla does \
+                         (further ones are logged at debug)"
+                    );
+                } else {
+                    debug!("skipped an empty compressed packet");
+                }
+                continue;
+            }
+        }
+        break buf;
+    };
 
     if tracing::enabled!(tracing::Level::TRACE) {
         static DO_NOT_CUT_OFF_PACKET_LOGS: LazyLock<bool> = LazyLock::new(|| {

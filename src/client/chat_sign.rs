@@ -88,14 +88,9 @@ pub(crate) fn chat_packet(bot: &Client, content: String, signing: bool) -> Serve
 
 #[cfg(feature = "online_mode")]
 fn salt() -> u64 {
-    use crate::platform::time::{SystemTime, UNIX_EPOCH};
     const DRAW: u32 = 1 << 30;
 
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let mut rng = crate::util::javarandom::JavaRandom::new(nanos as i64);
+    let mut rng = crate::util::javarandom::JavaRandom::time_seeded();
     ((rng.next_int(DRAW) as u64) << 32) | rng.next_int(DRAW) as u64
 }
 

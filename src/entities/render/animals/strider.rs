@@ -4,23 +4,20 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::strider;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Strider,
-        RenderSpec::new("strider", strider::layer, texture, strider::setup_anim)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Strider,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Strider],
+        RenderSpec::new("strider", strider::layer, texture, strider::setup_anim),
         RenderSpec::new(
             "strider_baby",
             strider::baby_layer,
             texture,
             strider::baby_setup_anim,
-        )
-        .with_visible(|st| st.extras.is_baby),
+        ),
     );
     registry.add(
         EntityKind::Strider,
@@ -30,7 +27,8 @@ pub fn register(registry: &mut Registry) {
             saddle_texture,
             strider::setup_anim,
         )
-        .with_visible(|st| !st.extras.is_baby && st.extras.saddled),
+        .with_visible(|st| !st.extras.is_baby && st.extras.saddled)
+        .ignoring_invisibility(),
     );
 }
 

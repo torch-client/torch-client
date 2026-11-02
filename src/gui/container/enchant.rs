@@ -298,7 +298,7 @@ fn draw_clue_tooltip(
     }
     if level != 1 {
         full_name.push(' ');
-        full_name.push_str(&roman(level));
+        full_name.push_str(&tooltip::roman(level));
     }
     let clue = tooltip::translate("container.enchant.clue", &[full_name]);
     let mut lines = vec![vec![Span::colored(clue, WHITE)]];
@@ -355,36 +355,6 @@ fn translate_enchantment(id: &str) -> String {
     tooltip::translate(&key, &[])
 }
 
-fn roman(n: i32) -> String {
-    if n <= 0 || n > 3999 {
-        return n.to_string();
-    }
-    const TABLE: [(i32, &str); 13] = [
-        (1000, "M"),
-        (900, "CM"),
-        (500, "D"),
-        (400, "CD"),
-        (100, "C"),
-        (90, "XC"),
-        (50, "L"),
-        (40, "XL"),
-        (10, "X"),
-        (9, "IX"),
-        (5, "V"),
-        (4, "IV"),
-        (1, "I"),
-    ];
-    let mut n = n;
-    let mut out = String::new();
-    for (value, sym) in TABLE {
-        while n >= value {
-            out.push_str(sym);
-            n -= value;
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,13 +394,5 @@ mod tests {
     fn truncation_stops_at_the_requested_width() {
         let n = enchantment_name(7, 0, 5.0, |s| s.len() as f32);
         assert!(n.as_str().len() <= 5);
-    }
-
-    #[test]
-    fn roman_numerals_match_the_usual_table() {
-        assert_eq!(roman(1), "I");
-        assert_eq!(roman(4), "IV");
-        assert_eq!(roman(9), "IX");
-        assert_eq!(roman(40), "XL");
     }
 }

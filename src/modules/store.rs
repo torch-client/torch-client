@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use super::registry::{COUNT, Id, Kind, MODULES, Mode, Options, SETTING_COUNT, SETTINGS, handle};
+use super::registry::{
+    COUNT, Kind, MODULES, Mode, ModuleDef, ModuleIx, Options, SETTING_COUNT, SETTINGS, Show, handle,
+};
 use super::value::{self, Value};
 use crate::gui::keybinds::Bound;
 
@@ -15,6 +17,62 @@ pub struct Store {
     binds: [AtomicU32; COUNT],
     profile: AtomicU8,
     allowed: [[u64; WORDS]; Mode::ALL.len()],
+    #[cfg(lua_mods)]
+    scripts: std::sync::RwLock<ScriptPart>,
+}
+
+#[cfg(lua_mods)]
+pub(super) struct ScriptPart {
+    rows: Box<[Row]>,
+    values: Box<[AtomicU64]>,
+    texts: Box<[(u16, Mutex<String>)]>,
+}
+
+#[cfg(lua_mods)]
+struct Row {
+    on: std::sync::atomic::AtomicBool,
+    toggles: AtomicU32,
+    bind: AtomicU32,
+    mode: Mode,
+}
+
+#[cfg(lua_mods)]
+impl ScriptPart {
+    pub(super) fn from_registry() -> ScriptPart {
+        let t = super::registry::scripts();
+        ScriptPart {
+            rows: (t.modules.iter())
+                .map(|m| Row {
+                    on: std::sync::atomic::AtomicBool::new(false),
+                    toggles: AtomicU32::new(0),
+                    bind: AtomicU32::new(0),
+                    mode: m.mode,
+                })
+                .collect(),
+            values: (t.settings.iter())
+                .map(|s| AtomicU64::new(value::default_bits(s.kind)))
+                .collect(),
+            texts: (t.settings.iter().enumerate())
+                .filter_map(|(i, s)| match s.kind {
+                    Kind::Text { default, .. } => {
+                        Some(((SETTING_COUNT + i) as u16, Mutex::new(default.to_string())))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    fn row(&self, i: usize) -> Option<&Row> {
+        self.rows.get(i - COUNT)
+    }
+
+    fn text(&self, slot: usize) -> Option<&Mutex<String>> {
+        self.texts
+            .iter()
+            .find(|(i, _)| *i as usize == slot)
+            .map(|(_, m)| m)
+    }
 }
 
 static MODULES_STORE: OnceLock<Store> = OnceLock::new();
@@ -30,6 +88,8 @@ pub fn store() -> &'static Store {
 pub fn save() {
     if let Some(s) = MODULES_STORE.get() {
         super::persist::save(s);
+        #[cfg(lua_mods)]
+        super::script::save_state(s);
     }
 }
 
@@ -57,31 +117,78 @@ impl Store {
                 .collect(),
             toggles: [const { AtomicU32::new(0) }; COUNT],
             binds: [const { AtomicU32::new(0) }; COUNT],
-            profile: AtomicU8::new(Mode::Rage as u8),
+            profile: AtomicU8::new(Mode::Blatant as u8),
             allowed,
+            #[cfg(lua_mods)]
+            scripts: std::sync::RwLock::new(ScriptPart::from_registry()),
         }
     }
 
-    pub fn enabled(&self, id: Id) -> bool {
-        let i = id as usize;
+    #[cfg(lua_mods)]
+    fn script<R>(&self, f: impl FnOnce(&ScriptPart) -> R) -> R {
+        f(&self.scripts.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    #[cfg(lua_mods)]
+    pub(super) fn install_scripts(&self, part: ScriptPart) {
+        *self.scripts.write().unwrap_or_else(PoisonError::into_inner) = part;
+    }
+
+    pub fn enabled(&self, id: impl Into<ModuleIx>) -> bool {
+        let i = id.into().0 as usize;
+        #[cfg(lua_mods)]
+        if i >= COUNT {
+            let p = self.profile();
+            return self.script(|s| s.row(i).is_some_and(|r| r.on.load(Relaxed) && r.mode <= p));
+        }
         (self.enabled[i / 64].load(Relaxed) & self.mask(i / 64)) >> (i % 64) & 1 != 0
     }
 
-    pub fn armed(&self, id: Id) -> bool {
-        let i = id as usize;
+    pub fn armed(&self, id: impl Into<ModuleIx>) -> bool {
+        let i = id.into().0 as usize;
+        #[cfg(lua_mods)]
+        if i >= COUNT {
+            return self.script(|s| s.row(i).is_some_and(|r| r.on.load(Relaxed)));
+        }
         self.enabled[i / 64].load(Relaxed) >> (i % 64) & 1 != 0
     }
 
-    pub fn allowed(&self, id: Id) -> bool {
-        let i = id as usize;
+    pub fn allowed(&self, id: impl Into<ModuleIx>) -> bool {
+        let i = id.into().0 as usize;
+        #[cfg(lua_mods)]
+        if i >= COUNT {
+            let p = self.profile();
+            return self.script(|s| s.row(i).is_some_and(|r| r.mode <= p));
+        }
         self.mask(i / 64) >> (i % 64) & 1 != 0
     }
 
-    pub fn set_enabled(&self, id: Id, on: bool) {
+    pub fn set_enabled(&self, id: impl Into<ModuleIx>, on: bool) {
+        let id = id.into();
+        let i = id.0 as usize;
+        #[cfg(lua_mods)]
+        if i >= COUNT {
+            let p = self.profile();
+            let moved = self.script(|s| {
+                let Some(r) = s.row(i) else {
+                    return false;
+                };
+                if r.on.swap(on, Relaxed) == on {
+                    return false;
+                }
+                if r.mode <= p {
+                    r.toggles.fetch_add(1, Relaxed);
+                }
+                true
+            });
+            if moved {
+                super::script::note_toggle();
+            }
+            return;
+        }
         if self.armed(id) == on {
             return;
         }
-        let i = id as usize;
         let bit = 1u64 << (i % 64);
         if on {
             self.enabled[i / 64].fetch_or(bit, Relaxed);
@@ -93,20 +200,41 @@ impl Store {
         }
     }
 
-    pub fn toggle(&self, id: Id) {
+    pub fn toggle(&self, id: impl Into<ModuleIx>) {
+        let id = id.into();
         self.set_enabled(id, !self.armed(id));
     }
 
-    pub fn toggle_count(&self, id: Id) -> u32 {
-        self.toggles[id as usize].load(Relaxed)
+    pub fn toggle_count(&self, id: impl Into<ModuleIx>) -> u32 {
+        let i = id.into().0 as usize;
+        #[cfg(lua_mods)]
+        if i >= COUNT {
+            return self.script(|s| s.row(i).map_or(0, |r| r.toggles.load(Relaxed)));
+        }
+        self.toggles[i].load(Relaxed)
     }
 
-    pub fn bind(&self, id: Id) -> Bound {
-        Bound::from_bits(self.binds[id as usize].load(Relaxed))
+    pub fn bind(&self, id: impl Into<ModuleIx>) -> Bound {
+        let i = id.into().0 as usize;
+        #[cfg(lua_mods)]
+        if i >= COUNT {
+            return Bound::from_bits(self.script(|s| s.row(i).map_or(0, |r| r.bind.load(Relaxed))));
+        }
+        Bound::from_bits(self.binds[i].load(Relaxed))
     }
 
-    pub fn set_bind(&self, id: Id, b: Bound) {
-        self.binds[id as usize].store(b.to_bits(), Relaxed);
+    pub fn set_bind(&self, id: impl Into<ModuleIx>, b: Bound) {
+        let i = id.into().0 as usize;
+        #[cfg(lua_mods)]
+        if i >= COUNT {
+            self.script(|s| {
+                if let Some(r) = s.row(i) {
+                    r.bind.store(b.to_bits(), Relaxed);
+                }
+            });
+            return;
+        }
+        self.binds[i].store(b.to_bits(), Relaxed);
     }
 
     fn mask(&self, word: usize) -> u64 {
@@ -129,6 +257,18 @@ impl Store {
                 self.toggles[w * 64 + changed.trailing_zeros() as usize].fetch_add(1, Relaxed);
                 changed &= changed - 1;
             }
+        }
+        #[cfg(lua_mods)]
+        {
+            let was = Mode::ALL[old];
+            self.script(|s| {
+                for r in s.rows.iter().filter(|r| r.on.load(Relaxed)) {
+                    if (r.mode <= was) != (r.mode <= m) {
+                        r.toggles.fetch_add(1, Relaxed);
+                    }
+                }
+            });
+            super::script::note_toggle();
         }
     }
 
@@ -157,10 +297,54 @@ impl Store {
     }
 
     pub fn value(&self, slot: usize) -> Option<Value> {
+        #[cfg(lua_mods)]
+        if slot >= SETTING_COUNT {
+            let kind = super::registry::setting(slot)?.kind;
+            return self.script(|s| {
+                Value::unpack(s.values.get(slot - SETTING_COUNT)?.load(Relaxed), kind)
+            });
+        }
         Value::unpack(self.values[slot].load(Relaxed), SETTINGS[slot].kind)
     }
 
+    pub fn visible(&self, m: &ModuleDef, slot: usize) -> bool {
+        let Some(def) = super::registry::setting(slot) else {
+            return true;
+        };
+        self.holds(m, def.show)
+    }
+
+    fn holds(&self, m: &ModuleDef, show: Show) -> bool {
+        let at = |off: u8| {
+            let slot = m.slots().start + off as usize;
+            m.slots()
+                .contains(&slot)
+                .then(|| self.value(slot))
+                .flatten()
+        };
+        match show {
+            Show::Always => true,
+            Show::On(off) => !matches!(at(off), Some(Value::Bool(false))),
+            Show::Is(off, mask) => match at(off) {
+                Some(Value::Choice(c)) => c < 32 && mask & 1 << c != 0,
+                _ => true,
+            },
+            Show::Any(list) => list.iter().any(|s| self.holds(m, *s)),
+            Show::All(list) => list.iter().all(|s| self.holds(m, *s)),
+        }
+    }
+
     pub fn set_value(&self, slot: usize, v: Value) {
+        #[cfg(lua_mods)]
+        if slot >= SETTING_COUNT {
+            self.script(|s| {
+                if let Some(at) = s.values.get(slot - SETTING_COUNT) {
+                    at.store(v.pack(), Relaxed);
+                }
+            });
+            super::script::note_setting();
+            return;
+        }
         self.values[slot].store(v.pack(), Relaxed);
     }
 
@@ -173,13 +357,17 @@ impl Store {
     }
 
     pub fn text_at(&self, slot: usize) -> String {
-        self.text_slot(slot)
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.with_text(slot, str::to_string)
     }
 
     pub fn with_text<R>(&self, slot: usize, f: impl FnOnce(&str) -> R) -> R {
+        #[cfg(lua_mods)]
+        if slot >= SETTING_COUNT {
+            return self.script(|s| match s.text(slot) {
+                Some(t) => f(&t.lock().unwrap_or_else(PoisonError::into_inner)),
+                None => f(""),
+            });
+        }
         f(&self
             .text_slot(slot)
             .lock()
@@ -187,18 +375,25 @@ impl Store {
     }
 
     pub fn set_text_at(&self, slot: usize, s: &str) {
-        let mut t = self
-            .text_slot(slot)
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        t.clear();
-        t.push_str(s);
+        let put = |t: &Mutex<String>| {
+            let mut t = t.lock().unwrap_or_else(PoisonError::into_inner);
+            t.clear();
+            t.push_str(s);
+        };
+        #[cfg(lua_mods)]
+        if slot >= SETTING_COUNT {
+            self.script(|part| part.text(slot).map(put));
+            super::script::note_setting();
+            return;
+        }
+        put(self.text_slot(slot));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::registry::Id;
 
     #[test]
     fn toggle_counter_sees_a_round_trip() {
@@ -241,14 +436,14 @@ mod tests {
     }
 
     #[test]
-    fn rage_needs_the_profile() {
+    fn blatant_needs_the_profile() {
         let s = Store::from_registry();
         s.set_profile(Mode::Normal);
         let f = Id::Flight;
         s.set_enabled(f, true);
         assert!(s.armed(f));
-        assert!(!s.enabled(f), "Normal does not permit a Rage module");
-        s.set_profile(Mode::Rage);
+        assert!(!s.enabled(f), "Normal does not permit a Blatant module");
+        s.set_profile(Mode::Blatant);
         assert!(s.enabled(f));
     }
 

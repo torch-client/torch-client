@@ -4,23 +4,20 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::camel;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Camel,
-        RenderSpec::new("camel", camel::layer, texture, camel::setup_anim)
-            .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Camel,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Camel],
+        RenderSpec::new("camel", camel::layer, texture, camel::setup_anim),
         RenderSpec::new(
             "camel_baby",
             camel::baby_layer,
             texture,
             camel::baby_setup_anim,
-        )
-        .with_visible(|st| st.extras.is_baby),
+        ),
     );
     registry.add(
         EntityKind::Camel,
@@ -30,7 +27,8 @@ pub fn register(registry: &mut Registry) {
             saddle_texture,
             camel::saddle_setup_anim,
         )
-        .with_visible(|st| !st.extras.is_baby && st.extras.saddled),
+        .with_visible(|st| !st.extras.is_baby && st.extras.saddled)
+        .ignoring_invisibility(),
     );
     registry.add(
         EntityKind::CamelHusk,
@@ -44,7 +42,8 @@ pub fn register(registry: &mut Registry) {
             saddle_texture,
             camel::saddle_setup_anim,
         )
-        .with_visible(|st| st.extras.saddled),
+        .with_visible(|st| st.extras.saddled)
+        .ignoring_invisibility(),
     );
 }
 

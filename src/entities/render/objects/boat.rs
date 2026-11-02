@@ -4,7 +4,7 @@ use bevy::math::{Mat4, Quat, Vec3};
 use crate::entities::TexturePath;
 use crate::entities::models::objects::boat;
 use crate::entities::registry::Registry;
-use crate::entities::render::objects::{hook_for, mirror};
+use crate::entities::render::objects::{hook_for, hurt_wobble, mirror};
 use crate::entities::state::EntityState;
 use crate::entities::{RenderSpec, RootPose};
 
@@ -95,15 +95,9 @@ fn chest_raft_texture(_st: &EntityState) -> TexturePath {
 }
 
 fn root(st: &EntityState) -> RootPose {
-    let mut extra_rotation = Quat::IDENTITY;
+    let mut extra_rotation = hurt_wobble(st);
 
-    let hurt = st.extras.hurt_time;
-    if hurt > 0.0 {
-        let degrees = hurt.sin() * hurt * st.extras.damage / 10.0 * st.extras.hurt_dir;
-        extra_rotation = Quat::from_rotation_x(degrees.to_radians());
-    }
-
-    let bubble = st.extras.bubble_time;
+    let bubble = st.extras.bubble_angle;
     if !st.extras.under_water && !mth_equal(bubble, 0.0) {
         let axis = Vec3::new(1.0, 0.0, 1.0).normalize();
         extra_rotation *= Quat::from_axis_angle(axis, bubble.to_radians());

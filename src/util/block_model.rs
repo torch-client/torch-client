@@ -371,6 +371,23 @@ pub fn powder_snow_at(x: f64, y: f64, z: f64) -> bool {
     })
 }
 
+pub fn solid_at(pos: bevy::math::DVec3) -> bool {
+    let Some(world) = crate::client::tracking::current_world()
+        .lock()
+        .unwrap()
+        .clone()
+    else {
+        return false;
+    };
+    let pos = azalea_core::position::BlockPos::new(
+        pos.x.floor() as i32,
+        pos.y.floor() as i32,
+        pos.z.floor() as i32,
+    );
+    let state = world.read().get_block_state(pos);
+    state.is_some_and(is_solid)
+}
+
 pub fn eye_fluid_at(x: f64, y: f64, z: f64) -> Option<EyeFluid> {
     let world = crate::client::tracking::current_world()
         .lock()

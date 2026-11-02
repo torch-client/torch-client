@@ -355,6 +355,8 @@ fn adopt(world: &mut World) {
     TOUCH.store(2, Ordering::Relaxed);
     world.write_message(AssetsReloaded);
 
+    #[cfg(all(resource_packs, target_arch = "wasm32"))]
+    crate::client::mesh_worker::forward_packs();
     if let Some(shared) = world.get_resource::<crate::renderer::systems::Shared>() {
         shared.0.lock().unwrap().remesh_chunks_requested = true;
     }

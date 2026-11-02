@@ -169,7 +169,10 @@ pub(crate) fn prepare_plan(
         buffers: &gpu.buffers,
         image_snapshots: &gpu.image_snapshots,
         atlas: pack_atlas,
+        #[cfg(not(all(target_arch = "wasm32", not(feature = "webgpu"))))]
         lightmap: display_view(lightmap),
+        #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+        lightmap: super::super::rawviews::lightmap_view(&device),
         atlas_sampler: atlas.sampler.clone(),
         lightmap_sampler: lightmap.sampler.clone(),
         layouts: &gpu.layouts,

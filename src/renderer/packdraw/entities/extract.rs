@@ -33,6 +33,7 @@ pub(crate) fn extract_entity_draws(
     player_rigs: Extract<Option<Res<crate::renderer::player_model::PlayerRigs>>>,
     parents: Extract<Query<&ChildOf>>,
     visibilities: Extract<Query<&Visibility>>,
+    world_camera: Extract<Query<&GlobalTransform, With<crate::renderer::systems::WorldCamera>>>,
     render: Option<ResMut<PackRender>>,
 ) {
     let Some(mut render) = render else { return };
@@ -41,6 +42,9 @@ pub(crate) fn extract_entity_draws(
     };
     let (installed, frame) = (&*install.installed, &mut install.frame);
     frame.entity_draws.clear();
+    let reach_centre = world_camera
+        .single()
+        .map_or(frame.camera, GlobalTransform::translation);
     let programs = installed.entities;
     let shadow_usable = install.usage.shadow;
     let pass_of = |kind: EntityKind| {
@@ -119,7 +123,7 @@ pub(crate) fn extract_entity_draws(
                 Some(root) => shown_below(entity, root),
                 None => inherited.get(),
             }
-            && transform.translation().distance(frame.camera) <= caster_reach;
+            && transform.translation().distance(reach_centre) <= caster_reach;
         let Some(material) = materials.get(&material.0) else {
             continue;
         };

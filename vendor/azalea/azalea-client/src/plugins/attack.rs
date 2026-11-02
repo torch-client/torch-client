@@ -1,9 +1,11 @@
 use azalea_core::{game_type::GameMode, tick::GameTick};
 use azalea_entity::{
-    Attributes, Physics, indexing::EntityIdIndex, metadata::Sprinting, update_bounding_box,
+    Attributes, EntityKindComponent, Physics, indexing::EntityIdIndex, metadata::Sprinting,
+    update_bounding_box,
 };
 use azalea_physics::PhysicsSystems;
 use azalea_protocol::packets::game::ServerboundAttack;
+use azalea_registry::builtin::EntityKind;
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 use derive_more::{Deref, DerefMut};
@@ -26,13 +28,14 @@ impl Plugin for AttackPlugin {
             .add_systems(
                 GameTick,
                 (
-                    increment_ticks_since_last_attack,
-                    update_attack_strength_scale.after(PhysicsSystems),
                     handle_attack_queued
                         .after(super::inventory::ensure_has_sent_carried_item)
+                        .before(PhysicsSystems)
                         .before(super::movement::send_sprinting_if_needed)
                         .before(super::tick_end::game_tick_packet)
                         .before(super::movement::send_position),
+                    increment_ticks_since_last_attack,
+                    update_attack_strength_scale.after(PhysicsSystems),
                 )
                     .chain(),
             );
@@ -51,16 +54,19 @@ pub fn handle_attack_queued(
         &mut TicksSinceLastAttack,
         &mut Physics,
         &mut Sprinting,
+        &mut Attributes,
         &AttackQueued,
         &GameMode,
         &EntityIdIndex,
     )>,
+    kinds: Query<&EntityKindComponent>,
 ) {
     for (
         client_entity,
         mut ticks_since_last_attack,
         mut physics,
         mut sprinting,
+        mut attributes,
         attack_queued,
         &game_mode,
         entity_id_index,
@@ -88,11 +94,62 @@ pub fn handle_attack_queued(
             continue;
         };
 
+        let strength = get_attack_strength_scale(ticks_since_last_attack.0, &attributes, 0.5);
+        let knockback = **sprinting && strength > 0.9;
+        let hurt = kinds
+            .get(target_entity)
+            .is_ok_and(|kind| hurts_on_client(**kind));
+
         ticks_since_last_attack.0 = 0;
 
-        physics.velocity = physics.velocity.multiply(0.6, 1.0, 0.6);
-        **sprinting = false;
+        if hurt && knockback {
+            physics.velocity = physics.velocity.multiply(0.6, 1.0, 0.6);
+            super::movement::set_sprinting(false, &mut sprinting, &mut attributes);
+        }
     }
+}
+
+fn hurts_on_client(kind: EntityKind) -> bool {
+    use EntityKind::*;
+    matches!(
+        kind,
+        Player
+            | AcaciaBoat
+            | AcaciaChestBoat
+            | BambooChestRaft
+            | BambooRaft
+            | BirchBoat
+            | BirchChestBoat
+            | CherryBoat
+            | CherryChestBoat
+            | DarkOakBoat
+            | DarkOakChestBoat
+            | JungleBoat
+            | JungleChestBoat
+            | MangroveBoat
+            | MangroveChestBoat
+            | OakBoat
+            | OakChestBoat
+            | PaleOakBoat
+            | PaleOakChestBoat
+            | SpruceBoat
+            | SpruceChestBoat
+            | Minecart
+            | ChestMinecart
+            | CommandBlockMinecart
+            | FurnaceMinecart
+            | HopperMinecart
+            | SpawnerMinecart
+            | TntMinecart
+            | Painting
+            | LeashKnot
+            | ItemFrame
+            | GlowItemFrame
+            | EndCrystal
+            | ShulkerBullet
+            | ExperienceOrb
+            | Item
+    )
 }
 
 #[derive(Message)]

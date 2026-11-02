@@ -56,7 +56,8 @@ fn lid_pose(lid: &mut PartState, progress: f32) {
 }
 
 fn transform(st: &BeState) -> Transform {
-    let facing = crate::direction::Direction::from(st.state.facing.unwrap_or(Direction::Up));
+    let facing =
+        crate::blocks::direction::Direction::from(st.state.facing.unwrap_or(Direction::Up));
     let rotation = facing.rotation() * Quat::from_rotation_x(std::f32::consts::PI);
     Transform {
         translation: Vec3::splat(0.5) + SCALE * (rotation * Vec3::NEG_Y),

@@ -4,10 +4,13 @@ pub mod nodemap;
 use bevy_platform::time::Instant;
 use std::{
     fmt::{self, Debug},
+    future::Future,
     hash::Hash,
+    pin::Pin,
     time::Duration,
 };
 
+use futures_lite::future;
 use num_format::ToFormattedString;
 use tracing::{debug, trace, warn};
 
@@ -29,6 +32,22 @@ const COEFFICIENTS: [f32; 7] = [1.5, 2., 2.5, 3., 4., 5., 15.];
 
 const MIN_IMPROVEMENT: f32 = 0.01;
 
+const CLOCK_INTERVAL: usize = 1024;
+
+pub type YieldFn = fn() -> Pin<Box<dyn Future<Output = ()>>>;
+
+const SLICE: Duration = Duration::from_millis(4);
+
+const SLICE_CHECK_INTERVAL: usize = 256;
+
+#[inline]
+fn budget_spent(budget: PathfinderTimeout, num_nodes: usize, work_time: Option<Duration>) -> bool {
+    match budget {
+        PathfinderTimeout::Nodes(max_nodes) => num_nodes >= max_nodes,
+        PathfinderTimeout::Time(max_duration) => work_time.is_some_and(|t| t >= max_duration),
+    }
+}
+
 pub fn a_star<P, M, HeuristicFn, SuccessorsFn, SuccessFn>(
     start: P,
     heuristic: HeuristicFn,
@@ -43,7 +62,67 @@ where
     SuccessorsFn: FnMut(P) -> Vec<Edge<P, M>>,
     SuccessFn: Fn(P) -> bool,
 {
+    a_star_into(
+        start,
+        heuristic,
+        |pos: P, out: &mut Vec<Edge<P, M>>| out.extend(successors(pos)),
+        success,
+        min_timeout,
+        max_timeout,
+        || false,
+    )
+}
+
+pub fn a_star_into<P, M, HeuristicFn, SuccessorsFn, SuccessFn, AbortFn>(
+    start: P,
+    heuristic: HeuristicFn,
+    successors: SuccessorsFn,
+    success: SuccessFn,
+    min_timeout: PathfinderTimeout,
+    max_timeout: PathfinderTimeout,
+    should_abort: AbortFn,
+) -> Path<P, M>
+where
+    P: Eq + Hash + Copy + Debug,
+    HeuristicFn: Fn(P) -> f32,
+    SuccessorsFn: FnMut(P, &mut Vec<Edge<P, M>>),
+    SuccessFn: Fn(P) -> bool,
+    AbortFn: Fn() -> bool,
+{
+    future::block_on(a_star_sliced(
+        start,
+        heuristic,
+        successors,
+        success,
+        min_timeout,
+        max_timeout,
+        should_abort,
+        None,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn a_star_sliced<P, M, HeuristicFn, SuccessorsFn, SuccessFn, AbortFn>(
+    start: P,
+    heuristic: HeuristicFn,
+    mut successors: SuccessorsFn,
+    success: SuccessFn,
+    min_timeout: PathfinderTimeout,
+    max_timeout: PathfinderTimeout,
+    should_abort: AbortFn,
+    yield_fn: Option<YieldFn>,
+) -> Path<P, M>
+where
+    P: Eq + Hash + Copy + Debug,
+    HeuristicFn: Fn(P) -> f32,
+    SuccessorsFn: FnMut(P, &mut Vec<Edge<P, M>>),
+    SuccessFn: Fn(P) -> bool,
+    AbortFn: Fn() -> bool,
+{
     let start_time = Instant::now();
+    let mut slice_start = start_time;
+    let mut paused = Duration::ZERO;
+    let mut edges: Vec<Edge<P, M>> = Vec::with_capacity(16);
 
     let mut open_set = PathfinderHeap::new();
     open_set.push(WeightedNode {
@@ -85,7 +164,9 @@ where
             };
         }
 
-        for neighbor in successors(node) {
+        edges.clear();
+        successors(node, &mut edges);
+        for neighbor in edges.drain(..) {
             let tentative_g_score = g_score + neighbor.cost;
             let neighbor_heuristic;
             let neighbor_index;
@@ -130,30 +211,38 @@ where
             }
         }
 
-        if num_nodes.is_multiple_of(10_000) {
-            let min_timeout_reached = match min_timeout {
-                PathfinderTimeout::Time(max_duration) => start_time.elapsed() >= max_duration,
-                PathfinderTimeout::Nodes(max_nodes) => num_nodes >= max_nodes,
+        let mut read_clock = num_nodes.is_multiple_of(CLOCK_INTERVAL);
+
+        if let Some(yield_fn) = yield_fn
+            && num_nodes.is_multiple_of(SLICE_CHECK_INTERVAL)
+            && slice_start.elapsed() >= SLICE
+        {
+            let pause_start = Instant::now();
+            yield_fn().await;
+            slice_start = Instant::now();
+            paused += slice_start - pause_start;
+            read_clock = true;
+        }
+
+        if read_clock && should_abort() {
+            trace!("A* aborted after {num_nodes} nodes");
+            log_perf_info(start_time, num_nodes, num_movements);
+            return Path {
+                movements: Vec::new(),
+                is_partial: true,
+                cost: f32::INFINITY,
             };
+        }
 
-            if min_timeout_reached {
-                if best_paths[6] != 0 {
-                    break;
-                }
+        let work_time = read_clock.then(|| start_time.elapsed().saturating_sub(paused));
+        if budget_spent(min_timeout, num_nodes, work_time) {
+            if best_paths[6] != 0 {
+                break;
+            }
 
-                if min_timeout_reached {
-                    let max_timeout_reached = match max_timeout {
-                        PathfinderTimeout::Time(max_duration) => {
-                            start_time.elapsed() >= max_duration
-                        }
-                        PathfinderTimeout::Nodes(max_nodes) => num_nodes >= max_nodes,
-                    };
-
-                    if max_timeout_reached {
-                        trace!("A* couldn't find a path in time, returning best path");
-                        break;
-                    }
-                }
+            if budget_spent(max_timeout, num_nodes, work_time) {
+                trace!("A* couldn't find a path in time, returning best path");
+                break;
             }
         }
     }
@@ -201,9 +290,10 @@ fn reconstruct_path<P, M, SuccessorsFn>(
 ) -> Vec<Movement<P, M>>
 where
     P: Eq + Hash + Copy + Debug,
-    SuccessorsFn: FnMut(P) -> Vec<Edge<P, M>>,
+    SuccessorsFn: FnMut(P, &mut Vec<Edge<P, M>>),
 {
     let mut path = Vec::new();
+    let mut edges = Vec::with_capacity(16);
     while let Some((&node_position, node)) = nodes.get_index(current_index) {
         if node.came_from == u32::MAX {
             break;
@@ -212,7 +302,9 @@ where
 
         let mut best_successor = None;
         let mut best_successor_cost = f32::INFINITY;
-        for successor in successors(came_from_position) {
+        edges.clear();
+        successors(came_from_position, &mut edges);
+        for successor in edges.drain(..) {
             if successor.movement.target == node_position && successor.cost < best_successor_cost {
                 best_successor_cost = successor.cost;
                 best_successor = Some(successor);

@@ -108,6 +108,7 @@ mod web {
     use wasm_bindgen::{JsCast, prelude::Closure};
 
     use super::Frame;
+    use crate::platform::describe_js as describe;
 
     enum Event {
         Open,
@@ -289,16 +290,5 @@ mod web {
             _close: close,
             _error: error,
         }
-    }
-
-    fn describe(value: &wasm_bindgen::JsValue) -> String {
-        value
-            .as_string()
-            .or_else(|| {
-                js_sys::Reflect::get(value, &"message".into())
-                    .ok()?
-                    .as_string()
-            })
-            .unwrap_or_else(|| format!("{value:?}"))
     }
 }

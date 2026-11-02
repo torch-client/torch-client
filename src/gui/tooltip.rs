@@ -27,7 +27,17 @@ static LANG: Reloadable<HashMap<String, String>> = Reloadable::new(load_lang);
 
 fn load_lang() -> HashMap<String, String> {
     let mut out = HashMap::new();
-    for text in crate::platform::assets::read_stack(crate::assets_root().join("lang/en_us.json")) {
+    #[cfg_attr(not(feature = "asset_download"), allow(unused_mut))]
+    let mut layers =
+        crate::platform::assets::read_stack(crate::assets_root().join("lang/en_us.json"));
+    #[cfg(feature = "asset_download")]
+    if let Some((code, text)) = crate::client::language::strings() {
+        layers.push(std::borrow::Cow::Owned(text.to_string()));
+        layers.extend(crate::platform::assets::read_stack(
+            crate::assets_root().join(format!("lang/{code}.json")),
+        ));
+    }
+    for text in layers {
         let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&text) else {
             continue;
         };
@@ -136,7 +146,7 @@ pub(crate) fn translate(key: &str, args: &[String]) -> String {
     out
 }
 
-fn roman(n: i32) -> String {
+pub(crate) fn roman(n: i32) -> String {
     if n <= 0 || n > 3999 {
         return n.to_string();
     }

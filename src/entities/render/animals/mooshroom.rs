@@ -4,28 +4,25 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::{cow, quadruped};
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Mooshroom,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Mooshroom],
         RenderSpec::new(
             "mooshroom",
             cow::layer,
             adult_texture,
             quadruped::setup_anim,
-        )
-        .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Mooshroom,
+        ),
         RenderSpec::new(
             "mooshroom_baby",
             cow::baby_layer,
             baby_texture,
             quadruped::setup_anim,
-        )
-        .with_visible(|st| st.extras.is_baby),
+        ),
     );
 }
 

@@ -4,35 +4,32 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::armadillo;
 use crate::entities::registry::Registry;
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Armadillo,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Armadillo],
         RenderSpec::new(
             "armadillo",
             armadillo::layer,
             texture,
             armadillo::setup_anim,
-        )
-        .with_visible(|st| !st.extras.is_baby),
-    );
-    registry.add(
-        EntityKind::Armadillo,
+        ),
         RenderSpec::new(
             "armadillo_baby",
             armadillo::baby_layer,
             texture,
             armadillo::baby_setup_anim,
-        )
-        .with_visible(|st| st.extras.is_baby),
+        ),
     );
 }
 
 fn texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/armadillo/armadillo_baby".into()
-    } else {
-        "entity/armadillo/armadillo".into()
-    }
+    aged_texture(
+        st,
+        "entity/armadillo/armadillo",
+        "entity/armadillo/armadillo_baby",
+    )
 }

@@ -2046,6 +2046,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4123,6 +4133,30 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mlua"
+version = "0.11.6"
+dependencies = [
+ "bstr",
+ "either",
+ "libc",
+ "mlua-sys",
+ "num-traits",
+ "parking_lot",
+ "rustc-hash 2.1.2",
+ "rustversion",
+]
+
+[[package]]
+name = "mlua-sys"
+version = "0.10.0"
+dependencies = [
+ "cc",
+ "js-sys",
+ "libc",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -6324,7 +6358,7 @@ dependencies = [
 
 [[package]]
 name = "torch-client"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "arboard",
  "azalea",
@@ -6332,6 +6366,7 @@ dependencies = [
  "azalea-buf",
  "azalea-chat",
  "azalea-core",
+ "azalea-crypto",
  "azalea-inventory",
  "azalea-physics",
  "azalea-protocol",
@@ -6349,6 +6384,7 @@ dependencies = [
  "image",
  "jni 0.22.4",
  "js-sys",
+ "mlua",
  "naga",
  "offset-allocator",
  "parking_lot",
@@ -6367,6 +6403,8 @@ dependencies = [
  "web-time",
  "webpki-roots 1.0.9",
  "wgpu",
+ "winit",
+ "winresource",
 ]
 
 [[package]]
@@ -7575,6 +7613,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2bc6d36480b829272a5bdabf08e6dca8004761c1da7e35efef800540c66221b"
+dependencies = [
+ "version_check",
 ]
 
 [[package]]

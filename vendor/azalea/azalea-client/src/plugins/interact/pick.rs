@@ -26,6 +26,11 @@ use derive_more::{Deref, DerefMut};
 #[derive(Clone, Component, Debug, Deref, DerefMut)]
 pub struct HitResultComponent(HitResult);
 
+#[derive(Clone, Component, Copy, Debug)]
+pub struct PickBoundingBox(pub Aabb);
+
+pub type PickBoxQuery<'world, 'state, 'a> = Query<'world, 'state, &'a PickBoundingBox>;
+
 #[allow(clippy::type_complexity)]
 pub fn update_hit_result_component(
     mut commands: Commands,
@@ -45,6 +50,7 @@ pub fn update_hit_result_component(
     worlds: Res<Worlds>,
     aabb_query: AabbQuery,
     pickable_query: MaybePickableEntityQuery,
+    pick_box_query: PickBoxQuery,
 ) {
     for (
         entity,
@@ -77,6 +83,7 @@ pub fn update_hit_result_component(
             block_pick_range,
             aabb_query: &aabb_query,
             pickable_query: &pickable_query,
+            pick_box_query: &pick_box_query,
         });
         if let Some(mut hit_result_ref) = hit_result_ref {
             **hit_result_ref = hit_result;
@@ -109,7 +116,7 @@ pub type MaybePickableEntityQuery<'world, 'state, 'a> = Query<
     ),
 >;
 
-pub struct PickOpts<'world, 'state, 'a, 'b, 'c> {
+pub struct PickOpts<'world, 'state, 'a, 'b, 'c, 'd> {
     source_entity: Entity,
     look_direction: LookDirection,
     eye_position: Vec3,
@@ -119,9 +126,10 @@ pub struct PickOpts<'world, 'state, 'a, 'b, 'c> {
     block_pick_range: f64,
     aabb_query: &'a AabbQuery<'world, 'state, 'b>,
     pickable_query: &'a MaybePickableEntityQuery<'world, 'state, 'c>,
+    pick_box_query: &'a PickBoxQuery<'world, 'state, 'd>,
 }
 
-pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_>) -> HitResult {
+pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_, '_>) -> HitResult {
 
     let mut max_range = opts.entity_pick_range.max(opts.block_pick_range);
     let mut max_range_squared = max_range.powi(2);
@@ -169,6 +177,7 @@ pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_>) -> HitResult {
         predicate: &is_pickable,
         aabb: &pick_aabb,
         aabb_query: opts.aabb_query,
+        pick_box_query: opts.pick_box_query,
     });
 
     if let Some(entity_hit_result) = entity_hit_result
@@ -221,7 +230,7 @@ pub fn pick_block(
     )
 }
 
-struct PickEntityOpts<'world, 'state, 'a, 'b> {
+struct PickEntityOpts<'world, 'state, 'a, 'b, 'd> {
     source_entity: Entity,
     eye_position: Vec3,
     end_position: Vec3,
@@ -230,6 +239,7 @@ struct PickEntityOpts<'world, 'state, 'a, 'b> {
     predicate: &'a dyn Fn(Entity) -> bool,
     aabb: &'a Aabb,
     aabb_query: &'a AabbQuery<'world, 'state, 'b>,
+    pick_box_query: &'a PickBoxQuery<'world, 'state, 'd>,
 }
 
 fn pick_entity(opts: PickEntityOpts) -> Option<EntityHitResult> {
@@ -244,6 +254,10 @@ fn pick_entity(opts: PickEntityOpts) -> Option<EntityHitResult> {
         opts.aabb_query,
     ) {
         let candidate_pick_radius = 0.;
+        let candidate_aabb = opts
+            .pick_box_query
+            .get(candidate)
+            .map_or(candidate_aabb, |b| b.0);
         let candidate_aabb = candidate_aabb.inflate_all(candidate_pick_radius);
         let clip_location = candidate_aabb.clip(opts.eye_position, opts.end_position);
 

@@ -1,5 +1,9 @@
 #[cfg(not(feature = "module_panel"))]
 mod columns;
+#[cfg(lua_mods)]
+mod mod_editor;
+#[cfg(lua_mods)]
+pub(crate) mod mods;
 #[cfg(feature = "module_panel")]
 mod panel;
 mod picker;
@@ -9,7 +13,7 @@ use bevy::prelude::Vec2;
 
 use crate::gui::keybinds::Bound;
 use crate::modules::list::BitList;
-use crate::modules::registry::{COUNT, Category, Id, Kind, Mode, SettingDef, module};
+use crate::modules::registry::{Category, Kind, Mode, ModuleIx, SettingDef, module, module_count};
 use crate::modules::{Value, store};
 use crate::text::contains_ci;
 use picker::{Picker, Row};
@@ -408,13 +412,28 @@ struct NumberEdit {
 
 enum KeyOwner {
     None,
-    Capture(Id),
+    Capture(BindTarget),
     Field(FieldEdit),
     Number(NumberEdit),
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum BindTarget {
+    Module(ModuleIx),
+    Setting(u16),
+}
+
+impl BindTarget {
+    fn set(self, b: Bound) {
+        match self {
+            BindTarget::Module(id) => store().set_bind(id, b),
+            BindTarget::Setting(slot) => store().set_value(slot as usize, Value::Key(b)),
+        }
+    }
+}
+
 impl KeyOwner {
-    fn capture(&self) -> Option<Id> {
+    fn capture(&self) -> Option<BindTarget> {
         match self {
             KeyOwner::Capture(id) => Some(*id),
             _ => None,
@@ -451,11 +470,13 @@ struct TextSpec {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Keys {
-    Capture(Id),
+    Capture(BindTarget),
     Overlay,
     Field,
     Number,
     Search,
+    #[cfg(lua_mods)]
+    ModEditor,
     Nothing,
 }
 
@@ -463,9 +484,18 @@ enum Keys {
 enum Tab {
     Modules,
     Config,
+    #[cfg(lua_mods)]
+    Mods,
 }
 
+#[cfg(not(lua_mods))]
 const TABS: [(Tab, &str); 2] = [(Tab::Modules, "Modules"), (Tab::Config, "Config")];
+#[cfg(lua_mods)]
+const TABS: [(Tab, &str); 3] = [
+    (Tab::Modules, "Modules"),
+    (Tab::Config, "Config"),
+    (Tab::Mods, "Mods"),
+];
 
 const TAB_PAD: f32 = 9.0;
 const STRIP_PAD: f32 = 2.0;
@@ -523,7 +553,7 @@ pub struct ClickGuiState {
     tab: Tab,
     panels: [Panel; COLUMNS],
     order: Vec<u8>,
-    expanded: Option<Id>,
+    expanded: Option<ModuleIx>,
     dropdown: Option<Control>,
     profile_seen: Mode,
     drag: Option<Drag>,
@@ -534,7 +564,23 @@ pub struct ClickGuiState {
     config: Panel,
     field: TextBox,
     mouse_input: GuiInput,
-    matches: Vec<Id>,
+    matches: Vec<ModuleIx>,
+    #[cfg(lua_mods)]
+    scripts_seen: u32,
+    #[cfg(lua_mods)]
+    mods_h: f32,
+    #[cfg(lua_mods)]
+    mod_selected: Option<String>,
+    #[cfg(lua_mods)]
+    mod_detail_h: f32,
+    #[cfg(lua_mods)]
+    mod_drop: Vec<crate::modules::script::Candidate>,
+    #[cfg(lua_mods)]
+    mod_uninstall: Option<String>,
+    #[cfg(lua_mods)]
+    drop_card_h: f32,
+    #[cfg(lua_mods)]
+    mod_editor: Option<mod_editor::ModEditor>,
     selected: usize,
     match_top: usize,
     scratch: String,
@@ -543,7 +589,9 @@ pub struct ClickGuiState {
     overlay_win: Panel,
     tip: Option<(&'static str, f32, f32)>,
     tip_lines: Vec<(usize, usize)>,
+    capture_rect: Option<(f32, f32, f32, f32)>,
     placed: bool,
+    placed_vw: f32,
     applied: f32,
     scale_set: bool,
     opened_at: Option<f32>,
@@ -571,7 +619,23 @@ impl Default for ClickGuiState {
             config: Panel::at(0.0, 0.0),
             field: TextBox::pinned(48, ""),
             mouse_input: GuiInput::default(),
-            matches: Vec::with_capacity(COUNT),
+            matches: Vec::with_capacity(module_count()),
+            #[cfg(lua_mods)]
+            scripts_seen: crate::modules::registry::generation(),
+            #[cfg(lua_mods)]
+            mods_h: 0.0,
+            #[cfg(lua_mods)]
+            mod_selected: None,
+            #[cfg(lua_mods)]
+            mod_detail_h: 0.0,
+            #[cfg(lua_mods)]
+            mod_drop: Vec::new(),
+            #[cfg(lua_mods)]
+            mod_uninstall: None,
+            #[cfg(lua_mods)]
+            drop_card_h: 0.0,
+            #[cfg(lua_mods)]
+            mod_editor: None,
             selected: 0,
             match_top: 0,
             scratch: String::with_capacity(16),
@@ -580,7 +644,9 @@ impl Default for ClickGuiState {
             overlay_win: Panel::at(0.0, 0.0),
             tip: None,
             tip_lines: Vec::with_capacity(4),
+            capture_rect: None,
             placed: false,
+            placed_vw: 0.0,
             applied: 1.0,
             scale_set: false,
             opened_at: None,
@@ -606,6 +672,8 @@ pub fn draw(p: &mut Painter, st: &mut ClickGuiState, ctx: &ScreenCtx) {
         vh: ctx.vh / s,
     };
 
+    #[cfg(lua_mods)]
+    st.sync_scripts();
     st.place(&mut ui);
     let s = st.applied;
     st.tab_key(&ui);
@@ -678,6 +746,8 @@ impl ClickGuiState {
                 self.config_window(p, ui);
                 self.overlay_window(p, ui);
             }
+            #[cfg(lua_mods)]
+            Tab::Mods => self.mods_window(p, ui),
         }
         #[cfg(not(feature = "module_panel"))]
         self.profile_control(p, ui);
@@ -754,9 +824,25 @@ impl ClickGuiState {
     }
 
     pub fn escape(&mut self) -> bool {
+        #[cfg(lua_mods)]
+        self.sync_scripts();
+        #[cfg(lua_mods)]
+        if self.typing() {
+            self.cancel_mod_editor();
+            return true;
+        }
+        #[cfg(lua_mods)]
+        if !self.mod_drop.is_empty() {
+            self.answer_mod_drop(false);
+            return true;
+        }
+        #[cfg(lua_mods)]
+        if self.mod_uninstall.take().is_some() {
+            return true;
+        }
         match self.keys() {
-            Keys::Capture(id) => {
-                store().set_bind(id, Bound::Unbound);
+            Keys::Capture(target) => {
+                target.set(Bound::Unbound);
                 self.owner = KeyOwner::None;
             }
             Keys::Overlay => self.overlay = None,
@@ -764,15 +850,21 @@ impl ClickGuiState {
             #[cfg(feature = "module_panel")]
             Keys::Search if self.expanded.is_some() => self.close_sheet(),
             Keys::Search | Keys::Nothing => return false,
+            #[cfg(lua_mods)]
+            Keys::ModEditor => {}
         }
         true
     }
 
     fn keys(&self) -> Keys {
-        if let Some(id) = self.owner.capture()
-            && self.block_open(id)
+        #[cfg(lua_mods)]
+        if self.typing() {
+            return Keys::ModEditor;
+        }
+        if let Some(target) = self.owner.capture()
+            && self.capture_alive(target)
         {
-            Keys::Capture(id)
+            Keys::Capture(target)
         } else if self.overlay.is_some() {
             Keys::Overlay
         } else if self.owner.field().is_some_and(|f| self.field_alive(f.slot)) {
@@ -788,7 +880,7 @@ impl ClickGuiState {
         }
     }
 
-    fn block_open(&self, id: Id) -> bool {
+    fn block_open(&self, id: ModuleIx) -> bool {
         self.tab == Tab::Modules
             && self.expanded == Some(id)
             && store().allowed(id)
@@ -798,6 +890,13 @@ impl ClickGuiState {
     fn field_alive(&self, slot: u16) -> bool {
         self.expanded
             .is_some_and(|id| module(id).slots().contains(&(slot as usize)) && self.block_open(id))
+    }
+
+    fn capture_alive(&self, target: BindTarget) -> bool {
+        match target {
+            BindTarget::Module(id) => self.block_open(id),
+            BindTarget::Setting(slot) => self.field_alive(slot),
+        }
     }
 
     fn number_alive(&self, ctl: Control) -> bool {
@@ -862,6 +961,14 @@ impl ClickGuiState {
             self.search.y = top;
             self.config.x = ((ui.vw - CONFIG_W) * 0.5).floor();
             self.config.y = top;
+            self.placed_vw = ui.vw;
+        }
+
+        let shift = ((ui.vw - self.placed_vw) * 0.5).trunc();
+        if shift != 0.0 {
+            self.placed_vw += shift * 2.0;
+            self.config.x += shift;
+            self.overlay_win.x += shift;
         }
 
         let (w, right) = (self.look.panel_w, (ui.vw - 24.0).floor());
@@ -928,11 +1035,19 @@ impl ClickGuiState {
             Focus::On(Window::Column(_) | Window::Search) => self.tab == Tab::Modules,
             #[cfg(feature = "module_panel")]
             Focus::On(Window::Grid | Window::Sheet) => self.tab == Tab::Modules,
-            Focus::On(Window::Config) => self.tab == Tab::Config,
+            Focus::On(Window::Config) => self.config_tab(),
             Focus::On(Window::Overlay) => {
                 self.overlay.is_some() && matches!(self.tab, Tab::Modules | Tab::Config)
             }
         }
+    }
+
+    fn config_tab(&self) -> bool {
+        #[cfg(lua_mods)]
+        if self.tab == Tab::Mods {
+            return true;
+        }
+        self.tab == Tab::Config
     }
 
     fn record(&mut self, focus: Focus, x: f32, y: f32, w: f32, h: f32) {
@@ -953,26 +1068,39 @@ impl ClickGuiState {
     fn keyboard(&mut self, ui: &Ui) {
         let stale = match &self.owner {
             KeyOwner::None => false,
-            KeyOwner::Capture(id) => !self.block_open(*id),
+            KeyOwner::Capture(target) => !self.capture_alive(*target),
             KeyOwner::Field(f) => !self.field_alive(f.slot),
             KeyOwner::Number(n) => !self.number_alive(n.ctl),
         };
         if stale {
             self.owner = KeyOwner::None;
         }
+        if !matches!(self.keys(), Keys::Number | Keys::Overlay)
+            && crate::platform::keyboard::has_focus()
+        {
+            crate::platform::keyboard::hide();
+        }
         match self.keys() {
-            Keys::Capture(id) => {
+            Keys::Capture(target) => {
                 if let Some(key) = ui.input.pressed_key {
                     if key != bevy::prelude::KeyCode::Escape {
-                        store().set_bind(id, Bound::Key(key));
+                        target.set(Bound::Key(key));
                         self.owner = KeyOwner::None;
                     }
                 } else if let Some(button) = ui.input.pressed_mouse {
-                    store().set_bind(id, Bound::Mouse(button));
-                    self.owner = KeyOwner::None;
+                    let on_button = button == bevy::prelude::MouseButton::Left
+                        && self
+                            .capture_rect
+                            .is_some_and(|(x, y, w, h)| ui.hovering(x, y, w, h));
+                    if !on_button {
+                        target.set(Bound::Mouse(button));
+                        self.owner = KeyOwner::None;
+                    }
                 }
             }
             Keys::Overlay | Keys::Nothing => {}
+            #[cfg(lua_mods)]
+            Keys::ModEditor => {}
             Keys::Field => {
                 let KeyOwner::Field(f) = &mut self.owner else {
                     return;
@@ -1022,7 +1150,11 @@ impl ClickGuiState {
         if ui.input.enter
             && let Some(&id) = self.matches.get(self.selected)
         {
-            store().toggle(id);
+            if ui.input.shift {
+                self.toggle_settings(id);
+            } else {
+                store().toggle(id);
+            }
         }
     }
 
@@ -1081,7 +1213,7 @@ impl ClickGuiState {
     fn open_editor(
         &mut self,
         slot: u16,
-        id: Id,
+        id: ModuleIx,
         name: &'static str,
         max_len: usize,
         font: &crate::text::Font,
@@ -1120,13 +1252,47 @@ impl ClickGuiState {
         self.overlay_win = Panel::at(((ui.vw - list.width) * 0.5).floor(), GAP + TOP_H + GAP);
     }
 
-    fn settings_height(&self, id: Id) -> f32 {
+    fn settings_height(&self, id: ModuleIx) -> f32 {
         let m = module(id);
         6.0 + (if SHOW_BIND { BIND_H } else { 0.0 })
             + m.slots()
                 .zip(m.settings())
+                .filter(|(slot, _)| store().visible(m, *slot))
                 .map(|(slot, d)| self.setting_height(slot, d))
                 .sum::<f32>()
+    }
+
+    fn release_slots(&mut self, drop: impl Fn(u16) -> bool) {
+        let stale = match &self.owner {
+            KeyOwner::None | KeyOwner::Capture(BindTarget::Module(_)) => false,
+            KeyOwner::Capture(BindTarget::Setting(s)) => drop(*s),
+            KeyOwner::Field(f) => drop(f.slot),
+            KeyOwner::Number(n) => matches!(n.ctl, Control::Setting(s) if drop(s)),
+        };
+        if stale {
+            self.owner = KeyOwner::None;
+        }
+        if matches!(&self.overlay, Some(Overlay::Editor(e)) if drop(e.slot)) {
+            self.overlay = None;
+        }
+        if matches!(self.dropdown, Some(Control::Setting(s)) if drop(s)) {
+            self.dropdown = None;
+        }
+        if matches!(self.drag, Some(Drag::Slider { id: Control::Setting(s), .. }) if drop(s)) {
+            self.drag = None;
+        }
+    }
+
+    fn hide_row(&mut self, slot: usize, d: &SettingDef) {
+        let slot = slot as u16;
+        self.release_slots(|s| s == slot);
+        let picking = matches!(
+            (d.kind, &self.overlay),
+            (Kind::List { list }, Some(Overlay::Picker(p))) if std::ptr::eq(list, p.list)
+        );
+        if picking {
+            self.overlay = None;
+        }
     }
 
     fn setting_height(&self, slot: usize, d: &SettingDef) -> f32 {
@@ -1142,6 +1308,7 @@ impl ClickGuiState {
             }
             Kind::List { .. } => LIST_H,
             Kind::Text { .. } => TEXTBOX_ROW_H,
+            Kind::Key { .. } | Kind::Button { .. } => BIND_H,
         }
     }
 
@@ -1266,6 +1433,10 @@ impl ClickGuiState {
         if matches!(self.keys(), Keys::Capture(_)) {
             return;
         }
+        #[cfg(lua_mods)]
+        if self.keys() == Keys::ModEditor {
+            return;
+        }
         let step = ui.input.profile_up as i8 - ui.input.profile_down as i8;
         if step != 0 {
             store().set_profile(store().profile().step(step));
@@ -1274,6 +1445,10 @@ impl ClickGuiState {
 
     fn tab_key(&mut self, ui: &Ui) {
         if !ui.input.tab || matches!(self.keys(), Keys::Capture(_)) {
+            return;
+        }
+        #[cfg(lua_mods)]
+        if self.keys() == Keys::ModEditor {
             return;
         }
         let here = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0);
@@ -1379,8 +1554,13 @@ impl ClickGuiState {
         panel.scroll
     }
 
-    fn outlined(&self) -> Option<Id> {
+    fn outlined(&self) -> Option<ModuleIx> {
         self.matches.get(self.selected).copied()
+    }
+
+    #[cfg(lua_mods)]
+    pub(crate) fn look(&self) -> Look {
+        self.look
     }
 
     fn dragging_scale(&self) -> bool {
@@ -1401,7 +1581,7 @@ impl ClickGuiState {
         x: f32,
         y: f32,
         w: f32,
-        id: Id,
+        id: ModuleIx,
         active: bool,
     ) -> f32 {
         let look = self.look;
@@ -1419,6 +1599,10 @@ impl ClickGuiState {
         }
         let m = module(id);
         for (slot, d) in m.slots().zip(m.settings()) {
+            if !store().visible(m, slot) {
+                self.hide_row(slot, d);
+                continue;
+            }
             let ctl = Control::Setting(slot as u16);
             let row_h = self.setting_height(slot, d);
             if !d.tip.is_empty() && self.hint(ui, x, sy, w, row_h, active) {
@@ -1429,10 +1613,13 @@ impl ClickGuiState {
             let label_y = match d.kind {
                 Kind::Toggle { .. } => text_y(sy, TOGGLE_H),
                 Kind::Enum { .. } => text_y(sy, ENUM_H - 3.0),
+                Kind::Key { .. } | Kind::Button { .. } => text_y(sy, BIND_H),
                 _ => sy + 1.0,
             };
             if self.revert(p, ui, rx, label_y, changed(slot, d.kind), active) {
-                if matches!(&self.owner, KeyOwner::Number(n) if n.ctl == ctl) {
+                if matches!(&self.owner, KeyOwner::Number(n) if n.ctl == ctl)
+                    || self.owner.capture() == Some(BindTarget::Setting(slot as u16))
+                {
                     self.owner = KeyOwner::None;
                 }
                 match d.kind {
@@ -1494,6 +1681,19 @@ impl ClickGuiState {
                 }
                 (Kind::List { list }, _) => {
                     self.list_button(p, ui, ix, sy, iw, d.name, list, active);
+                }
+                (Kind::Key { .. }, Some(Value::Key(bound))) => {
+                    let target = BindTarget::Setting(slot as u16);
+                    self.bind_button(p, ui, ix, sy, iw, d.name, target, bound, active);
+                }
+                (Kind::Button { text, key }, _) => {
+                    let live = store().enabled(id);
+                    if self.action_button(p, ui, ix, sy, iw, d.name, text, live, active) {
+                        #[cfg(lua_mods)]
+                        crate::modules::script::setting_button(id, key);
+                        #[cfg(not(lua_mods))]
+                        let _ = key;
+                    }
                 }
                 (
                     Kind::Text {
@@ -1910,42 +2110,58 @@ impl ClickGuiState {
             .sum::<f32>()
     }
 
-    fn config_window(&mut self, p: &mut Painter, ui: &Ui) {
-        let look = self.look;
-        let active = self.focus == Focus::On(Window::Config) && self.drag.is_none();
+    #[allow(clippy::too_many_arguments, reason = "one window, flat arguments")]
+    fn config_shell(
+        &mut self,
+        p: &mut Painter,
+        ui: &Ui,
+        title: &str,
+        content_h: f32,
+        active: bool,
+        w: f32,
+    ) -> Option<(f32, f32, f32, f32, f32)> {
         #[cfg(not(feature = "module_panel"))]
-        let (x, top, cw, view_h, scroll) = {
+        {
+            let look = self.look;
             let Panel {
                 x, y, collapsed, ..
             } = self.config;
-            let content_h = if collapsed {
-                0.0
+            let w = w.min(ui.vw - 2.0 * GAP).max(CONFIG_W);
+            let x = if w > CONFIG_W {
+                (x + (CONFIG_W - w) * 0.5)
+                    .clamp(GAP, (ui.vw - w - GAP).max(GAP))
+                    .floor()
             } else {
-                self.config_content_h()
+                x
             };
+            let content_h = if collapsed { 0.0 } else { content_h };
             let view_h = self.fit(content_h, y, ui.vh);
             let scroll = self.scroll(Window::Config, ui, active, content_h, view_h);
 
-            p.rounded_rect(x, y, CONFIG_W, HEADER_H + view_h, look.radius, look.panel());
-            self.record(Focus::On(Window::Config), x, y, CONFIG_W, HEADER_H + view_h);
-            self.title_bar(
-                p,
-                ui,
-                Window::Config,
-                x,
-                y,
-                CONFIG_W,
-                "Config",
-                collapsed,
-                active,
-            );
+            p.rounded_rect(x, y, w, HEADER_H + view_h, look.radius, look.panel());
+            self.record(Focus::On(Window::Config), x, y, w, HEADER_H + view_h);
+            self.title_bar(p, ui, Window::Config, x, y, w, title, collapsed, active);
             if collapsed {
-                return;
+                return None;
             }
-            (x, y + HEADER_H, CONFIG_W, view_h, scroll)
-        };
+            Some((x, y + HEADER_H, w, view_h, scroll))
+        }
         #[cfg(feature = "module_panel")]
-        let (x, top, cw, view_h, scroll) = self.config_frame(p, ui, active);
+        {
+            let _ = w;
+            Some(self.config_frame(p, ui, title, content_h, active))
+        }
+    }
+
+    fn config_window(&mut self, p: &mut Painter, ui: &Ui) {
+        let look = self.look;
+        let active = self.focus == Focus::On(Window::Config) && self.drag.is_none();
+        let content_h = self.config_content_h();
+        let Some((x, top, cw, view_h, scroll)) =
+            self.config_shell(p, ui, "Config", content_h, active, CONFIG_W)
+        else {
+            return;
+        };
 
         let guard = p.push_clip(x, top, cw, view_h);
         self.band = (top, top + view_h);
@@ -2249,7 +2465,7 @@ impl ClickGuiState {
         w: f32,
         name: &'static str,
         slot: u16,
-        id: Id,
+        id: ModuleIx,
         spec: TextSpec,
         active: bool,
     ) {
@@ -2326,10 +2542,60 @@ impl ClickGuiState {
     }
 
     #[allow(clippy::too_many_arguments, reason = "one widget, flat arguments")]
-    fn bind_row(&mut self, p: &mut Painter, ui: &Ui, x: f32, y: f32, w: f32, id: Id, active: bool) {
-        let look = self.look;
-        let capturing = self.owner.capture() == Some(id);
+    fn bind_row(
+        &mut self,
+        p: &mut Painter,
+        ui: &Ui,
+        x: f32,
+        y: f32,
+        w: f32,
+        id: ModuleIx,
+        active: bool,
+    ) {
         let bound = store().bind(id);
+        self.bind_button(
+            p,
+            ui,
+            x,
+            y,
+            w,
+            "Bind",
+            BindTarget::Module(id),
+            bound,
+            active,
+        );
+
+        let rx = x + w + 2.0;
+        if self.revert(
+            p,
+            ui,
+            rx,
+            text_y(y, BIND_H),
+            bound != Bound::Unbound,
+            active,
+        ) {
+            store().set_bind(id, Bound::Unbound);
+            if self.owner.capture().is_some() {
+                self.owner = KeyOwner::None;
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "one widget, flat arguments")]
+    fn bind_button(
+        &mut self,
+        p: &mut Painter,
+        ui: &Ui,
+        x: f32,
+        y: f32,
+        w: f32,
+        name: &str,
+        target: BindTarget,
+        bound: Bound,
+        active: bool,
+    ) {
+        let look = self.look;
+        let capturing = self.owner.capture() == Some(target);
         let label = if capturing {
             "> ? <"
         } else {
@@ -2339,15 +2605,15 @@ impl ClickGuiState {
         let bw = (lw + 8.0).max(28.0);
         let bx = x + w - bw;
         let hovered = self.lit(ui, bx, y, bw, BIND_H - 1.0, active);
+        if capturing {
+            self.capture_rect = Some((bx, y, bw, BIND_H - 1.0));
+        }
 
-        self.label(
-            p,
-            "Bind",
-            x,
-            text_y(y, BIND_H),
-            w - bw - 4.0,
-            look.text_dim(),
-        );
+        let name_argb = match target {
+            BindTarget::Module(_) => look.text_dim(),
+            BindTarget::Setting(_) => look.text(),
+        };
+        self.label(p, name, x, text_y(y, BIND_H), w - bw - 4.0, name_argb);
         p.rounded_rect(
             bx,
             y,
@@ -2379,24 +2645,66 @@ impl ClickGuiState {
             self.owner = if capturing {
                 KeyOwner::None
             } else {
-                KeyOwner::Capture(id)
+                KeyOwner::Capture(target)
             };
         }
+    }
 
-        let rx = x + w + 2.0;
-        if self.revert(
+    #[allow(clippy::too_many_arguments, reason = "one widget, flat arguments")]
+    fn action_button(
+        &mut self,
+        p: &mut Painter,
+        ui: &Ui,
+        x: f32,
+        y: f32,
+        w: f32,
+        name: &str,
+        text: &str,
+        live: bool,
+        active: bool,
+    ) -> bool {
+        let look = self.look;
+        let tw = p.atlas.font.width_str(text);
+        let bw = (tw + 10.0).max(34.0);
+        let bx = x + w - bw;
+        let h = BIND_H - 1.0;
+        let hovered = live && self.lit(ui, bx, y, bw, h, active);
+        self.label(
             p,
-            ui,
-            rx,
+            name,
+            x,
             text_y(y, BIND_H),
-            bound != Bound::Unbound,
-            active,
-        ) {
-            store().set_bind(id, Bound::Unbound);
-            if self.owner.capture().is_some() {
-                self.owner = KeyOwner::None;
-            }
-        }
+            w - bw - 4.0,
+            if live { look.text() } else { look.text_dim() },
+        );
+        p.rounded_rect(
+            bx,
+            y,
+            bw,
+            h,
+            3.0,
+            if !live {
+                look.nest_hi()
+            } else if hovered {
+                look.accent()
+            } else {
+                look.header()
+            },
+        );
+        p.text_plain(
+            text,
+            (bx + (bw - tw) * 0.5).floor(),
+            text_y(y, h),
+            if !live {
+                look.text_dim()
+            } else if hovered {
+                theme::TEXT_ON
+            } else {
+                look.text()
+            },
+            look.shadow,
+        );
+        live && self.press(ui, bx, y, bw, h, active)
     }
 
     #[allow(clippy::too_many_arguments, reason = "one widget, flat arguments")]

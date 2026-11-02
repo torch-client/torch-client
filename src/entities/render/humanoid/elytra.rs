@@ -11,12 +11,17 @@ use super::armor::{self, LAYER_WINGS};
 pub fn register(registry: &mut Registry, kinds: &[EntityKind]) {
     registry.add_many(
         kinds,
-        RenderSpec::new("elytra", model::layer, texture, setup).with_visible(visible),
+        RenderSpec::new("elytra", model::layer, texture, setup)
+            .with_visible(visible)
+            .with_armor_glint(armor::chestplate_foil)
+            .ignoring_invisibility(),
     );
     registry.add_many(
         kinds,
         RenderSpec::new("elytra_baby", model::baby_layer, texture, setup)
-            .with_visible(visible_baby),
+            .with_visible(visible_baby)
+            .with_armor_glint(armor::chestplate_foil)
+            .ignoring_invisibility(),
     );
 }
 

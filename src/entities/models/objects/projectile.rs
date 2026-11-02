@@ -168,15 +168,7 @@ pub fn llama_spit_layer() -> LayerDef {
 }
 
 pub fn wither_skull_layer() -> LayerDef {
-    let mut mesh = MeshDef::new();
-    mesh.root().child(
-        "head",
-        CubeList::new()
-            .tex_offs(0, 35)
-            .add_box(-4.0, -8.0, -4.0, 8.0, 8.0, 8.0),
-        PartPose::ZERO,
-    );
-    LayerDef::create(mesh, 64, 64)
+    LayerDef::single_box("head", (0, 35), [-4.0, -8.0, -4.0, 8.0, 8.0, 8.0], (64, 64))
 }
 
 pub fn wither_skull_setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {

@@ -421,7 +421,7 @@ impl<F: Fn([i32; 3]) -> BlockState> Resolver<'_, F> {
 
     fn add_branching_blocks(&mut self, from: [i32; 3]) -> bool {
         let from_state = self.level.state(from);
-        for direction in facing::ALL {
+        for direction in crate::blocks::direction::Direction::ALL.map(Direction::from) {
             if direction == self.push || direction == self.push.opposite() {
                 continue;
             }

@@ -6,6 +6,7 @@ pub mod find_blocks;
 pub mod heightmap;
 pub mod iterators;
 pub mod palette;
+pub mod retain;
 mod world;
 
 pub use bit_storage::BitStorage;

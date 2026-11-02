@@ -4,28 +4,26 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::aquatic::nautilus;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
+use crate::entities::render::humanoid::armor;
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Nautilus,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Nautilus],
         RenderSpec::new(
             "nautilus",
             nautilus::nautilus_layer,
             adult_texture,
             nautilus::setup_anim,
-        )
-        .with_visible(is_adult),
-    );
-    registry.add(
-        EntityKind::Nautilus,
+        ),
         RenderSpec::new(
             "nautilus_baby",
             nautilus::baby_layer,
             baby_texture,
             nautilus::setup_anim,
-        )
-        .with_visible(is_baby),
+        ),
     );
     registry.add(
         EntityKind::Nautilus,
@@ -35,7 +33,8 @@ pub fn register(registry: &mut Registry) {
             body_armor_texture,
             nautilus::setup_anim,
         )
-        .with_visible(shows_body_armor),
+        .with_visible(shows_body_armor)
+        .ignoring_invisibility(),
     );
     registry.add(
         EntityKind::Nautilus,
@@ -45,7 +44,8 @@ pub fn register(registry: &mut Registry) {
             saddle_texture,
             nautilus::setup_anim,
         )
-        .with_visible(shows_saddle),
+        .with_visible(shows_saddle)
+        .ignoring_invisibility(),
     );
 
     registry.add(
@@ -76,7 +76,8 @@ pub fn register(registry: &mut Registry) {
             body_armor_texture,
             nautilus::setup_anim,
         )
-        .with_visible(shows_body_armor),
+        .with_visible(shows_body_armor)
+        .ignoring_invisibility(),
     );
     registry.add(
         EntityKind::ZombieNautilus,
@@ -86,16 +87,9 @@ pub fn register(registry: &mut Registry) {
             saddle_texture,
             nautilus::setup_anim,
         )
-        .with_visible(shows_saddle),
+        .with_visible(shows_saddle)
+        .ignoring_invisibility(),
     );
-}
-
-fn is_adult(st: &EntityState) -> bool {
-    !st.extras.is_baby
-}
-
-fn is_baby(st: &EntityState) -> bool {
-    st.extras.is_baby
 }
 
 fn adult_texture(_st: &EntityState) -> TexturePath {
@@ -130,21 +124,12 @@ fn zombie_texture(st: &EntityState) -> TexturePath {
 }
 
 fn shows_body_armor(st: &EntityState) -> bool {
-    !st.extras.is_baby && st.extras.body_armor.is_some()
+    !st.extras.is_baby
+        && armor::has_layer(st.extras.body_armor.as_deref(), armor::LAYER_NAUTILUS_BODY)
 }
 
 fn body_armor_texture(st: &EntityState) -> TexturePath {
-    let asset = match &st.extras.body_armor {
-        Some(id) => id.rsplit(':').next().unwrap_or("copper"),
-        None => "copper",
-    };
-    match asset {
-        "diamond" => "entity/equipment/nautilus_body/diamond".into(),
-        "gold" => "entity/equipment/nautilus_body/gold".into(),
-        "iron" => "entity/equipment/nautilus_body/iron".into(),
-        "netherite" => "entity/equipment/nautilus_body/netherite".into(),
-        _ => "entity/equipment/nautilus_body/copper".into(),
-    }
+    armor::slot_texture(st.extras.body_armor.as_deref(), armor::LAYER_NAUTILUS_BODY).into()
 }
 
 fn shows_saddle(st: &EntityState) -> bool {

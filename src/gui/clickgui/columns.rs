@@ -3,7 +3,7 @@ use super::{
     search_field, text_y, theme,
 };
 use crate::gui::painter::Painter;
-use crate::modules::registry::{Category, ModuleDef, module};
+use crate::modules::registry::{Category, ModuleDef, ModuleIx, module};
 use crate::modules::store;
 
 #[derive(Clone, Copy)]
@@ -21,6 +21,12 @@ fn cat_w(p: &Painter, cat: &str) -> f32 {
 }
 
 impl ClickGuiState {
+    pub(super) fn toggle_settings(&mut self, id: ModuleIx) {
+        self.expanded = (self.expanded != Some(id)).then_some(id);
+        self.dropdown = None;
+        self.owner.drop_field();
+    }
+
     pub(super) fn columns(&mut self, p: &mut Painter, ui: &Ui) {
         for i in 0..self.order.len() {
             let pi = self.order[i] as usize;
@@ -73,9 +79,7 @@ impl ClickGuiState {
                     store().toggle(m.id);
                 }
                 if ui.input.right_click {
-                    self.expanded = (self.expanded != Some(m.id)).then_some(m.id);
-                    self.dropdown = None;
-                    self.owner.drop_field();
+                    self.toggle_settings(m.id);
                 }
             }
             cy += look.row_h;

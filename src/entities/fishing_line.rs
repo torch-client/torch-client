@@ -25,7 +25,7 @@ pub(crate) struct FishingLines {
 }
 
 struct Owner {
-    feet: [f32; 3],
+    feet: Vec3,
     sample: AnimSample,
     scale: f32,
     local: bool,
@@ -40,9 +40,9 @@ pub(crate) fn sync_fishing_lines(
     view: Res<crate::renderer::FrameView>,
     shared: Res<crate::renderer::systems::Shared>,
     gui: Res<crate::gui::GuiState>,
-    third_person: Res<crate::renderer::input::ThirdPersonState>,
-    freecam: Res<crate::renderer::input::FreecamState>,
-    camera_q: Query<(&GlobalTransform, &Projection), With<crate::renderer::systems::WorldCamera>>,
+    camera_view: Res<crate::renderer::input::CameraView>,
+    origin: Res<crate::renderer::RenderOrigin>,
+    projection_q: Query<&Projection, With<crate::renderer::systems::WorldCamera>>,
     window_q: Query<&Window, With<PrimaryWindow>>,
     mut lines: ResMut<FishingLines>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -51,18 +51,20 @@ pub(crate) fn sync_fishing_lines(
 ) {
     crate::prof_span!("render:sync_fishing_lines");
     let partial = view.partial;
+    let origin = *origin;
     let hooks: Vec<_> = view
         .entities
         .iter()
         .filter(|anim| anim.kind == EntityKind::FishingBobber)
         .map(|anim| anim.sample(partial))
-        .filter_map(|st| Some((Vec3::from(st.pos), st.extras.hook_owner?)))
+        .filter_map(|st| Some((origin.to_render_array(st.pos), st.extras.hook_owner?)))
         .collect();
 
     let mut drawn = 0;
-    if let (false, Ok((camera, Projection::Perspective(projection))), Ok(window)) =
-        (hooks.is_empty(), camera_q.single(), window_q.single())
+    if let (false, Ok(Projection::Perspective(projection)), Ok(window)) =
+        (hooks.is_empty(), projection_q.single(), window_q.single())
     {
+        let (camera, rotation) = (view.camera_render, view.camera_rotation);
         let local_id = crate::client::tracking::local_entity_id();
         let owners: Vec<Option<Owner>> = {
             let s = shared.0.lock().unwrap();
@@ -71,7 +73,7 @@ pub(crate) fn sync_fishing_lines(
                 .map(|&(_, owner)| {
                     if owner == local_id {
                         return Some(Owner {
-                            feet: view.player_lerp,
+                            feet: origin.to_render_array(view.player_lerp),
                             sample: view.local.clone(),
                             scale: view.local_body.scale,
                             local: true,
@@ -79,7 +81,7 @@ pub(crate) fn sync_fishing_lines(
                     }
                     let p = s.session.other_players.iter().find(|p| p.id == owner)?;
                     Some(Owner {
-                        feet: p.anim.position(partial),
+                        feet: origin.to_render_array(p.anim.position(partial)),
                         sample: p.anim.sample(partial),
                         scale: p.body.scale,
                         local: false,
@@ -93,15 +95,15 @@ pub(crate) fn sync_fishing_lines(
             window.physical_height() as f32,
         );
         let strip = Strip {
-            camera: camera.translation(),
-            forward: camera.forward().as_vec3(),
+            camera,
+            forward: rotation * Vec3::NEG_Z,
             half_width_per_depth: (LINE_WIDTH_PX.max(width / LINE_WIDTH_REFERENCE * LINE_WIDTH_PX)
                 / 2.0)
                 * 2.0
                 * (projection.fov / 2.0).tan()
                 / height.max(1.0),
         };
-        let first_person = !third_person.active && !freecam.active;
+        let first_person = camera_view.first_person();
         let material = lines
             .material
             .get_or_insert_with(|| {
@@ -125,6 +127,7 @@ pub(crate) fn sync_fishing_lines(
             let hand = if owner.local && first_person {
                 first_person_hand(
                     camera,
+                    rotation,
                     gui.options.fov as f32,
                     width / height.max(1.0),
                     &owner.sample,
@@ -191,11 +194,8 @@ fn third_person_hand(owner: &Owner) -> Vec3 {
     let right = invert * 0.35 * owner.scale;
     let forward = 0.8 * owner.scale;
     let crouch = if owner.sample.crouching { -0.1875 } else { 0.0 };
-    let eye = Vec3::from(crate::renderer::player_model::player_eye(
-        owner.feet,
-        &owner.sample,
-        owner.scale,
-    ));
+    let eye = owner.feet
+        + Vec3::Y * crate::renderer::player_model::player_eye_height(&owner.sample, owner.scale);
     eye + Vec3::new(
         -cos * right - sin * forward,
         crouch - 0.45 * owner.scale,
@@ -203,8 +203,13 @@ fn third_person_hand(owner: &Owner) -> Vec3 {
     )
 }
 
-fn first_person_hand(camera: &GlobalTransform, fov: f32, aspect: f32, sample: &AnimSample) -> Vec3 {
-    let rotation = camera.rotation();
+fn first_person_hand(
+    camera: Vec3,
+    rotation: Quat,
+    fov: f32,
+    aspect: f32,
+    sample: &AnimSample,
+) -> Vec3 {
     let plane_height = (fov.to_radians() / 2.0).tan() * Z_NEAR;
     let plane_width = plane_height * aspect;
     let forward = rotation * Vec3::NEG_Z * Z_NEAR;
@@ -213,7 +218,7 @@ fn first_person_hand(camera: &GlobalTransform, fov: f32, aspect: f32, sample: &A
     let point = forward + up * -0.1 - left * (holding_side(sample) * 0.525);
     let swing = swing(sample);
     let turn = Quat::from_rotation_x(swing * 0.7) * Quat::from_rotation_y(swing * 0.5);
-    camera.translation() + turn * (point * (VIEW_BOBBING_SCALE / fov))
+    camera + turn * (point * (VIEW_BOBBING_SCALE / fov))
 }
 
 struct Strip {

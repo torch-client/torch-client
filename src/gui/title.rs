@@ -2,14 +2,16 @@ use std::sync::OnceLock;
 
 use crate::gui::menu;
 use crate::gui::painter::Painter;
+use crate::gui::tooltip::label;
 use crate::gui::widgets::{Button, WIDGET_HEIGHT, WIDGET_WIDTH_BIG, centered_x};
 use crate::gui::{GuiState, Screen, ScreenCtx};
 use crate::platform::time::{SystemTime, UNIX_EPOCH};
 use crate::text::{Span, Style, texts};
 
-const MULTIPLAYER: &str = "Multiplayer";
-const OPTIONS: &str = "Options...";
-const QUIT: &str = "Quit Game";
+#[cfg(feature = "asset_download")]
+const LANGUAGE_X_OFFSET: f32 = 124.0;
+#[cfg(feature = "asset_download")]
+const LANGUAGE_ICON: (f32, f32) = (15.0, 15.0);
 const EDIT_PROFILE: &str = "Edit Profile";
 const PROFILE_LABEL_PAD: f32 = 8.0;
 
@@ -70,14 +72,36 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     #[cfg(feature = "online_mode")]
     crate::client::ban::check_once();
-    if Button::new(x, top, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, MULTIPLAYER).draw(p, ctx) {
+    if Button::new(
+        x,
+        top,
+        WIDGET_WIDTH_BIG,
+        WIDGET_HEIGHT,
+        label!("menu.multiplayer"),
+    )
+    .draw(p, ctx)
+    {
         state.nav = Some(Screen::Multiplayer);
         #[cfg(feature = "online_mode")]
         crate::gui::bannotice::before_multiplayer(state);
     }
 
     let bottom = top + BOTTOM_ROW_STEP;
-    if Button::new(x, bottom, HALF_WIDTH, WIDGET_HEIGHT, OPTIONS).draw(p, ctx) {
+    #[cfg(feature = "asset_download")]
+    if crate::gui::widgets::icon_button(
+        p,
+        ctx,
+        (ctx.vw / 2.0).floor() - LANGUAGE_X_OFFSET,
+        bottom,
+        WIDGET_HEIGHT,
+        WIDGET_HEIGHT,
+        "icon/language",
+        LANGUAGE_ICON,
+    ) {
+        state.language.open();
+        state.nav = Some(Screen::Language);
+    }
+    if Button::new(x, bottom, HALF_WIDTH, WIDGET_HEIGHT, label!("menu.options")).draw(p, ctx) {
         state.options_parent = Screen::Title;
         state.nav = Some(Screen::Options);
     }
@@ -86,7 +110,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         bottom,
         HALF_WIDTH,
         WIDGET_HEIGHT,
-        QUIT,
+        label!("menu.quit"),
     )
     .draw(p, ctx)
     {
@@ -103,6 +127,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let credits_x =
         p.text_str(DISCLAIMER, 2.0, disclaimer_y, 0xA0A0A0, true) + p.atlas.font.width_str(" ");
     if credits_link(p, ctx, credits_x, disclaimer_y) {
+        state.credits_parent = Screen::Title;
         state.nav = Some(Screen::Credits);
     }
 

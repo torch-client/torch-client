@@ -32,50 +32,67 @@ use crate::collision::legacy_blocks_motion;
 #[allow(clippy::type_complexity)]
 pub fn update_in_water_state_and_do_fluid_pushing(
     mut query: Query<
-        (&mut Physics, &Position, &WorldName),
+        (&mut Physics, &WorldName),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
     worlds: Res<Worlds>,
 ) {
-    for (mut physics, position, world_name) in &mut query {
+    for (mut physics, world_name) in &mut query {
         let Some(world_lock) = worlds.get(world_name) else {
             continue;
         };
         let world = world_lock.read();
-
-        physics.water_fluid_height = 0.;
-        physics.lava_fluid_height = 0.;
-
-        update_in_water_state_and_do_water_current_pushing(&mut physics, &world, *position);
-
-        let is_ultrawarm = world
-            .registries
-            .dimension_type
-            .map
-            .get(&**world_name)
-            .and_then(|i| i.ultrawarm)
-            .unwrap_or_default();
-        let lava_push_factor = if is_ultrawarm {
-            0.007
-        } else {
-            0.0023333333333333335
-        };
-
-        update_fluid_height_and_do_fluid_pushing(
-            &mut physics,
-            &world,
-            FluidKind::Lava,
-            lava_push_factor,
-        );
+        update_fluid_interaction(&mut physics, &world, world_name, FluidPush::Player);
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FluidPush {
+    Player,
+    Entity,
+    None,
+}
+
+pub fn update_fluid_interaction(
+    physics: &mut Physics,
+    world: &World,
+    world_name: &WorldName,
+    push: FluidPush,
+) {
+    physics.water_fluid_height = 0.;
+    physics.lava_fluid_height = 0.;
+
+    update_in_water_state_and_do_water_current_pushing(physics, world, push);
+
+    let is_ultrawarm = world
+        .registries
+        .dimension_type
+        .map
+        .get(&**world_name)
+        .and_then(|i| i.ultrawarm)
+        .unwrap_or_default();
+    let lava_push_factor = if is_ultrawarm {
+        0.007
+    } else {
+        0.0023333333333333335
+    };
+
+    update_fluid_height_and_do_fluid_pushing(
+        physics,
+        world,
+        FluidKind::Lava,
+        lava_push_factor,
+        push,
+    );
+}
+
 fn update_in_water_state_and_do_water_current_pushing(
     physics: &mut Physics,
     world: &World,
-    _position: Position,
+    push: FluidPush,
 ) {
 
-    if update_fluid_height_and_do_fluid_pushing(physics, world, FluidKind::Water, 0.014) {
+    if update_fluid_height_and_do_fluid_pushing(physics, world, FluidKind::Water, 0.014, push) {
 
         physics.reset_fall_distance();
         physics.was_touching_water = true;
@@ -90,6 +107,7 @@ fn update_fluid_height_and_do_fluid_pushing(
     world: &World,
     checking_fluid: FluidKind,
     fluid_push_factor: f64,
+    push: FluidPush,
 ) -> bool {
 
     let checking_liquids_aabb = physics.bounding_box.deflate_all(0.001);
@@ -103,7 +121,7 @@ fn update_fluid_height_and_do_fluid_pushing(
     let max_z = checking_liquids_aabb.max.z.ceil() as i32;
 
     let mut min_height_touching = 0.;
-    let is_entity_pushable_by_fluid = true;
+    let is_entity_pushable_by_fluid = push != FluidPush::None;
     let mut touching_fluid = false;
     let mut additional_player_delta = Vec3::ZERO;
     let mut num_fluids_being_touched = 0;
@@ -143,7 +161,11 @@ fn update_fluid_height_and_do_fluid_pushing(
     }
 
     if additional_player_delta.length() > 0. {
-        additional_player_delta /= num_fluids_being_touched as f64;
+        if push == FluidPush::Player {
+            additional_player_delta /= num_fluids_being_touched as f64;
+        } else {
+            additional_player_delta = additional_player_delta.normalize();
+        }
 
         let player_delta = physics.velocity;
         additional_player_delta *= fluid_push_factor;

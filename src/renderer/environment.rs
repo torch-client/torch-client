@@ -665,8 +665,23 @@ impl Environment {
             .advance(rain, delta_ticks, sky_light, has_precipitation);
         let environmental = self.rain_fog.apply(layer.fog_distance);
 
-        let radius = (render_distance.max(2) * 16) as f32;
-        let span = (radius / 10.0).clamp(4.0, 64.0);
+        #[cfg(not(feature = "render_lod"))]
+        let (radius, span) = {
+            let radius = (render_distance.max(2) * 16) as f32;
+            (radius, (radius / 10.0).clamp(4.0, 64.0))
+        };
+        #[cfg(feature = "render_lod")]
+        let (radius, span) = {
+            let lod = crate::client::lod::settings();
+            let chunks = (lod.lod_distance as i32).max(render_distance + 1);
+            let radius = (chunks.max(2) * 16) as f32;
+            (radius, radius * 0.6)
+        };
+        #[cfg(feature = "render_lod")]
+        let environmental = {
+            let _ = environmental;
+            (1.0e9, 2.0e9)
+        };
         self.fog_distance = environmental;
         self.render_fog_distance = (radius - span, radius);
         self.sky_fog_end = layer.sky_fog_end.min(radius);

@@ -10,6 +10,7 @@ use super::registry::{Id, aim_assist as setting};
 use super::{Edge, MS_PER_TICK, Phase, roll, store};
 use crate::session::{SharedMutex, SharedState};
 use crate::util::mth::wrap_degrees;
+use crate::util::offset_f32 as offset;
 
 const AIM_HEIGHT: f32 = 0.85;
 
@@ -67,14 +68,14 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
     shared.lock().unwrap().session.aim_target = armed.then_some(id);
 }
 
-fn pick(s: &SharedState, eye: [f32; 3], range: f32, fov: f32) -> Option<(i32, [f32; 3])> {
+fn pick(s: &SharedState, eye: [f64; 3], range: f32, fov: f32) -> Option<(i32, [f64; 3])> {
     let forward = forward(s.camera_yaw, s.camera_pitch);
     let cos_limit = (fov.clamp(0.0, 360.0) * 0.5).to_radians().cos();
     let range_sq = range * range;
-    let mut best: Option<(f32, i32, [f32; 3])> = None;
+    let mut best: Option<(f32, i32, [f64; 3])> = None;
 
-    let mut consider = |id: i32, point: [f32; 3]| {
-        let to = [point[0] - eye[0], point[1] - eye[1], point[2] - eye[2]];
+    let mut consider = |id: i32, point: [f64; 3]| {
+        let to = offset(eye, point);
         let dist_sq = to[0] * to[0] + to[1] * to[1] + to[2] * to[2];
         if dist_sq > range_sq || dist_sq < f32::EPSILON {
             return;
@@ -106,14 +107,14 @@ fn pick(s: &SharedState, eye: [f32; 3], range: f32, fov: f32) -> Option<(i32, [f
     best.map(|(_, id, point)| (id, point))
 }
 
-pub(super) fn visible(bot: &Client, eye: [f32; 3], point: [f32; 3]) -> bool {
+pub(super) fn visible(bot: &Client, eye: [f64; 3], point: [f64; 3]) -> bool {
     let Ok(world) = bot.world() else {
         return false;
     };
-    let vec = |p: [f32; 3]| AzVec3 {
-        x: p[0] as f64,
-        y: p[1] as f64,
-        z: p[2] as f64,
+    let vec = |p: [f64; 3]| AzVec3 {
+        x: p[0],
+        y: p[1],
+        z: p[2],
     };
     let hit = clip(
         &world.read().chunks,
@@ -179,7 +180,7 @@ fn assist(delta: f32, err: f32, p: Pull) -> f32 {
     delta * (1.0 - p.friction * closeness)
 }
 
-fn target_point(s: &SharedState, id: i32, partial: f32) -> Option<[f32; 3]> {
+fn target_point(s: &SharedState, id: i32, partial: f32) -> Option<[f64; 3]> {
     if let Some(p) = s.session.other_players.iter().find(|p| p.id == id) {
         return Some(player_point(p.anim.position(partial), p.discrete));
     }
@@ -187,24 +188,24 @@ fn target_point(s: &SharedState, id: i32, partial: f32) -> Option<[f32; 3]> {
     Some(entity_point(e.position(partial), e.bounding_box_height()))
 }
 
-fn player_point(pos: [f32; 3], discrete: bool) -> [f32; 3] {
+fn player_point(pos: [f64; 3], discrete: bool) -> [f64; 3] {
     [
         pos[0],
-        pos[1] + crate::renderer::systems::eye_height(discrete),
+        pos[1] + f64::from(crate::renderer::systems::eye_height(discrete)),
         pos[2],
     ]
 }
 
-fn entity_point(pos: [f32; 3], height: f32) -> [f32; 3] {
-    [pos[0], pos[1] + height * AIM_HEIGHT, pos[2]]
+fn entity_point(pos: [f64; 3], height: f32) -> [f64; 3] {
+    [pos[0], pos[1] + f64::from(height * AIM_HEIGHT), pos[2]]
 }
 
-pub(super) fn eye(s: &SharedState, partial: f32) -> [f32; 3] {
+pub(super) fn eye(s: &SharedState, partial: f32) -> [f64; 3] {
     let (prev, cur) = (s.session.player_pos_prev, s.session.player_pos);
-    let at = |i: usize| prev[i] + (cur[i] - prev[i]) * partial;
+    let at = |i: usize| prev[i] + (cur[i] - prev[i]) * f64::from(partial);
     [
         at(0),
-        at(1) + crate::renderer::systems::session_eye_height(&s.session),
+        at(1) + f64::from(crate::renderer::systems::session_eye_height(&s.session)),
         at(2),
     ]
 }
@@ -214,8 +215,8 @@ fn forward(yaw: f32, pitch: f32) -> [f32; 3] {
     [-y.sin() * p.cos(), p.sin(), -y.cos() * p.cos()]
 }
 
-pub(super) fn look_at(eye: [f32; 3], to: [f32; 3]) -> (f32, f32) {
-    let (dx, dy, dz) = (to[0] - eye[0], to[1] - eye[1], to[2] - eye[2]);
+pub(super) fn look_at(eye: [f64; 3], to: [f64; 3]) -> (f32, f32) {
+    let [dx, dy, dz] = offset(eye, to);
     let horizontal = (dx * dx + dz * dz).sqrt();
     (
         (-dx).atan2(-dz).to_degrees(),
@@ -284,11 +285,7 @@ mod tests {
         for (yaw, pitch) in [(0.0, 0.0), (90.0, 30.0), (-135.0, -45.0), (179.0, 80.0)] {
             let f = forward(yaw, pitch);
             let eye = [1.0, 64.0, -2.0];
-            let to = [
-                eye[0] + f[0] * 5.0,
-                eye[1] + f[1] * 5.0,
-                eye[2] + f[2] * 5.0,
-            ];
+            let to: [f64; 3] = std::array::from_fn(|i| eye[i] + f64::from(f[i]) * 5.0);
             let (got_yaw, got_pitch) = look_at(eye, to);
             assert!(
                 wrap_degrees(got_yaw - yaw).abs() < 1e-3,

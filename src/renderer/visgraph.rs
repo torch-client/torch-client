@@ -1,5 +1,5 @@
-pub use crate::direction::Direction;
-use crate::direction::Faces;
+pub use crate::blocks::direction::Direction;
+use crate::blocks::direction::Faces;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct VisibilitySet(u64);

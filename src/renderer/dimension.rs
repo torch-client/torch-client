@@ -195,7 +195,7 @@ impl Dimension {
         }
     }
 
-    #[cfg(feature = "shader_support")]
+    #[cfg(any(feature = "shader_support", lua_mods))]
     pub fn has_ceiling(self) -> bool {
         self.attributes().has_ceiling
     }
@@ -308,7 +308,6 @@ pub fn set_sea_level(level: i32) {
     SEA_LEVEL.store(level, Ordering::Relaxed);
 }
 
-#[cfg(feature = "shader_support")]
 pub fn sea_level() -> i32 {
     match SEA_LEVEL.load(Ordering::Relaxed) {
         i32::MIN => match current() {

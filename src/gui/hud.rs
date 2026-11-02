@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
+use crate::blocks::direction::Direction;
 use crate::diag::Stat;
-use crate::direction::Direction;
 use crate::gui::ScreenCtx;
 use crate::gui::chat::argb;
 use crate::gui::hud_layout::{ElementId, Hud, Rect};
@@ -26,24 +26,22 @@ const BAD_COLOR: u32 = 0xFF5555;
 const MS_60FPS: f32 = 1000.0 / 60.0;
 const MS_30FPS: f32 = 1000.0 / 30.0;
 
-fn frame_ms_color(ms: f32) -> u32 {
-    if ms <= MS_60FPS {
-        GOOD_COLOR
-    } else if ms <= MS_30FPS {
-        WARN_COLOR
+fn step_color(v: f32, first: f32, second: f32, colors: [u32; 3]) -> u32 {
+    if v <= first {
+        colors[0]
+    } else if v <= second {
+        colors[1]
     } else {
-        BAD_COLOR
+        colors[2]
     }
 }
 
+fn frame_ms_color(ms: f32) -> u32 {
+    step_color(ms, MS_60FPS, MS_30FPS, [GOOD_COLOR, WARN_COLOR, BAD_COLOR])
+}
+
 fn worker_ms_color(ms: f32) -> u32 {
-    if ms <= 2.0 {
-        VALUE_COLOR
-    } else if ms <= 8.0 {
-        WARN_COLOR
-    } else {
-        BAD_COLOR
-    }
+    step_color(ms, 2.0, 8.0, [VALUE_COLOR, WARN_COLOR, BAD_COLOR])
 }
 
 fn count_color(n: u64, warn_at: u64, bad_at: u64) -> u32 {
@@ -89,7 +87,7 @@ pub const FRAME_HISTORY_LEN: usize = 160;
 
 #[derive(Default)]
 pub struct HudInfo {
-    pub pos: [f32; 3],
+    pub pos: [f64; 3],
     pub gamemode: Gamemode,
     pub yaw: f32,
     pub flying: bool,
@@ -150,17 +148,6 @@ fn rate(n: f64) -> String {
 }
 
 pub const TEXT_COLOR: u32 = 0xFFFFFF;
-
-fn facing_name(d: Direction) -> &'static str {
-    match d {
-        Direction::North => "north",
-        Direction::South => "south",
-        Direction::West => "west",
-        Direction::East => "east",
-        Direction::Down => "down",
-        Direction::Up => "up",
-    }
-}
 
 fn facing_towards(d: Direction) -> &'static str {
     match d {
@@ -230,6 +217,14 @@ pub fn draw(
     use bevy::math::Vec2;
 
     let (vw, vh) = (ctx.vw, ctx.vh);
+    #[cfg(lua_mods)]
+    crate::modules::script::draw_hud(p, vw, vh);
+    if let Some(n) = crate::modules::scaffold::count() {
+        let text = n.to_string();
+        p.scaled(2.0, vw / 2.0, vh / 2.0 + 14.0, |p| {
+            p.text_centered(&text, 0.0, 0.0, 0xFF_FF_D0, true);
+        });
+    }
     let editing = hud.editing();
     let atlas = p.atlas;
     let width = |s: &str| atlas.font.width_str(s);
@@ -247,7 +242,7 @@ pub fn draw(
     let widest_of = |names: &mut dyn Iterator<Item = f32>| names.fold(0.0, f32::max);
     let widest_gamemode = widest_of(&mut GAMEMODES.iter().map(|g| width(gamemode_name(*g))));
 
-    let mut lines: [Option<Line>; COUNT] = Default::default();
+    let mut lines: [Option<Line>; COUNT] = std::array::from_fn(|_| None);
     let mut put = |id: ElementId, l: Line| lines[id.index()] = Some(l);
 
     let gamemode = gamemode_name(info.gamemode);
@@ -275,11 +270,12 @@ pub fn draw(
         put(ElementId::Gamemode, line(format!("[{gamemode}]"), GOLD, w));
     }
     if hud.shown(ElementId::Direction) {
-        let text = |d: Direction| format!("Direction: {} ({})", facing_name(d), facing_towards(d));
-        let w = width("Direction: ")
-            + widest_of(&mut HORIZONTAL.into_iter().map(|d| {
-                width(facing_name(d)) + width(" (") + width(facing_towards(d)) + width(")")
-            }));
+        let text = |d: Direction| format!("Direction: {} ({})", d.name(), facing_towards(d));
+        let w =
+            width("Direction: ")
+                + widest_of(&mut HORIZONTAL.into_iter().map(|d| {
+                    width(d.name()) + width(" (") + width(facing_towards(d)) + width(")")
+                }));
         put(
             ElementId::Direction,
             line(text(facing_from_bevy_yaw(info.yaw)), TEXT_COLOR, w),
@@ -405,6 +401,12 @@ pub fn draw(
                 Rect::new(slot.x + (x + l.text_w) * s, slot.y, w * s, LINE_HEIGHT * s),
             );
         }
+    }
+
+    #[cfg(lua_mods)]
+    for i in 0..crate::gui::hud_layout::MOD_PANELS {
+        let id = ElementId::mod_panel_slot(i);
+        hud.draw(p, vw, vh, id, |p| crate::modules::script::draw_panel(p, i));
     }
 }
 
@@ -636,6 +638,8 @@ fn help_items() -> Vec<Item<'static>> {
         row("F3+H", "Advanced tooltips".to_string()).into(),
         row("F3+G", "Chunk borders".to_string()).into(),
         row("F3+A", "Reload chunks".to_string()).into(),
+        row("F3+N", "Cycle spectator".to_string()).into(),
+        row("F3+F4", "Game mode switcher".to_string()).into(),
     ]
 }
 
@@ -1141,13 +1145,7 @@ const GAMEMODE_COLOR: u32 = 0xE8_B923;
 const DISTANCE_COLOR: u32 = 0x96_9696;
 
 fn health_color(ratio: f32) -> u32 {
-    if ratio <= 0.333 {
-        0xFF_1919
-    } else if ratio <= 0.666 {
-        0xFF_6919
-    } else {
-        0x19_FC19
-    }
+    step_color(ratio, 0.333, 0.666, [0xFF_1919, 0xFF_6919, 0x19_FC19])
 }
 
 fn effect_icon_alpha(duration: i32) -> f32 {

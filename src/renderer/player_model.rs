@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
+use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -8,87 +8,50 @@ use bevy::prelude::*;
 use super::anim::{AnimSample, ArmPose, Armor, HeldItem};
 use super::entity_material::{ALPHA_CUTOUT, EntityMaterial, LightMode, Lit, diffuse_lights};
 use super::item_assets::ItemAssets;
-use crate::entities::geom;
+use crate::entities::geom::{self, PartState};
 use crate::entities::models::humanoid::armor as armor_mesh;
+use crate::entities::models::humanoid::humanoid;
 use crate::entities::render::humanoid::armor as armor_tex;
 use crate::items::mesh::Transform as ItemTransform;
 use crate::items::model::DisplayContext;
 
-use crate::util::mth::ease::{in_out_expo, in_out_sine, in_quad, out_quart};
-use crate::util::mth::{DEG_TO_RAD, RAD_TO_DEG, lerp, progress, rot_lerp_rad};
+use crate::util::mth::{DEG_TO_RAD, lerp, rot_lerp_rad};
 
 const DUCK_WALK_ROTATION: f32 = 0.005;
 
 const FLIP_DEGREES: f32 = 90.0;
 
-const AVATAR_SCALE: f32 = 0.937_5;
+pub(crate) const AVATAR_SCALE: f32 = 0.937_5;
 
-const MODEL_Y_OFFSET: f32 = -1.501;
-
-const SPYGLASS_ARM_ROT_Y: f32 = 0.261_799_4;
-
-const SPYGLASS_ARM_ROT_X: f32 = 1.919_862_2;
-
-const SPYGLASS_ARM_CROUCH_ROT_X: f32 = 0.261_799_4;
-
-const HIGHEST_SHIELD_BLOCKING_ANGLE: f32 = -1.396_263_4;
-const LOWEST_SHIELD_BLOCKING_ANGLE: f32 = 0.436_332_32;
-
-const HORIZONTAL_SHIELD_MOVEMENT_LIMIT: f32 = 0.523_598_8;
-
-const TOOT_HORN_XROT_BASE: f32 = 1.483_529_8;
-const TOOT_HORN_YROT_BASE: f32 = 0.523_598_8;
+pub(crate) const MODEL_Y_OFFSET: f32 = -1.501;
 
 const MAX_CROSSBOW_CHARGE_DURATION: f32 = 25.0;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct PosedPart {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub x_rot: f32,
-    pub y_rot: f32,
-    pub z_rot: f32,
+fn part_at(pivot: [f32; 3]) -> PartState {
+    PartState::from(geom::PartPose::offset(pivot[0], pivot[1], pivot[2]))
 }
 
-impl PosedPart {
-    fn at(pivot: [f32; 3]) -> Self {
-        Self {
-            x: pivot[0],
-            y: pivot[1],
-            z: pivot[2],
-            x_rot: 0.0,
-            y_rot: 0.0,
-            z_rot: 0.0,
-        }
-    }
-
-    pub fn transform(&self) -> Transform {
-        Transform {
-            translation: Vec3::new(self.x, self.y, self.z),
-            rotation: Quat::from_rotation_z(self.z_rot)
-                * Quat::from_rotation_y(self.y_rot)
-                * Quat::from_rotation_x(self.x_rot),
-            scale: Vec3::ONE,
-        }
-    }
+pub(crate) fn model_transform(part: &PartState) -> Transform {
+    let mut t = part.transform();
+    t.translation *= MODEL_UNITS_PER_BLOCK;
+    t
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Pose {
-    pub head: PosedPart,
-    pub body: PosedPart,
-    pub right_arm: PosedPart,
-    pub left_arm: PosedPart,
-    pub right_leg: PosedPart,
-    pub left_leg: PosedPart,
+    pub head: PartState,
+    pub body: PartState,
+    pub right_arm: PartState,
+    pub left_arm: PartState,
+    pub right_leg: PartState,
+    pub left_leg: PartState,
     #[cfg(feature = "skins")]
     pub cape: Quat,
-    pub wings: [PosedPart; 2],
+    pub wings: [PartState; 2],
 }
 
 impl Pose {
-    pub fn parts(&self) -> [PosedPart; 6] {
+    pub fn parts(&self) -> [PartState; 6] {
         [
             self.head,
             self.body,
@@ -100,144 +63,14 @@ impl Pose {
     }
 }
 
-fn quadratic_arm_update(x: f32) -> f32 {
-    -65.0 * x + x * x
-}
-
-fn pose_blocking_arm(arm: &mut PosedPart, head: &PosedPart, right: bool) {
-    arm.x_rot = arm.x_rot * 0.5 - 0.942_477_9
-        + head
-            .x_rot
-            .clamp(HIGHEST_SHIELD_BLOCKING_ANGLE, LOWEST_SHIELD_BLOCKING_ANGLE);
-    arm.y_rot = (if right { -30.0 } else { 30.0 }) * DEG_TO_RAD
-        + head.y_rot.clamp(
-            -HORIZONTAL_SHIELD_MOVEMENT_LIMIT,
-            HORIZONTAL_SHIELD_MOVEMENT_LIMIT,
-        );
-}
-
-fn animate_crossbow_charge(
-    holding: &mut PosedPart,
-    pulling: &mut PosedPart,
-    ticks_using_item: f32,
-    holding_in_right_arm: bool,
-) {
-    let sign = if holding_in_right_arm { 1.0 } else { -1.0 };
-    holding.y_rot = -0.8 * sign;
-    holding.x_rot = -0.970_796_35;
-    pulling.x_rot = holding.x_rot;
-    let use_ticks = ticks_using_item.clamp(0.0, MAX_CROSSBOW_CHARGE_DURATION);
-    let alpha = use_ticks / MAX_CROSSBOW_CHARGE_DURATION;
-    pulling.y_rot = lerp(alpha, 0.4, 0.85) * sign;
-    pulling.x_rot = lerp(alpha, pulling.x_rot, -FRAC_PI_2);
-}
-
-fn animate_crossbow_hold(
-    holding: &mut PosedPart,
-    shooting: &mut PosedPart,
-    head: &PosedPart,
-    holding_in_right_arm: bool,
-) {
-    let sign = if holding_in_right_arm { 1.0 } else { -1.0 };
-    holding.y_rot = -0.3 * sign + head.y_rot;
-    shooting.y_rot = 0.6 * sign + head.y_rot;
-    holding.x_rot = -FRAC_PI_2 + head.x_rot + 0.1;
-    shooting.x_rot = -1.5 + head.x_rot;
-}
-
-fn spear_third_person_hand_use(
-    arm: &mut PosedPart,
-    head: &PosedPart,
-    s: &AnimSample,
-    holding_in_right_arm: bool,
-) {
-    let invert = if holding_in_right_arm { 1.0 } else { -1.0 };
-    arm.y_rot = -0.1 * invert + head.y_rot;
-    arm.x_rot = -FRAC_PI_2 + head.x_rot + 0.8;
-    if s.fall_flying || s.swim_amount > 0.0 {
-        arm.x_rot -= 0.959_931_1;
-    }
-    arm.y_rot = DEG_TO_RAD * (RAD_TO_DEG * arm.y_rot).clamp(-60.0, 60.0);
-    arm.x_rot = DEG_TO_RAD * (RAD_TO_DEG * arm.x_rot).clamp(-120.0, 30.0);
-}
-
-fn pose_arm(
-    arm: &mut PosedPart,
-    other: &mut PosedPart,
-    head: &PosedPart,
-    s: &AnimSample,
-    right: bool,
-) {
-    let invert = if right { 1.0 } else { -1.0 };
-    match if right {
-        s.right_arm_pose
-    } else {
-        s.left_arm_pose
-    } {
-        ArmPose::Empty => {
-            arm.y_rot = 0.0;
-        }
-        ArmPose::Item => {
-            arm.x_rot = arm.x_rot * 0.5 - 0.314_159_27;
-            arm.y_rot = 0.0;
-        }
-        ArmPose::Block => {
-            pose_blocking_arm(arm, head, right);
-        }
-        ArmPose::BowAndArrow => {
-            arm.y_rot = -0.1 * invert + head.y_rot;
-            other.y_rot = 0.1 * invert + head.y_rot + 0.4 * invert;
-            arm.x_rot = -FRAC_PI_2 + head.x_rot;
-            other.x_rot = -FRAC_PI_2 + head.x_rot;
-        }
-        ArmPose::ThrowTrident => {
-            arm.x_rot = arm.x_rot * 0.5 - PI;
-            arm.y_rot = 0.0;
-        }
-        ArmPose::CrossbowCharge => {
-            animate_crossbow_charge(arm, other, s.ticks_using_item, right);
-        }
-        ArmPose::CrossbowHold => {
-            animate_crossbow_hold(arm, other, head, right);
-        }
-        ArmPose::Spyglass => {
-            arm.x_rot = (head.x_rot
-                - SPYGLASS_ARM_ROT_X
-                - if s.crouching {
-                    SPYGLASS_ARM_CROUCH_ROT_X
-                } else {
-                    0.0
-                })
-            .clamp(-2.4, 3.3);
-            arm.y_rot = head.y_rot - SPYGLASS_ARM_ROT_Y * invert;
-        }
-        ArmPose::TootHorn => {
-            arm.x_rot = head.x_rot.clamp(-1.2, 1.2) - TOOT_HORN_XROT_BASE;
-            arm.y_rot = head.y_rot - TOOT_HORN_YROT_BASE * invert;
-        }
-        ArmPose::Brush => {
-            arm.x_rot = arm.x_rot * 0.5 - 0.628_318_55;
-            arm.y_rot = 0.0;
-        }
-        ArmPose::Spear => {
-            spear_third_person_hand_use(arm, head, s, right);
-        }
-    }
-}
-
-fn bob_model_part(part: &mut PosedPart, age_ticks: f32, scale: f32) {
-    part.z_rot += scale * ((age_ticks * 0.09).cos() * 0.05 + 0.05);
-    part.x_rot += scale * (age_ticks * 0.067).sin() * 0.05;
-}
-
 pub fn pose_humanoid(s: &AnimSample) -> Pose {
     let passenger = s.passenger;
-    let mut head = PosedPart::at(PARTS[0].pivot);
-    let mut body = PosedPart::at(PARTS[1].pivot);
-    let mut right_arm = PosedPart::at(PARTS[2].pivot);
-    let mut left_arm = PosedPart::at(PARTS[3].pivot);
-    let mut right_leg = PosedPart::at(PARTS[4].pivot);
-    let mut left_leg = PosedPart::at(PARTS[5].pivot);
+    let mut head = part_at(PARTS[0].pivot);
+    let mut body = part_at(PARTS[1].pivot);
+    let mut right_arm = part_at(PARTS[2].pivot);
+    let mut left_arm = part_at(PARTS[3].pivot);
+    let mut right_leg = part_at(PARTS[4].pivot);
+    let mut left_leg = part_at(PARTS[5].pivot);
 
     head.x_rot = s.pitch * DEG_TO_RAD;
     head.y_rot = s.head_yaw * DEG_TO_RAD;
@@ -249,10 +82,11 @@ pub fn pose_humanoid(s: &AnimSample) -> Pose {
 
     let pos = s.walk_pos;
     let speed = s.walk_speed;
-    right_arm.x_rot = (pos * 0.6662 + PI).cos() * 2.0 * speed * 0.5;
-    left_arm.x_rot = (pos * 0.6662).cos() * 2.0 * speed * 0.5;
-    right_leg.x_rot = (pos * 0.6662).cos() * 1.4 * speed;
-    left_leg.x_rot = (pos * 0.6662 + PI).cos() * 1.4 * speed;
+    let speed_value = s.speed_value.max(1.0);
+    right_arm.x_rot = (pos * 0.6662 + PI).cos() * 2.0 * speed * 0.5 / speed_value;
+    left_arm.x_rot = (pos * 0.6662).cos() * 2.0 * speed * 0.5 / speed_value;
+    right_leg.x_rot = (pos * 0.6662).cos() * 1.4 * speed / speed_value;
+    left_leg.x_rot = (pos * 0.6662 + PI).cos() * 1.4 * speed / speed_value;
     right_leg.y_rot = DUCK_WALK_ROTATION;
     left_leg.y_rot = -DUCK_WALK_ROTATION;
     right_leg.z_rot = DUCK_WALK_ROTATION;
@@ -280,63 +114,43 @@ pub fn pose_humanoid(s: &AnimSample) -> Pose {
         };
         right_handed == two_handed
     };
+    let inputs = humanoid::ArmInputs {
+        ticks_using_item: s.ticks_using_item,
+        max_crossbow_charge: MAX_CROSSBOW_CHARGE_DURATION,
+        crouching: s.crouching,
+        fall_flying: s.fall_flying,
+        swim_amount: s.swim_amount,
+        charging: s.charging(),
+    };
+    let (right, left) = (&mut right_arm, &mut left_arm);
     if right_first {
-        pose_arm(&mut right_arm, &mut left_arm, &head, s, true);
+        humanoid::pose_arm(right, left, &head, &inputs, s.right_arm_pose, true);
         if !s.right_arm_pose.affects_offhand_pose() {
-            pose_arm(&mut left_arm, &mut right_arm, &head, s, false);
+            humanoid::pose_arm(left, right, &head, &inputs, s.left_arm_pose, false);
         }
     } else {
-        pose_arm(&mut left_arm, &mut right_arm, &head, s, false);
+        humanoid::pose_arm(left, right, &head, &inputs, s.left_arm_pose, false);
         if !s.left_arm_pose.affects_offhand_pose() {
-            pose_arm(&mut right_arm, &mut left_arm, &head, s, true);
+            humanoid::pose_arm(right, left, &head, &inputs, s.right_arm_pose, true);
         }
     }
 
     if s.attack_time > 0.0 {
-        body.y_rot = (s.attack_time.sqrt() * TAU).sin() * 0.2;
-        if s.attack_left {
-            body.y_rot *= -1.0;
-        }
-        right_arm.z = body.y_rot.sin() * 5.0;
-        right_arm.x = -body.y_rot.cos() * 5.0;
-        left_arm.z = -body.y_rot.sin() * 5.0;
-        left_arm.x = body.y_rot.cos() * 5.0;
-        right_arm.y_rot += body.y_rot;
-        left_arm.y_rot += body.y_rot;
-        left_arm.x_rot += body.y_rot;
-
         let stab = if s.attack_left {
             s.left_arm_pose
         } else {
             s.right_arm_pose
         } == ArmPose::Spear;
-        let body_yaw = body.y_rot;
-        if stab {
-            right_arm.y_rot -= body_yaw;
-            left_arm.y_rot -= body_yaw;
-            left_arm.x_rot -= body_yaw;
-            let prepare = in_out_sine(progress(s.attack_time, 0.0, 0.05));
-            let attack = in_quad(progress(s.attack_time, 0.05, 0.2));
-            let retract = in_out_expo(progress(s.attack_time, 0.4, 1.0));
-            let arm = if s.attack_left {
-                &mut left_arm
-            } else {
-                &mut right_arm
-            };
-            arm.x_rot += (90.0 * prepare - 120.0 * attack + 30.0 * retract) * DEG_TO_RAD;
-        } else {
-            let swing = out_quart(s.attack_time);
-            let arc = (swing * PI).sin();
-            let aim = (s.attack_time * PI).sin() * -(head.x_rot - 0.7) * 0.75;
-            let arm = if s.attack_left {
-                &mut left_arm
-            } else {
-                &mut right_arm
-            };
-            arm.x_rot -= arc * 1.2 + aim;
-            arm.y_rot += body_yaw * 2.0;
-            arm.z_rot += (s.attack_time * PI).sin() * -0.4;
-        }
+        humanoid::attack_swing(
+            &mut body,
+            &mut right_arm,
+            &mut left_arm,
+            head.x_rot,
+            s.attack_time,
+            s.attack_left,
+            1.0,
+            stab,
+        );
     }
 
     if s.crouching {
@@ -352,10 +166,10 @@ pub fn pose_humanoid(s: &AnimSample) -> Pose {
     }
 
     if s.right_arm_pose != ArmPose::Spyglass {
-        bob_model_part(&mut right_arm, s.age_ticks, 1.0);
+        humanoid::bob_model_part(&mut right_arm, s.age_ticks, 1.0);
     }
     if s.left_arm_pose != ArmPose::Spyglass {
-        bob_model_part(&mut left_arm, s.age_ticks, -1.0);
+        humanoid::bob_model_part(&mut left_arm, s.age_ticks, -1.0);
     }
 
     if s.swim_amount > 0.0 {
@@ -373,32 +187,13 @@ pub fn pose_humanoid(s: &AnimSample) -> Pose {
                 0.0
             };
         if !s.using_item {
-            let reach = quadratic_arm_update(swim_pos) / quadratic_arm_update(14.0);
-            if swim_pos < 14.0 {
-                left_arm.x_rot = rot_lerp_rad(left_swim, left_arm.x_rot, 0.0);
-                right_arm.x_rot = lerp(right_swim, right_arm.x_rot, 0.0);
-                left_arm.y_rot = rot_lerp_rad(left_swim, left_arm.y_rot, PI);
-                right_arm.y_rot = lerp(right_swim, right_arm.y_rot, PI);
-                left_arm.z_rot = rot_lerp_rad(left_swim, left_arm.z_rot, PI + 1.870_796_4 * reach);
-                right_arm.z_rot = lerp(right_swim, right_arm.z_rot, PI - 1.870_796_4 * reach);
-            } else if swim_pos < 22.0 {
-                let t = (swim_pos - 14.0) / 8.0;
-                left_arm.x_rot = rot_lerp_rad(left_swim, left_arm.x_rot, FRAC_PI_2 * t);
-                right_arm.x_rot = lerp(right_swim, right_arm.x_rot, FRAC_PI_2 * t);
-                left_arm.y_rot = rot_lerp_rad(left_swim, left_arm.y_rot, PI);
-                right_arm.y_rot = lerp(right_swim, right_arm.y_rot, PI);
-                left_arm.z_rot =
-                    rot_lerp_rad(left_swim, left_arm.z_rot, 5.012_389 - 1.870_796_4 * t);
-                right_arm.z_rot = lerp(right_swim, right_arm.z_rot, 1.270_796_3 + 1.870_796_4 * t);
-            } else if swim_pos < 26.0 {
-                let t = (swim_pos - 22.0) / 4.0;
-                left_arm.x_rot = rot_lerp_rad(left_swim, left_arm.x_rot, FRAC_PI_2 - FRAC_PI_2 * t);
-                right_arm.x_rot = lerp(right_swim, right_arm.x_rot, FRAC_PI_2 - FRAC_PI_2 * t);
-                left_arm.y_rot = rot_lerp_rad(left_swim, left_arm.y_rot, PI);
-                right_arm.y_rot = lerp(right_swim, right_arm.y_rot, PI);
-                left_arm.z_rot = rot_lerp_rad(left_swim, left_arm.z_rot, PI);
-                right_arm.z_rot = lerp(right_swim, right_arm.z_rot, PI);
-            }
+            humanoid::swim_arms(
+                &mut right_arm,
+                &mut left_arm,
+                swim_pos,
+                right_swim,
+                left_swim,
+            );
         }
         left_leg.x_rot = lerp(
             s.swim_amount,
@@ -425,17 +220,18 @@ pub fn pose_humanoid(s: &AnimSample) -> Pose {
     }
 }
 
-fn wing_parts(s: &AnimSample) -> [PosedPart; 2] {
+fn wing_parts(s: &AnimSample) -> [PartState; 2] {
     use crate::entities::models::humanoid::elytra;
 
     let (left, right) = elytra::wing_angles(s.elytra, s.crouching);
-    let part = |x: f32, [y, x_rot, y_rot, z_rot]: [f32; 4]| PosedPart {
+    let part = |x: f32, [y, x_rot, y_rot, z_rot]: [f32; 4]| PartState {
         x,
         y,
         z: 2.0,
         x_rot,
         y_rot,
         z_rot,
+        ..PartState::default()
     };
     [part(5.0, left), part(-5.0, right)]
 }
@@ -480,7 +276,10 @@ pub fn root_pose(s: &AnimSample, scale: f32) -> AvatarRoot {
 
     if s.fall_flying {
         if !s.spin_attack {
-            rot *= Quat::from_rotation_x((-90.0 - s.pitch).to_radians());
+            rot *= Quat::from_rotation_x((s.fall_flying_scale * (-90.0 - s.pitch)).to_radians());
+        }
+        if let Some(y_rot) = s.flying_y_rot {
+            rot *= Quat::from_rotation_y(y_rot);
         }
     } else if s.swim_amount > 0.0 {
         rot *= Quat::from_rotation_x(lerp(s.swim_amount, 0.0, -90.0 - s.pitch).to_radians());
@@ -498,7 +297,7 @@ pub fn root_pose(s: &AnimSample, scale: f32) -> AvatarRoot {
 
 const MODEL_UNITS_PER_BLOCK: f32 = 16.0;
 
-fn held_item_transform(t: &ItemTransform, left_hand: bool) -> Transform {
+fn held_item_transform(t: &ItemTransform, left_hand: bool, pose: Mat4) -> Transform {
     let hand_rot = Quat::from_rotation_x(-FRAC_PI_2) * Quat::from_rotation_y(PI);
     let hand_off = Vec3::new(if left_hand { -1.0 } else { 1.0 }, 2.0, -10.0);
 
@@ -514,11 +313,85 @@ fn held_item_transform(t: &ItemTransform, left_hand: bool) -> Transform {
     let scale = Vec3::from(t.scale);
     let centre = disp_rot * (scale * -0.5) * MODEL_UNITS_PER_BLOCK;
 
-    Transform {
-        translation: hand_rot * (hand_off + disp_off + centre),
-        rotation: hand_rot * disp_rot,
-        scale: scale * MODEL_UNITS_PER_BLOCK,
+    if pose == Mat4::IDENTITY {
+        return Transform {
+            translation: hand_rot * (hand_off + disp_off + centre),
+            rotation: hand_rot * disp_rot,
+            scale: scale * MODEL_UNITS_PER_BLOCK,
+        };
     }
+    let pose = Mat4::from_scale(Vec3::splat(MODEL_UNITS_PER_BLOCK))
+        * pose
+        * Mat4::from_scale(Vec3::splat(1.0 / MODEL_UNITS_PER_BLOCK));
+    Transform::from_matrix(
+        Mat4::from_quat(hand_rot)
+            * Mat4::from_translation(hand_off)
+            * pose
+            * Mat4::from_scale_rotation_translation(
+                scale * MODEL_UNITS_PER_BLOCK,
+                disp_rot,
+                disp_off + centre,
+            ),
+    )
+}
+
+fn spear_item_pose(s: &AnimSample, right: bool) -> Mat4 {
+    use crate::items::kinetic::hit_feedback_amount;
+    use crate::util::mth::ease::{in_out_expo, in_quad, out_back};
+    use crate::util::mth::progress;
+
+    let pose = if right {
+        s.right_arm_pose
+    } else {
+        s.left_arm_pose
+    };
+    let charging = s.charging()[usize::from(!right)];
+    let stabbing = s.attack_time > 0.0 && s.attack_left != right && pose == ArmPose::Spear;
+    if !stabbing && charging.is_none() {
+        return Mat4::IDENTITY;
+    }
+
+    let attack = in_quad(progress(s.attack_time, 0.05, 0.2));
+    let retract = in_out_expo(progress(s.attack_time, 0.4, 1.0));
+    let around = |q: Quat, pivot: Vec3| crate::entities::rotate_around(q, pivot).to_matrix();
+    let mut m = Mat4::IDENTITY;
+
+    if stabbing {
+        let jet = s.main_hand.kinetic.map_or(0.0, |k| k.forward_movement);
+        m *= around(
+            Quat::from_rotation_x(-70.0 * (attack - retract) * DEG_TO_RAD),
+            Vec3::new(0.0, -0.125, 0.125),
+        );
+        m *= Mat4::from_translation(Vec3::new(0.0, jet * (attack - retract), 0.0));
+    }
+
+    if let Some(kinetic) = charging
+        && pose == ArmPose::Spear
+        && s.ticks_using_item != 0.0
+    {
+        let p = kinetic.use_params(s.ticks_using_item);
+        let invert = if right { 1.0 } else { -1.0 };
+        let raise_modified = 1.0 - out_back(1.0 - p.raise);
+        let hit = hit_feedback_amount(s.ticks_since_kinetic_hit);
+        m *= Mat4::from_translation(Vec3::new(
+            0.0,
+            -hit * 0.4,
+            -kinetic.forward_movement * (raise_modified - p.raise_back) + hit,
+        ));
+        m *= around(
+            Quat::from_rotation_x(
+                -(70.0 * (p.raise - p.raise_back) - 40.0 * (attack - retract)) * DEG_TO_RAD,
+            ),
+            Vec3::new(0.0, -0.031_25, 0.125),
+        );
+        m *= around(
+            Quat::from_rotation_y(
+                invert * 90.0 * (p.raise - p.sway + 3.0 * retract + attack) * DEG_TO_RAD,
+            ),
+            Vec3::new(0.0, 0.0, 0.125),
+        );
+    }
+    m
 }
 
 fn held_context(left_hand: bool) -> DisplayContext {
@@ -534,17 +407,17 @@ fn display_transform(gpu: &super::item_assets::ItemGpu, left_hand: bool) -> Item
 }
 
 #[derive(Clone, Copy)]
-struct PartDef {
+pub(crate) struct PartDef {
     name: &'static str,
-    tex: [f32; 2],
-    origin: [f32; 3],
-    size: [f32; 3],
-    grow: f32,
-    pivot: [f32; 3],
+    pub(crate) tex: [f32; 2],
+    pub(crate) origin: [f32; 3],
+    pub(crate) size: [f32; 3],
+    pub(crate) grow: f32,
+    pub(crate) pivot: [f32; 3],
     parent: Option<usize>,
 }
 
-const PARTS: [PartDef; 12] = [
+pub(crate) const PARTS: [PartDef; 12] = [
     PartDef {
         name: "head",
         tex: [0.0, 0.0],
@@ -655,8 +528,7 @@ const PARTS: [PartDef; 12] = [
     },
 ];
 
-#[cfg(feature = "skins")]
-const SLIM_ARMS: [(usize, [f32; 3], [f32; 3]); 4] = [
+pub(crate) const SLIM_ARMS: [(usize, [f32; 3], [f32; 3]); 4] = [
     (2, [-2.0, -2.0, -2.0], [3.0, 12.0, 4.0]),
     (3, [-1.0, -2.0, -2.0], [3.0, 12.0, 4.0]),
     (8, [-2.0, -2.0, -2.0], [3.0, 12.0, 4.0]),
@@ -704,14 +576,14 @@ fn slim_meshes(wide: &[Handle<Mesh>], meshes: &mut Assets<Mesh>) -> Vec<Handle<M
     slim
 }
 
-const ARMOR_LAYERS: [fn() -> geom::LayerDef; 4] = [
+pub(crate) const ARMOR_LAYERS: [fn() -> geom::LayerDef; 4] = [
     armor_mesh::humanoid_helmet,
     armor_mesh::humanoid_chestplate,
     armor_mesh::humanoid_leggings,
     armor_mesh::humanoid_boots,
 ];
 
-const ARMOR_PARTS: [(&str, usize); 7] = [
+pub(crate) const ARMOR_PARTS: [(&str, usize); 7] = [
     ("head", 0),
     ("hat", 0),
     ("body", 1),
@@ -775,11 +647,13 @@ fn bake_armor(layer: geom::LayerDef, meshes: &mut Assets<Mesh>) -> Vec<ArmorMesh
     out
 }
 
-fn armor_texture(slot: usize, item: &str) -> String {
+pub(crate) fn armor_texture(slot: usize, item: &str) -> Option<String> {
     if slot == LEGGINGS_SLOT {
-        armor_tex::leggings_layer_texture(Some(item))
+        armor_tex::has_layer(Some(item), armor_tex::LAYER_HUMANOID_LEGGINGS)
+            .then(|| armor_tex::leggings_layer_texture(Some(item)))
     } else {
-        armor_tex::humanoid_texture(Some(item))
+        armor_tex::has_layer(Some(item), armor_tex::LAYER_HUMANOID)
+            .then(|| armor_tex::humanoid_texture(Some(item)))
     }
 }
 
@@ -812,6 +686,8 @@ struct RigArmor;
 struct HeldItemNode {
     shown: HeldItem,
     blocking: bool,
+    display: Option<ItemTransform>,
+    pose: Mat4,
 }
 
 #[cfg(feature = "skins")]
@@ -828,7 +704,7 @@ const FIRST_OVERLAY: usize = 6;
 struct ArmorSlotRig {
     boxes: Vec<Entity>,
     material: Handle<EntityMaterial>,
-    worn: Option<&'static str>,
+    worn: (Option<&'static str>, bool),
 }
 
 struct HeldRig {
@@ -847,7 +723,7 @@ struct CapeRig {
 struct WingsRig {
     nodes: [Entity; 2],
     material: Handle<EntityMaterial>,
-    worn: Option<(Option<&'static str>, u32)>,
+    worn: Option<(Option<&'static str>, bool, u32)>,
 }
 
 struct Rig {
@@ -1059,6 +935,8 @@ fn spawn_rig(
                 HeldItemNode {
                     shown: HeldItem::default(),
                     blocking: false,
+                    display: None,
+                    pose: Mat4::IDENTITY,
                 },
                 Name::new(if arm == PART_RIGHT_ARM {
                     "right_hand_item"
@@ -1134,7 +1012,7 @@ fn spawn_rig(
             })
             .collect(),
         material: armor_materials[slot].clone(),
-        worn: None,
+        worn: (None, false),
     });
 
     Rig {
@@ -1251,6 +1129,7 @@ struct ItemCtx<'a> {
     entity_materials: &'a mut Assets<EntityMaterial>,
     no_item: Handle<Mesh>,
     entity_images: &'a mut crate::entities::EntityImages,
+    armor_glint: Option<Handle<Image>>,
     #[cfg(feature = "skins")]
     skins: &'a mut super::skin::SkinTextures,
     #[cfg(feature = "skins")]
@@ -1266,8 +1145,7 @@ struct WornSkin {
 fn sync_player_models(
     shared: Res<crate::renderer::systems::Shared>,
     view: Res<crate::renderer::frame_view::FrameView>,
-    freecam: Res<crate::renderer::input::FreecamState>,
-    third_person: Res<crate::renderer::input::ThirdPersonState>,
+    camera_view: Res<crate::renderer::input::CameraView>,
     assets: Option<Res<PlayerModelAssets>>,
     mut rigs: ResMut<PlayerRigs>,
     mut commands: Commands,
@@ -1279,6 +1157,8 @@ fn sync_player_models(
     mut entity_images: ResMut<crate::entities::EntityImages>,
     #[cfg(feature = "skins")] mut skin_textures: ResMut<super::skin::SkinTextures>,
     lightmap: Res<crate::renderer::systems::LightmapState>,
+    origin: Res<crate::renderer::RenderOrigin>,
+    armor_glint: Option<Res<super::glint::ArmorGlintTexture>>,
 ) {
     crate::prof_span!("render:sync_player_models");
     let Some(assets) = assets else { return };
@@ -1289,6 +1169,7 @@ fn sync_player_models(
         entity_materials: &mut entity_materials,
         no_item: assets.no_item.clone(),
         entity_images: &mut entity_images,
+        armor_glint: armor_glint.map(|glint| glint.0.clone()),
         #[cfg(feature = "skins")]
         skins: &mut skin_textures,
         #[cfg(feature = "skins")]
@@ -1297,7 +1178,7 @@ fn sync_player_models(
     let dirs = diffuse_lights(crate::renderer::dimension::current());
 
     let partial = view.partial;
-    let players: Vec<(i32, [f32; 3], AnimSample, WornSkin, Body)> = {
+    let players: Vec<(i32, [f64; 3], AnimSample, WornSkin, Body)> = {
         let s = shared.0.lock().unwrap();
         s.session
             .other_players
@@ -1380,7 +1261,7 @@ fn sync_player_models(
         let lit = player_lit(&lightmap.current, &light, *feet, sample, body.scale, dirs);
         apply_rig(
             &mut rigs.entries[slot],
-            *feet,
+            origin.to_render_array(*feet),
             sample,
             worn,
             *body,
@@ -1415,7 +1296,7 @@ fn sync_player_models(
             view.local_body.scale,
             dirs,
         );
-        let shown = if freecam.active || third_person.active {
+        let shown = if camera_view.detached() {
             RigVisibility::Shown
         } else if pose_hidden {
             RigVisibility::HiddenPosed
@@ -1424,7 +1305,7 @@ fn sync_player_models(
         };
         apply_rig(
             local,
-            local_pos,
+            origin.to_render_array(local_pos),
             &local_pose,
             &local_skin,
             Body::of(&view.local_body, view.gamemode),
@@ -1457,11 +1338,13 @@ fn sync_player_models(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_held_item(
     entity: Entity,
     item: &HeldItem,
     left_hand: bool,
     blocking: bool,
+    pose: Mat4,
     material: &Handle<EntityMaterial>,
     items: &mut ItemCtx,
     query: &mut Query<
@@ -1478,10 +1361,17 @@ fn update_held_item(
         return;
     };
     if node.blocking == blocking && node.shown.same_model(item) {
+        if node.pose != pose {
+            node.pose = pose;
+            if let Some(display) = node.display {
+                *transform = held_item_transform(&display, left_hand, pose);
+            }
+        }
         return;
     }
     node.shown = item.clone();
     node.blocking = blocking;
+    node.pose = pose;
     let key = item.model_key();
 
     let slot = held_context(left_hand).name();
@@ -1491,7 +1381,9 @@ fn update_held_item(
         .cloned();
     match gpu {
         Some(gpu) => {
-            *transform = held_item_transform(&display_transform(&gpu, left_hand), left_hand);
+            let display = display_transform(&gpu, left_hand);
+            node.display = Some(display);
+            *transform = held_item_transform(&display, left_hand, pose);
             mesh.0 = gpu.mesh;
             if let Some(material) = items.entity_materials.get_mut(material) {
                 material.texture = Some(gpu.texture);
@@ -1499,6 +1391,7 @@ fn update_held_item(
             *vis = Visibility::Inherited;
         }
         None => {
+            node.display = None;
             mesh.0 = items.no_item.clone();
             *vis = Visibility::Hidden;
         }
@@ -1511,15 +1404,16 @@ fn update_wings(
     items: &mut ItemCtx,
     layers: &mut LayerQuery<'_, '_>,
 ) {
-    let chest = armor[CHEST_SLOT];
+    let chest = armor.items[CHEST_SLOT];
+    let glint = armor.foil[CHEST_SLOT] && items.armor_glint.is_some();
     #[cfg(feature = "skins")]
     let generation = items.skins.generation();
     #[cfg(not(feature = "skins"))]
     let generation = 0;
-    if rig.wings.worn == Some((chest, generation)) {
+    if rig.wings.worn == Some((chest, glint, generation)) {
         return;
     }
-    rig.wings.worn = Some((chest, generation));
+    rig.wings.worn = Some((chest, glint, generation));
 
     let worn = crate::entities::render::humanoid::armor::has_layer(
         chest,
@@ -1553,6 +1447,7 @@ fn update_wings(
 
     if let Some(material) = items.entity_materials.get_mut(&rig.wings.material) {
         material.texture = texture.clone();
+        material.set_glint(super::glint::armor_scale(glint), items.armor_glint.clone());
     }
     let shown = if texture.is_some() {
         Visibility::Inherited
@@ -1585,8 +1480,7 @@ fn update_wings(
     }
 }
 
-#[cfg(feature = "skins")]
-const OVERLAY_BITS: [u8; 6] = [6, 1, 3, 2, 5, 4];
+pub(crate) const OVERLAY_BITS: [u8; 6] = [6, 1, 3, 2, 5, 4];
 
 #[cfg(feature = "skins")]
 const CAPE_BIT: u8 = 0;
@@ -1669,7 +1563,12 @@ fn update_skin(
     }
 }
 
-pub(crate) fn player_eye(feet: [f32; 3], sample: &AnimSample, scale: f32) -> [f32; 3] {
+pub(crate) fn player_eye(feet: [f64; 3], sample: &AnimSample, scale: f32) -> [f64; 3] {
+    let eye_height = player_eye_height(sample, scale);
+    [feet[0], feet[1] + f64::from(eye_height), feet[2]]
+}
+
+pub(crate) fn player_eye_height(sample: &AnimSample, scale: f32) -> f32 {
     use azalea::entity::Pose;
     let pose = if sample.sleeping {
         Pose::Sleeping
@@ -1684,14 +1583,13 @@ pub(crate) fn player_eye(feet: [f32; 3], sample: &AnimSample, scale: f32) -> [f3
     } else {
         Pose::Standing
     };
-    let eye_height = crate::session::player_dimensions(pose, scale).eye_height;
-    [feet[0], feet[1] + eye_height, feet[2]]
+    crate::session::player_dimensions(pose, scale).eye_height
 }
 
 fn player_lit(
     lm: &crate::renderer::lightmap::State,
     light: &crate::lighting::level::LightMap,
-    feet: [f32; 3],
+    feet: [f64; 3],
     sample: &AnimSample,
     scale: f32,
     dirs: [Vec3; 2],
@@ -1754,7 +1652,7 @@ fn hide_body(rig: &mut Rig, hidden: bool, materials: &mut Assets<EntityMaterial>
 #[cfg_attr(not(feature = "skins"), allow(unused_variables))]
 fn apply_rig(
     rig: &mut Rig,
-    feet: [f32; 3],
+    feet: Vec3,
     sample: &AnimSample,
     worn: &WornSkin,
     body: Body,
@@ -1767,7 +1665,7 @@ fn apply_rig(
     let Ok((mut transform, mut vis)) = queries.0.get_mut(rig.root) else {
         return;
     };
-    let translation = Vec3::from(feet) + root.world_offset;
+    let translation = feet + root.world_offset;
     let scale = Vec3::splat(body.scale);
     if transform.translation != translation
         || transform.rotation != root.rotation
@@ -1793,13 +1691,13 @@ fn apply_rig(
     let pose = pose_humanoid(sample);
     for (entity, part) in rig.parts.iter().zip(pose.parts().iter()) {
         if let Ok(mut transform) = queries.2.get_mut(*entity) {
-            *transform = part.transform();
+            *transform = model_transform(part);
         }
     }
 
     for (entity, part) in rig.wings.nodes.iter().zip(pose.wings.iter()) {
         if let Ok(mut transform) = queries.2.get_mut(*entity) {
-            *transform = part.transform();
+            *transform = model_transform(part);
         }
     }
 
@@ -1825,6 +1723,7 @@ fn apply_rig(
         right_item,
         false,
         sample.right_arm_pose == ArmPose::Block,
+        spear_item_pose(sample, true),
         &right_held.material,
         items,
         &mut queries.3,
@@ -1834,6 +1733,7 @@ fn apply_rig(
         left_item,
         true,
         sample.left_arm_pose == ArmPose::Block,
+        spear_item_pose(sample, false),
         &left_held.material,
         items,
         &mut queries.3,
@@ -1871,20 +1771,20 @@ fn update_armor(
     >,
 ) {
     for (index, slot) in rig.armor.iter_mut().enumerate() {
-        if slot.worn == armor[index] {
+        let item = armor.items[index];
+        let glint = armor.foil[index] && items.armor_glint.is_some();
+        if slot.worn == (item, glint) {
             continue;
         }
-        slot.worn = armor[index];
+        slot.worn = (item, glint);
 
-        let texture = match &armor[index] {
-            Some(item) => {
-                let path = armor_texture(index, item);
-                items.entity_images.get(&path, items.images)
-            }
+        let texture = match item.and_then(|item| armor_texture(index, item)) {
+            Some(path) => items.entity_images.get(&path, items.images),
             None => None,
         };
         if let Some(material) = items.entity_materials.get_mut(&slot.material) {
             material.texture = texture.clone();
+            material.set_glint(super::glint::armor_scale(glint), items.armor_glint.clone());
         }
         let shown = if texture.is_some() {
             Visibility::Inherited
@@ -1902,6 +1802,9 @@ fn update_armor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::models::humanoid::humanoid::{
+        HORIZONTAL_SHIELD_MOVEMENT_LIMIT, LOWEST_SHIELD_BLOCKING_ANGLE,
+    };
     use crate::renderer::skin::{SKIN_H, SKIN_W};
 
     #[test]
@@ -1951,7 +1854,7 @@ mod tests {
         assert_eq!((p.left_arm.x, p.left_arm.y), (5.0, 2.0));
         assert_eq!((p.right_leg.x, p.right_leg.y), (-1.9, 12.0));
         assert_eq!((p.left_leg.x, p.left_leg.y), (1.9, 12.0));
-        assert_eq!(p.body, PosedPart::at([0.0, 0.0, 0.0]));
+        assert_eq!(p.body, part_at([0.0, 0.0, 0.0]));
         assert!((p.right_arm.z_rot + p.left_arm.z_rot).abs() < 1e-6);
         assert!(p.right_arm.z_rot.abs() > 1e-3);
     }
@@ -2103,19 +2006,46 @@ mod tests {
 
     #[test]
     fn an_untransformed_item_centres_on_the_fist() {
-        let right = held_item_transform(&ItemTransform::NONE, false);
+        let right = held_item_transform(&ItemTransform::NONE, false, Mat4::IDENTITY);
         assert_eq!(right.scale, Vec3::splat(MODEL_UNITS_PER_BLOCK));
         let centre = right.transform_point(Vec3::splat(0.5));
         assert!(
             centre.abs_diff_eq(Vec3::new(-1.0, 10.0, -2.0), 1e-4),
             "{centre:?}"
         );
-        let left =
-            held_item_transform(&ItemTransform::NONE, true).transform_point(Vec3::splat(0.5));
+        let left = held_item_transform(&ItemTransform::NONE, true, Mat4::IDENTITY)
+            .transform_point(Vec3::splat(0.5));
         assert!(
             left.abs_diff_eq(Vec3::new(1.0, 10.0, -2.0), 1e-4),
             "{left:?}"
         );
+    }
+
+    #[test]
+    fn a_spear_pose_moves_the_item_in_blocks() {
+        let base = held_item_transform(&ItemTransform::NONE, false, Mat4::IDENTITY);
+        let pushed =
+            held_item_transform(&ItemTransform::NONE, false, Mat4::from_translation(Vec3::Y));
+        let hand_rot = Quat::from_rotation_x(-FRAC_PI_2) * Quat::from_rotation_y(PI);
+        let moved =
+            pushed.transform_point(Vec3::splat(0.5)) - base.transform_point(Vec3::splat(0.5));
+        assert!(
+            moved.abs_diff_eq(hand_rot * Vec3::new(0.0, MODEL_UNITS_PER_BLOCK, 0.0), 1e-3),
+            "{moved:?}"
+        );
+        assert!(pushed.scale.abs_diff_eq(base.scale, 1e-4));
+    }
+
+    #[test]
+    fn spear_item_pose_is_identity_without_a_spear() {
+        let s = AnimSample {
+            attack_time: 0.5,
+            using_item: true,
+            ticks_using_item: 10.0,
+            ..AnimSample::default()
+        };
+        assert_eq!(spear_item_pose(&s, true), Mat4::IDENTITY);
+        assert_eq!(spear_item_pose(&s, false), Mat4::IDENTITY);
     }
 
     #[test]
@@ -2140,7 +2070,7 @@ mod tests {
     fn sleeping_shoves_the_body_along_the_bed_instead_of_turning_it() {
         let asleep = AnimSample {
             sleeping: true,
-            bed_orientation: Some(crate::direction::Direction::South),
+            bed_orientation: Some(crate::blocks::direction::Direction::South),
             body_yaw: 123.0,
             ..Default::default()
         };

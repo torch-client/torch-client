@@ -41,6 +41,7 @@ pub(crate) struct InstalledProgram {
     pub(crate) fragment: Module,
     pub(crate) fragment_tests: Vec<(compile::AlphaTest, Module)>,
     pub(crate) alpha_override: Option<Option<compile::AlphaTest>>,
+    pub(crate) blend: compile::Blend,
     pub(crate) fragment_linear: Option<Module>,
     pub(crate) compute: Option<Module>,
     pub(crate) compute_used: Option<Vec<u32>>,
@@ -125,6 +126,7 @@ fn install(pack: &str, generation: u32, direct: bool, frame: Frame) -> Installed
                 .map(|(n, (test, f))| (test, add(&p.name, &format!("alpha{n}.fsh"), f)))
                 .collect(),
             alpha_override: p.alpha_override,
+            blend: p.blend,
             fragment_linear: p.fragment_linear.map(|f| add(&p.name, "linear.fsh", f)),
             name: p.name,
             kind: p.kind,
@@ -232,6 +234,7 @@ pub(crate) fn sync_compiled_pack(
                     let installed = install(&name, *generation, direct, frame);
                     report(&name, &installed, &notes);
                     *failed = None;
+                    crate::shaderpack::FAILED.set(Vec::new());
                     commands.insert_resource(CompiledPack {
                         name,
                         revision,
@@ -241,6 +244,7 @@ pub(crate) fn sync_compiled_pack(
                 }
                 Err(e) => {
                     crate::log_warn!("shaders", "{name} did not compile: {e}");
+                    crate::shaderpack::FAILED.set(vec![name.clone()]);
                     *failed = Some((name, revision, dimension));
                     commands.remove_resource::<CompiledPack>();
                 }
@@ -311,6 +315,7 @@ pub(crate) fn sync_pack_vertices(
         _ => true,
     };
     crate::renderer::packvertex::set_current(wanted.clone());
+    crate::client::mesh_worker::forward_pack_ids(wanted.as_deref());
     *published = wanted;
     if remesh {
         let Ok(mut state) = shared.0.lock();

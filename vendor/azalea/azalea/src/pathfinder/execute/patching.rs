@@ -207,6 +207,8 @@ pub fn patch_path(
     }
 }
 
+pub const OBSTRUCTION_LOOKAHEAD: usize = 32;
+
 pub fn check_path_obstructed<SuccessorsFn>(
     origin: BlockPos,
     mut current_position: RelBlockPos,
@@ -219,7 +221,7 @@ where
 {
     let start_time = Instant::now();
 
-    for (i, edge) in path.iter().enumerate() {
+    for (i, edge) in path.iter().enumerate().take(OBSTRUCTION_LOOKAHEAD) {
         if start_time.elapsed() > timeout {
             break;
         }

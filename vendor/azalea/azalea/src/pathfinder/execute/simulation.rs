@@ -162,7 +162,7 @@ pub fn tick_execute_path(
                         is_currently_mining: mining.is_some(),
                         can_mine: true,
                         world: world_holder.shared.clone(),
-                        menu: inventory.inventory_menu.clone(),
+                        menu: &inventory.inventory_menu,
 
                         commands: &mut commands,
                         look_at_events: &mut look_at_events,
@@ -436,7 +436,7 @@ fn run_one_simulation(
                     is_currently_mining: mining.is_some(),
                     can_mine: false,
                     world: sim.world.clone(),
-                    menu: inventory.inventory_menu.clone(),
+                    menu: &inventory.inventory_menu,
 
                     commands: &mut commands,
                     look_at_events: &mut look_at_events,

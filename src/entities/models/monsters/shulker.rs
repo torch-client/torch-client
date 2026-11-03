@@ -1,24 +1,22 @@
 #![allow(clippy::approx_constant)]
 
-use crate::entities::geom::{BakedModel, CubeList, LayerDef, MeshDef, PartPose, PartState};
+use crate::entities::geom::{BakedModel, LayerDef, MeshDef, PartPose, PartState};
 use crate::entities::state::EntityState;
 use crate::util::mth::DEG_TO_RAD;
 
 fn shell_mesh() -> MeshDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "lid",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-8.0, -16.0, -8.0, 16.0, 12.0, 16.0),
+        (0, 0),
+        [-8.0, -16.0, -8.0, 16.0, 12.0, 16.0],
         PartPose::offset(0.0, 24.0, 0.0),
     );
-    root.child(
+    root.part(
         "base",
-        CubeList::new()
-            .tex_offs(0, 28)
-            .add_box(-8.0, -8.0, -8.0, 16.0, 8.0, 16.0),
+        (0, 28),
+        [-8.0, -8.0, -8.0, 16.0, 8.0, 16.0],
         PartPose::offset(0.0, 24.0, 0.0),
     );
     mesh
@@ -30,11 +28,10 @@ pub fn box_layer() -> LayerDef {
 
 pub fn layer() -> LayerDef {
     let mut mesh = shell_mesh();
-    mesh.root().child(
+    mesh.root().part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 52)
-            .add_box(-3.0, 0.0, -3.0, 6.0, 6.0, 6.0),
+        (0, 52),
+        [-3.0, 0.0, -3.0, 6.0, 6.0, 6.0],
         PartPose::offset(0.0, 12.0, 0.0),
     );
     LayerDef::create(mesh, 64, 64)

@@ -1,6 +1,12 @@
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use parking_lot::Mutex;
+
+use crate::util::reload::Label;
+
 use bevy::input::ButtonInput;
+use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::{KeyCode, MouseButton};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -12,6 +18,19 @@ pub enum Bound {
 }
 
 const UNBOUND_NAME: &str = "Not Bound";
+
+fn tr_or(key: &'static str, fallback: &'static str) -> &'static str {
+    static CELLS: Mutex<Option<HashMap<&'static str, &'static Label>>> = Mutex::new(None);
+    let cell: &'static Label = {
+        let mut cells = CELLS.lock();
+        *cells
+            .get_or_insert_with(HashMap::new)
+            .entry(key)
+            .or_insert_with(|| Box::leak(Box::new(Label::new())))
+    };
+    let text = crate::gui::tooltip::resolve_label(key, cell);
+    if text == key { fallback } else { text }
+}
 
 #[rustfmt::skip]
 const KEYS: &[(KeyCode, &str, &str)] = &[
@@ -164,17 +183,17 @@ impl Bound {
 
     pub fn display_name(self) -> &'static str {
         match self {
-            Bound::Unbound => UNBOUND_NAME,
+            Bound::Unbound => tr_or("key.keyboard.unknown", UNBOUND_NAME),
             Bound::Key(code) => KEYS
                 .iter()
                 .find(|(k, ..)| *k == code)
-                .map(|(.., display)| *display)
-                .unwrap_or(UNBOUND_NAME),
+                .map(|(_, name, display)| tr_or(*name, *display))
+                .unwrap_or_else(|| tr_or("key.keyboard.unknown", UNBOUND_NAME)),
             Bound::Mouse(button) => MOUSE
                 .iter()
                 .find(|(b, ..)| *b == button)
-                .map(|(.., display)| *display)
-                .unwrap_or(UNBOUND_NAME),
+                .map(|(_, name, display)| tr_or(*name, *display))
+                .unwrap_or_else(|| tr_or("key.keyboard.unknown", UNBOUND_NAME)),
         }
     }
 
@@ -268,6 +287,29 @@ pub struct BindDef {
     pub name: &'static str,
     pub category: &'static str,
     pub default: Bound,
+}
+
+impl BindDef {
+    pub fn label(&self) -> &'static str {
+        if self.id.starts_with("key.client.") || self.id == "key.spectatorHotbar" {
+            self.name
+        } else {
+            tr_or(self.id, self.name)
+        }
+    }
+
+    pub fn category_label(&self) -> &'static str {
+        let key = match self.category {
+            MOVEMENT => "key.categories.movement",
+            MISC => "key.categories.misc",
+            MULTIPLAYER => "key.categories.multiplayer",
+            GAMEPLAY => "key.categories.gameplay",
+            INVENTORY => "key.categories.inventory",
+            SPECTATOR => "key.categories.spectator",
+            _ => return self.category,
+        };
+        tr_or(key, self.category)
+    }
 }
 
 const MOVEMENT: &str = "Movement";
@@ -481,7 +523,7 @@ impl KeyBinds {
             .filter(|j| {
                 *j != i && self.row(*j) == key && !(self.is_default(*j) && self.is_default(i))
             })
-            .map(|j| BINDS[j].name)
+            .map(|j| BINDS[j].label())
             .collect()
     }
 
@@ -515,6 +557,25 @@ impl KeyBinds {
             Bound::Unbound => false,
             Bound::Key(code) => keys.just_pressed(code),
             Bound::Mouse(button) => buttons.just_pressed(button),
+        }
+    }
+
+    pub fn clicks<'a>(
+        &self,
+        action: Action,
+        events: impl IntoIterator<Item = &'a KeyboardInput>,
+        buttons: &ButtonInput<MouseButton>,
+    ) -> u32 {
+        let bound = self.bound(action);
+        let mut n = 0;
+        for ev in events {
+            if bound == Bound::Key(ev.key_code) && ev.state.is_pressed() {
+                n += 1;
+            }
+        }
+        match bound {
+            Bound::Mouse(button) => u32::from(buttons.just_pressed(button)),
+            _ => n,
         }
     }
 
@@ -606,5 +667,40 @@ mod tests {
             binds.collisions(Action::Jump as usize),
             vec!["Strafe Left", "Reload Chunks"]
         );
+    }
+
+    #[test]
+    fn clicks_count_repeats() {
+        use bevy::input::ButtonState;
+        use bevy::input::keyboard::Key;
+        use bevy::prelude::Entity;
+
+        let ev = |key_code, state, repeat| KeyboardInput {
+            key_code,
+            logical_key: Key::Escape,
+            state,
+            text: None,
+            repeat,
+            window: Entity::PLACEHOLDER,
+        };
+        let events = [
+            ev(KeyCode::KeyQ, ButtonState::Pressed, false),
+            ev(KeyCode::KeyQ, ButtonState::Pressed, true),
+            ev(KeyCode::KeyW, ButtonState::Pressed, true),
+            ev(KeyCode::KeyQ, ButtonState::Pressed, true),
+            ev(KeyCode::KeyQ, ButtonState::Released, false),
+        ];
+        let mut binds = KeyBinds {
+            bound: BINDS.iter().map(|d| d.default).collect(),
+            capturing: None,
+            escape_guard: false,
+        };
+        let mut buttons = ButtonInput::<MouseButton>::default();
+        assert_eq!(binds.clicks(Action::Drop, &events, &buttons), 3);
+
+        binds.bound[Action::Drop as usize] = Bound::Mouse(MouseButton::Middle);
+        assert_eq!(binds.clicks(Action::Drop, &events, &buttons), 0);
+        buttons.press(MouseButton::Middle);
+        assert_eq!(binds.clicks(Action::Drop, &events, &buttons), 1);
     }
 }

@@ -1,5 +1,5 @@
 use super::socket::{Frame, Socket};
-use crate::log_warn;
+use crate::{log_info, log_warn};
 
 pub(super) const HANDSHAKE_VERSIONS: [u16; 2] = [5, 4];
 
@@ -155,21 +155,49 @@ async fn expect(socket: &mut Socket, opcode: u8) -> eyre::Result<Reader> {
         if got == opcode {
             return Ok(reader);
         }
-        eyre::bail!("{}", describe(got, &mut reader));
+        return Err(describe(got, &mut reader));
     }
 }
 
-fn describe(opcode: u8, reader: &mut Reader) -> String {
+#[derive(Debug)]
+pub(crate) struct Refused {
+    pub(crate) reason: Vec<crate::text::Span>,
+    plain: String,
+}
+
+impl Refused {
+    fn new(message: &str) -> Self {
+        let reason = match serde_json::from_str::<azalea_chat::FormattedText>(message) {
+            Ok(component) => crate::client::chat_text::to_spans(&component),
+            Err(_) => crate::text::parse_formatted(message),
+        };
+        let plain = reason.iter().map(|span| span.text.as_str()).collect();
+        Self { reason, plain }
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.plain)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+fn describe(opcode: u8, reader: &mut Reader) -> eyre::Report {
     match opcode {
         SERVER_DENY_LOGIN => match reader.long_str() {
-            Ok(message) => format!("the server refused the login: {message}"),
-            Err(_) => "the server refused the login".to_string(),
+            Ok(message) => Refused::new(&message).into(),
+            Err(_) => eyre::eyre!("the server refused the login"),
         },
         SERVER_ERROR => {
             let code = reader.u8().unwrap_or(0);
             match reader.long_str() {
-                Ok(message) => format!("the server reported an error ({code}): {message}"),
-                Err(_) => format!("the server reported error code {code}"),
+                Ok(message) => {
+                    log_info!("net", "eagler: the server sent error code {code}");
+                    Refused::new(&message).into()
+                }
+                Err(_) => eyre::eyre!("the server reported error code {code}"),
             }
         }
         VERSION_MISMATCH => {
@@ -182,13 +210,13 @@ fn describe(opcode: u8, reader: &mut Reader) -> String {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            format!(
+            eyre::eyre!(
                 "the server does not support eagler handshake versions {HANDSHAKE_VERSIONS:?}; \
                  it accepts {allowed:?}. Only 5 and 4 are implemented, so this server cannot \
                  be joined; see src/eagler/handshake.rs."
             )
         }
-        _ => format!("the server sent an unexpected handshake packet 0x{opcode:02x}"),
+        _ => eyre::eyre!("the server sent an unexpected handshake packet 0x{opcode:02x}"),
     }
 }
 

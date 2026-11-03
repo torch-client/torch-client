@@ -105,7 +105,7 @@ impl From<WalkDirection> for DirectionStates {
                 s.right = true
             }
             WalkDirection::BackwardLeft => {
-                s.forward = true;
+                s.backward = true;
                 s.left = true
             }
         };

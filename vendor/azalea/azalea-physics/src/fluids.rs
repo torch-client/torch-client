@@ -6,7 +6,7 @@ use azalea_core::{
     direction::Direction,
     position::{BlockPos, Vec3},
 };
-use azalea_entity::{HasClientLoaded, LocalEntity, Physics, Position, metadata::{Sprinting, Swimming}};
+use azalea_entity::{HasClientLoaded, LocalEntity, Physics, PlayerAbilities, Position, metadata::{Sprinting, Swimming}};
 use azalea_registry::builtin::BlockKind;
 use azalea_world::{World, WorldName, Worlds};
 use bevy_ecs::prelude::*;
@@ -32,17 +32,22 @@ use crate::collision::legacy_blocks_motion;
 #[allow(clippy::type_complexity)]
 pub fn update_in_water_state_and_do_fluid_pushing(
     mut query: Query<
-        (&mut Physics, &WorldName),
+        (&mut Physics, &WorldName, Option<&PlayerAbilities>),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
     worlds: Res<Worlds>,
 ) {
-    for (mut physics, world_name) in &mut query {
+    for (mut physics, world_name, abilities) in &mut query {
         let Some(world_lock) = worlds.get(world_name) else {
             continue;
         };
         let world = world_lock.read();
-        update_fluid_interaction(&mut physics, &world, world_name, FluidPush::Player);
+        let push = if abilities.is_some_and(|abilities| abilities.flying) {
+            FluidPush::None
+        } else {
+            FluidPush::Player
+        };
+        update_fluid_interaction(&mut physics, &world, world_name, push);
     }
 }
 

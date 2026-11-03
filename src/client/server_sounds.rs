@@ -69,7 +69,7 @@ pub(crate) fn play_server_sounds(
     }
 }
 
-fn event_name(sound: &Holder<SoundEvent, CustomSound>) -> Option<&str> {
+pub(crate) fn event_name(sound: &Holder<SoundEvent, CustomSound>) -> Option<&str> {
     match sound {
         Holder::Reference(event) => Some(crate::items::kinetic::sound_name(*event)),
         Holder::Direct(custom) => vanilla_path(&custom.sound_id),

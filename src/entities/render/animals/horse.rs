@@ -3,8 +3,8 @@ use azalea_registry::builtin::EntityKind;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::equine;
 use crate::entities::registry::Registry;
-use crate::entities::render::add_adult_and_baby;
 use crate::entities::render::humanoid::armor;
+use crate::entities::render::{add_adult_and_baby, saddle_spec};
 use crate::entities::state::EntityState;
 use crate::entities::{Blend, RenderSpec};
 
@@ -55,14 +55,12 @@ pub fn register(registry: &mut Registry) {
     );
     registry.add(
         EntityKind::Horse,
-        RenderSpec::new(
+        saddle_spec(
             "horse_saddle",
             equine::horse_saddle_layer,
             saddle_texture,
             equine::saddle_setup_anim,
-        )
-        .with_visible(|st| !st.extras.is_baby && st.extras.saddled)
-        .ignoring_invisibility(),
+        ),
     );
 }
 

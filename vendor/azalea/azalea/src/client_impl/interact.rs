@@ -23,6 +23,7 @@ impl Client {
             client: self.entity,
             target: entity,
             location: None,
+            hand: InteractionHand::MainHand,
         });
     }
 

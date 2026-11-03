@@ -10,7 +10,6 @@ use bevy::render::render_resource::{
     AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
 use bevy::shader::ShaderRef;
-use bevy::transform::TransformSystems;
 
 use azalea_core::heightmap_kind::HeightmapKind;
 use azalea_core::position::ChunkPos;
@@ -53,25 +52,13 @@ pub struct WeatherMaterial {
 }
 
 impl Material for WeatherMaterial {
-    fn vertex_shader() -> ShaderRef {
-        shader()
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        shader()
-    }
+    crate::renderer::material_shader_fns!();
 
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Blend
     }
 
-    fn enable_prepass() -> bool {
-        false
-    }
-
-    fn enable_shadows() -> bool {
-        false
-    }
+    crate::renderer::material_no_prepass_no_shadows!();
 
     fn specialize(
         _pipeline: &MaterialPipeline,
@@ -119,7 +106,7 @@ impl Plugin for WeatherPlugin {
             .add_systems(
                 PostUpdate,
                 update_weather
-                    .before(TransformSystems::Propagate)
+                    .in_set(super::CameraPinnedMeshes)
                     .run_if(in_state(AppState::InGame))
                     .run_if(resource_exists::<WeatherAssets>),
             );
@@ -529,8 +516,7 @@ pub(crate) fn tick_rain_particles(ctx: &mut Emitter, rain: f32, tick: u64, sound
         let Some(state) = ctx.block(cell) else {
             continue;
         };
-        let top =
-            shape_top(state, pos, block_x, block_z).max(f64::from(fluid_top(ctx, state, cell)));
+        let top = surface_top(ctx.world, state, pos, block_x, block_z);
         let fluid = azalea::block::fluid_state::FluidState::from(state);
         let smoke = fluid.kind == azalea::block::fluid_state::FluidKind::Lava
             || state.as_block_kind() == azalea_registry::builtin::BlockKind::MagmaBlock
@@ -598,14 +584,23 @@ fn shape_top(state: azalea::block::BlockState, pos: IVec3, x: f64, z: f64) -> f6
         .fold(0.0, f64::max)
 }
 
-fn fluid_top(ctx: &Emitter, state: azalea::block::BlockState, cell: [i32; 3]) -> f32 {
+pub(crate) fn surface_top(
+    world: &azalea_world::World,
+    state: azalea::block::BlockState,
+    pos: IVec3,
+    x: f64,
+    z: f64,
+) -> f64 {
+    shape_top(state, pos, x, z).max(f64::from(fluid_top(world, state, pos.to_array())))
+}
+
+fn fluid_top(world: &azalea_world::World, state: azalea::block::BlockState, cell: [i32; 3]) -> f32 {
     use azalea::block::fluid_state::FluidState;
     let fluid = FluidState::from(state);
     if fluid.is_empty() {
         return 0.0;
     }
-    let above = ctx
-        .block([cell[0], cell[1] + 1, cell[2]])
+    let above = crate::util::particles::block_at(world, [cell[0], cell[1] + 1, cell[2]])
         .map(FluidState::from)
         .unwrap_or_default();
     fluid.height_under(&above)

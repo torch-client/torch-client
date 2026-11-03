@@ -17,7 +17,7 @@ ELEMENT = {FUNCREF: "funcref", EXTERNREF: "externref"}
 
 GROWN_TABLE = "__wbindgen_externrefs"
 
-REQUIRED_EXPORTS = ("start_web", "take_web_assets", "asset_cache_key")
+REQUIRED_EXPORTS = ("start_web", "take_web_assets", "asset_cache_key", "seed_mod_file")
 
 def name_at(module, at):
     length, at = uleb(module, at)

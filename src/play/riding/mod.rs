@@ -1,5 +1,7 @@
 mod boat;
 mod mount;
+#[cfg(feature = "audio")]
+pub(crate) mod sound;
 mod travel;
 
 use std::sync::Mutex;
@@ -24,13 +26,15 @@ use azalea::physics::client_movement::ClientMovementState;
 use azalea::physics::collision::entity_collisions::{
     AabbQuery, CollidableEntityQuery, VehicleCollidableQuery, VehicleCollisions,
 };
-use azalea::physics::collision::{MoveCtx, MoverType, block_speed_factor_for, move_colliding};
+use azalea::physics::collision::{
+    BorderSource, MoveCtx, MoverType, block_speed_factor_for, move_colliding,
+};
 use azalea::physics::fluids::{FluidPush, update_fluid_interaction};
 use azalea::physics::travel::no_collision;
 use azalea::physics::{
     EntityMovement, InsideKind, apply_effects_from_blocks_for, block_jump_factor,
 };
-use azalea::world::{WorldName, Worlds};
+use azalea::world::{WorldBorder, WorldName, Worlds};
 use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::math;
 use azalea_core::position::Vec3;
@@ -38,12 +42,14 @@ use azalea_core::tick::GameTick;
 use azalea_inventory::components::EquipmentSlot;
 use azalea_protocol::packets::game::s_move_vehicle::ServerboundMoveVehicle;
 use azalea_protocol::packets::game::s_paddle_boat::ServerboundPaddleBoat;
-use azalea_registry::builtin::{Attribute, ItemKind};
+use azalea_registry::builtin::{Attribute, EntityKind, ItemKind};
 
 use boat::Boat;
 pub(crate) use boat::{Keys, hull_under_water};
-use mount::{Gear, Jump, Rider, SeatPose};
-pub(crate) use mount::{Hull, Mount};
+use mount::{Gear, Jump, Rider};
+pub(crate) use mount::{
+    Hull, Mount, Passenger, SeatPose, passenger_attachment, vehicle_attachment,
+};
 
 use crate::entities::feed::stand_anim_step;
 use crate::util::mth::DEG_TO_RAD;
@@ -301,8 +307,6 @@ pub(crate) fn reset(blocking: bool) {
     crate::client::tracking::LOCAL_VEHICLE_ID.store(-1, Ordering::Relaxed);
 }
 
-const PLAYER_VEHICLE_ATTACHMENT: f64 = 0.6;
-
 fn seat(vehicle_id: i32) -> Option<(usize, usize)> {
     let map = crate::client::tracking::passengers().lock().unwrap();
     let riders = map.get(&vehicle_id)?;
@@ -341,7 +345,7 @@ type MountMeta = (
     Option<&'static StaysStill>,
 );
 
-fn camel_pose(last_change: Option<&LastPoseChangeTick>) -> (bool, i64) {
+pub(crate) fn camel_pose(last_change: Option<&LastPoseChangeTick>) -> (bool, i64) {
     let last = last_change.map_or(0, |t| t.0);
     let now = crate::client::tracking::GAME_TIME.load(Ordering::Relaxed);
     (last < 0, now - last.abs())
@@ -363,6 +367,7 @@ fn ride_pre_travel(
             &Inventory,
             &Jumping,
             Option<&Sprinting>,
+            Option<&WorldBorder>,
         ),
         With<LocalEntity>,
     >,
@@ -392,7 +397,8 @@ fn ride_pre_travel(
         riding.stop_driving();
         return;
     };
-    let Ok((rider, rider_look, id_index, movement, inventory, jumping, sprinting)) = local.single()
+    let Ok((rider, rider_look, id_index, movement, inventory, jumping, sprinting, border)) =
+        local.single()
     else {
         return;
     };
@@ -620,6 +626,7 @@ fn ride_pre_travel(
         powder_snow_walkable: false,
         stands_on_lava: mount == Mount::Strider,
         fall_flying: false,
+        border,
         direction: *direction,
         sprinting: Sprinting(false),
         on_climbable: *on_climbable,
@@ -635,14 +642,14 @@ fn ride_pre_travel(
             let mut pos = **ctx.position;
             let mut velocity = ctx.physics.velocity;
             let start_y = pos.y;
-            let physics_now: &Physics = ctx.physics;
+            let border_source = BorderSource::at(border, pos.x, pos.z);
             boat.float(&world, &hull, &mut pos, &mut velocity, |target| {
                 no_collision(
                     &world,
                     Some(entity),
                     &aabb_query,
                     &collidable_entity_query,
-                    physics_now,
+                    border_source,
                     &hull.move_relative(Vec3::new(0.0, target - start_y, 0.0)),
                     false,
                     Default::default(),
@@ -838,12 +845,24 @@ fn ride_post_travel(
     };
 
     let mount_yaw = mount_direction.y_rot();
-    let seat_pos =
-        **mount_position + mount::passenger_attachment(**kind, mount_yaw, index, riders, pose);
+    let (mount_scale, own_scale) = {
+        use crate::client::tracking::{EntityAttributes, attributes, local_entity_id};
+        let map = attributes().lock().unwrap();
+        let scale = |id: i32| EntityAttributes::of(&map, id).scale() as f64;
+        (scale(vehicle_id), scale(local_entity_id()))
+    };
+    let passenger = mount::Passenger {
+        kind: EntityKind::Player,
+        animal: false,
+        index,
+        of: riders,
+    };
+    let seat_pos = **mount_position
+        + mount::passenger_attachment(**kind, mount_yaw, mount_scale, passenger, pose);
     physics.velocity = Vec3::ZERO;
     **position = Vec3 {
         x: seat_pos.x,
-        y: seat_pos.y - PLAYER_VEHICLE_ATTACHMENT,
+        y: seat_pos.y - mount::vehicle_attachment(EntityKind::Player, own_scale, 0.0, 0.0),
         z: seat_pos.z,
     };
     physics.set_on_ground(mount_physics.on_ground());

@@ -333,6 +333,14 @@ impl ClickGuiState {
                 }
                 self.label(p, &self.scratch, cx, cy, cw, look.text_dim());
                 cy += TIP_LINE;
+                for (prefix, value) in [("By ", &m.author), ("Source: ", &m.source)] {
+                    let Some(value) = value else { continue };
+                    let mut line = std::mem::take(&mut self.scratch);
+                    line.clear();
+                    let _ = write!(line, "{prefix}{value}");
+                    cy = self.paragraph(p, cx, cy, cw, &line, look.text_dim());
+                    self.scratch = line;
+                }
                 if let Some(d) = &m.description {
                     let ink = if m.disabled {
                         look.text_dim()

@@ -104,6 +104,26 @@ impl SkinTextures {
         self.defaults.insert(index, handle.clone());
         handle
     }
+
+    pub fn profile_texture(
+        &mut self,
+        skin: &super::anim::ProfileSkin,
+        entity_images: &mut crate::entities::EntityImages,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        use super::anim::ProfileSkin;
+        match skin {
+            ProfileSkin::Url(url) => self.get(url).cloned(),
+            ProfileSkin::Resource(path) => entity_images.get(path, images),
+            ProfileSkin::Default(index) => self.default_skin(*index, images),
+            ProfileSkin::Lookup { key, fallback } => {
+                match crate::client::skins::looked_up(key).and_then(|url| self.get(&url).cloned()) {
+                    Some(handle) => Some(handle),
+                    None => self.default_skin(*fallback, images),
+                }
+            }
+        }
+    }
 }
 
 #[cfg(feature = "skins")]

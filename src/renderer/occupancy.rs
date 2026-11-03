@@ -142,6 +142,17 @@ impl Occupancy {
         }
     }
 
+    pub fn set_light_z_run(&mut self, x: i32, y: i32, z0: i32, z1: i32, block: u8, sky: u8) {
+        match (self.index(x, y, z0), self.index(x, y, z1)) {
+            (Some(a), Some(b)) if a <= b => self.light[a..=b].fill((block & 15) | (sky & 15) << 4),
+            _ => {
+                for z in z0..=z1 {
+                    self.set_light(x, y, z, block, sky);
+                }
+            }
+        }
+    }
+
     #[inline]
     pub fn fill_light_constant(&mut self, block: u8, sky: u8) {
         self.light.fill((block & 15) | (sky & 15) << 4);

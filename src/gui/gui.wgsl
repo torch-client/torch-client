@@ -74,3 +74,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     return vec4(rgb * color.a, color.a);
 }
+
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    return select(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, c <= vec3(0.0031308));
+}
+fn srgb_decode(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, c <= vec3(0.04045));
+}
+
+@fragment
+fn vignette_fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    let texel = textureSampleLevel(atlas_texture, atlas_sampler, in.uv, 0.0);
+    let src = srgb_encode(texel.rgb) * srgb_encode(in.color.rgb);
+    return vec4(1.0 - srgb_decode(1.0 - src), 0.0);
+}

@@ -279,7 +279,7 @@ pub fn draw(
         for (i, line) in state.lines.iter().enumerate() {
             let half = width(line) / 2;
             let y = i as f32 * lh - midpoint;
-            p.text_str(line, -half as f32, y, color, false);
+            p.text_plain(line, -half as f32, y, color, false);
             if i != state.line {
                 continue;
             }

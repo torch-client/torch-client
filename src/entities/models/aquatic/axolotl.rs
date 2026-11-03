@@ -18,32 +18,32 @@ pub fn adult_layer() -> LayerDef {
         PartPose::offset(0.0, 19.5, 5.0),
     );
     let fudge = Grow::all(0.001);
-    let head = body.child(
+    let head = body.part_grow(
         "head",
-        CubeList::new()
-            .tex_offs(0, 1)
-            .add_box_grow(-4.0, -3.0, -5.0, 8.0, 5.0, 5.0, fudge),
+        (0, 1),
+        [-4.0, -3.0, -5.0, 8.0, 5.0, 5.0],
+        fudge,
         PartPose::offset(0.0, 0.0, -9.0),
     );
-    head.child(
+    head.part_grow(
         "top_gills",
-        CubeList::new()
-            .tex_offs(3, 37)
-            .add_box_grow(-4.0, -3.0, 0.0, 8.0, 3.0, 0.0, fudge),
+        (3, 37),
+        [-4.0, -3.0, 0.0, 8.0, 3.0, 0.0],
+        fudge,
         PartPose::offset(0.0, -3.0, -1.0),
     );
-    head.child(
+    head.part_grow(
         "left_gills",
-        CubeList::new()
-            .tex_offs(0, 40)
-            .add_box_grow(-3.0, -5.0, 0.0, 3.0, 7.0, 0.0, fudge),
+        (0, 40),
+        [-3.0, -5.0, 0.0, 3.0, 7.0, 0.0],
+        fudge,
         PartPose::offset(-4.0, 0.0, -1.0),
     );
-    head.child(
+    head.part_grow(
         "right_gills",
-        CubeList::new()
-            .tex_offs(11, 40)
-            .add_box_grow(0.0, -5.0, 0.0, 3.0, 7.0, 0.0, fudge),
+        (11, 40),
+        [0.0, -5.0, 0.0, 3.0, 7.0, 0.0],
+        fudge,
         PartPose::offset(4.0, 0.0, -1.0),
     );
     let left_leg = CubeList::new()
@@ -68,11 +68,10 @@ pub fn adult_layer() -> LayerDef {
         PartPose::offset(-3.5, 1.0, -8.0),
     );
     body.child("left_front_leg", left_leg, PartPose::offset(3.5, 1.0, -8.0));
-    body.child(
+    body.part(
         "tail",
-        CubeList::new()
-            .tex_offs(2, 19)
-            .add_box(0.0, -3.0, 0.0, 0.0, 5.0, 12.0),
+        (2, 19),
+        [0.0, -3.0, 0.0, 0.0, 5.0, 12.0],
         PartPose::offset(0.0, 0.0, 1.0),
     );
     LayerDef::create(mesh, 64, 64)
@@ -266,11 +265,10 @@ pub fn baby_layer() -> LayerDef {
             .add_box(0.0, -1.75, -2.75, 0.0, 3.0, 5.0),
         PartPose::offset(0.0, -1.25, 1.75),
     );
-    body.child(
+    body.part(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(20, 16)
-            .add_box(-3.0, 0.0, -0.5, 3.0, 0.0, 1.0),
+        (20, 16),
+        [-3.0, 0.0, -0.5, 3.0, 0.0, 1.0],
         PartPose::offset(-2.0, 0.25, -1.25),
     );
     body.child(
@@ -278,60 +276,52 @@ pub fn baby_layer() -> LayerDef {
         CubeList::new(),
         PartPose::offset_rotation(-2.0, 0.25, 1.75, 0.0, 1.5708, 1.5708),
     )
-    .child(
+    .part(
         "right_leg_r1",
-        CubeList::new()
-            .tex_offs(20, 14)
-            .add_box(0.0, 0.0, -0.5, 3.0, 0.0, 1.0),
+        (20, 14),
+        [0.0, 0.0, -0.5, 3.0, 0.0, 1.0],
         PartPose::offset_rotation(0.0, 0.0, 0.0, -1.5708, 0.0, 1.5708),
     );
-    body.child(
+    body.part(
         "left_front_leg",
-        CubeList::new()
-            .tex_offs(20, 13)
-            .add_box(0.0, 0.0, -0.5, 3.0, 0.0, 1.0),
+        (20, 13),
+        [0.0, 0.0, -0.5, 3.0, 0.0, 1.0],
         PartPose::offset(2.0, 0.25, -1.25),
     );
-    body.child(
+    body.part(
         "left_hind_leg",
-        CubeList::new()
-            .tex_offs(20, 14)
-            .add_box(0.0, 0.0, -0.5, 3.0, 0.0, 1.0),
+        (20, 14),
+        [0.0, 0.0, -0.5, 3.0, 0.0, 1.0],
         PartPose::offset(2.0, 0.25, 1.75),
     );
-    body.child(
+    body.part(
         "tail",
-        CubeList::new()
-            .tex_offs(10, 9)
-            .add_box(0.0, -1.5, -1.0, 0.0, 3.0, 8.0),
+        (10, 9),
+        [0.0, -1.5, -1.0, 0.0, 3.0, 8.0],
         PartPose::offset(0.0, -0.25, 3.25),
     );
-    let head = body.child(
+    let head = body.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 8)
-            .add_box(-3.0, -2.0, -4.0, 6.0, 3.0, 4.0),
+        (0, 8),
+        [-3.0, -2.0, -4.0, 6.0, 3.0, 4.0],
         PartPose::offset(0.0, 0.25, -2.75),
     );
-    head.child(
+    head.part(
         "left_gills",
-        CubeList::new()
-            .tex_offs(20, 8)
-            .add_box(0.0, -3.5, 0.0, 3.0, 5.0, 0.0),
+        (20, 8),
+        [0.0, -3.5, 0.0, 3.0, 5.0, 0.0],
         PartPose::offset(3.0, -0.5, -2.0),
     );
-    head.child(
+    head.part(
         "right_gills",
-        CubeList::new()
-            .tex_offs(20, 3)
-            .add_box(-3.0, -3.5, 0.0, 3.0, 5.0, 0.0),
+        (20, 3),
+        [-3.0, -3.5, 0.0, 3.0, 5.0, 0.0],
         PartPose::offset(-3.0, -0.5, -2.0),
     );
-    head.child(
+    head.part(
         "top_gills",
-        CubeList::new()
-            .tex_offs(20, 0)
-            .add_box(-3.0, -3.0, 0.0, 6.0, 3.0, 0.0),
+        (20, 0),
+        [-3.0, -3.0, 0.0, 6.0, 3.0, 0.0],
         PartPose::offset(0.0, -2.0, -2.0),
     );
     LayerDef::create(mesh, 32, 32)

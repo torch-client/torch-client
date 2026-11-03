@@ -8,7 +8,7 @@ use crate::blockentities::sim::Anim;
 use crate::blockentities::sim::book::Book;
 use crate::blockentities::{BeRegistry, BeSpec, BeState, GeomKey};
 use crate::entities::geom::{BakedModel, LayerDef, PartState};
-use crate::util::mth::{lerp, wrap_rad};
+use crate::util::mth::{frac, lerp, wrap_rad};
 
 pub fn register(registry: &mut BeRegistry) {
     registry.add(
@@ -57,10 +57,6 @@ fn book(st: &BeState) -> Book {
         Anim::Book(book) => *book,
         _ => Book::default(),
     }
-}
-
-fn frac(x: f32) -> f32 {
-    x - x.floor()
 }
 
 fn page_flip(flip: f32, offset: f32) -> f32 {

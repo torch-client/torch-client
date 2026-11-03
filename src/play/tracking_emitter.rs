@@ -102,17 +102,32 @@ fn advance(bot: &Client, emitters: &mut Vec<Emitter>) -> Vec<TrackingEmit> {
 }
 
 #[cfg(feature = "audio")]
-fn sound_source(kind: azalea_registry::builtin::EntityKind) -> crate::audio::SoundCategory {
+pub(crate) fn sound_source(
+    kind: azalea_registry::builtin::EntityKind,
+) -> crate::audio::SoundCategory {
     use crate::audio::SoundCategory;
-    use azalea_registry::builtin::EntityKind;
+    use azalea_registry::builtin::EntityKind as K;
     match kind {
-        EntityKind::Player => SoundCategory::Players,
-        EntityKind::Allay
-        | EntityKind::CopperGolem
-        | EntityKind::Dolphin
-        | EntityKind::Fox
-        | EntityKind::Panda
-        | EntityKind::WanderingTrader => SoundCategory::Neutral,
-        _ => SoundCategory::Hostile,
+        K::Player => SoundCategory::Players,
+        K::Zombie
+        | K::Husk
+        | K::Drowned
+        | K::Giant
+        | K::ZombieVillager
+        | K::Skeleton
+        | K::Stray
+        | K::WitherSkeleton
+        | K::Bogged
+        | K::Parched
+        | K::Piglin
+        | K::PiglinBrute
+        | K::ZombifiedPiglin
+        | K::Pillager
+        | K::Vindicator
+        | K::Evoker
+        | K::Illusioner
+        | K::Witch
+        | K::Vex => SoundCategory::Hostile,
+        _ => SoundCategory::Neutral,
     }
 }

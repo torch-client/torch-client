@@ -85,7 +85,7 @@ async fn resolve_ip_without_redirects(address: &ServerAddr) -> Result<SocketAddr
 }
 
 #[cfg(feature = "dns")]
-async fn resolve_srv_redirect(address: &ServerAddr) -> Result<ServerAddr, ResolveError> {
+pub async fn resolve_srv_redirect(address: &ServerAddr) -> Result<ServerAddr, ResolveError> {
     if address.port != 25565 {
         return Err(ResolveError::from("Port must be 25565 to do a SRV lookup"));
     }

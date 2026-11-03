@@ -6,12 +6,24 @@ use crate::gui::{Screen, ScreenCtx};
 use crate::session::SharedMutex;
 use crate::text::{LINE_HEIGHT, Span, Style};
 
-const TITLE: &str = "You Died!";
-const TITLE_HARDCORE: &str = "Game Over!";
-const RESPAWN: &str = "Respawn";
-const SPECTATE: &str = "Spectate World";
-const TITLE_SCREEN: &str = "Title Screen";
-const QUIT_CONFIRM: &str = "Are you sure you want to quit?";
+mod tr {
+    use crate::gui::tooltip::label;
+
+    macro_rules! keys {
+        ($($name:ident = $key:literal),* $(,)?) => {
+            $(pub fn $name() -> &'static str { label!($key) })*
+        };
+    }
+
+    keys! {
+        title = "deathScreen.title",
+        title_hardcore = "deathScreen.title.hardcore",
+        respawn = "deathScreen.respawn",
+        spectate = "deathScreen.spectate",
+        title_screen = "deathScreen.titleScreen",
+        quit_confirm = "deathScreen.quit.confirm",
+    }
+}
 
 const TITLE_SCALE: f32 = 2.0;
 const CONFIRM_BUTTON_W: f32 = 150.0;
@@ -79,9 +91,9 @@ pub fn draw(
     let opened = *state.opened.get_or_insert(p.frame);
 
     let title = if state.hardcore {
-        TITLE_HARDCORE
+        tr::title_hardcore()
     } else {
-        TITLE
+        tr::title()
     };
     p.scaled(TITLE_SCALE, 0.0, 0.0, |p| {
         p.text_centered(title, ctx.vw / TITLE_SCALE / 2.0, 30.0, 0xFFFFFF, true);
@@ -104,7 +116,11 @@ pub fn draw(
             top + 72.0,
             WIDGET_WIDTH_BIG,
             WIDGET_HEIGHT,
-            if state.hardcore { SPECTATE } else { RESPAWN },
+            if state.hardcore {
+                tr::spectate()
+            } else {
+                tr::respawn()
+            },
         )
     };
     if respawn.draw(p, ctx) {
@@ -114,7 +130,13 @@ pub fn draw(
 
     let quit = Button {
         active: ready,
-        ..Button::new(x, top + 96.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, TITLE_SCREEN)
+        ..Button::new(
+            x,
+            top + 96.0,
+            WIDGET_WIDTH_BIG,
+            WIDGET_HEIGHT,
+            tr::title_screen(),
+        )
     };
     if quit.draw(p, ctx) {
         if state.hardcore {
@@ -135,7 +157,7 @@ fn draw_confirm(
     let block_h = LINE_HEIGHT + CONFIRM_PAD + WIDGET_HEIGHT;
     let y = ((ctx.vh - block_h) / 2.0).floor().max(0.0);
 
-    p.text_centered(QUIT_CONFIRM, ctx.vw / 2.0, y, 0xFFFFFF, true);
+    p.text_centered(tr::quit_confirm(), ctx.vw / 2.0, y, 0xFFFFFF, true);
 
     let row_y = y + LINE_HEIGHT + CONFIRM_PAD;
     let row_w = CONFIRM_BUTTON_W * 2.0 + CONFIRM_GAP;
@@ -144,7 +166,13 @@ fn draw_confirm(
 
     let yes = Button {
         active: ready,
-        ..Button::new(x, row_y, CONFIRM_BUTTON_W, WIDGET_HEIGHT, TITLE_SCREEN)
+        ..Button::new(
+            x,
+            row_y,
+            CONFIRM_BUTTON_W,
+            WIDGET_HEIGHT,
+            tr::title_screen(),
+        )
     };
     if yes.draw(p, ctx) {
         return Some(Screen::Title);
@@ -156,7 +184,7 @@ fn draw_confirm(
             row_y,
             CONFIRM_BUTTON_W,
             WIDGET_HEIGHT,
-            RESPAWN,
+            tr::respawn(),
         )
     };
     if no.draw(p, ctx) {

@@ -8,12 +8,13 @@ use mlua::{Function, Lua, Table, Value};
 use super::super::registry::{Kind, ModuleIx};
 use super::super::{Value as Setting, store};
 use super::api::{
-    self, Api, CHAT, Ctx, DISABLE, ENABLE, EVENTS, NONE, PACKET, RENDER2D, Switch, TICK, cancelable,
+    self, Api, CHAT, Class, Ctx, DISABLE, ENABLE, EVENTS, NONE, PACKET, RENDER2D, Switch, TICK,
+    cancelable,
 };
 use super::game::{self, Pending};
 use super::{CHAT as WANTS_CHAT, RESCAN, RUNNING, SETTINGS, WANTS, kinds, state};
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub(super) struct Body {
     pub velocity: [f64; 3],
     pub fall_distance: f64,
@@ -24,6 +25,7 @@ pub(super) struct Body {
     pub flying: bool,
 }
 
+#[derive(Clone, Copy, Default)]
 pub(super) struct World {
     pub epoch: u64,
     pub pos: [f64; 3],
@@ -35,13 +37,19 @@ pub(super) struct World {
     pub camera: [f32; 2],
     pub on_ground: bool,
     pub physics: Body,
-    pub dimension: String,
     pub gamemode: &'static str,
     pub xp: u32,
     pub dead: bool,
     pub op_level: u8,
     pub selected: u8,
-    pub address: Option<String>,
+}
+
+#[derive(Default)]
+struct Shown {
+    world: World,
+    dimension: String,
+    address: Option<String>,
+    screen: (f32, f32),
 }
 
 const STRIKES: u8 = 3;
@@ -150,10 +158,11 @@ pub(super) struct Runtime {
     pub mods: Vec<state::Mod>,
     lists: [Vec<usize>; EVENTS.len()],
     fixed: Vec<Vec<Option<Table>>>,
-    address: Option<String>,
+    shown: Option<Shown>,
     stopping: bool,
     epoch: u64,
     parked: Option<u64>,
+    queued: Vec<Pending>,
 }
 
 fn is_fixed(ev: usize) -> bool {
@@ -176,17 +185,20 @@ impl Runtime {
             .map(|api| {
                 (0..EVENTS.len())
                     .map(|ev| {
-                        if is_fixed(ev) {
-                            api.event(EVENTS[ev], false).map(|(e, _)| Some(e))
-                        } else {
-                            Ok(None)
+                        if !is_fixed(ev) {
+                            return Ok(None);
                         }
+                        let e = api.event_table()?;
+                        api.seal(&e, ev, Class::Plain)?;
+                        Ok(Some(e))
                     })
                     .collect::<mlua::Result<Vec<_>>>()
             })
             .collect::<mlua::Result<_>>()?;
         ctx.game.lock().unwrap_or_else(PoisonError::into_inner).hud =
-            vec![Vec::new(); modules.len()];
+            std::iter::repeat_with(Default::default)
+                .take(modules.len())
+                .collect();
         Ok(Runtime {
             ctx,
             apis,
@@ -194,10 +206,11 @@ impl Runtime {
             mods: Vec::new(),
             lists: Default::default(),
             fixed,
-            address: None,
+            shown: None,
             stopping: false,
             epoch: 0,
             parked: None,
+            queued: Vec::new(),
         })
     }
 
@@ -208,17 +221,17 @@ impl Runtime {
     }
 
     fn with_bot<R>(&mut self, bot: &Client, f: impl FnOnce(&mut Self) -> R) -> R {
-        self.ctx
-            .game
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .bot = Some(bot.clone());
+        let world = bot.world().ok();
+        {
+            let mut g = self.ctx.game.lock().unwrap_or_else(PoisonError::into_inner);
+            g.bot = Some(bot.clone());
+            g.world = world;
+        }
         let r = f(self);
-        self.ctx
-            .game
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .bot = None;
+        let mut g = self.ctx.game.lock().unwrap_or_else(PoisonError::into_inner);
+        g.bot = None;
+        g.world = None;
+        drop(g);
         r
     }
 
@@ -240,6 +253,7 @@ impl Runtime {
         if bits & SETTINGS != 0 {
             self.sync_settings();
         }
+        check(self.publish(w, &snap));
         let old = std::mem::replace(
             &mut self
                 .ctx
@@ -249,8 +263,7 @@ impl Runtime {
                 .snap,
             snap,
         );
-        *game::SPARE.lock().unwrap_or_else(PoisonError::into_inner) = Some(old);
-        check(self.publish(w));
+        old.recycle();
         self.ctx
             .game
             .lock()
@@ -260,21 +273,25 @@ impl Runtime {
             if bits & RESCAN != 0 {
                 rt.rescan();
             }
-            for p in game::take(w.epoch) {
+            let mut queued = std::mem::take(&mut rt.queued);
+            game::take(w.epoch, &mut queued);
+            for p in queued.drain(..) {
                 let ev = p.event();
-                let id = match &p {
-                    Pending::Packet(pk) => pk.id,
-                    _ => 0,
+                let (id, class) = match &p {
+                    Pending::Packet(pk) => (pk.id, pk.class()),
+                    _ => (0, Class::Plain),
                 };
                 let owner = p.owner();
-                rt.dispatch(
+                rt.dispatch_as(
                     ev,
+                    class,
                     |lua, e| p.fill(lua, e),
                     |k, live| {
                         owner.is_none_or(|o| o == k) && (ev != PACKET || live.packets.has(id))
                     },
                 );
             }
+            rt.queued = queued;
             let (arrived, changed) = super::chunk::take();
             for (ev, columns) in [(api::CHUNK, arrived), (api::BLOCKCHANGE, changed)] {
                 for [cx, cz] in columns {
@@ -316,18 +333,16 @@ impl Runtime {
             }
             {
                 let mut g = self.ctx.game.lock().unwrap_or_else(PoisonError::into_inner);
-                g.clear_hud(k);
+                g.begin_hud(k);
                 g.drawing = Some(k);
                 g.drawn = (0, 0);
             }
             if let Some(e) = &self.fixed[self.modules[k].api][RENDER2D] {
                 self.call(k, RENDER2D, e);
             }
-            self.ctx
-                .game
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .drawing = None;
+            let mut g = self.ctx.game.lock().unwrap_or_else(PoisonError::into_inner);
+            g.drawing = None;
+            g.end_hud(k);
         }
     }
 
@@ -443,9 +458,20 @@ impl Runtime {
         fill: impl Fn(&Lua, &Table) -> mlua::Result<()>,
         wants: impl Fn(usize, &Live) -> bool,
     ) -> bool {
+        self.dispatch_as(ev, Class::Plain, fill, wants)
+    }
+
+    fn dispatch_as(
+        &self,
+        ev: usize,
+        class: Class,
+        fill: impl Fn(&Lua, &Table) -> mlua::Result<()>,
+        wants: impl Fn(usize, &Live) -> bool,
+    ) -> bool {
         let s = store();
+        let cancel = cancelable(ev);
         let mut prevented = false;
-        let mut current: Option<(usize, Table, Table)> = None;
+        let mut current: Option<(usize, Table, Option<Table>)> = None;
         for &k in &self.lists[ev] {
             let live = &self.modules[k];
             if !s.enabled(live.ix) || !wants(k, live) {
@@ -457,15 +483,24 @@ impl Runtime {
                 continue;
             }
             if current.as_ref().is_none_or(|(at, ..)| *at != a) {
-                if let Some((_, _, backing)) = &current {
+                if let Some((_, _, Some(backing))) = &current {
                     prevented |= backing.raw_get::<bool>("defaultPrevented").unwrap_or(false);
                 }
-                current = match self.apis[a].event(EVENTS[ev], cancelable(ev)) {
-                    Ok((e, backing)) => {
-                        check(fill(&self.apis[a].lua, &backing));
-                        check(backing.raw_set("defaultPrevented", prevented));
-                        Some((a, e, backing))
-                    }
+                let api = &self.apis[a];
+                let built = if cancel {
+                    api.cancelable_event(EVENTS[ev], prevented)
+                        .map(|(e, backing)| {
+                            check(fill(&api.lua, &backing));
+                            (e, Some(backing))
+                        })
+                } else {
+                    api.event_table().and_then(|e| {
+                        check(fill(&api.lua, &e));
+                        api.seal(&e, ev, class).map(|()| (e, None))
+                    })
+                };
+                current = match built {
+                    Ok((e, backing)) => Some((a, e, backing)),
                     Err(err) => {
                         crate::log_error!(
                             "mods",
@@ -480,58 +515,115 @@ impl Runtime {
                 self.call(k, ev, e);
             }
         }
-        if let Some((_, _, backing)) = &current {
+        if let Some((_, _, Some(backing))) = &current {
             prevented |= backing.raw_get::<bool>("defaultPrevented").unwrap_or(false);
         }
         prevented
     }
 
-    fn publish(&mut self, w: &World) -> mlua::Result<()> {
-        let (sw, sh) = game::screen();
-        let address = (self.address != w.address).then(|| w.address.clone());
+    fn publish(&mut self, w: &World, snap: &game::Snapshot) -> mlua::Result<()> {
+        let screen = game::screen();
+        let mut shown = self.shown.take();
+        let o = shown.as_ref();
+        let all = o.is_none();
+        let last = o.map_or(*w, |o| o.world);
+        let (b, lb) = (&w.physics, &last.physics);
+        let dimension = all || o.is_some_and(|o| o.dimension != snap.dimension);
+        let address = all || o.is_some_and(|o| o.address != snap.address);
+        let screen_moved = all || o.is_some_and(|o| o.screen != screen);
         for api in &self.apis {
             let p = &api.player;
-            p.raw_set("x", w.pos[0])?;
-            p.raw_set("y", w.pos[1])?;
-            p.raw_set("z", w.pos[2])?;
-            p.raw_set("health", w.health as f64)?;
-            p.raw_set("food", w.food)?;
-            p.raw_set("yaw", w.yaw as f64)?;
-            p.raw_set("pitch", w.pitch as f64)?;
-            p.raw_set("camerayaw", w.camera[0] as f64)?;
-            p.raw_set("camerapitch", w.camera[1] as f64)?;
-            p.raw_set("onground", w.on_ground)?;
-            let b = &w.physics;
-            p.raw_set("vx", b.velocity[0])?;
-            p.raw_set("vy", b.velocity[1])?;
-            p.raw_set("vz", b.velocity[2])?;
-            p.raw_set("falldistance", b.fall_distance)?;
-            p.raw_set("hcollision", b.horizontal_collision)?;
-            p.raw_set("vcollision", b.vertical_collision)?;
-            p.raw_set("crouching", b.crouching)?;
-            p.raw_set("flying", b.flying)?;
-            for (k, v) in ["minx", "miny", "minz", "maxx", "maxy", "maxz"]
-                .iter()
-                .zip(b.bbox)
+            for (i, k) in ["x", "y", "z"].into_iter().enumerate() {
+                if all || w.pos[i] != last.pos[i] {
+                    p.raw_set(k, w.pos[i])?;
+                }
+            }
+            if all || w.health != last.health {
+                p.raw_set("health", w.health as f64)?;
+            }
+            if all || w.food != last.food {
+                p.raw_set("food", w.food)?;
+            }
+            if all || w.yaw != last.yaw {
+                p.raw_set("yaw", w.yaw as f64)?;
+            }
+            if all || w.pitch != last.pitch {
+                p.raw_set("pitch", w.pitch as f64)?;
+            }
+            if all || w.camera != last.camera {
+                p.raw_set("camerayaw", w.camera[0] as f64)?;
+                p.raw_set("camerapitch", w.camera[1] as f64)?;
+            }
+            if all || w.on_ground != last.on_ground {
+                p.raw_set("onground", w.on_ground)?;
+            }
+            for (i, k) in ["vx", "vy", "vz"].into_iter().enumerate() {
+                if all || b.velocity[i] != lb.velocity[i] {
+                    p.raw_set(k, b.velocity[i])?;
+                }
+            }
+            if all || b.fall_distance != lb.fall_distance {
+                p.raw_set("falldistance", b.fall_distance)?;
+            }
+            if all || b.horizontal_collision != lb.horizontal_collision {
+                p.raw_set("hcollision", b.horizontal_collision)?;
+            }
+            if all || b.vertical_collision != lb.vertical_collision {
+                p.raw_set("vcollision", b.vertical_collision)?;
+            }
+            if all || b.crouching != lb.crouching {
+                p.raw_set("crouching", b.crouching)?;
+            }
+            if all || b.flying != lb.flying {
+                p.raw_set("flying", b.flying)?;
+            }
+            for (i, k) in ["minx", "miny", "minz", "maxx", "maxy", "maxz"]
+                .into_iter()
+                .enumerate()
             {
-                api.bbox.raw_set(*k, v)?;
+                if all || b.bbox[i] != lb.bbox[i] {
+                    api.bbox.raw_set(k, b.bbox[i])?;
+                }
             }
-            p.raw_set("dimension", w.dimension.as_str())?;
-            p.raw_set("gamemode", w.gamemode)?;
-            p.raw_set("xp", w.xp)?;
-            p.raw_set("dead", w.dead)?;
-            p.raw_set("oplevel", w.op_level)?;
-            api.screen.raw_set("open", w.screen_open)?;
-            api.screen.raw_set("width", sw as f64)?;
-            api.screen.raw_set("height", sh as f64)?;
-            api.inventory.raw_set("selected", w.selected + 1)?;
-            if let Some(address) = &address {
-                api.server.raw_set("address", address.as_deref())?;
+            if dimension {
+                p.raw_set("dimension", snap.dimension.as_str())?;
+            }
+            if all || w.gamemode != last.gamemode {
+                p.raw_set("gamemode", w.gamemode)?;
+            }
+            if all || w.xp != last.xp {
+                p.raw_set("xp", w.xp)?;
+            }
+            if all || w.dead != last.dead {
+                p.raw_set("dead", w.dead)?;
+            }
+            if all || w.op_level != last.op_level {
+                p.raw_set("oplevel", w.op_level)?;
+            }
+            if all || w.screen_open != last.screen_open {
+                api.screen.raw_set("open", w.screen_open)?;
+            }
+            if screen_moved {
+                api.screen.raw_set("width", screen.0 as f64)?;
+                api.screen.raw_set("height", screen.1 as f64)?;
+            }
+            if all || w.selected != last.selected {
+                api.inventory.raw_set("selected", w.selected + 1)?;
+            }
+            if address {
+                api.server.raw_set("address", snap.address.as_deref())?;
             }
         }
-        if let Some(address) = address {
-            self.address = address;
+        let s = shown.get_or_insert_with(Shown::default);
+        s.world = *w;
+        if dimension {
+            s.dimension.clone_from(&snap.dimension);
         }
+        if address {
+            s.address.clone_from(&snap.address);
+        }
+        s.screen = screen;
+        self.shown = shown;
         Ok(())
     }
 
@@ -676,10 +768,16 @@ impl Runtime {
         for live in &mut self.modules {
             for set in &mut live.settings {
                 if let Kind::Text { .. } = set.kind {
-                    let text = s.text_at(set.slot);
-                    if text != set.text {
-                        check(live.values.raw_set(set.key, text.as_str()));
-                        set.text = text;
+                    let moved = s.with_text(set.slot, |text| {
+                        let moved = text != set.text;
+                        if moved {
+                            set.text.clear();
+                            set.text.push_str(text);
+                        }
+                        moved
+                    });
+                    if moved {
+                        check(live.values.raw_set(set.key, set.text.as_str()));
                     }
                     continue;
                 }

@@ -24,25 +24,25 @@ fn adult_mesh(g: Grow) -> MeshDef {
             .add_box_at(1.0, -3.0, 0.0, 1.0, 1.0, 2.0, g, 6, 10),
         PartPose::offset(0.0, 15.0, -9.0),
     );
-    root.child(
+    root.part_grow(
         "body",
-        CubeList::new()
-            .tex_offs(20, 0)
-            .add_box_grow(-2.0, 3.0, -8.0, 4.0, 16.0, 6.0, g),
+        (20, 0),
+        [-2.0, 3.0, -8.0, 4.0, 16.0, 6.0],
+        g,
         PartPose::offset_rotation(0.0, 12.0, -10.0, std::f32::consts::FRAC_PI_2, 0.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "tail1",
-        CubeList::new()
-            .tex_offs(0, 15)
-            .add_box_grow(-0.5, 0.0, 0.0, 1.0, 8.0, 1.0, g),
+        (0, 15),
+        [-0.5, 0.0, 0.0, 1.0, 8.0, 1.0],
+        g,
         PartPose::offset_rotation(0.0, 15.0, 8.0, 0.9, 0.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "tail2",
-        CubeList::new()
-            .tex_offs(4, 15)
-            .add_box_grow(-0.5, 0.0, 0.0, 1.0, 8.0, 1.0, tail_g),
+        (4, 15),
+        [-0.5, 0.0, 0.0, 1.0, 8.0, 1.0],
+        tail_g,
         PartPose::offset(0.0, 20.0, 14.0),
     );
     let hind_leg = CubeList::new()
@@ -102,46 +102,40 @@ pub fn baby_mesh() -> MeshDef {
             .add_box(-1.5, -1.0, -3.875, 3.0, 2.0, 1.0),
         PartPose::offset(0.0, 20.0, -3.125),
     );
-    root.child(
+    root.part(
         "left_front_leg",
-        CubeList::new()
-            .tex_offs(18, 18)
-            .add_box(-0.5, 0.0, -1.0, 1.0, 2.0, 2.0),
+        (18, 18),
+        [-0.5, 0.0, -1.0, 1.0, 2.0, 2.0],
         PartPose::offset(1.0, 22.0, -1.5),
     );
-    root.child(
+    root.part(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(12, 18)
-            .add_box(-0.5, 0.0, -1.0, 1.0, 2.0, 2.0),
+        (12, 18),
+        [-0.5, 0.0, -1.0, 1.0, 2.0, 2.0],
         PartPose::offset(-1.0, 22.0, -1.5),
     );
-    root.child(
+    root.part(
         "left_hind_leg",
-        CubeList::new()
-            .tex_offs(18, 22)
-            .add_box(-0.5, 0.0, -1.0, 1.0, 2.0, 2.0),
+        (18, 22),
+        [-0.5, 0.0, -1.0, 1.0, 2.0, 2.0],
         PartPose::offset(1.0, 22.0, 2.5),
     );
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 8)
-            .add_box(-2.0, -1.5, -3.5, 4.0, 3.0, 7.0),
+        (0, 8),
+        [-2.0, -1.5, -3.5, 4.0, 3.0, 7.0],
         PartPose::offset(0.0, 20.5, 0.5),
     );
-    root.child(
+    root.part(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(12, 22)
-            .add_box(-0.5, 0.0, -1.0, 1.0, 2.0, 2.0),
+        (12, 22),
+        [-0.5, 0.0, -1.0, 1.0, 2.0, 2.0],
         PartPose::offset(-1.0, 22.0, 2.5),
     );
-    root.child(
+    root.part(
         "tail1",
-        CubeList::new()
-            .tex_offs(0, 18)
-            .add_box(-0.5, -0.107, 0.0849, 1.0, 1.0, 5.0),
+        (0, 18),
+        [-0.5, -0.107, 0.0849, 1.0, 1.0, 5.0],
         PartPose::offset_rotation(0.0, 19.107, 3.9151, -0.567232, 0.0, 0.0),
     );
     root.child("tail2", CubeList::new(), PartPose::ZERO);

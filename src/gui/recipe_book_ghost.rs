@@ -95,7 +95,7 @@ impl GhostSlots {
             } else {
                 p.fill(x, y, 16.0, 16.0, GHOST_BACK);
             }
-            p.item_icon(&item.model_key(), x, y);
+            p.item_icon_for(&item.model_key(), item.item, item.item_use(), x, y, false);
             p.fill(x, y, 16.0, 16.0, GHOST_FRONT);
             if g.result {
                 p.item_decorations(x, y, item.count, item.damage, item.max_damage);

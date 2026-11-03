@@ -725,10 +725,10 @@ pub fn apply_ops(
 
                 let vertex_count = mesh.verts.len() as u32;
                 let index_count = mesh.index_count() as u32;
-                let solid_count = mesh.idx.len() as u32;
+                let solid_count = mesh.solid_quads * QUAD_INDICES.len() as u32;
                 debug_assert!(vertex_count % 4 == 0, "terrain meshes are quads");
                 let quads = vertex_count / 4;
-                let solid_quads = solid_count / 6;
+                let solid_quads = mesh.solid_quads;
                 let streams = if water {
                     [(STREAM_WATER, quads), (STREAM_WATER, 0)]
                 } else {

@@ -207,6 +207,15 @@ pub fn take_web_assets() -> Option<Vec<u8>> {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
+pub fn seed_mod_file(path: String, bytes: Option<Vec<u8>>) {
+    #[cfg(lua_mods)]
+    platform::packfs::seed(&path, bytes);
+    #[cfg(not(lua_mods))]
+    let _ = (path, bytes);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
 pub fn ships_assets() -> bool {
     !cfg!(feature = "asset_download")
 }

@@ -36,6 +36,7 @@ pub fn register(registry: &mut Registry) {
     registry.add(
         EntityKind::ItemDisplay,
         RenderSpec::item("item_display", display_item, "none", no_inner)
+            .with_display_of(item_display_context)
             .with_camera_root(item_display_root),
     );
     registry.add(
@@ -48,6 +49,7 @@ pub fn register(registry: &mut Registry) {
         RenderSpec::item("item_frame_item", frame_item, "fixed", frame_item_inner)
             .with_root(super::frame::frame_root)
             .with_visible(frame_item_visible)
+            .with_levels(frame_item_levels)
             .ignoring_invisibility(),
     );
     registry.add_carried(
@@ -89,7 +91,7 @@ fn carried_root(_st: &EntityState) -> RootPose {
     RootPose::default()
 }
 
-fn item_key(item: &crate::renderer::anim::HeldItem) -> TexturePath {
+pub(crate) fn item_key(item: &crate::renderer::anim::HeldItem) -> TexturePath {
     let has_layers = item
         .layers
         .as_ref()
@@ -117,9 +119,12 @@ fn dropped_seed(st: &EntityState) -> i64 {
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32)) as i64
 }
 
+pub(crate) fn bob_offset(id: i32) -> f32 {
+    crate::util::javarandom::JavaRandom::new(id as i64).next_f32() * std::f32::consts::TAU
+}
+
 fn item_entity_root(st: &EntityState) -> RootPose {
-    let bob_offset =
-        crate::util::javarandom::JavaRandom::new(st.id as i64).next_f32() * std::f32::consts::TAU;
+    let bob_offset = bob_offset(st.id);
     let bob = (st.age_ticks / 10.0 + bob_offset).sin() * 0.1 + 0.1;
     let spin = st.age_ticks / 20.0 + bob_offset;
     RootPose {
@@ -174,6 +179,21 @@ fn thrown_root(st: &EntityState, camera: &CameraView) -> RootPose {
 
 fn display_item(st: &EntityState) -> TexturePath {
     item_key(&st.extras.item)
+}
+
+fn item_display_context(st: &EntityState) -> &'static str {
+    st.extras
+        .display
+        .as_deref()
+        .map_or("none", |display| display.item_context)
+}
+
+fn frame_item_levels(st: &EntityState, levels: (u8, u8)) -> (u8, u8) {
+    if st.kind == EntityKind::GlowItemFrame {
+        (15, 15)
+    } else {
+        levels
+    }
 }
 
 fn item_display_root(st: &EntityState, camera: &CameraView) -> RootPose {

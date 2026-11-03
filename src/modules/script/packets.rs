@@ -1,15 +1,16 @@
 use std::fmt::Write as _;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, LazyLock};
 
 use azalea_protocol::packets::ProtocolPacket;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use mlua::{Error, Lua, Table};
 
-use super::api::Ctx;
+use super::api::{Class, Ctx};
 use super::game::{game_fn, waypoint_fields};
 use super::perm;
 use crate::session::{WaypointInfo, WaypointKey};
+use crate::util::wire::{Reader, write_varint};
 
 const WORDS: usize = 4;
 const _: () = assert!(ClientboundGamePacket::NAMES.len() <= WORDS * 64);
@@ -84,6 +85,12 @@ fn variant(resource: &str) -> String {
     out
 }
 
+static EVENT_NAMES: LazyLock<Box<[[String; 2]]>> = LazyLock::new(|| {
+    (ClientboundGamePacket::NAMES.iter())
+        .map(|resource| [variant(resource), format!("minecraft:{resource}")])
+        .collect()
+});
+
 pub(super) fn packet_set(names: &[String]) -> Result<PacketSet, String> {
     let all = ClientboundGamePacket::NAMES;
     let mut set = PacketSet::default();
@@ -140,7 +147,7 @@ pub(super) enum Fields {
         key: WaypointKey,
         info: Option<WaypointInfo>,
     },
-    Debug(String, bool),
+    Debug,
 }
 
 pub(super) struct Packet {
@@ -150,13 +157,18 @@ pub(super) struct Packet {
 }
 
 impl Packet {
+    pub fn class(&self) -> Class {
+        match self.fields {
+            Fields::Debug => Class::PacketDebug,
+            _ => Class::Plain,
+        }
+    }
+
     pub fn fill(&self, lua: &Lua, e: &Table) -> mlua::Result<()> {
-        let resource = ClientboundGamePacket::NAMES
-            .get(self.id as usize)
-            .copied()
-            .unwrap_or("");
-        e.raw_set("name", variant(resource))?;
-        e.raw_set("resource", format!("minecraft:{resource}"))?;
+        if let Some([name, resource]) = EVENT_NAMES.get(self.id as usize) {
+            e.raw_set("name", name.as_str())?;
+            e.raw_set("resource", resource.as_str())?;
+        }
         e.raw_set("id", self.id)?;
         e.raw_set("bytes", lua.create_string(&self.bytes)?)?;
         match &self.fields {
@@ -185,12 +197,43 @@ impl Packet {
                 e.raw_set("op", *op)?;
                 waypoint_fields(e, key, info.as_ref())
             }
-            Fields::Debug(text, cut) => {
-                e.raw_set("debug", text.as_str())?;
-                e.raw_set("truncated", *cut)
-            }
+            Fields::Debug => Ok(()),
         }
     }
+}
+
+fn debug_text(id: u32, bytes: &[u8]) -> (String, bool) {
+    let mut cursor = std::io::Cursor::new(bytes);
+    match ClientboundGamePacket::read(id, &mut cursor) {
+        Ok(packet) => {
+            let mut out = Capped(String::new());
+            let cut = write!(out, "{packet:?}").is_err();
+            (out.0, cut)
+        }
+        Err(e) => (
+            format!("(azalea could not read this packet back: {e})"),
+            false,
+        ),
+    }
+}
+
+pub(super) fn debug_index(lua: &Lua, base: Table) -> mlua::Result<mlua::Function> {
+    lua.create_function(move |_, (e, key): (Table, mlua::Value)| {
+        let wanted = matches!(&key, mlua::Value::String(s) if *s == "debug" || *s == "truncated");
+        if !wanted {
+            return base.raw_get::<mlua::Value>(key);
+        }
+        let id: u32 = e.raw_get("id")?;
+        let bytes: mlua::String = e.raw_get("bytes")?;
+        let (text, cut) = debug_text(id, &bytes.as_bytes());
+        e.set_readonly(false);
+        let written = e
+            .raw_set("debug", text)
+            .and_then(|()| e.raw_set("truncated", cut));
+        e.set_readonly(true);
+        written?;
+        e.raw_get::<mlua::Value>(key)
+    })
 }
 
 pub(super) fn convert(packet: &ClientboundGamePacket) -> Option<Packet> {
@@ -230,11 +273,7 @@ pub(super) fn convert(packet: &ClientboundGamePacket) -> Option<Packet> {
             };
             Fields::Waypoint { op, key, info }
         }
-        other => {
-            let mut out = Capped(String::new());
-            let cut = write!(out, "{other:?}").is_err();
-            Fields::Debug(out.0, cut)
-        }
+        _ => Fields::Debug,
     };
     let mut bytes = Vec::new();
     let _ = packet.write(&mut bytes);
@@ -244,18 +283,6 @@ pub(super) fn convert(packet: &ClientboundGamePacket) -> Option<Packet> {
 const REFUSED: [&str; 2] = ["configuration_acknowledged", "chat_session_update"];
 
 const SEND_CAP: usize = 8 << 20;
-
-fn varint(mut v: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(5);
-    loop {
-        if v & !0x7F == 0 {
-            out.push(v as u8);
-            return out;
-        }
-        out.push((v as u8 & 0x7F) | 0x80);
-        v >>= 7;
-    }
-}
 
 pub(super) fn table(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
@@ -332,7 +359,9 @@ pub(super) fn table(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Table> {
                 )));
             }
             let bits = if v < 0.0 { v as i32 as u32 } else { v as u32 };
-            lua.create_string(varint(bits))
+            let mut out = Vec::with_capacity(5);
+            write_varint(&mut out, bits as i32);
+            lua.create_string(out)
         })?,
     )?;
     t.raw_set(
@@ -340,19 +369,65 @@ pub(super) fn table(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Table> {
         lua.create_function(|_, (s, at): (mlua::String, Option<usize>)| {
             let bytes = s.as_bytes();
             let start = at.unwrap_or(1).max(1) - 1;
-            let mut v: u32 = 0;
-            for i in 0..5 {
-                let Some(&b) = bytes.get(start + i) else {
-                    return Ok((None, None));
-                };
-                v |= u32::from(b & 0x7F) << (7 * i);
-                if b & 0x80 == 0 {
-                    return Ok((Some(v as i32), Some(start + i + 2)));
+            let rest = bytes.get(start..).unwrap_or_default();
+            let mut r = Reader::new(rest);
+            match r.varint() {
+                Some(v) => Ok((Some(v), Some(start + r.pos() + 1))),
+                None if rest.len() >= 5 => {
+                    Err(Error::runtime("torch.net.readvarint: more than 5 bytes"))
                 }
+                None => Ok((None, None)),
             }
-            Err(Error::runtime("torch.net.readvarint: more than 5 bytes"))
         })?,
     )?;
     t.set_readonly(true);
     Ok(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use azalea_protocol::packets::ProtocolPacket;
+    use azalea_protocol::packets::game::ClientboundGamePacket;
+    use azalea_protocol::packets::game::c_keep_alive::ClientboundKeepAlive;
+
+    use super::super::api::{Api, Class, Ctx, PACKET};
+    use super::{Fields, Packet};
+
+    #[test]
+    fn debug_is_formatted_on_first_read() {
+        let api = Api::new(Arc::new(Ctx::new())).unwrap();
+        let packet = ClientboundGamePacket::KeepAlive(ClientboundKeepAlive { id: 4242 });
+        let mut bytes = Vec::new();
+        packet.write(&mut bytes).unwrap();
+        let p = Packet {
+            id: packet.id(),
+            bytes,
+            fields: Fields::Debug,
+        };
+        assert_eq!(p.class(), Class::PacketDebug);
+        let e = api.event_table().unwrap();
+        p.fill(&api.lua, &e).unwrap();
+        api.seal(&e, PACKET, p.class()).unwrap();
+        let check: mlua::Function = (api.lua)
+            .load(
+                r#"
+                local e = ...
+                assert(rawget(e, "debug") == nil, "debug was made before it was read")
+                assert(e.name == "KeepAlive" and e.resource == "minecraft:keep_alive", e.name)
+                assert(e.type == "packet" and e.cancelable == false and e.defaultPrevented == false)
+                assert(string.find(e.debug, "4242", 1, true), e.debug)
+                assert(e.truncated == false)
+                assert(rawget(e, "debug") ~= nil, "debug was not kept once read")
+                assert(not pcall(function() e.x = 1 end), "the event is writable")
+                assert(getmetatable(e) ~= nil and type(getmetatable(e)) == "string")
+                e:preventDefault()
+                return true
+                "#,
+            )
+            .into_function()
+            .unwrap();
+        assert!(check.call::<bool>(&e).unwrap());
+    }
 }

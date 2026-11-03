@@ -146,6 +146,9 @@ const HELP_EAGLER: &str = "    wss://host[/path]       An Eaglercraft server ove
                             EaglerXServer. Port defaults to 443, or 80 for
                             ws://. The path is part of the URL and is kept, so
                             proxies that route by path work.
+    java://host[:port]      A vanilla server, through the proxy selected on the
+                            multiplayer screen. With no port, its SRV record
+                            or 25565.
 ";
 
 #[cfg(not(any(feature = "eagler", target_arch = "wasm32")))]

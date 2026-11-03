@@ -906,12 +906,21 @@ fn frustum_planes(view: &ExtractedView) -> [[f32; 4]; 6] {
     let clip_from_world = view
         .clip_from_world
         .unwrap_or_else(|| view.clip_from_view * view.world_from_view.to_matrix().inverse());
-    let frustum = Frustum::from_clip_from_world(&clip_from_world);
+    planes_of(&clip_from_world)
+}
+
+fn planes_of(clip_from_world: &Mat4) -> [[f32; 4]; 6] {
+    let frustum = Frustum::from_clip_from_world(clip_from_world);
     let mut planes = [[0.0f32; 4]; 6];
     for i in 0..6 {
         planes[i] = frustum.half_spaces[i].normal_d().into();
     }
     planes
+}
+
+#[cfg(lua_mods)]
+pub fn frustum_of(clip_from_world: &Mat4) -> CullShape {
+    CullShape::frustum(planes_of(clip_from_world))
 }
 
 pub fn prepare_cull_bind_group(
@@ -1094,14 +1103,9 @@ mod tests {
         };
         let cull = declaration(include_str!("cull.wgsl"));
         assert_eq!(
-            declaration(include_str!("../terrain.wgsl")),
+            declaration(include_str!("../terrain_common.wgsl")),
             cull,
-            "terrain.wgsl"
-        );
-        assert_eq!(
-            declaration(include_str!("../terrain_prepass.wgsl")),
-            cull,
-            "terrain_prepass.wgsl"
+            "terrain_common.wgsl"
         );
     }
 

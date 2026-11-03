@@ -40,13 +40,7 @@ pub struct LodMaterial {
 }
 
 impl Material for LodMaterial {
-    fn vertex_shader() -> ShaderRef {
-        shader()
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        shader()
-    }
+    crate::renderer::material_shader_fns!();
 
     fn alpha_mode(&self) -> AlphaMode {
         if self.blend {
@@ -56,13 +50,7 @@ impl Material for LodMaterial {
         }
     }
 
-    fn enable_prepass() -> bool {
-        false
-    }
-
-    fn enable_shadows() -> bool {
-        false
-    }
+    crate::renderer::material_no_prepass_no_shadows!();
 
     fn specialize(
         _pipeline: &MaterialPipeline,

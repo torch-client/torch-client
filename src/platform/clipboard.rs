@@ -13,6 +13,13 @@ pub fn get() -> String {
     }
 }
 
+pub fn offer(text: Option<String>) {
+    #[cfg(target_arch = "wasm32")]
+    web::offer(text);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = text;
+}
+
 pub fn set(text: &str) {
     #[cfg(target_arch = "wasm32")]
     {
@@ -148,6 +155,78 @@ mod android {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::prelude::Closure;
+    use web_sys::{ClipboardEvent, HtmlDocument, KeyboardEvent};
+
+    static OFFERED: Mutex<Option<String>> = Mutex::new(None);
+
+    pub(super) fn offer(text: Option<String>) {
+        if text.is_some() {
+            install();
+        }
+        if let Ok(mut slot) = OFFERED.lock() {
+            *slot = text;
+        }
+    }
+
+    fn offered() -> Option<String> {
+        OFFERED.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    fn install() {
+        static INSTALLED: AtomicBool = AtomicBool::new(false);
+        if INSTALLED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+
+        let on_copy = Closure::<dyn FnMut(ClipboardEvent)>::new(|event: ClipboardEvent| {
+            let Some(text) = offered() else {
+                return;
+            };
+            let Some(data) = event.clipboard_data() else {
+                return;
+            };
+            if data.set_data("text/plain", &text).is_ok() {
+                event.prevent_default();
+            }
+        });
+        let _ = doc.add_event_listener_with_callback("copy", on_copy.as_ref().unchecked_ref());
+        on_copy.forget();
+
+        let on_keydown = Closure::<dyn FnMut(KeyboardEvent)>::new(|event: KeyboardEvent| {
+            let chord = (event.ctrl_key() || event.meta_key())
+                && !event.shift_key()
+                && !event.alt_key()
+                && event.code() == "KeyC";
+            if !chord {
+                return;
+            }
+            let Some(text) = offered() else {
+                return;
+            };
+            let html: Option<HtmlDocument> = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.dyn_into().ok());
+            let copied = html.is_some_and(|d| d.exec_command("copy").unwrap_or(false));
+            if !copied {
+                copy(&text);
+            }
+            event.prevent_default();
+            event.stop_propagation();
+        });
+        let _ = doc.add_event_listener_with_callback_and_bool(
+            "keydown",
+            on_keydown.as_ref().unchecked_ref(),
+            true,
+        );
+        on_keydown.forget();
+    }
 
     static PASTED: Mutex<String> = Mutex::new(String::new());
 

@@ -8,18 +8,88 @@ use crate::gui::widgets::{
 use crate::gui::{GAMMA_MAX, GuiState, Screen, ScreenCtx, keybinds};
 use crate::text::LINE_HEIGHT;
 
-const TITLE: &str = "Options";
+mod tr {
+    use crate::gui::tooltip::label;
 
-const VIDEO_TITLE: &str = "Video Settings";
-const VIDEO: &str = "Video Settings...";
+    macro_rules! keys {
+        ($($(#[$meta:meta])* $name:ident = $key:literal),* $(,)?) => {
+            $($(#[$meta])* pub fn $name() -> &'static str { label!($key) })*
+        };
+    }
 
-const CONTROLS_TITLE: &str = "Controls";
-const CONTROLS: &str = "Controls...";
+    keys! {
+        title = "options.title",
+        video_title = "options.videoTitle",
+        video = "options.video",
+        controls_title = "controls.title",
+        controls = "options.controls",
+        #[cfg(feature = "audio")]
+        audio = "options.sounds",
+        display_header = "options.video.display.header",
+        quality_header = "options.video.quality.header",
+        done = "gui.done",
+        gui_scale = "options.guiScale",
+        gui_scale_auto = "options.guiScale.auto",
+        clouds = "options.renderClouds",
+        particles = "options.particles",
+        entity_shadows = "options.entityShadows",
+        on = "options.on",
+        off = "options.off",
+        smooth_lighting = "options.ao",
+        max_framerate = "options.framerateLimit",
+        unlimited = "options.framerateLimit.max",
+        auto_jump = "options.autoJump",
+        sprint_toggle = "options.key.toggle",
+        sprint_hold = "options.key.hold",
+        main_hand = "options.mainHand",
+        main_hand_left = "options.mainHand.left",
+        main_hand_right = "options.mainHand.right",
+        #[cfg(feature = "skins")]
+        cape = "options.modelPart.cape",
+        #[cfg(feature = "skins")]
+        jacket = "options.modelPart.jacket",
+        #[cfg(feature = "skins")]
+        left_sleeve = "options.modelPart.left_sleeve",
+        #[cfg(feature = "skins")]
+        right_sleeve = "options.modelPart.right_sleeve",
+        #[cfg(feature = "skins")]
+        hat = "options.modelPart.hat",
+        chat_header = "options.chat.title",
+        toast_advancement = "gui.advancements",
+        fov = "options.fov",
+        fov_normal = "options.fov.min",
+        fov_quake_pro = "options.fov.max",
+        brightness = "options.gamma",
+        brightness_moody = "options.gamma.min",
+        brightness_bright = "options.gamma.max",
+        render_distance = "options.renderDistance",
+        fov_effects = "options.fovEffectScale",
+        screen_effects = "options.screenEffectScale",
+        reset = "controls.reset",
+        reset_all_keys = "controls.resetAll",
+    }
+}
+
+fn generic_value(caption: &str, value: &str) -> String {
+    crate::gui::tooltip::translate(
+        "options.generic_value",
+        &[caption.to_owned(), value.to_owned()],
+    )
+}
+
+fn percent_value(caption: &str, value: i32) -> String {
+    crate::gui::tooltip::translate(
+        "options.percent_value",
+        &[caption.to_owned(), value.to_string()],
+    )
+}
+
+fn chunks(n: impl std::fmt::Display) -> String {
+    crate::gui::tooltip::translate("options.chunks", &[n.to_string()])
+}
 
 #[cfg(feature = "audio")]
 const AUDIO_TITLE: &str = "Music & Sounds";
-#[cfg(feature = "audio")]
-const AUDIO: &str = "Music & Sounds...";
 
 const GAME_TITLE: &str = "Game";
 const GAME: &str = "Game...";
@@ -52,18 +122,6 @@ const CLEAR_ASSETS_YES: &str = "Clear";
 #[cfg(feature = "asset_download")]
 const CLEAR_ASSETS_NO: &str = "Cancel";
 
-const DISPLAY_HEADER: &str = "Display";
-
-const QUALITY_HEADER: &str = "Quality & Performance";
-
-const DONE: &str = "Done";
-
-const GUI_SCALE: &str = "GUI Scale";
-
-const CLOUDS: &str = "Clouds";
-
-const PARTICLES: &str = "Particles";
-
 #[cfg(feature = "builtin_shaders")]
 const SHADER_QUALITY: &str = "Shader Quality";
 
@@ -75,13 +133,7 @@ const PLAYER_SHADOWS: &str = "Player Shadows";
 
 const ANTIALIASING: &str = "Antialiasing";
 
-const ON: &str = "ON";
-const OFF: &str = "OFF";
-
-const SMOOTH_LIGHTING: &str = "Smooth Lighting";
 const LIGHTING_ENGINE: &str = "Lighting Engine";
-const MAX_FRAMERATE: &str = "Max Framerate";
-const UNLIMITED: &str = "Unlimited";
 const VSYNC: &str = "VSync";
 
 const FPS_COUNTER: &str = "FPS Counter";
@@ -103,37 +155,28 @@ const CHECK_ASSETS: &str = "Install missing assets";
 #[cfg(feature = "asset_download")]
 const NOTHING_MISSING: &str = "Nothing is missing";
 
-const AUTO_JUMP: &str = "Auto-Jump";
-
 const SPRINT_MODE: &str = "Sprint Mode";
-const SPRINT_MODE_TOGGLE: &str = "Toggle";
-const SPRINT_MODE_HOLD: &str = "Hold";
-
-const MAIN_HAND: &str = "Main Hand";
-const MAIN_HAND_LEFT: &str = "Left";
-const MAIN_HAND_RIGHT: &str = "Right";
 
 #[cfg(feature = "skins")]
 const SKIN_HEADER: &str = "Skin Customisation";
 
 #[cfg(feature = "skins")]
-const SKIN_PART_LABELS: [&str; 7] = [
-    "Cape",
-    "Jacket",
-    "Left Sleeve",
-    "Right Sleeve",
-    "Left Pants Leg",
-    "Right Pants Leg",
-    "Hat",
-];
-
-const CHAT_HEADER: &str = "Chat Settings";
+fn skin_part_labels() -> [&'static str; 7] {
+    [
+        tr::cape(),
+        tr::jacket(),
+        tr::left_sleeve(),
+        tr::right_sleeve(),
+        "Left Pants Leg",
+        "Right Pants Leg",
+        tr::hat(),
+    ]
+}
 
 const SIGNED_CHAT: &str = "Allow Signed Chat";
 
 const TOAST_HEADER: &str = "Toasts";
 
-const TOAST_ADVANCEMENT: &str = "Advancements";
 const TOAST_RECIPE: &str = "Recipes";
 const TOAST_SYSTEM: &str = "System";
 
@@ -141,37 +184,15 @@ const TOAST_TIME: &str = "Toast Time";
 
 const SIGNED_CHAT_UNAVAILABLE: &str = "Needs a Microsoft account";
 
-const FOV: &str = "FOV";
-
-const BRIGHTNESS: &str = "Brightness";
-
-const BRIGHTNESS_MOODY: &str = "Moody";
-
-const BRIGHTNESS_BRIGHT: &str = "Bright";
-
-const RENDER_DISTANCE: &str = "Render Distance";
-
-const CHUNKS: &str = "Chunks";
-
-const FOV_NORMAL: &str = "Normal";
-
-const FOV_QUAKE_PRO: &str = "Quake Pro";
-
 const FOV_MIN: i32 = 30;
 const FOV_MAX: i32 = 110;
 
-const FOV_EFFECTS: &str = "FOV Effects";
-
 const FOV_EFFECTS_MAX: i32 = 100;
-
-const SCREEN_EFFECTS: &str = "Distortion Effects";
 
 const SCREEN_EFFECTS_MAX: i32 = 100;
 
 pub(crate) const RENDER_DISTANCE_MIN: i32 = 2;
 pub(crate) const RENDER_DISTANCE_MAX: i32 = 32;
-
-const GUI_SCALE_AUTO: &str = "Auto";
 
 pub(in crate::gui) const LAYOUT: HeaderFooter =
     HeaderFooter::new(HeaderFooter::DEFAULT_H, HeaderFooter::DEFAULT_H);
@@ -567,22 +588,22 @@ const AUDIO_CONTENT_H: f32 = Y_AUDIO_ROW_4 + ROW_H;
 
 fn fov_label(value: i32) -> String {
     match value {
-        70 => format!("{FOV}: {FOV_NORMAL}"),
-        FOV_MAX => format!("{FOV}: {FOV_QUAKE_PRO}"),
-        v => format!("{FOV}: {v}"),
+        70 => generic_value(tr::fov(), tr::fov_normal()),
+        FOV_MAX => generic_value(tr::fov(), tr::fov_quake_pro()),
+        v => generic_value(tr::fov(), &v.to_string()),
     }
 }
 
 fn percent_or_off(caption: &str, value: i32) -> String {
     if value == 0 {
-        format!("{caption}: {OFF}")
+        generic_value(caption, tr::off())
     } else {
-        format!("{caption}: {value}%")
+        percent_value(caption, value)
     }
 }
 
 fn render_distance_label(value: i32) -> String {
-    format!("{RENDER_DISTANCE}: {value} {CHUNKS}")
+    generic_value(tr::render_distance(), &chunks(value))
 }
 
 #[cfg(feature = "render_lod")]
@@ -633,12 +654,15 @@ fn lod_render_distance_label(value: i32) -> String {
 
 #[cfg(feature = "render_lod")]
 fn lod_distance_label(stop: i32, render_distance: u32) -> String {
-    let chunks = LOD_DISTANCE_STOPS[(stop.max(0) as usize).min(LOD_DISTANCE_STOPS.len() - 1)];
+    let lod_chunks = LOD_DISTANCE_STOPS[(stop.max(0) as usize).min(LOD_DISTANCE_STOPS.len() - 1)];
     let floor = render_distance + 1;
-    if chunks >= floor {
-        format!("{LOD_DISTANCE}: {chunks} {CHUNKS}")
+    if lod_chunks >= floor {
+        generic_value(LOD_DISTANCE, &chunks(lod_chunks))
     } else {
-        format!("{LOD_DISTANCE}: {floor} {CHUNKS} {LOD_DISTANCE_FLOOR}")
+        format!(
+            "{} {LOD_DISTANCE_FLOOR}",
+            generic_value(LOD_DISTANCE, &chunks(floor))
+        )
     }
 }
 
@@ -661,7 +685,7 @@ fn draw_lod_group(
 
     let (x, y) = cell(0.0, Y_LOD_HINT);
     for (i, line) in LOD_HINT.iter().enumerate() {
-        p.text_str(line, x, y + i as f32 * (LINE_HEIGHT + 1.0), 0xA0A0A0, true);
+        p.text_plain(line, x, y + i as f32 * (LINE_HEIGHT + 1.0), 0xA0A0A0, true);
     }
 
     let (x, y) = cell(0.0, Y_LOD_ROW_1);
@@ -712,9 +736,9 @@ fn draw_lod_group(
 
 fn brightness_label(value: i32) -> String {
     match value {
-        0 => format!("{BRIGHTNESS}: {BRIGHTNESS_MOODY}"),
-        100 => format!("{BRIGHTNESS}: {BRIGHTNESS_BRIGHT}"),
-        v => format!("{BRIGHTNESS}: {v}%"),
+        0 => generic_value(tr::brightness(), tr::brightness_moody()),
+        100 => generic_value(tr::brightness(), tr::brightness_bright()),
+        v => percent_value(tr::brightness(), v),
     }
 }
 
@@ -724,22 +748,23 @@ fn toast_time_label(value: i32) -> String {
 
 fn max_framerate_label(fps: u32) -> String {
     if fps >= crate::gui::MAX_FPS_UNLIMITED {
-        format!("{MAX_FRAMERATE}: {UNLIMITED}")
+        generic_value(tr::max_framerate(), tr::unlimited())
     } else {
-        format!("{MAX_FRAMERATE}: {fps} fps")
+        let value = crate::gui::tooltip::translate("options.framerate", &[fps.to_string()]);
+        generic_value(tr::max_framerate(), &value)
     }
 }
 
 fn gui_scale_label(value: i32) -> String {
     if value == 0 {
-        format!("{GUI_SCALE}: {GUI_SCALE_AUTO}")
+        generic_value(tr::gui_scale(), tr::gui_scale_auto())
     } else {
-        format!("{GUI_SCALE}: {value}")
+        generic_value(tr::gui_scale(), &value.to_string())
     }
 }
 
 fn toggle(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, label: &str, value: &mut bool) -> bool {
-    let caption = format!("{label}: {}", if *value { ON } else { OFF });
+    let caption = generic_value(label, if *value { tr::on() } else { tr::off() });
 
     if !Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &caption).draw(p, ctx) {
         return false;
@@ -759,7 +784,7 @@ pub(in crate::gui) fn draw_done(p: &mut Painter, ctx: &ScreenCtx) -> bool {
         LAYOUT.footer_y(ctx.vh),
         WIDGET_WIDTH_BIG,
         WIDGET_HEIGHT,
-        DONE,
+        tr::done(),
     )
     .draw(p, ctx)
 }
@@ -782,6 +807,7 @@ const VIDEO_KEYS: &[&str] = &[
     "shaders",
     "shaderQuality",
     "playerShadows",
+    "entityShadows",
     "touchMovement",
     #[cfg(feature = "render_lod")]
     "lodDistance",
@@ -816,7 +842,7 @@ fn reset_audio_options(o: &mut crate::gui::GuiOptions) {
 }
 
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
-    draw_title(p, ctx, TITLE);
+    draw_title(p, ctx, tr::title());
 
     enum Entry {
         Screen(Screen),
@@ -827,12 +853,12 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     let mut entries = vec![
-        (VIDEO, Entry::Screen(Screen::VideoSettings)),
-        (CONTROLS, Entry::Screen(Screen::Controls)),
+        (tr::video(), Entry::Screen(Screen::VideoSettings)),
+        (tr::controls(), Entry::Screen(Screen::Controls)),
         (GAME, Entry::Screen(Screen::GameSettings)),
     ];
     #[cfg(feature = "audio")]
-    entries.push((AUDIO, Entry::Screen(Screen::AudioSettings)));
+    entries.push((tr::audio(), Entry::Screen(Screen::AudioSettings)));
     #[cfg(resource_packs)]
     entries.push((crate::gui::resourcepacks::RESOURCE_PACKS, Entry::Packs));
     #[cfg(feature = "hud_editor")]
@@ -967,6 +993,7 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
     #[cfg(feature = "asset_download")]
     {
         let (x, y) = cell(next);
+        next += 1;
         let label = if state.storage_nothing_missing {
             NOTHING_MISSING
         } else {
@@ -992,7 +1019,7 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
 }
 
 pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
-    draw_title(p, ctx, VIDEO_TITLE);
+    draw_title(p, ctx, tr::video_title());
 
     let max = auto_gui_scale(ctx.vw * ctx.input.scale, ctx.vh * ctx.input.scale) as i32;
 
@@ -1028,7 +1055,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     let cell = |column: f32, row_y: f32| (left + column * COLUMN_STEP, top + row_y + ROW_INSET);
     let header = |p: &mut Painter, row_y: f32, pad_top: f32, text: &str| {
-        p.text_str(
+        p.text_plain(
             text,
             left,
             top + row_y + ROW_INSET + pad_top,
@@ -1037,7 +1064,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         );
     };
 
-    header(p, Y_DISPLAY_HEADER, 0.0, DISPLAY_HEADER);
+    header(p, Y_DISPLAY_HEADER, 0.0, tr::display_header());
 
     let stored_fps = state.options.max_fps;
     let stored_step = (stored_fps / FRAMERATE_STEP) as i32;
@@ -1097,9 +1124,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         value: state.options.gamma as i32,
         label: brightness_label,
     };
-    let new_gamma = brightness.draw(p, ctx).clamp(0, GAMMA_MAX as i32) as u32;
-    if new_gamma != state.options.gamma {
-        state.options.gamma = new_gamma;
+    if brightness.draw_into(p, ctx, &mut state.options.gamma) {
         crate::gui::save_options(&state.options);
     }
 
@@ -1115,9 +1140,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         value: state.options.fov as i32,
         label: fov_label,
     };
-    let new_fov = fov.draw(p, ctx).clamp(FOV_MIN, FOV_MAX) as u32;
-    if new_fov != state.options.fov {
-        state.options.fov = new_fov;
+    if fov.draw_into(p, ctx, &mut state.options.fov) {
         crate::gui::save_options(&state.options);
     }
 
@@ -1146,11 +1169,9 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         min: 0,
         max: FOV_EFFECTS_MAX,
         value: state.options.fov_effects as i32,
-        label: |v| percent_or_off(FOV_EFFECTS, v),
+        label: |v| percent_or_off(tr::fov_effects(), v),
     };
-    let new_fov_effects = fov_effects.draw(p, ctx).clamp(0, FOV_EFFECTS_MAX) as u32;
-    if new_fov_effects != state.options.fov_effects {
-        state.options.fov_effects = new_fov_effects;
+    if fov_effects.draw_into(p, ctx, &mut state.options.fov_effects) {
         crate::gui::save_options(&state.options);
     }
 
@@ -1164,15 +1185,13 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         min: 0,
         max: SCREEN_EFFECTS_MAX,
         value: state.options.screen_effects as i32,
-        label: |v| percent_or_off(SCREEN_EFFECTS, v),
+        label: |v| percent_or_off(tr::screen_effects(), v),
     };
-    let new_screen_effects = screen_effects.draw(p, ctx).clamp(0, SCREEN_EFFECTS_MAX) as u32;
-    if new_screen_effects != state.options.screen_effects {
-        state.options.screen_effects = new_screen_effects;
+    if screen_effects.draw_into(p, ctx, &mut state.options.screen_effects) {
         crate::gui::save_options(&state.options);
     }
 
-    header(p, Y_QUALITY_HEADER, HEADER_PAD_TOP, QUALITY_HEADER);
+    header(p, Y_QUALITY_HEADER, HEADER_PAD_TOP, tr::quality_header());
 
     #[cfg(feature = "render_lod")]
     let (x, y) = cell(0.0, Y_LOD_ROW_0);
@@ -1195,18 +1214,14 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         #[cfg(not(feature = "render_lod"))]
         label: render_distance_label,
     };
-    let new_render_distance = render_distance
-        .draw(p, ctx)
-        .clamp(RENDER_DISTANCE_MIN, RENDER_DISTANCE_MAX) as u32;
-    if new_render_distance != state.options.render_distance {
-        state.options.render_distance = new_render_distance;
+    if render_distance.draw_into(p, ctx, &mut state.options.render_distance) {
         crate::gui::save_options(&state.options);
     }
 
     #[cfg(feature = "render_lod")]
     draw_lod_group(p, ctx, state, &cell, &header);
 
-    let clouds_label = format!("{CLOUDS}: {}", state.options.clouds.caption());
+    let clouds_label = generic_value(tr::clouds(), state.options.clouds.caption());
     let (x, y) = cell(1.0, Y_QUALITY_ROW_0);
     let clouds = Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &clouds_label);
     if clouds.draw(p, ctx) {
@@ -1220,7 +1235,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         ctx,
         x,
         y,
-        SMOOTH_LIGHTING,
+        tr::smooth_lighting(),
         &mut state.options.smooth_lighting,
     ) {
         crate::gui::save_options(&state.options);
@@ -1243,11 +1258,23 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         crate::gui::save_options(&state.options);
     }
 
-    let particles_label = format!("{PARTICLES}: {}", state.options.particles.caption());
+    let particles_label = generic_value(tr::particles(), state.options.particles.caption());
     let (x, y) = cell(0.0, Y_QUALITY_ROW_3);
     let particles = Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &particles_label);
     if particles.draw(p, ctx) {
         state.options.particles = state.options.particles.next();
+        crate::gui::save_options(&state.options);
+    }
+
+    let (x, y) = cell(1.0, Y_QUALITY_ROW_3);
+    if toggle(
+        p,
+        ctx,
+        x,
+        y,
+        tr::entity_shadows(),
+        &mut state.options.entity_shadows,
+    ) {
         crate::gui::save_options(&state.options);
     }
 
@@ -1260,10 +1287,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
         let enabled = state.options.shaders_enabled;
 
-        let label = format!(
-            "{SHADER_QUALITY}: {}",
-            state.options.shader_quality.caption()
-        );
+        let label = generic_value(SHADER_QUALITY, state.options.shader_quality.caption());
         let (x, y) = cell(0.0, Y_QUALITY_ROW_4);
         let mut quality = Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &label);
         quality.active = enabled;
@@ -1272,13 +1296,13 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             crate::gui::save_options(&state.options);
         }
 
-        let label = format!(
-            "{PLAYER_SHADOWS}: {}",
+        let label = generic_value(
+            PLAYER_SHADOWS,
             if state.options.player_shadows {
-                ON
+                tr::on()
             } else {
-                OFF
-            }
+                tr::off()
+            },
         );
         let (x, y) = cell(1.0, Y_QUALITY_ROW_4);
         let mut shadows = Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &label);
@@ -1344,7 +1368,7 @@ fn bind_rows() -> Vec<BindRow> {
     for (i, def) in keybinds::BINDS.iter().enumerate() {
         if def.category != category {
             category = def.category;
-            rows.push(BindRow::Category(category));
+            rows.push(BindRow::Category(def.category_label()));
         }
         rows.push(BindRow::Bind(i));
     }
@@ -1365,13 +1389,8 @@ const BIND_BUTTON_GAP: f32 = 5.0;
 const COLLISION_COLOR: u32 = 0xFFFF_FF00;
 const COLLISION_W: f32 = 3.0;
 
-const RESET: &str = "Reset";
-const RESET_ALL_KEYS: &str = "Reset Keys";
-
-const DUPLICATE: &str = "This key is also used for:";
-
 pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
-    draw_title(p, ctx, CONTROLS_TITLE);
+    draw_title(p, ctx, tr::controls_title());
 
     let captured = state
         .keybinds
@@ -1392,10 +1411,7 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     #[cfg(feature = "mobile_ui")]
     let (list_y, list_h) = {
         let x = centered_x(ctx.vw) + (WIDGET_WIDTH_BIG - COLUMN_W) / 2.0;
-        let label = format!(
-            "{TOUCH_MOVEMENT}: {}",
-            state.options.touch_movement.caption()
-        );
+        let label = generic_value(TOUCH_MOVEMENT, state.options.touch_movement.caption());
         if Button::new(x, list_y, COLUMN_W, WIDGET_HEIGHT, &label).draw(p, ctx) {
             state.options.touch_movement = state.options.touch_movement.next();
             crate::gui::save_options(&state.options);
@@ -1452,7 +1468,7 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                 let collisions = state.keybinds.collisions(*bind);
                 let selected = state.keybinds.capturing == Some(*bind);
 
-                p.text_str(def.name, left, row_y + 6.0, 0xFFFFFF, true);
+                p.text_plain(def.label(), left, row_y + 6.0, 0xFFFFFF, true);
 
                 if !collisions.is_empty() {
                     p.fill(
@@ -1481,7 +1497,11 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                 if !collisions.is_empty()
                     && list_ctx.hovering(change_x, row_y, CHANGE_W, BIND_ROW_H)
                 {
-                    tooltip = Some(vec![DUPLICATE.to_string(), collisions.join(", ")]);
+                    let text = crate::gui::tooltip::translate(
+                        "controls.keybinds.duplicateKeybinds",
+                        &[collisions.join(", ")],
+                    );
+                    tooltip = Some(text.split('\n').map(str::to_owned).collect());
                 }
 
                 let reset = Button {
@@ -1489,7 +1509,7 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                     y: row_y,
                     w: RESET_W,
                     h: BIND_ROW_H,
-                    label: RESET,
+                    label: tr::reset(),
                     active: !state.keybinds.is_default(*bind),
                 };
                 if reset.draw(p, list_ctx) {
@@ -1522,7 +1542,7 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         y: footer_y,
         w: FOOTER_W,
         h: WIDGET_HEIGHT,
-        label: RESET_ALL_KEYS,
+        label: tr::reset_all_keys(),
         active: state.keybinds.any_rebound(),
     };
     if reset_all.draw(p, screen_ctx) {
@@ -1533,7 +1553,7 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         footer_y,
         FOOTER_W,
         WIDGET_HEIGHT,
-        DONE,
+        tr::done(),
     );
     if done.draw(p, screen_ctx) {
         state.keybinds.capturing = None;
@@ -1556,7 +1576,7 @@ pub(in crate::gui) fn draw_bind_tooltip(
     let (x, y) = crate::gui::tooltip::position_flat(mx, my, vw, w);
     p.fill(x - 3.0, y - 3.0, w + 6.0, h + 6.0, 0xF010_0010);
     for (i, line) in lines.iter().enumerate() {
-        p.text_str(line, x, y + i as f32 * (LINE_HEIGHT + 1.0), 0xFFFFFF, true);
+        p.text_plain(line, x, y + i as f32 * (LINE_HEIGHT + 1.0), 0xFFFFFF, true);
     }
 }
 
@@ -1629,18 +1649,18 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let cell = |column: f32, row_y: f32| (left + column * COLUMN_STEP, top + row_y + ROW_INSET);
 
     let (x, y) = cell(0.0, Y_GAME_ROW_0);
-    if toggle(p, ctx, x, y, AUTO_JUMP, &mut state.options.auto_jump) {
+    if toggle(p, ctx, x, y, tr::auto_jump(), &mut state.options.auto_jump) {
         crate::gui::save_options(&state.options);
     }
 
     let (x, y) = cell(1.0, Y_GAME_ROW_0);
-    let caption = format!(
-        "{MAIN_HAND}: {}",
+    let caption = generic_value(
+        tr::main_hand(),
         if state.options.main_hand_left {
-            MAIN_HAND_LEFT
+            tr::main_hand_left()
         } else {
-            MAIN_HAND_RIGHT
-        }
+            tr::main_hand_right()
+        },
     );
     if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &caption).draw(p, ctx) {
         state.options.main_hand_left = !state.options.main_hand_left;
@@ -1648,21 +1668,21 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     let (x, y) = cell(0.0, Y_GAME_ROW_1);
-    let caption = format!(
-        "{SPRINT_MODE}: {}",
+    let caption = generic_value(
+        SPRINT_MODE,
         if state.options.toggle_sprint {
-            SPRINT_MODE_TOGGLE
+            tr::sprint_toggle()
         } else {
-            SPRINT_MODE_HOLD
-        }
+            tr::sprint_hold()
+        },
     );
     if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &caption).draw(p, ctx) {
         state.options.toggle_sprint = !state.options.toggle_sprint;
         crate::gui::save_options(&state.options);
     }
 
-    p.text_str(
-        CHAT_HEADER,
+    p.text_plain(
+        tr::chat_header(),
         left,
         top + Y_CHAT_HEADER + ROW_INSET + HEADER_PAD_TOP,
         0xFFFFFF,
@@ -1683,13 +1703,13 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             crate::gui::save_options(&state.options);
         }
     } else {
-        let caption = format!("{SIGNED_CHAT}: {OFF}");
+        let caption = generic_value(SIGNED_CHAT, tr::off());
         Button {
             active: false,
             ..Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &caption)
         }
         .draw(p, ctx);
-        p.text_str(
+        p.text_plain(
             SIGNED_CHAT_UNAVAILABLE,
             x + COLUMN_STEP,
             y + (WIDGET_HEIGHT - LINE_HEIGHT) / 2.0,
@@ -1698,7 +1718,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         );
     }
 
-    p.text_str(
+    p.text_plain(
         TOAST_HEADER,
         left,
         top + Y_TOAST_HEADER + ROW_INSET + HEADER_PAD_TOP,
@@ -1712,7 +1732,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         ctx,
         x,
         y,
-        TOAST_ADVANCEMENT,
+        tr::toast_advancement(),
         &mut state.options.toast_advancement,
     ) {
         crate::gui::save_options(&state.options);
@@ -1738,18 +1758,13 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         value: state.options.toast_time as i32,
         label: toast_time_label,
     };
-    let new_toast_time = toast_time
-        .draw(p, ctx)
-        .clamp(crate::gui::TOAST_TIME_MIN, crate::gui::TOAST_TIME_MAX)
-        as u32;
-    if new_toast_time != state.options.toast_time {
-        state.options.toast_time = new_toast_time;
+    if toast_time.draw_into(p, ctx, &mut state.options.toast_time) {
         crate::gui::save_options(&state.options);
     }
 
     #[cfg(feature = "skins")]
     {
-        p.text_str(
+        p.text_plain(
             SKIN_HEADER,
             left,
             top + Y_SKIN_HEADER + ROW_INSET + HEADER_PAD_TOP,
@@ -1757,8 +1772,8 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             true,
         );
         let rows = [Y_SKIN_ROW_0, Y_SKIN_ROW_1, Y_SKIN_ROW_2, Y_SKIN_ROW_3];
-        for (i, (label, bit)) in SKIN_PART_LABELS
-            .iter()
+        for (i, (label, bit)) in skin_part_labels()
+            .into_iter()
             .zip(crate::gui::MODEL_PART_KEYS.map(|(_, bit)| bit))
             .enumerate()
         {
@@ -1773,7 +1788,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
     {
-        p.text_str(
+        p.text_plain(
             STORAGE_HEADER,
             left,
             top + Y_STORAGE_HEADER + ROW_INSET + HEADER_PAD_TOP,

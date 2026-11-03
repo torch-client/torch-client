@@ -30,6 +30,9 @@ pub(super) enum JobResult {
     Tag(NbtTag),
     File(Mutex<Option<Result<NbtCompound, String>>>),
     Saved(Result<u64, String>),
+    Read(Result<(), String>),
+    Captured(Result<bool, String>),
+    Loaded(Mutex<Option<Result<super::image::Loaded, String>>>),
 }
 
 impl JobResult {
@@ -60,7 +63,27 @@ impl JobResult {
                 e.raw_set("size", *size)?;
                 e.raw_set("ok", true)
             }
-            JobResult::Saved(Err(why)) => failed(why),
+            JobResult::Saved(Err(why))
+            | JobResult::Read(Err(why))
+            | JobResult::Captured(Err(why)) => failed(why),
+            JobResult::Read(Ok(())) => e.raw_set("ok", true),
+            JobResult::Captured(Ok(partial)) => {
+                e.raw_set("partial", *partial)?;
+                e.raw_set("ok", true)
+            }
+            JobResult::Loaded(slot) => {
+                match slot.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                    Some(Ok(loaded)) => match super::image::adopt(lua, loaded)? {
+                        Ok(image) => {
+                            e.raw_set("image", image)?;
+                            e.raw_set("ok", true)
+                        }
+                        Err(why) => failed(&why),
+                    },
+                    Some(Err(why)) => failed(&why),
+                    None => failed("already delivered"),
+                }
+            }
         }
     }
 }
@@ -685,7 +708,7 @@ pub(super) fn table(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Table> {
                         owner: k,
                         id,
                         generation,
-                        result: JobResult::File(Mutex::new(Some(result))),
+                        result: Box::new(JobResult::File(Mutex::new(Some(result)))),
                     });
                 }
             };

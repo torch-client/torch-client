@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::util::hash::sha1_hex;
 use crate::util::zip;
 use crate::{log_info, log_warn};
 
@@ -955,9 +956,7 @@ impl Download {
             crate::platform::http::Fetched::Cancelled => return Ok(None),
         };
 
-        let mut hash = Sha1::new();
-        hash.update(&bytes);
-        let got = hash.hex();
+        let got = sha1_hex(&bytes);
         if !sha1.is_empty() && got != sha1 {
             return Err(Failure::new(
                 "The download arrived damaged",
@@ -1050,9 +1049,7 @@ impl Download {
                 crate::platform::http::Fetched::Cancelled => return Ok(None),
             };
 
-            let mut sha = Sha1::new();
-            sha.update(&bytes);
-            let got = sha.hex();
+            let got = sha1_hex(&bytes);
             if got != hash {
                 return Err(Failure::new(
                     "An asset arrived damaged",
@@ -1275,12 +1272,6 @@ impl Drop for SoundTask {
     }
 }
 
-fn sha1_hex(bytes: &[u8]) -> String {
-    let mut hash = Sha1::new();
-    hash.update(bytes);
-    hash.hex()
-}
-
 fn pack(mut entries: Vec<(String, Vec<u8>)>) -> Vec<u8> {
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let before = entries.len();
@@ -1411,115 +1402,9 @@ pub(super) fn pick_version(manifest: &serde_json::Value, version: &str) -> Resul
         })
 }
 
-struct Sha1 {
-    h: [u32; 5],
-    block: [u8; 64],
-    filled: usize,
-    len: u64,
-}
-
-impl Sha1 {
-    fn new() -> Sha1 {
-        Sha1 {
-            h: [
-                0x6745_2301,
-                0xEFCD_AB89,
-                0x98BA_DCFE,
-                0x1032_5476,
-                0xC3D2_E1F0,
-            ],
-            block: [0; 64],
-            filled: 0,
-            len: 0,
-        }
-    }
-
-    fn update(&mut self, mut data: &[u8]) {
-        self.len = self.len.wrapping_add(data.len() as u64);
-        while !data.is_empty() {
-            let take = (64 - self.filled).min(data.len());
-            self.block[self.filled..self.filled + take].copy_from_slice(&data[..take]);
-            self.filled += take;
-            data = &data[take..];
-            if self.filled == 64 {
-                self.compress();
-                self.filled = 0;
-            }
-        }
-    }
-
-    fn compress(&mut self) {
-        let mut w = [0u32; 80];
-        for (i, word) in w.iter_mut().take(16).enumerate() {
-            let b = &self.block[i * 4..i * 4 + 4];
-            *word = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e] = self.h;
-        for (i, wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999),
-                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
-                _ => (b ^ c ^ d, 0xCA62_C1D6),
-            };
-            let t = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(*wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = t;
-        }
-        self.h[0] = self.h[0].wrapping_add(a);
-        self.h[1] = self.h[1].wrapping_add(b);
-        self.h[2] = self.h[2].wrapping_add(c);
-        self.h[3] = self.h[3].wrapping_add(d);
-        self.h[4] = self.h[4].wrapping_add(e);
-    }
-
-    fn hex(mut self) -> String {
-        let bits = self.len.wrapping_mul(8);
-        self.update(&[0x80]);
-        while self.filled != 56 {
-            self.update(&[0]);
-        }
-        self.block[56..64].copy_from_slice(&bits.to_be_bytes());
-        self.compress();
-        let mut out = String::with_capacity(40);
-        for word in self.h {
-            out.push_str(&format!("{word:08x}"));
-        }
-        out
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sha1_matches_the_published_vectors() {
-        let mut h = Sha1::new();
-        h.update(b"abc");
-        assert_eq!(h.hex(), "a9993e364706816aba3e25717850c26c9cd0d89d");
-
-        let mut h = Sha1::new();
-        h.update(b"");
-        assert_eq!(h.hex(), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-
-        let mut h = Sha1::new();
-        for chunk in b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq".chunks(7) {
-            h.update(chunk);
-        }
-        assert_eq!(h.hex(), "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
-    }
 
     #[test]
     fn a_key_is_the_jar_path_verbatim() {

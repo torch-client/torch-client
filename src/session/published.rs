@@ -66,6 +66,16 @@ pub enum ParticleEmit {
     Event(LevelEventEmit),
     Explosion(ExplosionEmit),
     Tracking(TrackingEmit),
+    ItemUse(ItemUseEmit),
+}
+
+#[derive(Clone)]
+pub struct ItemUseEmit {
+    pub item: &'static str,
+    pub eye: [f64; 3],
+    pub x_rot: f32,
+    pub y_rot: f32,
+    pub count: u32,
 }
 
 #[derive(Clone)]
@@ -159,23 +169,75 @@ pub struct SlotStack {
     pub cooldown: u8,
     pub damage: u16,
     pub max_damage: u16,
-    pub custom_name: Option<Vec<crate::text::Span>>,
-    pub lore: Vec<Vec<crate::text::Span>>,
-    pub enchantments: Vec<(String, i32)>,
-    pub potion: Option<crate::items::potions::PotionContents>,
+    pub extra: Extra,
     pub unbreakable: bool,
     pub glint: bool,
     pub charged: bool,
+    pub rocket: bool,
+    pub trim: u8,
+    pub has_lodestone: bool,
+    pub lodestone: Option<[i32; 3]>,
     pub death_protection: bool,
     pub kinetic: Option<crate::items::kinetic::Kinetic>,
     pub swing_ticks: u8,
     pub map_id: Option<i32>,
     pub component_count: u16,
     pub nbt_bytes: usize,
+    pub raw: Option<std::sync::Arc<azalea_inventory::ItemStack>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StackExtra {
+    pub custom_name: Option<Vec<crate::text::Span>>,
+    pub lore: Vec<Vec<crate::text::Span>>,
+    pub enchantments: Vec<(String, i32)>,
+    pub potion: Option<crate::items::potions::PotionContents>,
     pub banner_patterns: Option<Box<[Box<str>]>>,
     pub book: Option<Box<Book>>,
     pub banner_layers: Option<Box<[crate::blockentities::banner::BannerLayer]>>,
-    pub raw: Option<std::sync::Arc<azalea_inventory::ItemStack>>,
+}
+
+static NO_EXTRA: StackExtra = StackExtra {
+    custom_name: None,
+    lore: Vec::new(),
+    enchantments: Vec::new(),
+    potion: None,
+    banner_patterns: None,
+    book: None,
+    banner_layers: None,
+};
+
+#[derive(Clone, Debug, Default)]
+pub struct Extra(Option<Box<StackExtra>>);
+
+impl Extra {
+    #[cfg(test)]
+    pub fn make_mut(&mut self) -> &mut StackExtra {
+        self.0.get_or_insert_default()
+    }
+}
+
+impl From<StackExtra> for Extra {
+    fn from(extra: StackExtra) -> Extra {
+        Extra((extra != NO_EXTRA).then(|| Box::new(extra)))
+    }
+}
+
+impl std::ops::Deref for Extra {
+    type Target = StackExtra;
+
+    fn deref(&self) -> &StackExtra {
+        self.0.as_deref().unwrap_or(&NO_EXTRA)
+    }
+}
+
+impl PartialEq for Extra {
+    fn eq(&self, other: &Extra) -> bool {
+        match (&self.0, &other.0) {
+            (None, None) => true,
+            _ => **self == **other,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -201,17 +263,32 @@ impl SlotStack {
         self.item.is_empty() || self.count == 0
     }
 
+    pub fn item_use(&self) -> crate::items::dispatch::ItemUse {
+        use crate::items::dispatch::{ChargeType, ItemUse};
+        ItemUse {
+            charge: match (self.charged, self.rocket) {
+                (false, _) => ChargeType::None,
+                (true, false) => ChargeType::Arrow,
+                (true, true) => ChargeType::Rocket,
+            },
+            trim: self.trim,
+            has_lodestone: self.has_lodestone,
+            lodestone: self.lodestone,
+            ..ItemUse::NONE
+        }
+    }
+
     pub fn model_key(&self) -> std::borrow::Cow<'_, str> {
         use crate::items::potions;
         use std::borrow::Cow;
 
-        if let Some(layers) = &self.banner_layers
+        if let Some(layers) = &self.extra.banner_layers
             && !layers.is_empty()
         {
             return Cow::Owned(crate::blockentities::banner::model_key(self.item, layers));
         }
 
-        match &self.potion {
+        match &self.extra.potion {
             Some(contents) if potions::is_potion_item(self.item) => {
                 Cow::Owned(potions::tint_key(self.item, contents.color()))
             }
@@ -245,10 +322,12 @@ pub struct PlayerBody {
     pub scale: f32,
     pub bounding_box: [f32; 2],
     pub eye_height: f32,
+    pub outline: u32,
 }
 
 impl PlayerBody {
     pub const STANDING: PlayerBody = PlayerBody {
+        outline: 0,
         invisible: false,
         team_sees: false,
         on_fire: false,
@@ -293,13 +372,13 @@ pub fn invisible_to(invisible: bool, viewer: Gamemode) -> bool {
 pub struct OtherPlayerInfo {
     pub id: i32,
     pub username: String,
-    pub name_tag: Vec<crate::text::Span>,
+    pub name_tag: std::sync::Arc<[crate::text::Span]>,
     pub hidden_by_team: bool,
     pub health: Option<f32>,
     pub max_health: f32,
     pub body: PlayerBody,
     pub gamemode: Option<Gamemode>,
-    pub below_name: Vec<crate::text::Span>,
+    pub below_name: std::sync::Arc<[crate::text::Span]>,
     pub discrete: bool,
     #[cfg(feature = "skins")]
     pub skin: crate::client::skins::SkinState,
@@ -422,7 +501,10 @@ impl MerchantOffers {
                 if result.count == 0 {
                     break;
                 }
-                if slot.item == result.item && slot.potion == result.potion && slot.count < max {
+                if slot.item == result.item
+                    && slot.extra.potion == result.extra.potion
+                    && slot.count < max
+                {
                     let moved = (max - slot.count).min(result.count);
                     slot.count += moved;
                     result.count -= moved;

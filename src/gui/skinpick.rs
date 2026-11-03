@@ -145,7 +145,7 @@ impl SkinPick {
             self.open(None);
         }
         let n = self.skins.len();
-        p.text_str("Skin", x + 1.0, y, 0xA0A0A0, true);
+        p.text_plain("Skin", x + 1.0, y, 0xA0A0A0, true);
         let row = y + 12.0;
         if Button::new(x, row, ARROW_W, WIDGET_HEIGHT, "<").draw(p, ctx) {
             self.index = (self.index + n - 1) % n;
@@ -204,7 +204,7 @@ impl SkinPick {
             self.save();
         }
         if self.rejected {
-            p.text_str(
+            p.text_plain(
                 "Not a skin PNG",
                 x + half + GAP + 4.0,
                 row + 6.0,

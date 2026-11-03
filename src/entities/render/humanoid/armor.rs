@@ -324,7 +324,7 @@ fn over_onto(under: &mut image::RgbaImage, over: &image::RgbaImage) {
 }
 
 fn helmet_texture(st: &EntityState) -> TexturePath {
-    humanoid_texture(st.extras.helmet.as_deref()).into()
+    humanoid_texture(st.extras.helmet()).into()
 }
 
 fn chestplate_texture(st: &EntityState) -> TexturePath {
@@ -368,7 +368,7 @@ pub const SMALL_STAND: [fn(&EntityState) -> bool; 4] =
     [small_helmet, small_chestplate, small_leggings, small_boots];
 
 fn has_helmet(st: &EntityState) -> bool {
-    has_layer(st.extras.helmet.as_deref(), LAYER_HUMANOID)
+    has_layer(st.extras.helmet(), LAYER_HUMANOID)
 }
 fn has_chestplate(st: &EntityState) -> bool {
     has_layer(st.extras.chestplate.as_deref(), LAYER_HUMANOID)

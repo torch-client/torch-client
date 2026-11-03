@@ -234,6 +234,7 @@ pub fn handle_mining_queued(
             &mut MineItem,
             &mut MineBlockPos,
         ),
+        Option<&azalea_world::WorldBorder>,
     )>,
 ) {
     for (
@@ -255,6 +256,7 @@ pub fn handle_mining_queued(
             mut current_mining_item,
             mut current_mining_pos,
         ),
+        border,
     ) in query
     {
         trace!("handle_mining_queued {mining_queued:?}");
@@ -262,6 +264,9 @@ pub fn handle_mining_queued(
 
         let world = world_holder.shared.read();
         if check_is_interaction_restricted(&world, mining_queued.position, &game_mode, inventory) {
+            continue;
+        }
+        if border.is_some_and(|b| !b.is_within_block(mining_queued.position)) {
             continue;
         }
 
@@ -566,6 +571,7 @@ pub fn continue_mining_block(
     mut commands: Commands,
     mut mine_block_progress_events: MessageWriter<MineBlockProgressEvent>,
     worlds: Res<Worlds>,
+    borders: Query<&azalea_world::WorldBorder>,
 ) {
     for (
         entity,
@@ -586,6 +592,9 @@ pub fn continue_mining_block(
     ) in query.iter_mut()
     {
         if game_mode == GameMode::Creative {
+            if borders.get(entity).is_ok_and(|b| !b.is_within_block(mining.pos)) {
+                continue;
+            }
             **mine_delay = 5;
             commands.trigger(SendGamePacketEvent::new(
                 entity,

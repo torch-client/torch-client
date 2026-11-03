@@ -593,7 +593,25 @@ pub fn draw_region<'w>(
     else {
         return Ok(());
     };
+    let draws = draw_slots(pass, pools, slots, pool_index, stream, false);
+    if draws > 0 {
+        pools
+            .stats
+            .0
+            .draws_pending
+            .fetch_add(draws, Ordering::Relaxed);
+    }
+    Ok(())
+}
 
+pub fn draw_slots(
+    pass: &mut TrackedRenderPass<'_>,
+    pools: &TerrainPools,
+    slots: &[u32],
+    pool_index: u32,
+    stream: u32,
+    instanced: bool,
+) -> usize {
     let mut run: Option<(u32, u32)> = None;
     let mut draws = 0usize;
 
@@ -604,6 +622,11 @@ pub fn draw_region<'w>(
     for &slot in &slots[start..end] {
         let (first, count) = pools.meta_cpu[slot as usize].stream_range(stream);
         if count == 0 {
+            continue;
+        }
+        if instanced {
+            pass.draw_indexed(first..first + count, 0, slot..slot + 1);
+            draws += 1;
             continue;
         }
         match run {
@@ -625,14 +648,7 @@ pub fn draw_region<'w>(
         pass.draw_indexed(start..end, 0, 0..1);
         draws += 1;
     }
-    if draws > 0 {
-        pools
-            .stats
-            .0
-            .draws_pending
-            .fetch_add(draws, Ordering::Relaxed);
-    }
-    Ok(())
+    draws
 }
 
 const INDIRECT_ARGS_SIZE: u64 = 20;
@@ -947,7 +963,7 @@ pub fn prepare_terrain_bind_group(
     bind_group.key = Some(key);
 }
 
-fn init_terrain_pipeline(world: &mut World) {
+pub(crate) fn init_terrain_pipeline(world: &mut World) {
     let pipeline = TerrainPipeline::from_world(world);
     world.insert_resource(pipeline);
 }
@@ -1002,19 +1018,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn both_params_declarations_match_the_uniform() {
-        let declaration = |source: &str| {
-            let start = source.find("struct TerrainParams {").expect("declared");
-            let end = start + source[start..].find('}').expect("closed");
-            source[start..=end].split_whitespace().collect::<String>()
-        };
-        let main = declaration(include_str!("../terrain.wgsl"));
-        assert_eq!(declaration(include_str!("../terrain_prepass.wgsl")), main);
+    fn params_declaration_matches_the_uniform() {
+        let source = include_str!("../terrain_common.wgsl");
+        let start = source.find("struct TerrainParams {").expect("declared");
+        let end = start + source[start..].find('}').expect("closed");
+        let declaration = source[start..=end].split_whitespace().collect::<String>();
         assert_eq!(
-            main.matches("vec4<").count() * 16,
+            declaration.matches("vec4<").count() * 16,
             size_of::<ParamsUniform>()
         );
-        assert!(main.contains("origin:vec4<i32>"));
+        assert!(declaration.contains("origin:vec4<i32>"));
     }
 
     #[test]
@@ -1039,7 +1052,7 @@ mod tests {
     #[test]
     fn the_shaders_use_the_coefficients_the_phases_assume() {
         let main = include_str!("../terrain.wgsl");
-        let shadow = include_str!("../terrain_prepass.wgsl");
+        let common = include_str!("../terrain_common.wgsl");
         for term in [
             "sin(xz.x * 0.55 + ph.x",
             "sin(xz.y * 0.42 + ph.y",
@@ -1054,20 +1067,18 @@ mod tests {
             format!("WIND_FREQ_PLANT: f32 = {WIND_FREQ_PLANT};"),
             format!("WIND_FREQ_LEAF: f32 = {WIND_FREQ_LEAF};"),
         ];
-        for source in [main, shadow] {
-            for term in [
-                "sin(p.x + p.z + phase.x",
-                "sin(p.x * 1.7 - p.z * 1.1 + phase.y",
-                "cos(p.z * 0.9 - p.x * 0.4 + phase.z",
-            ] {
-                assert!(source.contains(term), "a terrain shader lost `{term}`");
-            }
-            for freq in &freqs {
-                assert!(
-                    source.contains(freq.as_str()),
-                    "a terrain shader lost `{freq}`"
-                );
-            }
+        for term in [
+            "sin(p.x + p.z + phase.x",
+            "sin(p.x * 1.7 - p.z * 1.1 + phase.y",
+            "cos(p.z * 0.9 - p.x * 0.4 + phase.z",
+        ] {
+            assert!(common.contains(term), "terrain_common.wgsl lost `{term}`");
+        }
+        for freq in &freqs {
+            assert!(
+                common.contains(freq.as_str()),
+                "terrain_common.wgsl lost `{freq}`"
+            );
         }
     }
 

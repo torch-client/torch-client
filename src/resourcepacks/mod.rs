@@ -376,14 +376,6 @@ fn inflate(source: &Source) -> Result<(Vec<u8>, Vec<(String, std::ops::Range<usi
     Ok((bytes, ranges))
 }
 
-pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
-    use sha1::Digest;
-    sha1::Sha1::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

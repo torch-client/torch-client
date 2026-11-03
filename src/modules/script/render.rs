@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mlua::{Error, Lua, Table, UserData, UserDataMethods, Value};
@@ -14,37 +13,71 @@ const LINE_WIDTH: f64 = 0.05;
 const MAX_WIDTH: f64 = 1.0;
 const DEFAULT_COLOR: u32 = 0x40FF_FFFF;
 
-#[derive(Default)]
+struct Entry {
+    id: u64,
+    owner: usize,
+    node: Option<Node>,
+}
+
 struct Store {
     next: u64,
-    nodes: BTreeMap<u64, (usize, Node)>,
+    entries: Vec<Entry>,
+    counts: Vec<u32>,
     dirty: bool,
 }
 
 static STORE: Mutex<Store> = Mutex::new(Store {
     next: 0,
-    nodes: BTreeMap::new(),
+    entries: Vec::new(),
+    counts: Vec::new(),
     dirty: false,
 });
 
+impl Store {
+    fn find(&mut self, id: u64) -> Option<&mut Entry> {
+        let i = self.entries.binary_search_by_key(&id, |e| e.id).ok()?;
+        Some(&mut self.entries[i]).filter(|e| e.node.is_some())
+    }
+
+    fn count(&mut self, owner: usize) -> &mut u32 {
+        if self.counts.len() <= owner {
+            self.counts.resize(owner + 1, 0);
+        }
+        &mut self.counts[owner]
+    }
+}
+
+fn store() -> std::sync::MutexGuard<'static, Store> {
+    STORE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 pub(super) fn publish() {
-    let mut s = STORE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut s = store();
     if !std::mem::take(&mut s.dirty) {
         return;
     }
-    world_draw::set(OWNER, s.nodes.values().map(|(_, n)| *n).collect());
+    let mut nodes = Vec::with_capacity(s.entries.len());
+    s.entries
+        .retain(|e| e.node.inspect(|n| nodes.push(*n)).is_some());
+    world_draw::set(OWNER, nodes);
 }
 
 pub(super) fn drop_owner(owner: usize) {
-    let mut s = STORE.lock().unwrap_or_else(PoisonError::into_inner);
-    let before = s.nodes.len();
-    s.nodes.retain(|_, (o, _)| *o != owner);
-    s.dirty |= s.nodes.len() != before;
+    let mut s = store();
+    if s.counts.get(owner).is_none_or(|&n| n == 0) {
+        return;
+    }
+    s.counts[owner] = 0;
+    for e in s.entries.iter_mut().filter(|e| e.owner == owner) {
+        e.node = None;
+    }
+    s.dirty = true;
 }
 
 pub(super) fn clear() {
-    let mut s = STORE.lock().unwrap_or_else(PoisonError::into_inner);
-    s.nodes.clear();
+    let mut s = store();
+    s.entries.clear();
+    s.counts.clear();
     s.dirty = false;
     world_draw::clear(OWNER);
 }
@@ -54,32 +87,37 @@ struct Handle(u64);
 impl UserData for Handle {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("set", |_, h, spec: Table| {
-            let mut s = STORE.lock().unwrap_or_else(PoisonError::into_inner);
-            let Some((_, node)) = s.nodes.get(&h.0).copied() else {
+            let mut s = store();
+            let Some(e) = s.find(h.0) else {
                 return Ok(false);
             };
-            let node = read(&spec, Some(node), "node:set")?;
-            s.nodes.get_mut(&h.0).expect("checked above").1 = node;
+            e.node = Some(read(&spec, e.node, "node:set")?);
             s.dirty = true;
             Ok(true)
         });
         methods.add_method("remove", |_, h, ()| {
-            let mut s = STORE.lock().unwrap_or_else(PoisonError::into_inner);
-            let gone = s.nodes.remove(&h.0).is_some();
-            s.dirty |= gone;
-            Ok(gone)
+            let mut s = store();
+            let Some(e) = s.find(h.0) else {
+                return Ok(false);
+            };
+            e.node = None;
+            let owner = e.owner;
+            *s.count(owner) -= 1;
+            s.dirty = true;
+            Ok(true)
         });
-        methods.add_method("exists", |_, h, ()| {
-            Ok(STORE
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .nodes
-                .contains_key(&h.0))
-        });
+        methods.add_method("exists", |_, h, ()| Ok(store().find(h.0).is_some()));
     }
 }
 
-fn point(v: Value, key: &str, what: &str) -> mlua::Result<[f64; 3]> {
+pub(super) fn number_at(t: &Table, name: &str, i: usize) -> mlua::Result<Option<f64>> {
+    match t.raw_get::<Option<f64>>(name)? {
+        Some(n) => Ok(Some(n)),
+        None => t.raw_get(i),
+    }
+}
+
+pub(super) fn point(v: Value, key: &str, what: &str) -> mlua::Result<[f64; 3]> {
     let bad = || {
         Error::runtime(format!(
             "{what}: `{key}` is {{ x, y, z }} with finite numbers"
@@ -90,10 +128,7 @@ fn point(v: Value, key: &str, what: &str) -> mlua::Result<[f64; 3]> {
     };
     let mut out = [0.0; 3];
     for (i, (name, slot)) in ["x", "y", "z"].iter().zip(&mut out).enumerate() {
-        let n = t
-            .raw_get::<Option<f64>>(*name)?
-            .or(t.raw_get::<Option<f64>>(i + 1)?)
-            .ok_or_else(bad)?;
+        let n = number_at(&t, name, i + 1)?.ok_or_else(bad)?;
         if !n.is_finite() {
             return Err(bad());
         }
@@ -102,14 +137,7 @@ fn point(v: Value, key: &str, what: &str) -> mlua::Result<[f64; 3]> {
     Ok(out)
 }
 
-const BOX_FIELDS: [&str; 5] = ["min", "max", "color", "outline", "through"];
-const LINE_FIELDS: [&str; 5] = ["from", "to", "width", "color", "through"];
-
-fn read(spec: &Table, base: Option<Node>, what: &str) -> mlua::Result<Node> {
-    let fields: &[&str] = match base.map(|n| n.shape) {
-        Some(Shape::Line { .. }) => &LINE_FIELDS,
-        _ => &BOX_FIELDS,
-    };
+pub(super) fn known(spec: &Table, fields: &[&str], what: &str) -> mlua::Result<()> {
     for pair in spec.pairs::<String, Value>() {
         let (k, _) = pair?;
         if !fields.contains(&k.as_str()) {
@@ -120,6 +148,18 @@ fn read(spec: &Table, base: Option<Node>, what: &str) -> mlua::Result<Node> {
             )));
         }
     }
+    Ok(())
+}
+
+const BOX_FIELDS: [&str; 5] = ["min", "max", "color", "outline", "through"];
+const LINE_FIELDS: [&str; 5] = ["from", "to", "width", "color", "through"];
+
+fn read(spec: &Table, base: Option<Node>, what: &str) -> mlua::Result<Node> {
+    let fields: &[&str] = match base.map(|n| n.shape) {
+        Some(Shape::Line { .. }) => &LINE_FIELDS,
+        _ => &BOX_FIELDS,
+    };
+    known(spec, fields, what)?;
     let opt_point = |k: &str| -> mlua::Result<Option<[f64; 3]>> {
         match spec.raw_get::<Value>(k)? {
             Value::Nil => Ok(None),
@@ -179,15 +219,21 @@ fn width_of(spec: &Table, default: f64, what: &str) -> mlua::Result<f64> {
 
 fn add(ctx: &Ctx, what: &str, node: Node) -> mlua::Result<Handle> {
     let (k, _) = ctx.caller(what)?;
-    let mut s = STORE.lock().unwrap_or_else(PoisonError::into_inner);
-    if s.nodes.values().filter(|(o, _)| *o == k).count() >= PER_MODULE {
+    let mut s = store();
+    let count = s.count(k);
+    if *count as usize >= PER_MODULE {
         return Err(Error::runtime(format!(
             "{what}: more than {PER_MODULE} nodes in one module"
         )));
     }
+    *count += 1;
     s.next += 1;
     let id = s.next;
-    s.nodes.insert(id, (k, node));
+    s.entries.push(Entry {
+        id,
+        owner: k,
+        node: Some(node),
+    });
     s.dirty = true;
     Ok(Handle(id))
 }
@@ -220,6 +266,7 @@ pub(super) fn table(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Table> {
             add(ctx, what, read(&spec, Some(base), what)?)
         })?,
     )?;
+    t.raw_set("capture", super::capture::function(lua, ctx)?)?;
     t.raw_set(
         "clear",
         game_fn(lua, ctx, "torch.render.clear", |_, ctx, ()| {

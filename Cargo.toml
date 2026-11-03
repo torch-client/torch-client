@@ -1,6 +1,6 @@
 [package]
 name = "torch-client"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 
 [lib]
@@ -19,9 +19,9 @@ default = [
     "hud_editor",
 ]
 
-update_checker = ["dep:reqwest", "dep:rustls"]
+update_checker = ["dep:reqwest", "dep:rustls", "dep:sha1"]
 
-skins = ["dep:reqwest", "dep:rustls"]
+skins = ["dep:reqwest", "dep:rustls", "dep:sha1", "dep:azalea-crypto"]
 
 full_font = []
 profiling = ["bevy/trace"]
@@ -38,7 +38,7 @@ click_gui = []
 
 module_panel = ["click_gui"]
 
-lua_mods = ["click_gui", "dep:mlua", "dep:flate2", "dep:reqwest", "dep:rustls", "dep:azalea-crypto"]
+lua_mods = ["click_gui", "dep:mlua", "dep:flate2", "dep:reqwest", "dep:rustls", "dep:azalea-crypto", "dep:sha1"]
 
 hud_editor = []
 
@@ -65,7 +65,7 @@ online_mode = [
     "uuid/v4",
 ]
 
-asset_download = ["dep:flate2", "dep:reqwest", "dep:rustls"]
+asset_download = ["dep:flate2", "dep:reqwest", "dep:rustls", "dep:sha1"]
 multiversion = ["azalea/multiversion"]
 
 audio = ["asset_download", "dep:rodio"]
@@ -185,6 +185,8 @@ web-sys = { version = "0.3", features = [
     "Storage",
     "Navigator",
     "Clipboard",
+    "ClipboardEvent",
+    "HtmlDocument",
     "Document",
     "Element",
     "EventTarget",
@@ -193,6 +195,10 @@ web-sys = { version = "0.3", features = [
     "CssStyleDeclaration",
     "Event",
     "KeyboardEvent",
+    "DomRect",
+    "Touch",
+    "TouchEvent",
+    "TouchList",
     "VisualViewport",
     "WebSocket",
     "BinaryType",

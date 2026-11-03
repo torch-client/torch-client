@@ -1,4 +1,4 @@
-use crate::entities::geom::{BakedModel, CubeList, LayerDef, MeshDef, PartPose, PartState};
+use crate::entities::geom::{BakedModel, LayerDef, MeshDef, PartPose, PartState};
 use crate::entities::keyframe::apply;
 use crate::entities::models::aquatic::DEG_TO_RAD;
 use crate::entities::models::aquatic::animation::bat as anim;
@@ -7,67 +7,58 @@ use crate::entities::state::EntityState;
 pub fn layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    let body = root.child(
+    let body = root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-1.5, 0.0, -1.0, 3.0, 5.0, 2.0),
+        (0, 0),
+        [-1.5, 0.0, -1.0, 3.0, 5.0, 2.0],
         PartPose::offset(0.0, 17.0, 0.0),
     );
-    body.child(
+    body.part(
         "right_wing",
-        CubeList::new()
-            .tex_offs(12, 0)
-            .add_box(-2.0, -2.0, 0.0, 2.0, 7.0, 0.0),
+        (12, 0),
+        [-2.0, -2.0, 0.0, 2.0, 7.0, 0.0],
         PartPose::offset(-1.5, 0.0, 0.0),
     )
-    .child(
+    .part(
         "right_wing_tip",
-        CubeList::new()
-            .tex_offs(16, 0)
-            .add_box(-6.0, -2.0, 0.0, 6.0, 8.0, 0.0),
+        (16, 0),
+        [-6.0, -2.0, 0.0, 6.0, 8.0, 0.0],
         PartPose::offset(-2.0, 0.0, 0.0),
     );
-    body.child(
+    body.part(
         "left_wing",
-        CubeList::new()
-            .tex_offs(12, 7)
-            .add_box(0.0, -2.0, 0.0, 2.0, 7.0, 0.0),
+        (12, 7),
+        [0.0, -2.0, 0.0, 2.0, 7.0, 0.0],
         PartPose::offset(1.5, 0.0, 0.0),
     )
-    .child(
+    .part(
         "left_wing_tip",
-        CubeList::new()
-            .tex_offs(16, 8)
-            .add_box(0.0, -2.0, 0.0, 6.0, 8.0, 0.0),
+        (16, 8),
+        [0.0, -2.0, 0.0, 6.0, 8.0, 0.0],
         PartPose::offset(2.0, 0.0, 0.0),
     );
-    body.child(
+    body.part(
         "feet",
-        CubeList::new()
-            .tex_offs(16, 16)
-            .add_box(-1.5, 0.0, 0.0, 3.0, 2.0, 0.0),
+        (16, 16),
+        [-1.5, 0.0, 0.0, 3.0, 2.0, 0.0],
         PartPose::offset(0.0, 5.0, 0.0),
     );
-    let head = root.child(
+    let head = root.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 7)
-            .add_box(-2.0, -3.0, -1.0, 4.0, 3.0, 2.0),
+        (0, 7),
+        [-2.0, -3.0, -1.0, 4.0, 3.0, 2.0],
         PartPose::offset(0.0, 17.0, 0.0),
     );
-    head.child(
+    head.part(
         "right_ear",
-        CubeList::new()
-            .tex_offs(1, 15)
-            .add_box(-2.5, -4.0, 0.0, 3.0, 5.0, 0.0),
+        (1, 15),
+        [-2.5, -4.0, 0.0, 3.0, 5.0, 0.0],
         PartPose::offset(-1.5, -2.0, 0.0),
     );
-    head.child(
+    head.part(
         "left_ear",
-        CubeList::new()
-            .tex_offs(8, 15)
-            .add_box(-0.1, -3.0, 0.0, 3.0, 5.0, 0.0),
+        (8, 15),
+        [-0.1, -3.0, 0.0, 3.0, 5.0, 0.0],
         PartPose::offset(1.1, -3.0, 0.0),
     );
     LayerDef::create(mesh, 32, 32)

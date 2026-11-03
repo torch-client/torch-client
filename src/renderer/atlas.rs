@@ -10,7 +10,7 @@ pub struct Sprites {
     tiles: HashMap<String, u32>,
     opaque: HashSet<String>,
     rows: u32,
-    #[cfg(any(feature = "render_lod", lua_mods))]
+    #[cfg(feature = "render_lod")]
     tile_colors: std::sync::Arc<crate::renderer::tile_colors::TileColors>,
 }
 
@@ -20,7 +20,7 @@ impl Default for Sprites {
             tiles: HashMap::new(),
             opaque: HashSet::new(),
             rows: 1,
-            #[cfg(any(feature = "render_lod", lua_mods))]
+            #[cfg(feature = "render_lod")]
             tile_colors: Default::default(),
         }
     }
@@ -39,7 +39,7 @@ impl Sprites {
         self.opaque.contains(stem)
     }
 
-    #[cfg(any(feature = "render_lod", lua_mods))]
+    #[cfg(feature = "render_lod")]
     pub fn tile_colors(&self) -> &std::sync::Arc<crate::renderer::tile_colors::TileColors> {
         &self.tile_colors
     }
@@ -266,7 +266,7 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
     let opaque_count = opaque.len();
 
     let (atlas_data, atlas_w, atlas_h, tex_to_tile) = pack_tiles(&entries);
-    #[cfg(any(feature = "render_lod", lua_mods))]
+    #[cfg(feature = "render_lod")]
     let tile_colors = std::sync::Arc::new(crate::renderer::tile_colors::TileColors::from_atlas(
         &atlas_data,
         atlas_w,
@@ -332,7 +332,7 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
             tiles: tex_to_tile,
             opaque,
             rows,
-            #[cfg(any(feature = "render_lod", lua_mods))]
+            #[cfg(feature = "render_lod")]
             tile_colors,
         },
         tables: AtlasTables {
@@ -358,6 +358,22 @@ fn build_mip_chain(level0: &[u8], atlas_w: u32, atlas_h: u32, n_mips: u32) -> Ve
     out.extend_from_slice(level0);
 
     let tile_px = atlas_w / ATLAS_COLS;
+    let tiles_y0 = atlas_h / tile_px;
+    let mut tile_alpha = vec![0u8; (tile_px * tile_px) as usize];
+    let cutout_coverage: Vec<Option<f32>> = (0..tiles_y0 * ATLAS_COLS)
+        .map(|t| {
+            let (s_ox, s_oy) = ((t % ATLAS_COLS) * tile_px, (t / ATLAS_COLS) * tile_px);
+            for y in 0..tile_px {
+                for x in 0..tile_px {
+                    let si = (((s_oy + y) * atlas_w + s_ox + x) * 4 + 3) as usize;
+                    tile_alpha[(y * tile_px + x) as usize] = level0[si];
+                }
+            }
+            tile_alpha
+                .contains(&0)
+                .then(|| alpha_test_coverage(&tile_alpha, tile_px, MIP_ALPHA_CUTOFF, 1.0))
+        })
+        .collect();
     for level in 1..n_mips {
         let ts = tile_px >> level;
         let f = tile_px / ts;
@@ -401,11 +417,83 @@ fn build_mip_chain(level0: &[u8], atlas_w: u32, atlas_h: u32, n_mips: u32) -> Ve
                         buf[di + 3] = (sa / n) as u8;
                     }
                 }
+                if let Some(Some(coverage)) = cutout_coverage.get((ty * tiles_x + tx) as usize) {
+                    scale_tile_alpha_to_coverage(&mut buf, lw, (d_ox, d_oy), ts, *coverage);
+                }
             }
         }
         out.extend_from_slice(&buf);
     }
     out
+}
+
+const MIP_ALPHA_CUTOFF: f32 = 0.5;
+
+fn alpha_test_coverage(alpha: &[u8], size: u32, alpha_ref: f32, scale: f32) -> f32 {
+    if size < 2 {
+        return 0.0;
+    }
+    let at = |x: u32, y: u32| {
+        (f32::from(alpha[(y * size + x) as usize]) / 255.0 * scale).clamp(0.0, 1.0)
+    };
+    let mut coverage = 0.0;
+    for y in 0..size - 1 {
+        for x in 0..size - 1 {
+            let (a00, a10, a01, a11) = (at(x, y), at(x + 1, y), at(x, y + 1), at(x + 1, y + 1));
+            let mut texel = 0.0;
+            for sy in 0..4 {
+                let fy = (sy as f32 + 0.5) / 4.0;
+                for sx in 0..4 {
+                    let fx = (sx as f32 + 0.5) / 4.0;
+                    let a = a00 * (1.0 - fx) * (1.0 - fy)
+                        + a10 * fx * (1.0 - fy)
+                        + a01 * (1.0 - fx) * fy
+                        + a11 * fx * fy;
+                    if a > alpha_ref {
+                        texel += 1.0;
+                    }
+                }
+            }
+            coverage += texel / 16.0;
+        }
+    }
+    coverage / ((size - 1) * (size - 1)) as f32
+}
+
+fn scale_tile_alpha_to_coverage(
+    buf: &mut [u8],
+    level_w: u32,
+    origin: (u32, u32),
+    size: u32,
+    desired: f32,
+) {
+    let index = |x: u32, y: u32| (((origin.1 + y) * level_w + origin.0 + x) * 4 + 3) as usize;
+    let alpha: Vec<u8> = (0..size * size)
+        .map(|i| buf[index(i % size, i / size)])
+        .collect();
+    let (mut min, mut max, mut scale) = (0.0f32, 4.0f32, 1.0f32);
+    let (mut best_scale, mut best_error) = (1.0f32, f32::MAX);
+    for _ in 0..5 {
+        let current = alpha_test_coverage(&alpha, size, MIP_ALPHA_CUTOFF, scale);
+        let error = (current - desired).abs();
+        if error < best_error {
+            best_error = error;
+            best_scale = scale;
+        }
+        if current < desired {
+            min = scale;
+        } else if current > desired {
+            max = scale;
+        } else {
+            break;
+        }
+        scale = (min + max) * 0.5;
+    }
+    for (i, a) in alpha.iter().enumerate() {
+        let i = i as u32;
+        let scaled = (f32::from(*a) / 255.0 * best_scale + 0.025).clamp(0.0, 1.0);
+        buf[index(i % size, i / size)] = (scaled * 255.0) as u8;
+    }
 }
 
 const FIXED_TINTED: &[(&str, [u8; 4])] = &[

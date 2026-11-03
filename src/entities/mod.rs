@@ -6,12 +6,14 @@ pub mod fishing_line;
 pub mod flame;
 pub mod geom;
 pub mod keyframe;
+pub mod leash;
 pub mod living;
 pub mod models;
 pub mod physics;
 pub mod quads;
 pub mod registry;
 pub mod render;
+pub mod shadow;
 pub mod state;
 
 use bevy::platform::collections::HashMap;
@@ -194,6 +196,10 @@ pub fn no_glint(_st: &EntityState) -> bool {
     false
 }
 
+pub fn own_levels(_st: &EntityState, levels: (u8, u8)) -> (u8, u8) {
+    levels
+}
+
 pub(crate) fn hurt_overlay_alpha(has_red_overlay: bool) -> f32 {
     if has_red_overlay { 0.698 } else { 1.0 }
 }
@@ -341,14 +347,229 @@ pub struct ModelGeom {
     pub layer: fn() -> LayerDef,
     pub texture: fn(&EntityState) -> TexturePath,
     pub setup: fn(&BakedModel, &mut [PartState], &EntityState),
+    pub anchor: Option<Anchor>,
 }
 
 pub struct ItemGeom {
     pub item: fn(&EntityState) -> TexturePath,
     pub display: &'static str,
+    pub display_of: Option<fn(&EntityState) -> &'static str>,
     pub inner: fn(&EntityState) -> Transform,
     pub cluster: Option<ItemCluster>,
     pub lift: ItemLift,
+    pub anchor: Option<Anchor>,
+}
+
+impl ItemGeom {
+    fn display_for(&self, st: &EntityState) -> &'static str {
+        self.display_of.map_or(self.display, |of| of(st))
+    }
+
+    fn holds(&self, st: &EntityState) -> bool {
+        match self.anchor {
+            Some(Anchor::Hand { right }) => !hand_stack(st, right).is_empty(),
+            _ => true,
+        }
+    }
+
+    fn stack<'a>(
+        &self,
+        st: &'a EntityState,
+    ) -> Option<(&'a crate::renderer::anim::HeldItem, bool)> {
+        let e = &st.extras;
+        Some(match self.anchor? {
+            Anchor::Hand { right } => {
+                let main = right != e.left_handed;
+                (hand_stack(st, right), e.using_item && e.use_offhand != main)
+            }
+            Anchor::Head(_) => (&e.head, false),
+            Anchor::Carry => (&e.main_hand, e.using_item && !e.use_offhand),
+        })
+    }
+
+    fn foil(&self, st: &EntityState) -> bool {
+        match self.anchor {
+            None => st.extras.item.glint,
+            Some(Anchor::Hand { right }) => hand_stack(st, right).glint,
+            Some(Anchor::Head(_)) => st.extras.armor_foil[0] && !is_skull(st.extras.head.id),
+            Some(Anchor::Carry) => st.extras.main_hand.glint,
+        }
+    }
+}
+
+fn item_owner(st: &EntityState) -> crate::renderer::item_assets::Owner {
+    let yaw = match st.kind {
+        EntityKind::ItemFrame | EntityKind::GlowItemFrame => {
+            let (facing, correction) = match st.extras.hanging_direction {
+                Direction::Up => (-90.0, 90.0),
+                Direction::Down => (-90.0, -90.0),
+                horizontal => (horizontal.to_y_rot(), 0.0),
+            };
+            let turns = st.extras.item_rotation as f32 * 45.0;
+            crate::util::mth::wrap_degrees(180.0 + facing + turns + correction)
+        }
+        EntityKind::Item => {
+            let spin =
+                (st.age_ticks.floor() + 0.5) / 20.0 + render::objects::thrown::bob_offset(st.id);
+            180.0 - spin.to_degrees()
+        }
+        _ => st.body_rot,
+    };
+    crate::renderer::item_assets::Owner {
+        pos: st.pos,
+        yaw,
+        local: false,
+        seed: st.id,
+    }
+}
+
+pub fn hand_stack(st: &EntityState, right: bool) -> &crate::renderer::anim::HeldItem {
+    if right != st.extras.left_handed {
+        &st.extras.main_hand
+    } else {
+        &st.extras.off_hand
+    }
+}
+
+pub fn is_skull(item: &str) -> bool {
+    item.ends_with("_skull") || item.ends_with("_head")
+}
+
+#[derive(Clone, Copy)]
+pub enum Anchor {
+    Hand { right: bool },
+    Head(HeadTransforms),
+    Carry,
+}
+
+#[derive(Clone, Copy)]
+pub struct HeadTransforms {
+    pub y_offset: f32,
+    pub skull_y_offset: f32,
+    pub horizontal_scale: f32,
+}
+
+impl HeadTransforms {
+    pub const DEFAULT: HeadTransforms = HeadTransforms {
+        y_offset: 0.0,
+        skull_y_offset: 0.0,
+        horizontal_scale: 1.0,
+    };
+}
+
+#[derive(Clone, Copy)]
+pub struct Anchors {
+    pub hands: [Mat4; 2],
+    pub head: Mat4,
+    pub carry: Mat4,
+}
+
+impl Default for Anchors {
+    fn default() -> Anchors {
+        Anchors {
+            hands: [Mat4::IDENTITY; 2],
+            head: Mat4::IDENTITY,
+            carry: Mat4::IDENTITY,
+        }
+    }
+}
+
+pub type AnchorHook = fn(&BakedModel, &[PartState], &EntityState) -> Anchors;
+
+fn holds_anything(st: &EntityState) -> bool {
+    !st.extras.main_hand.is_empty() || !st.extras.off_hand.is_empty() || !st.extras.head.is_empty()
+}
+
+fn layer_base(root: &RootPose) -> Mat4 {
+    Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
+        * root.hook.to_matrix()
+        * Mat4::from_translation(Vec3::new(0.0, MODEL_Y_OFFSET, 0.0))
+}
+
+fn held_anchors(
+    hook: AnchorHook,
+    model: &BakedModel,
+    states: &[PartState],
+    st: &EntityState,
+    root: &RootPose,
+) -> (RootPose, Anchors) {
+    let base = layer_base(root);
+    let a = hook(model, states, st);
+    let anchors = Anchors {
+        hands: a.hands.map(|m| base * m),
+        head: base * a.head,
+        carry: base * a.carry,
+    };
+    (
+        RootPose {
+            hook: Transform::IDENTITY,
+            ..*root
+        },
+        anchors,
+    )
+}
+
+pub(crate) const SKULL_ITEM_UNDO: Transform = Transform {
+    translation: Vec3::new(-0.5, 0.0, 0.5),
+    rotation: Quat::from_xyzw(1.0, 0.0, 0.0, 0.0),
+    scale: Vec3::ONE,
+};
+
+fn anchored_pose(anchor: Anchor, anchors: &Anchors, st: &EntityState) -> Mat4 {
+    match anchor {
+        Anchor::Hand { right } => {
+            let baby = st.extras.is_baby && st.kind != EntityKind::ArmorStand;
+            use crate::renderer::player_model::{
+                SpearState, hand_offset, hand_rotation, spear_item_pose,
+            };
+            let rot = hand_rotation();
+            let off = hand_offset(!right, baby) / 16.0;
+            let hand = anchors.hands[usize::from(!right)]
+                * Mat4::from_rotation_translation(rot, rot * off);
+            if st.extras.main_hand.kinetic.is_none() && st.extras.off_hand.kinetic.is_none() {
+                return hand;
+            }
+            let armed_only = matches!(
+                st.kind,
+                EntityKind::Vex | EntityKind::Allay | EntityKind::CopperGolem
+            );
+            let poses = models::humanoid::humanoid::mob_arm_poses(st);
+            let spear = SpearState {
+                arm_poses: [poses.right, poses.left],
+                charging: models::humanoid::humanoid::mob_charging(st),
+                attack_time: st.attack_time,
+                attack_left: st.swing_left,
+                main_kinetic: st.extras.main_hand.kinetic,
+                ticks_using_item: if armed_only {
+                    0.0
+                } else {
+                    st.extras.ticks_using_item
+                },
+                ticks_since_kinetic_hit: st.extras.ticks_since_kinetic_hit,
+            };
+            hand * spear_item_pose(&spear, right)
+        }
+        Anchor::Head(t) => {
+            Mat4::from_scale(Vec3::new(t.horizontal_scale, 1.0, t.horizontal_scale))
+                * anchors.head
+                * head_item_pose(t, is_skull(st.extras.head.id))
+        }
+        Anchor::Carry => anchors.carry,
+    }
+}
+
+pub(crate) fn head_item_pose(t: HeadTransforms, skull: bool) -> Mat4 {
+    if skull {
+        Mat4::from_scale_rotation_translation(
+            Vec3::splat(1.1875),
+            Quat::IDENTITY,
+            Vec3::new(0.0, t.skull_y_offset, 0.0),
+        )
+    } else {
+        Mat4::from_translation(Vec3::new(0.0, -0.25 + t.y_offset, 0.0))
+            * Mat4::from_rotation_y(std::f32::consts::PI)
+            * Mat4::from_scale(Vec3::new(0.625, -0.625, -0.625))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -486,7 +707,9 @@ pub struct RenderSpec {
     pub tint: fn(&EntityState) -> [f32; 4],
     pub respects_invisibility: bool,
     pub light: Option<LightMode>,
+    pub levels: fn(&EntityState, (u8, u8)) -> (u8, u8),
     pub armor_glint: fn(&EntityState) -> bool,
+    pub anchors: Option<AnchorHook>,
 }
 
 impl RenderSpec {
@@ -502,6 +725,7 @@ impl RenderSpec {
                 layer,
                 texture,
                 setup,
+                anchor: None,
             }),
         )
     }
@@ -517,9 +741,11 @@ impl RenderSpec {
             Geom::Item(ItemGeom {
                 item,
                 display,
+                display_of: None,
                 inner,
                 cluster: None,
                 lift: ItemLift::None,
+                anchor: None,
             }),
         )
     }
@@ -531,6 +757,22 @@ impl RenderSpec {
     ) -> RenderSpec {
         if let Geom::Item(geom) = &mut self.geom {
             geom.cluster = Some(ItemCluster { count, seed });
+        }
+        self
+    }
+
+    pub fn with_display_of(mut self, display_of: fn(&EntityState) -> &'static str) -> RenderSpec {
+        if let Geom::Item(geom) = &mut self.geom {
+            geom.display_of = Some(display_of);
+        }
+        self
+    }
+
+    pub fn with_anchor(mut self, anchor: Anchor) -> RenderSpec {
+        match &mut self.geom {
+            Geom::Item(geom) => geom.anchor = Some(anchor),
+            Geom::Model(geom) => geom.anchor = Some(anchor),
+            _ => {}
         }
         self
     }
@@ -573,8 +815,15 @@ impl RenderSpec {
             tint: no_tint,
             respects_invisibility: true,
             light: None,
+            levels: own_levels,
             armor_glint: no_glint,
+            anchors: None,
         }
+    }
+
+    pub fn with_levels(mut self, levels: fn(&EntityState, (u8, u8)) -> (u8, u8)) -> RenderSpec {
+        self.levels = levels;
+        self
     }
 
     pub fn with_root(mut self, root: fn(&EntityState) -> RootPose) -> RenderSpec {
@@ -1222,6 +1471,41 @@ struct SingleNode {
     bounds: Option<(Vec3, Vec3)>,
     material: Option<Handle<EntityMaterial>>,
     collapsed: bool,
+    held: Option<Box<crate::renderer::anim::HeldItem>>,
+    branch: u32,
+}
+
+#[cfg(feature = "skins")]
+type WornSkins<'w> = Option<ResMut<'w, crate::renderer::skin::SkinTextures>>;
+#[cfg(not(feature = "skins"))]
+type WornSkins<'w> = Option<Res<'w, NoSkins>>;
+#[cfg(not(feature = "skins"))]
+#[derive(Resource)]
+struct NoSkins;
+
+#[cfg(feature = "skins")]
+fn worn_skin(
+    skins: &mut WornSkins,
+    entity_images: &mut EntityImages,
+    images: &mut Assets<Image>,
+    geom: &ItemGeom,
+    st: &EntityState,
+) -> Option<Handle<Image>> {
+    if !matches!(geom.anchor, Some(Anchor::Head(_))) {
+        return None;
+    }
+    let skin = st.extras.head.profile_skin.as_ref()?;
+    skins.as_mut()?.profile_texture(skin, entity_images, images)
+}
+#[cfg(not(feature = "skins"))]
+fn worn_skin(
+    _skins: &mut WornSkins,
+    _entity_images: &mut EntityImages,
+    _images: &mut Assets<Image>,
+    _geom: &ItemGeom,
+    _st: &EntityState,
+) -> Option<Handle<Image>> {
+    None
 }
 
 #[derive(PartialEq)]
@@ -1259,7 +1543,7 @@ struct BakedRig {
 #[derive(PartialEq)]
 struct BakedPose {
     states: Vec<PartState>,
-    hook: Transform,
+    base: Mat4,
 }
 
 struct LayerRig {
@@ -1274,6 +1558,7 @@ struct LayerRig {
     lit: Lit,
     glint: Vec4,
     states: Vec<PartState>,
+    glow: u32,
 }
 
 struct EntityRig {
@@ -1334,12 +1619,17 @@ impl Plugin for EntityPlugin {
         app.init_resource::<flame::FlameAssets>()
             .init_resource::<EntityImages>()
             .init_resource::<fishing_line::FishingLines>()
+            .init_resource::<shadow::EntityShadows>()
+            .init_resource::<leash::Leashes>()
             .init_resource::<elder_guardian::ElderGuardianCurse>()
             .add_systems(
                 Update,
                 (
                     flame::sync_flames,
                     fishing_line::sync_fishing_lines,
+                    shadow::sync_shadows.run_if(shadow::enabled),
+                    shadow::hide_shadows.run_if(not(shadow::enabled)),
+                    leash::sync_leashes,
                     elder_guardian::sync_elder_guardian,
                 )
                     .after(crate::renderer::FrameViewSystems)
@@ -1347,7 +1637,11 @@ impl Plugin for EntityPlugin {
             )
             .add_systems(
                 OnExit(crate::renderer::AppState::InGame),
-                elder_guardian::clear_elder_guardian,
+                (
+                    elder_guardian::clear_elder_guardian,
+                    leash::clear_leashes,
+                    shadow::hide_shadows,
+                ),
             );
     }
 }
@@ -1364,7 +1658,16 @@ fn sync_entities(
     mut materials: ResMut<Assets<EntityMaterial>>,
     standard_materials: Res<Assets<StandardMaterial>>,
     mut item_assets: ResMut<crate::renderer::item_assets::ItemAssets>,
-    (map_textures, chunk_material, lightmap, carried, origin, glint_texture, armor_glint_texture): (
+    (
+        map_textures,
+        chunk_material,
+        lightmap,
+        carried,
+        origin,
+        glint_texture,
+        armor_glint_texture,
+        mut skins,
+    ): (
         Res<crate::renderer::maps::MapTextures>,
         Res<crate::renderer::systems::ChunkMaterial>,
         Res<crate::renderer::systems::LightmapState>,
@@ -1372,15 +1675,17 @@ fn sync_entities(
         Res<RenderOrigin>,
         Option<Res<crate::renderer::glint::GlintTexture>>,
         Option<Res<crate::renderer::glint::ArmorGlintTexture>>,
+        WornSkins<'_>,
     ),
     mut nodes: Query<(&mut Transform, &mut Visibility), With<EntityRigNode>>,
     mut globals: Query<&mut GlobalTransform, With<EntityRigNode>>,
     mut mats: Query<&mut MeshMaterial3d<EntityMaterial>>,
-    (mut variant_tick, mut frame, mut seen, mut idx): (
+    (mut variant_tick, mut frame, mut seen, mut idx, mut glowing): (
         Local<u32>,
         Local<Vec<EntityState>>,
         Local<HashMap<i32, (EntityKind, Option<Carried>)>>,
         Local<Vec<((i32, i32), usize)>>,
+        Local<HashMap<i32, u32>>,
     ),
 ) {
     crate::prof_span!("render:sync_entities");
@@ -1426,6 +1731,14 @@ fn sync_entities(
         });
         frame.extend(view.item_pickups.iter().map(|p| p.sample(partial)));
     }
+    let glowing = &mut *glowing;
+    glowing.clear();
+    glowing.extend(
+        anims
+            .iter()
+            .filter(|a| a.outline() != 0)
+            .map(|a| (a.id, a.outline())),
+    );
 
     let seen = &mut *seen;
     seen.clear();
@@ -1450,6 +1763,7 @@ fn sync_entities(
 
     let mut copy_locals: Vec<Transform> = Vec::new();
     let mut posed: Vec<PosedPart> = Vec::new();
+    let mut hidden_states: Vec<PartState> = Vec::new();
 
     for st in frame.iter().chain(&carried.0) {
         let spec_ids = registry.specs_for_state(st);
@@ -1472,11 +1786,44 @@ fn sync_entities(
             carried: st.carrier.and_then(|c| c.specs),
             layers: spec_ids.iter().map(|_| None).collect(),
         });
+        let mut held: Option<(RootPose, Anchors)> = None;
 
         for (slot, &idx) in rig.layers.iter_mut().zip(spec_ids) {
             let spec = &registry.specs[idx];
+            let (levels, lit) = match (spec.levels)(st, levels) {
+                own if own == levels => (levels, lit),
+                own => (
+                    own,
+                    Lit {
+                        light: assets.lights.get(&lightmap.current, own.0, own.1),
+                        ..lit
+                    },
+                ),
+            };
             let hidden = crate::session::invisible_to(st.is_invisible, view.gamemode);
-            let show = in_range && (!hidden || !spec.respects_invisibility) && (spec.visible)(st);
+            let show = in_range
+                && (!hidden || !spec.respects_invisibility)
+                && (spec.visible)(st)
+                && match &spec.geom {
+                    Geom::Item(geom) => geom.holds(st),
+                    _ => true,
+                };
+            if !show
+                && hidden
+                && in_range
+                && let Some(hook) = spec.anchors
+                && let Geom::Model(model) = &spec.geom
+                && holds_anything(st)
+                && (spec.visible)(st)
+            {
+                let gpu = assets.spec(idx, model);
+                hidden_states.clear();
+                hidden_states.extend(gpu.model.parts.iter().map(|p| PartState::from(p.initial)));
+                gpu.model.reset_pose(&mut hidden_states);
+                (model.setup)(&gpu.model, &mut hidden_states, st);
+                let root = spec.root.pose(st, &camera);
+                held = Some(held_anchors(hook, &gpu.model, &hidden_states, st, &root));
+            }
             if slot.is_none() {
                 if !show {
                     continue;
@@ -1500,18 +1847,44 @@ fn sync_entities(
             if let Ok((_, mut visibility)) = nodes.get_mut(layer.pose_root) {
                 set_visibility(&mut visibility, shown(show));
             }
+            let glow = match glowing.get(&st.id) {
+                Some(&argb)
+                    if !matches!(spec.geom, Geom::Built(_)) && display_leftover(st).is_none() =>
+                {
+                    argb
+                }
+                _ => 0,
+            };
+            crate::renderer::outline::set_glowing(
+                &mut commands,
+                layer.pose_root,
+                &mut layer.glow,
+                glow,
+            );
             if !show {
                 continue;
             }
 
+            let anchor = match &spec.geom {
+                Geom::Item(geom) => geom.anchor,
+                Geom::Model(geom) => geom.anchor,
+                _ => None,
+            };
             let lit = Lit {
                 tint: (spec.tint)(st),
-                overlay_alpha: overlay_alpha(st),
+                overlay_alpha: if anchor.is_some() {
+                    1.0
+                } else {
+                    overlay_alpha(st)
+                },
                 ..lit
             };
             let mut placement = Transform::IDENTITY;
             copy_locals.clear();
-            let root = spec.root.pose(st, &camera);
+            let root = match (anchor, &held) {
+                (Some(_), Some((root, _))) => *root,
+                _ => spec.root.pose(st, &camera),
+            };
             match (&spec.geom, &mut layer.body) {
                 (Geom::Model(model), RigBody::Baked(baked)) => {
                     if recompute_variants {
@@ -1548,94 +1921,174 @@ fn sync_entities(
                         .expect("a baked layer's spec is baked when the layer spawns");
                     gpu.model.reset_pose(&mut layer.states);
                     (model.setup)(&gpu.model, &mut layer.states, st);
+                    if let Some(hook) = spec.anchors
+                        && holds_anything(st)
+                    {
+                        held = Some(held_anchors(hook, &gpu.model, &layer.states, st, &root));
+                    }
+                    let base = match (anchor, &held) {
+                        (None, _) => layer_base(&root),
+                        (Some(anchor), Some((_, anchors))) => anchored_pose(anchor, anchors, st),
+                        (Some(_), None) => continue,
+                    };
 
                     let stale = baked
                         .baked
                         .as_ref()
-                        .is_none_or(|b| b.states != layer.states || b.hook != root.hook);
+                        .is_none_or(|b| b.states != layer.states || b.base != base);
                     if stale && let Some(mesh) = meshes.get_mut(&baked.mesh) {
-                        let base = Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
-                            * root.hook.to_matrix()
-                            * Mat4::from_translation(Vec3::new(0.0, MODEL_Y_OFFSET, 0.0));
                         gpu.model.pose_parts(&layer.states, base, &mut posed);
                         let aabb = bake::layer(mesh, &gpu.model, &posed, &layer.states);
                         commands.entity(baked.node).insert(aabb);
                         let prev = baked.baked.get_or_insert_with(|| BakedPose {
                             states: Vec::new(),
-                            hook: Transform::IDENTITY,
+                            base: Mat4::IDENTITY,
                         });
                         prev.states.clear();
                         prev.states.extend_from_slice(&layer.states);
-                        prev.hook = root.hook;
+                        prev.base = base;
                     }
                 }
                 (Geom::Item(geom), RigBody::Single(single)) => {
-                    if recompute_variants {
-                        let item = (geom.item)(st);
-                        if !single.key.is_named(&item) {
-                            single.key = GeomKey::Named(Box::from(&*item));
-                            let built = item_assets
-                                .get(&item, geom.display, false, &mut meshes, &mut images)
-                                .map(|gpu| {
-                                    (
-                                        gpu.mesh.clone(),
-                                        gpu.texture.clone(),
-                                        gpu.transform(geom.display),
-                                        gpu.bounds,
-                                    )
-                                });
-                            let built = built.map(|(mesh, texture, display, bounds)| {
-                                let glint =
-                                    assets.item_glint(st.extras.item.glint, &texture, &images);
-                                let material = assets.material(
-                                    Some(texture.clone()),
-                                    spec,
-                                    lit,
-                                    levels,
-                                    glint,
-                                    &mut materials,
-                                );
-                                (mesh, material, texture, display, bounds, glint)
+                    use crate::renderer::item_assets::ItemUse;
+                    let context = geom.display_for(st);
+                    let owner = Some(item_owner(st));
+                    let anchored = geom.stack(st).map(|(stack, using)| {
+                        let use_ = ItemUse {
+                            owner,
+                            ..ItemUse::of(stack, using, st.extras.ticks_using_item)
+                        };
+                        let branch = item_assets.branch(stack.id, context, use_);
+                        let changed = branch != single.branch
+                            || single.held.as_deref().is_none_or(|prev| {
+                                !prev.same_model(stack) || prev.profile_skin != stack.profile_skin
                             });
-                            match built {
-                                Some((mesh, material, texture, display, bounds, glint)) => {
-                                    single.display = item_display_transform(&display);
-                                    single.bounds = Some(display_bounds(bounds, &single.display));
-                                    layer.material = Some(material.clone());
-                                    layer.tex = Some(texture);
-                                    layer.lit = lit;
-                                    layer.glint = glint;
-                                    insert_copies(&mut commands, &single.copies, &mesh, &material);
-                                }
-                                None => {
-                                    single.display = Transform::IDENTITY;
-                                    single.bounds = None;
-                                    clear_copies(&mut commands, &single.copies);
-                                }
-                            }
-                        } else if single.bounds.is_some()
-                            && (st.extras.item.glint || layer.glint.z > 0.0)
-                            && let Some(texture) = layer.tex.clone()
-                        {
-                            let glint = assets.item_glint(st.extras.item.glint, &texture, &images);
-                            if glint != layer.glint {
-                                let material = assets.material(
-                                    Some(texture),
-                                    spec,
-                                    lit,
-                                    levels,
-                                    glint,
-                                    &mut materials,
-                                );
-                                point_copies(&single.copies, &material, &mut mats);
-                                layer.material = Some(material);
+                        (stack, use_, branch, changed)
+                    });
+                    let item = match anchored {
+                        Some((stack, _, branch, true)) => {
+                            single.held = Some(Box::new(stack.clone()));
+                            single.branch = branch;
+                            Some((geom.item)(st))
+                        }
+                        Some(_) => None,
+                        None if recompute_variants => {
+                            let use_ = ItemUse {
+                                owner,
+                                ..ItemUse::of(&st.extras.item, false, 0.0)
+                            };
+                            let branch = item_assets.branch(st.extras.item.id, context, use_);
+                            let item = (geom.item)(st);
+                            (branch != single.branch || !single.key.is_named(&item)).then(|| {
+                                single.branch = branch;
+                                item
+                            })
+                        }
+                        None => None,
+                    };
+                    let use_ = anchored.map_or_else(
+                        || ItemUse {
+                            owner,
+                            ..ItemUse::of(&st.extras.item, false, 0.0)
+                        },
+                        |(_, use_, ..)| use_,
+                    );
+                    if let Some(item) = item {
+                        single.key = GeomKey::Named(Box::from(&*item));
+                        let skin = worn_skin(&mut skins, &mut entity_images, &mut images, geom, st);
+                        let built = item_assets
+                            .get(&item, context, use_, &mut meshes, &mut images)
+                            .map(|gpu| {
+                                (
+                                    gpu.mesh.clone(),
+                                    skin.unwrap_or_else(|| gpu.texture.clone()),
+                                    gpu.transform(context),
+                                    gpu.bounds,
+                                )
+                            });
+                        let built = built.map(|(mesh, texture, display, bounds)| {
+                            let glint = assets.item_glint(geom.foil(st), &texture, &images);
+                            let material = assets.material(
+                                Some(texture.clone()),
+                                spec,
+                                lit,
+                                levels,
+                                glint,
+                                &mut materials,
+                            );
+                            (mesh, material, texture, display, bounds, glint)
+                        });
+                        match built {
+                            Some((mesh, material, texture, display, bounds, glint)) => {
+                                single.display = match geom.anchor {
+                                    Some(Anchor::Head(_)) if is_skull(&item) => SKULL_ITEM_UNDO,
+                                    Some(Anchor::Hand { right }) => item_display_transform(
+                                        &crate::renderer::player_model::handed(&display, !right),
+                                    ),
+                                    _ => item_display_transform(&display),
+                                };
+                                single.bounds = Some(display_bounds(bounds, &single.display));
+                                layer.material = Some(material.clone());
+                                layer.tex = Some(texture);
                                 layer.lit = lit;
                                 layer.glint = glint;
+                                insert_copies(&mut commands, &single.copies, &mesh, &material);
+                            }
+                            None => {
+                                single.display = Transform::IDENTITY;
+                                single.bounds = None;
+                                clear_copies(&mut commands, &single.copies);
                             }
                         }
+                    } else if recompute_variants
+                        && single.bounds.is_some()
+                        && let Some(skin) =
+                            worn_skin(&mut skins, &mut entity_images, &mut images, geom, st)
+                        && layer.tex.as_ref() != Some(&skin)
+                    {
+                        let material = assets.material(
+                            Some(skin.clone()),
+                            spec,
+                            lit,
+                            levels,
+                            layer.glint,
+                            &mut materials,
+                        );
+                        point_copies(&single.copies, &material, &mut mats);
+                        layer.material = Some(material);
+                        layer.tex = Some(skin);
+                        layer.lit = lit;
+                    } else if recompute_variants
+                        && single.bounds.is_some()
+                        && (geom.foil(st) || layer.glint.z > 0.0)
+                        && let Some(texture) = layer.tex.clone()
+                    {
+                        let glint = assets.item_glint(geom.foil(st), &texture, &images);
+                        if glint != layer.glint {
+                            let material = assets.material(
+                                Some(texture),
+                                spec,
+                                lit,
+                                levels,
+                                glint,
+                                &mut materials,
+                            );
+                            point_copies(&single.copies, &material, &mut mats);
+                            layer.material = Some(material);
+                            layer.lit = lit;
+                            layer.glint = glint;
+                        }
                     }
-                    placement = (geom.inner)(st);
-                    if let Some((min, max)) = single.bounds {
+                    let pose = match geom.anchor {
+                        None => Some((geom.inner)(st)),
+                        Some(anchor) => held
+                            .as_ref()
+                            .map(|(_, a)| Transform::from_matrix(anchored_pose(anchor, a, st))),
+                    };
+                    if let Some(pose) = pose
+                        && let Some((min, max)) = single.bounds
+                    {
+                        placement = pose;
                         placement.translation.y += geom.lift.offset(min.y, max.y);
                         let (count, seed) = match &geom.cluster {
                             Some(cluster) => {
@@ -1818,7 +2271,7 @@ fn clear_copies(commands: &mut Commands, copies: &[Entity]) {
     }
 }
 
-fn item_display_transform(t: &crate::items::mesh::Transform) -> Transform {
+pub(crate) fn item_display_transform(t: &crate::items::mesh::Transform) -> Transform {
     const DEG_TO_RAD: f32 = std::f32::consts::PI / 180.0;
     let rotation = Quat::from_rotation_x(t.rotation[0] * DEG_TO_RAD)
         * Quat::from_rotation_y(t.rotation[1] * DEG_TO_RAD)
@@ -1952,6 +2405,7 @@ fn spawn_model_rig(
         lit,
         glint: Vec4::ZERO,
         states,
+        glow: 0,
     }
 }
 
@@ -1985,6 +2439,8 @@ fn spawn_single_rig(
                 bounds: None,
                 material: None,
                 collapsed: true,
+                held: None,
+                branch: 0,
             }),
             texture: TexturePath::Borrowed(""),
             material: None,
@@ -1992,6 +2448,7 @@ fn spawn_single_rig(
             lit: Lit::full_bright(),
             glint: Vec4::ZERO,
             states: Vec::new(),
+            glow: 0,
         };
     }
 
@@ -2028,6 +2485,8 @@ fn spawn_single_rig(
             node,
             copies,
             collapsed: false,
+            held: None,
+            branch: 0,
             key: GeomKey::Unresolved,
             display: Transform::IDENTITY,
             bounds: None,
@@ -2039,6 +2498,7 @@ fn spawn_single_rig(
         lit: Lit::full_bright(),
         glint: Vec4::ZERO,
         states: Vec::new(),
+        glow: 0,
     }
 }
 

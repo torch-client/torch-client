@@ -798,7 +798,7 @@ fn draw_body(
             let scale = (width / 16.0).min(height / 16.0);
             let iy = (y + (row.h - height) / 2.0).floor();
             p.scaled(scale, x, iy, |p| {
-                p.item_icon_glint(&stack.model_key(), 0.0, 0.0, stack.glint);
+                p.stack_icon(stack, 0.0, 0.0);
                 if *show_decorations {
                     p.item_decorations(0.0, 0.0, stack.count, stack.damage, stack.max_damage);
                 }

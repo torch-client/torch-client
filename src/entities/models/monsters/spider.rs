@@ -18,25 +18,22 @@ pub fn cave_spider_layer() -> LayerDef {
 fn body_mesh() -> MeshDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "head",
-        CubeList::new()
-            .tex_offs(32, 4)
-            .add_box(-4.0, -4.0, -8.0, 8.0, 8.0, 8.0),
+        (32, 4),
+        [-4.0, -4.0, -8.0, 8.0, 8.0, 8.0],
         PartPose::offset(0.0, 15.0, -3.0),
     );
-    root.child(
+    root.part(
         "body0",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-3.0, -3.0, -3.0, 6.0, 6.0, 6.0),
+        (0, 0),
+        [-3.0, -3.0, -3.0, 6.0, 6.0, 6.0],
         PartPose::offset(0.0, 15.0, 0.0),
     );
-    root.child(
+    root.part(
         "body1",
-        CubeList::new()
-            .tex_offs(0, 12)
-            .add_box(-5.0, -4.0, -6.0, 10.0, 8.0, 12.0),
+        (0, 12),
+        [-5.0, -4.0, -6.0, 10.0, 8.0, 12.0],
         PartPose::offset(0.0, 15.0, 9.0),
     );
     let right_leg = CubeList::new()

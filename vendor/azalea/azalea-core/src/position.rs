@@ -116,15 +116,15 @@ macro_rules! vec3_impl {
             pub fn min(&self, other: Self) -> Self {
                 Self {
                     x: self.x.min(other.x),
-                    y: self.x.min(other.y),
-                    z: self.x.min(other.z),
+                    y: self.y.min(other.y),
+                    z: self.z.min(other.z),
                 }
             }
             pub fn max(&self, other: Self) -> Self {
                 Self {
                     x: self.x.max(other.x),
-                    y: self.x.max(other.y),
-                    z: self.x.max(other.z),
+                    y: self.y.max(other.y),
+                    z: self.z.max(other.z),
                 }
             }
 

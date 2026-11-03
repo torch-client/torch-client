@@ -15,13 +15,15 @@ use crate::util::pack::Source;
 
 const API: u64 = 1;
 
-const MANIFEST_FIELDS: [&str; 7] = [
+const MANIFEST_FIELDS: [&str; 9] = [
     "id",
     "name",
     "version",
     "api",
     "license",
     "description",
+    "author",
+    "source",
     "permissions",
 ];
 
@@ -69,7 +71,10 @@ pub(super) fn all(dir: &Path, disabled: &std::collections::BTreeSet<String>) -> 
             if let Ok(i) = inspect(&f.path) {
                 row.name = i.name;
                 row.version = i.version;
+                row.license = i.license;
                 row.description = i.description;
+                row.author = i.author;
+                row.source = i.source;
             }
             crate::log_info!("mods", "{} is disabled; not loaded", f.file);
             info.push(row);
@@ -151,18 +156,19 @@ pub(super) fn all(dir: &Path, disabled: &std::collections::BTreeSet<String>) -> 
     let mut panel_slots: Vec<(usize, &'static str, u8)> = Vec::new();
     for (k, d) in defs.iter().enumerate() {
         for p in &d.panels {
-            if panels.len() == hud_layout::MOD_PANELS {
+            let slot = hud_layout::LUA_FIRST + panels.len();
+            if slot == hud_layout::MOD_PANELS {
                 loaded.errors.push(format!(
                     "[mods] {}/{}: panel `{}` not shown; every mod together has {} HUD panels",
                     d.mod_id,
                     d.name,
                     p.name,
-                    hud_layout::MOD_PANELS
+                    hud_layout::MOD_PANELS - hud_layout::LUA_FIRST
                 ));
                 panel_slots.push((k, p.name, super::game::NO_SLOT));
                 continue;
             }
-            panel_slots.push((k, p.name, panels.len() as u8));
+            panel_slots.push((k, p.name, slot as u8));
             panels.push(hud_layout::ModPanel {
                 key: intern(format!("mod:{}/{}", d.mod_id, p.name)),
                 label: p.label,
@@ -309,7 +315,10 @@ pub(super) struct Inspected {
     pub shape: Shape,
     pub name: Option<String>,
     pub version: Option<String>,
+    pub license: Option<String>,
     pub description: Option<String>,
+    pub author: Option<String>,
+    pub source: Option<String>,
     pub perms: Vec<&'static str>,
 }
 
@@ -335,7 +344,10 @@ pub(super) fn inspect(path: &Path) -> Result<Inspected, String> {
         shape,
         name: None,
         version: None,
+        license: None,
         description: None,
+        author: None,
+        source: None,
         perms: Vec::new(),
     };
     if shape == Shape::File {
@@ -351,7 +363,10 @@ pub(super) fn inspect(path: &Path) -> Result<Inspected, String> {
     }
     out.name = Some(m.name);
     out.version = Some(m.version);
+    out.license = m.license;
     out.description = m.description;
+    out.author = m.author;
+    out.source = m.source;
     out.perms = m.perms.iter().map(|&ix| perm::PERMS[ix].name).collect();
     Ok(out)
 }
@@ -387,6 +402,8 @@ fn load_one(api: &Api, f: &Found, id: &'static str, row: &mut ModInfo) -> Result
     row.version = Some(m.version);
     row.license = m.license;
     row.description = m.description;
+    row.author = m.author;
+    row.source = m.source;
     let mut declared = api.ctx.perms.lock().unwrap_or_else(PoisonError::into_inner);
     for &ix in &m.perms {
         declared.insert((id, ix));
@@ -423,10 +440,14 @@ struct Manifest {
     version: String,
     license: Option<String>,
     description: Option<String>,
+    author: Option<String>,
+    source: Option<String>,
     perms: Vec<usize>,
 }
 
 const DESCRIPTION_MAX: usize = 300;
+const AUTHOR_MAX: usize = 100;
+const SOURCE_MAX: usize = 300;
 
 fn manifest(text: &str, id: &str) -> Result<Manifest, String> {
     let json: Json =
@@ -487,17 +508,21 @@ fn manifest(text: &str, id: &str) -> Result<Manifest, String> {
         None => return Err("mod.json: `api` is required".to_string()),
     }
     let license = string(&m, "license")?.map(str::to_string);
-    let description = string(&m, "description")?
-        .map(str::trim)
-        .filter(|d| !d.is_empty());
-    if let Some(d) = description
-        && d.chars().count() > DESCRIPTION_MAX
-    {
-        return Err(format!(
-            "mod.json: `description` is {} characters; at most {DESCRIPTION_MAX}",
-            d.chars().count()
-        ));
-    }
+    let text = |key: &str, max: usize| -> Result<Option<String>, String> {
+        let Some(t) = string(&m, key)?.map(str::trim).filter(|t| !t.is_empty()) else {
+            return Ok(None);
+        };
+        let n = t.chars().count();
+        if n > max {
+            return Err(format!(
+                "mod.json: `{key}` is {n} characters; at most {max}"
+            ));
+        }
+        Ok(Some(t.to_string()))
+    };
+    let description = text("description", DESCRIPTION_MAX)?;
+    let author = text("author", AUTHOR_MAX)?;
+    let source = text("source", SOURCE_MAX)?;
     let mut perms = Vec::new();
     match m.get("permissions") {
         None => {}
@@ -525,7 +550,9 @@ fn manifest(text: &str, id: &str) -> Result<Manifest, String> {
         name: name.to_string(),
         version: version.to_string(),
         license,
-        description: description.map(str::to_string),
+        description,
+        author,
+        source,
         perms,
     })
 }
@@ -650,6 +677,23 @@ mod tests {
             "a".repeat(DESCRIPTION_MAX + 1)
         );
         assert!(manifest(&long, "autogg").is_err());
+        let credited = r#"{ "id": "autogg", "name": "x", "version": "1.0.0", "api": 1,
+            "author": " Someone ", "source": "https://example.com/autogg" }"#;
+        assert_eq!(
+            manifest(credited, "autogg").map(|m| (m.author, m.source)),
+            Ok((
+                Some("Someone".to_string()),
+                Some("https://example.com/autogg".to_string())
+            ))
+        );
+        let blank = r#"{ "id": "autogg", "name": "x", "version": "1.0.0", "api": 1, "author": "  ", "source": "" }"#;
+        assert_eq!(
+            manifest(blank, "autogg").map(|m| (m.author, m.source)),
+            Ok((None, None))
+        );
+        let numeric =
+            r#"{ "id": "autogg", "name": "x", "version": "1.0.0", "api": 1, "author": 5 }"#;
+        assert!(manifest(numeric, "autogg").is_err());
         let extra = r#"{ "id": "autogg", "name": "x", "version": "1.0.0", "api": 1, "nmae": "x" }"#;
         assert!(
             manifest(extra, "autogg")

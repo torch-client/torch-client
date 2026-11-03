@@ -325,6 +325,19 @@ impl Limbs {
         }
     }
 
+    pub(crate) fn from_parts(parts: [PartState; 6]) -> Limbs {
+        let [head, body, right_arm, left_arm, right_leg, left_leg] = parts;
+        Limbs {
+            head,
+            body,
+            right_arm,
+            left_arm,
+            right_leg,
+            left_leg,
+            ids: [0, 1, 2, 3, 4, 5],
+        }
+    }
+
     pub fn store(&self, parts: &mut [PartState]) {
         parts[self.ids[0]] = self.head;
         parts[self.ids[1]] = self.body;
@@ -509,9 +522,38 @@ impl ArmInputs {
             crouching: st.extras.crouching,
             fall_flying: st.extras.fall_flying,
             swim_amount: st.extras.swim_amount,
-            charging: [None; 2],
+            charging: {
+                let e = &st.extras;
+                let (right, left) = if is_undead_state(st.kind) {
+                    (&e.main_hand, &e.main_hand)
+                } else if e.left_handed {
+                    (&e.off_hand, &e.main_hand)
+                } else {
+                    (&e.main_hand, &e.off_hand)
+                };
+                crate::renderer::anim::sway_charging(e.using_item, e.use_offhand, right, left)
+            },
         }
     }
+}
+
+fn is_undead_state(kind: azalea_registry::builtin::EntityKind) -> bool {
+    use azalea_registry::builtin::EntityKind as K;
+    matches!(
+        kind,
+        K::Zombie | K::Husk | K::Drowned | K::Giant | K::ZombieVillager | K::ZombifiedPiglin
+    )
+}
+
+pub fn mob_charging(st: &EntityState) -> [Option<crate::items::kinetic::Kinetic>; 2] {
+    let e = &st.extras;
+    crate::renderer::anim::charging_arms(
+        e.using_item,
+        e.use_offhand,
+        e.left_handed,
+        &e.main_hand,
+        &e.off_hand,
+    )
 }
 
 fn spear_third_person_hand_use(
@@ -544,7 +586,7 @@ fn spear_third_person_hand_use(
             + 0.6 * p.sway_slow * p.sway_intensity);
 }
 
-pub(crate) fn pose_arm(
+fn pose_arm(
     arm: &mut PartState,
     other: &mut PartState,
     head: &PartState,
@@ -612,29 +654,35 @@ pub(crate) fn pose_arm(
 }
 
 pub fn setup_attack_animation(l: &mut Limbs, st: &EntityState, poses: ArmPoses) {
-    if st.attack_time <= 0.0 {
+    attack_animation(l, st.attack_time, st.swing_left, st.age_scale, poses);
+}
+
+pub(crate) fn attack_animation(
+    l: &mut Limbs,
+    attack_time: f32,
+    swing_left: bool,
+    age_scale: f32,
+    poses: ArmPoses,
+) {
+    if attack_time <= 0.0 {
         return;
     }
-    let stab = if st.swing_left {
-        poses.left
-    } else {
-        poses.right
-    } == ArmPose::Spear;
+    let stab = if swing_left { poses.left } else { poses.right } == ArmPose::Spear;
     let head_x_rot = l.head.x_rot;
     attack_swing(
         &mut l.body,
         &mut l.right_arm,
         &mut l.left_arm,
         head_x_rot,
-        st.attack_time,
-        st.swing_left,
-        st.age_scale,
+        attack_time,
+        swing_left,
+        age_scale,
         stab,
     );
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn attack_swing(
+fn attack_swing(
     body: &mut PartState,
     right_arm: &mut PartState,
     left_arm: &mut PartState,
@@ -683,20 +731,58 @@ pub fn pose_humanoid_with(
     poses: ArmPoses,
     setup_attack: fn(&mut Limbs, &EntityState, ArmPoses),
 ) {
-    let swim_amount = st.extras.swim_amount;
-    let fall_flying = st.extras.fall_flying;
+    let input = HumanoidIn {
+        x_rot: st.x_rot,
+        y_rot: st.y_rot,
+        walk_pos: st.walk_pos,
+        walk_speed: st.walk_speed,
+        speed_value: st.extras.speed_value,
+        passenger: st.extras.passenger,
+        left_handed: st.extras.left_handed,
+        using_item: st.extras.using_item,
+        use_offhand: st.extras.use_offhand,
+        poses,
+        arm: ArmInputs::of(st),
+        age_ticks: st.age_ticks,
+        attack_time: st.attack_time,
+        swing_left: st.swing_left,
+    };
+    pose_core(l, &input, |l| setup_attack(l, st, poses));
+}
 
-    l.head.x_rot = st.x_rot * DEG_TO_RAD;
-    l.head.y_rot = st.y_rot * DEG_TO_RAD;
+pub(crate) struct HumanoidIn {
+    pub x_rot: f32,
+    pub y_rot: f32,
+    pub walk_pos: f32,
+    pub walk_speed: f32,
+    pub speed_value: f32,
+    pub passenger: bool,
+    pub left_handed: bool,
+    pub using_item: bool,
+    pub use_offhand: bool,
+    pub poses: ArmPoses,
+    pub arm: ArmInputs,
+    pub age_ticks: f32,
+    pub attack_time: f32,
+    pub swing_left: bool,
+}
+
+pub(crate) fn pose_core(l: &mut Limbs, i: &HumanoidIn, setup_attack: impl FnOnce(&mut Limbs)) {
+    let swim_amount = i.arm.swim_amount;
+    let fall_flying = i.arm.fall_flying;
+    let poses = i.poses;
+
+    l.head.x_rot = i.x_rot * DEG_TO_RAD;
+    l.head.y_rot = i.y_rot * DEG_TO_RAD;
     if fall_flying {
         l.head.x_rot = -FRAC_PI_4;
     } else if swim_amount > 0.0 {
         l.head.x_rot = rot_lerp_rad(swim_amount, l.head.x_rot, -FRAC_PI_4);
     }
 
-    let pos = st.walk_pos;
-    let speed = st.walk_speed;
-    let speed_value = st.extras.speed_value.max(1.0);
+    let pos = i.walk_pos;
+    let speed = i.walk_speed;
+    let speed_value = i.speed_value.max(1.0);
     l.right_arm.x_rot = (pos * 0.6662 + PI).cos() * 2.0 * speed * 0.5 / speed_value;
     l.left_arm.x_rot = (pos * 0.6662).cos() * 2.0 * speed * 0.5 / speed_value;
     l.right_leg.x_rot = (pos * 0.6662).cos() * 1.4 * speed / speed_value;
@@ -706,7 +792,7 @@ pub fn pose_humanoid_with(
     l.right_leg.z_rot = DUCK_WALK_ROTATION;
     l.left_leg.z_rot = -DUCK_WALK_ROTATION;
 
-    if st.extras.passenger {
+    if i.passenger {
         l.right_arm.x_rot += -0.628_318_55;
         l.left_arm.x_rot += -0.628_318_55;
         l.right_leg.x_rot = -1.413_716_7;
@@ -717,9 +803,9 @@ pub fn pose_humanoid_with(
         l.left_leg.z_rot = -0.078_539_82;
     }
 
-    let right_handed = !st.extras.left_handed;
-    let right_first = if st.extras.using_item {
-        (!st.extras.use_offhand) == right_handed
+    let right_handed = !i.left_handed;
+    let right_first = if i.using_item {
+        (!i.use_offhand) == right_handed
     } else {
         let two_handed = if right_handed {
             poses.left.two_handed()
@@ -729,23 +815,23 @@ pub fn pose_humanoid_with(
         right_handed == two_handed
     };
     let head = l.head;
-    let inputs = ArmInputs::of(st);
+    let inputs = &i.arm;
     let (right, left) = (&mut l.right_arm, &mut l.left_arm);
     if right_first {
-        pose_arm(right, left, &head, &inputs, poses.right, true);
+        pose_arm(right, left, &head, inputs, poses.right, true);
         if !poses.right.affects_offhand_pose() {
-            pose_arm(left, right, &head, &inputs, poses.left, false);
+            pose_arm(left, right, &head, inputs, poses.left, false);
         }
     } else {
-        pose_arm(left, right, &head, &inputs, poses.left, false);
+        pose_arm(left, right, &head, inputs, poses.left, false);
         if !poses.left.affects_offhand_pose() {
-            pose_arm(right, left, &head, &inputs, poses.right, true);
+            pose_arm(right, left, &head, inputs, poses.right, true);
         }
     }
 
-    setup_attack(l, st, poses);
+    setup_attack(l);
 
-    if st.extras.crouching {
+    if i.arm.crouching {
         l.body.x_rot = 0.5;
         l.right_arm.x_rot += 0.4;
         l.left_arm.x_rot += 0.4;
@@ -758,27 +844,26 @@ pub fn pose_humanoid_with(
     }
 
     if poses.right != ArmPose::Spyglass {
-        bob_model_part(&mut l.right_arm, st.age_ticks, 1.0);
+        bob_model_part(&mut l.right_arm, i.age_ticks, 1.0);
     }
     if poses.left != ArmPose::Spyglass {
-        bob_model_part(&mut l.left_arm, st.age_ticks, -1.0);
+        bob_model_part(&mut l.left_arm, i.age_ticks, -1.0);
     }
 
     if swim_amount > 0.0 {
         let swim_pos = pos % 26.0;
-        let right_swim =
-            if poses.right != ArmPose::Spear && (st.swing_left || st.attack_time <= 0.0) {
-                swim_amount
-            } else {
-                0.0
-            };
-        let left_swim = if poses.left != ArmPose::Spear && (!st.swing_left || st.attack_time <= 0.0)
+        let right_swim = if poses.right != ArmPose::Spear && (i.swing_left || i.attack_time <= 0.0)
         {
             swim_amount
         } else {
             0.0
         };
-        if !st.extras.using_item {
+        let left_swim = if poses.left != ArmPose::Spear && (!i.swing_left || i.attack_time <= 0.0) {
+            swim_amount
+        } else {
+            0.0
+        };
+        if !i.using_item {
             swim_arms(
                 &mut l.right_arm,
                 &mut l.left_arm,
@@ -800,7 +885,7 @@ pub fn pose_humanoid_with(
     }
 }
 
-pub(crate) fn swim_arms(
+fn swim_arms(
     right_arm: &mut PartState,
     left_arm: &mut PartState,
     swim_pos: f32,

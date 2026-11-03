@@ -290,7 +290,7 @@ impl Overlay {
                     y + 2.0 + py - 8.0 * OVERLAY_ITEM_SCALE,
                 );
                 p.scaled(OVERLAY_ITEM_SCALE, ox, oy, |p| {
-                    p.item_icon(&s.model_key(), 0.0, 0.0)
+                    p.stack_icon_as(s, 0.0, 0.0, s.item_use())
                 });
             }
         }

@@ -168,10 +168,11 @@ impl LivingCore {
         if pos == self.raw_pos && y_rot == self.raw_y_rot && x_rot == self.raw_x_rot {
             return None;
         }
+        let too_big =
+            pos != self.raw_pos && distance_sqr(self.pos, pos) > MAX_INTERPOLATION_DISTANCE_SQR;
         self.raw_pos = pos;
         self.raw_y_rot = y_rot;
         self.raw_x_rot = x_rot;
-        let too_big = distance_sqr(self.pos, pos) > MAX_INTERPOLATION_DISTANCE_SQR;
         let Some(mut interp) = self.interp.take() else {
             return Some((pos, y_rot, x_rot));
         };
@@ -197,6 +198,11 @@ impl LivingCore {
         }
         self.interp = Some(interp);
         None
+    }
+
+    pub fn seat(&mut self, pos: [f64; 3]) {
+        self.pos = pos;
+        self.raw_pos = pos;
     }
 
     pub fn rotate_head(&mut self, head_rot: f32, lerp: bool) {

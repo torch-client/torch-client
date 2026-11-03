@@ -14,13 +14,13 @@ use azalea_entity::{
 };
 use azalea_inventory::components::EquipmentSlot;
 use azalea_registry::builtin::{ItemKind, MobEffect};
-use azalea_world::{World, WorldName, Worlds};
+use azalea_world::{World, WorldBorder, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 
 use crate::{
     client_movement::ClientMovementState,
     collision::{
-        MoveCtx, MoverType, Shapes,
+        BorderSource, MoveCtx, MoverType, Shapes,
         entity_collisions::{AabbQuery, CollidableEntityQuery, get_entity_collisions},
         move_colliding,
         world_collisions::{
@@ -55,6 +55,7 @@ pub fn travel(
                 Option<&ActiveEffects>,
                 Option<&Inventory>,
                 Option<&FallFlying>,
+                Option<&WorldBorder>,
             ),
             &mut Physics,
             &mut LookDirection,
@@ -78,7 +79,7 @@ pub fn travel(
         pose,
         abilities,
         gamemode,
-        (active_effects, inventory, fall_flying),
+        (active_effects, inventory, fall_flying, border),
         mut physics,
         direction,
         position,
@@ -107,6 +108,7 @@ pub fn travel(
             powder_snow_walkable: wearing_leather_boots(inventory),
             stands_on_lava: false,
             fall_flying: fall_flying.is_some_and(|flying| **flying),
+            border,
             direction: *direction,
             sprinting,
             on_climbable: *on_climbable,
@@ -135,7 +137,11 @@ pub fn travel_ctx(ctx: &mut MoveCtx) {
             .world
             .get_fluid_state(BlockPos::from(*ctx.position))
             .is_some_and(|fluid| fluid.kind == FluidKind::Lava);
-    if (ctx.physics.is_in_water() || ctx.physics.is_in_lava()) && !standing_on_fluid {
+    let affected_by_fluids = !ctx.abilities.is_some_and(|abilities| abilities.flying);
+    if (ctx.physics.is_in_water() || ctx.physics.is_in_lava())
+        && affected_by_fluids
+        && !standing_on_fluid
+    {
         travel_in_fluid(ctx);
     } else if ctx.fall_flying {
         travel_fall_flying(ctx);
@@ -328,7 +334,7 @@ fn travel_in_fluid(ctx: &mut MoveCtx) {
             ctx.source_entity,
             ctx.aabb_query,
             ctx.collidable_entity_query,
-            ctx.physics,
+            ctx.border_source(),
             ctx.physics.bounding_box,
             velocity.up(0.6).down(ctx.position.y).up(y),
         )
@@ -368,7 +374,7 @@ fn is_free(
     source_entity: Entity,
     aabb_query: &AabbQuery,
     collidable_entity_query: &CollidableEntityQuery,
-    entity_physics: &Physics,
+    border: Option<BorderSource>,
     bounding_box: Aabb,
     delta: Vec3,
 ) -> bool {
@@ -379,7 +385,7 @@ fn is_free(
         Some(source_entity),
         aabb_query,
         collidable_entity_query,
-        entity_physics,
+        border,
         &bounding_box,
         false,
         PowderSnowCollision::default(),
@@ -391,7 +397,7 @@ pub fn no_collision(
     source_entity: Option<Entity>,
     aabb_query: &AabbQuery,
     collidable_entity_query: &CollidableEntityQuery,
-    entity_physics: &Physics,
+    border: Option<BorderSource>,
     aabb: &Aabb,
     include_liquid_collisions: bool,
     powder_snow: PowderSnowCollision,
@@ -421,18 +427,13 @@ pub fn no_collision(
     } else if source_entity.is_none() {
         true
     } else {
-        let collision = border_collision(entity_physics, aabb);
+        let collision = border.and_then(|b| b.collision(aabb));
         if let Some(collision) = collision {
-            !Shapes::matches_anywhere(&collision.into(), &aabb.into(), |a, b| a && b)
+            !Shapes::matches_anywhere(&collision, &aabb.into(), |a, b| a && b)
         } else {
             true
         }
     }
-}
-
-fn border_collision(_entity_physics: &Physics, _aabb: &Aabb) -> Option<Aabb> {
-
-    None
 }
 
 fn contains_any_liquid(world: &World, bounding_box: Aabb) -> bool {

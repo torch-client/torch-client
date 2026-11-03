@@ -150,10 +150,13 @@ pub(crate) fn flight_pre_travel(
 
         let forced = match demand {
             module::State::On(speed) if !spectator => Some(speed),
-            module::State::Release => {
+            module::State::Release | module::State::Drop => {
                 abilities.flying = false;
                 abilities.can_fly = may_fly;
                 abilities.flying_speed = DEFAULT_FLYING_SPEED;
+                if matches!(demand, module::State::Drop) && !spectator {
+                    physics.velocity.y = physics.velocity.y.min(-module::SINK_STEP);
+                }
                 None
             }
             _ => None,
@@ -194,7 +197,7 @@ pub(crate) fn flight_pre_travel(
 
         let sprinting = sprinting.is_some_and(|s| **s);
 
-        if abilities.flying != was_flying && physics.on_ground() {
+        if abilities.flying != was_flying && physics.on_ground() && forced.is_none() {
             jump_from_ground(
                 &mut physics,
                 *position,

@@ -6,7 +6,7 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::RenderDevice;
 
 use super::GPU_LABEL;
-use super::fullscreen::{fullscreen_corner, fullscreen_pass, fullscreen_pipeline};
+use super::fullscreen::{fullscreen_corner, fullscreen_pass, fullscreen_pipeline, pipeline_layout};
 
 pub(super) fn level_count(width: u32, height: u32) -> u32 {
     32 - width.max(height).max(1).leading_zeros()
@@ -74,11 +74,7 @@ impl MipGen {
                 },
             ],
         );
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(gpu_label!("mipmap")),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
-        });
+        let pipeline_layout = pipeline_layout(device, gpu_label!("mipmap"), &layout);
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some(gpu_label!("mipmap")),
             mag_filter: wgpu::FilterMode::Linear,

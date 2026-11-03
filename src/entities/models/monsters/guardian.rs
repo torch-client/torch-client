@@ -73,25 +73,22 @@ fn body_mesh() -> MeshDef {
             ),
         );
     }
-    head.child(
+    head.part(
         "eye",
-        CubeList::new()
-            .tex_offs(8, 0)
-            .add_box(-1.0, 15.0, 0.0, 2.0, 2.0, 1.0),
+        (8, 0),
+        [-1.0, 15.0, 0.0, 2.0, 2.0, 1.0],
         PartPose::offset(0.0, 0.0, -8.25),
     );
-    let tail0 = head.child(
+    let tail0 = head.part(
         "tail0",
-        CubeList::new()
-            .tex_offs(40, 0)
-            .add_box(-2.0, 14.0, 7.0, 4.0, 4.0, 8.0),
+        (40, 0),
+        [-2.0, 14.0, 7.0, 4.0, 4.0, 8.0],
         PartPose::ZERO,
     );
-    let tail1 = tail0.child(
+    let tail1 = tail0.part(
         "tail1",
-        CubeList::new()
-            .tex_offs(0, 54)
-            .add_box(0.0, 14.0, 0.0, 3.0, 3.0, 7.0),
+        (0, 54),
+        [0.0, 14.0, 0.0, 3.0, 3.0, 7.0],
         PartPose::offset(-1.5, 0.5, 14.0),
     );
     tail1.child(

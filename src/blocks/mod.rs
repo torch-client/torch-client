@@ -48,6 +48,10 @@ pub fn registry() -> Arc<Blocks> {
         .clone()
 }
 
+pub fn block_name(state: azalea::block::BlockState) -> &'static str {
+    Box::<dyn azalea::block::BlockTrait>::from(state).id()
+}
+
 pub fn install(blocks: Blocks) {
     *REGISTRY.write() = Some(Arc::new(blocks));
 }

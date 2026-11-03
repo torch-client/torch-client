@@ -118,7 +118,7 @@ impl BlockTable {
                 break;
             };
             if matches!(
-                Box::<dyn BlockTrait>::from(state).id(),
+                crate::blocks::block_name(state),
                 "air" | "cave_air" | "void_air"
             ) {
                 found[n] = id;
@@ -205,6 +205,7 @@ fn apply_tint(base: BaseColor, biome: u8) -> u32 {
         TintKind::DryFoliage => bc::dry_foliage_ratio(biome),
         TintKind::Water => bc::water_ratio(biome),
         TintKind::Redstone(power) => bc::redstone_ratio(power),
+        TintKind::Stem(age) => bc::stem_ratio(age),
     };
     let ch = |shift: u32, k: f32| {
         ((((base.argb >> shift) & 0xFF) as f32 * k)

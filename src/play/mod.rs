@@ -7,6 +7,7 @@ pub(crate) mod flight;
 pub(crate) mod interaction;
 pub(crate) mod inventory_bridge;
 pub(crate) mod item_pickup;
+pub(crate) mod item_use;
 pub(crate) mod mob_effects;
 pub(crate) mod no_fall;
 pub(crate) mod pick_box;

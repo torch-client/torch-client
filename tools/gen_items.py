@@ -358,6 +358,7 @@ def generate_rust(defs: List[dict], tabs: List[Tab], titles: Dict[str, str],
     out.append("}\n\n")
 
     out.append("/// Sorted by `id`.\n")
+    out.append("#[rustfmt::skip]\n")
     out.append("pub static ITEMS: &[ItemDef] = &[\n")
     for d in defs:
         out.append(
@@ -395,9 +396,17 @@ def generate_rust(defs: List[dict], tabs: List[Tab], titles: Dict[str, str],
     out.append("}\n\n")
 
     for tab in tabs:
+        out.append("#[rustfmt::skip]\n")
         out.append(f"static TAB_{tab.id.upper()}: &[&str] = &[\n")
+        line = "   "
         for item_id in tab.items:
-            out.append(f"    {rust_str(item_id)},\n")
+            entry = f" {rust_str(item_id)},"
+            if len(line) + len(entry) > 120:
+                out.append(line + "\n")
+                line = "   "
+            line += entry
+        if line.strip():
+            out.append(line + "\n")
         out.append("];\n\n")
 
     out.append("/// In vanilla display order. Does NOT include the special `hotbar`,\n")

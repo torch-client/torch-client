@@ -13,7 +13,7 @@ use crate::gui::hud_layout::{ElementId, Hud, Transforms};
 use crate::gui::painter::Painter;
 use crate::gui::render::effective_gui_scale;
 use crate::gui::{GuiState, Screen, ScreenCtx};
-use crate::renderer::input::{CameraAngles, CameraView, apply_look};
+use crate::renderer::input::{CameraAngles, CameraView, FreecamTouch, apply_look};
 use crate::renderer::systems::Shared;
 use crate::session::{
     Gamemode, MOVE_BACK, MOVE_DESCEND, MOVE_FORWARD, MOVE_JUMP, MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK,
@@ -97,6 +97,7 @@ pub fn register(app: &mut App) {
         Update,
         mobile_input
             .before(crate::renderer::intent::publish)
+            .before(crate::renderer::input::freecam_movement)
             .before(crate::renderer::FrameViewSystems)
             .after(crate::gui::render::collect_input)
             .before(crate::gui::render::draw_gui)
@@ -124,6 +125,7 @@ fn mobile_input(
     mut angles: ResMut<CameraAngles>,
     camera_view: Res<CameraView>,
     mut intent: ResMut<crate::renderer::intent::Intent>,
+    mut freecam_touch: ResMut<FreecamTouch>,
 ) {
     let Ok(window) = windows.single() else { return };
     let gui = &mut *gui;
@@ -296,6 +298,7 @@ fn mobile_input(
     owners.retain(|o| o.seen);
 
     let mut move_bits = 0u8;
+    let mut stick_vec: Option<Vec2> = None;
     let mut attack_held = false;
     let mut use_held = false;
     let mut zoom_held = false;
@@ -319,6 +322,7 @@ fn mobile_input(
             Claim::Stick { at } => {
                 let Some(stick) = layout.stick else { continue };
                 *stick_at = Some(stick.knob(at));
+                stick_vec = stick.vector(at);
                 let Some((x, y)) = stick.direction(at) else {
                     continue;
                 };
@@ -381,6 +385,9 @@ fn mobile_input(
         gui.nav = Some(next);
     }
 
+    let free = camera_view.free();
+    let fly_toggle = fly_toggle && !free;
+
     let flying = {
         let mut s = shared.0.lock().unwrap();
         if fly_toggle && matches!(s.session.gamemode, Gamemode::Creative | Gamemode::Spectator) {
@@ -391,6 +398,24 @@ fn mobile_input(
         }
         s.session.flying
     };
+    if free {
+        let bit = |b: u8| if move_bits & b != 0 { 1.0 } else { 0.0 };
+        let dir = match stick_vec {
+            Some(v) => Vec2::new(v.x, -v.y),
+            None => Vec2::new(
+                bit(MOVE_RIGHT) - bit(MOVE_LEFT),
+                bit(MOVE_FORWARD) - bit(MOVE_BACK),
+            )
+            .normalize_or_zero(),
+        };
+        *freecam_touch = FreecamTouch {
+            dir,
+            up: move_bits & MOVE_JUMP != 0,
+            down: sneak,
+            sprint,
+        };
+        return;
+    }
     let descend = flying && sneak;
     intent.walk(
         move_bits
@@ -627,7 +652,7 @@ fn round_button(p: &mut Painter, c: Vec2, r: f32, label: &str, pressed: bool, la
     disc(p, c, r, face);
     ring(p, c, r, edge, border);
     let text_w = p.atlas.font.width_str(label);
-    p.text_str(
+    p.text_plain(
         label,
         (c.x - text_w / 2.0).round(),
         (c.y - LINE_H / 2.0).round(),
@@ -712,7 +737,7 @@ fn button(p: &mut Painter, r: Rect, label: &str, pressed: bool, latched: bool) {
     }
 
     let text_w = p.atlas.font.width_str(label);
-    p.text_str(
+    p.text_plain(
         label,
         (x + (w - text_w) / 2.0).round(),
         (y + (h - LINE_H) / 2.0).round(),

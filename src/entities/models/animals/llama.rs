@@ -18,25 +18,25 @@ pub fn adult_mesh(g: Grow) -> MeshDef {
             .add_box_grow(1.0, -19.0, -4.0, 3.0, 3.0, 2.0, g),
         PartPose::offset(0.0, 7.0, -6.0),
     );
-    root.child(
+    root.part_grow(
         "body",
-        CubeList::new()
-            .tex_offs(29, 0)
-            .add_box_grow(-6.0, -10.0, -7.0, 12.0, 18.0, 10.0, g),
+        (29, 0),
+        [-6.0, -10.0, -7.0, 12.0, 18.0, 10.0],
+        g,
         PartPose::offset_rotation(0.0, 5.0, 2.0, std::f32::consts::FRAC_PI_2, 0.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "right_chest",
-        CubeList::new()
-            .tex_offs(45, 28)
-            .add_box_grow(-3.0, 0.0, 0.0, 8.0, 8.0, 3.0, g),
+        (45, 28),
+        [-3.0, 0.0, 0.0, 8.0, 8.0, 3.0],
+        g,
         PartPose::offset_rotation(-8.5, 3.0, 3.0, 0.0, std::f32::consts::FRAC_PI_2, 0.0),
     );
-    root.child(
+    root.part_grow(
         "left_chest",
-        CubeList::new()
-            .tex_offs(45, 41)
-            .add_box_grow(-3.0, 0.0, 0.0, 8.0, 8.0, 3.0, g),
+        (45, 41),
+        [-3.0, 0.0, 0.0, 8.0, 8.0, 3.0],
+        g,
         PartPose::offset_rotation(5.5, 3.0, 3.0, 0.0, std::f32::consts::FRAC_PI_2, 0.0),
     );
     let leg = CubeList::new()
@@ -77,53 +77,53 @@ pub fn baby_mesh(g: Grow) -> MeshDef {
             .add_box_grow(-2.5, -11.0, -3.0, 2.0, 2.0, 2.0, g),
         PartPose::offset(0.0, 12.0, -4.0),
     );
-    root.child(
+    root.part_grow(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(0, 45)
-            .add_box_grow(-1.4, -0.5, -1.5, 3.0, 8.0, 3.0, g),
+        (0, 45),
+        [-1.4, -0.5, -1.5, 3.0, 8.0, 3.0],
+        g,
         PartPose::offset(-2.5, 16.5, 4.5),
     );
-    root.child(
+    root.part_grow(
         "left_hind_leg",
-        CubeList::new()
-            .tex_offs(12, 45)
-            .add_box_grow(-1.6, -0.5, -1.5, 3.0, 8.0, 3.0, g),
+        (12, 45),
+        [-1.6, -0.5, -1.5, 3.0, 8.0, 3.0],
+        g,
         PartPose::offset(2.5, 16.5, 4.5),
     );
-    root.child(
+    root.part_grow(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(0, 34)
-            .add_box_grow(-1.4, -0.5, -1.5, 3.0, 8.0, 3.0, g),
+        (0, 34),
+        [-1.4, -0.5, -1.5, 3.0, 8.0, 3.0],
+        g,
         PartPose::offset(-2.5, 16.5, -3.5),
     );
-    root.child(
+    root.part_grow(
         "left_front_leg",
-        CubeList::new()
-            .tex_offs(12, 34)
-            .add_box_grow(-1.6, -0.5, -1.5, 3.0, 8.0, 3.0, g),
+        (12, 34),
+        [-1.6, -0.5, -1.5, 3.0, 8.0, 3.0],
+        g,
         PartPose::offset(2.5, 16.5, -3.5),
     );
-    root.child(
+    root.part_grow(
         "body",
-        CubeList::new()
-            .tex_offs(0, 15)
-            .add_box_grow(-4.0, -3.0, -8.5, 8.0, 6.0, 13.0, g),
+        (0, 15),
+        [-4.0, -3.0, -8.5, 8.0, 6.0, 13.0],
+        g,
         PartPose::offset(0.0, 14.0, 2.5),
     );
-    root.child(
+    root.part_grow(
         "right_chest",
-        CubeList::new()
-            .tex_offs(45, 28)
-            .add_box_grow(-3.0, 0.0, 0.0, 8.0, 8.0, 3.0, g),
+        (45, 28),
+        [-3.0, 0.0, 0.0, 8.0, 8.0, 3.0],
+        g,
         PartPose::offset_rotation(-8.5, 4.0, 3.0, 0.0, std::f32::consts::FRAC_PI_2, 0.0),
     );
-    root.child(
+    root.part_grow(
         "left_chest",
-        CubeList::new()
-            .tex_offs(45, 41)
-            .add_box_grow(-3.0, 0.0, 0.0, 8.0, 8.0, 3.0, g),
+        (45, 41),
+        [-3.0, 0.0, 0.0, 8.0, 8.0, 3.0],
+        g,
         PartPose::offset_rotation(5.5, 4.0, 3.0, 0.0, std::f32::consts::FRAC_PI_2, 0.0),
     );
     mesh

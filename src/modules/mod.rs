@@ -10,10 +10,12 @@ pub mod commands;
 mod edge;
 pub mod entities;
 pub mod esp;
+pub mod extra_hud;
 pub mod flight;
 pub mod freecam;
 pub mod fullbright;
 pub mod hooks;
+pub mod hud_panels;
 pub mod items;
 pub mod list;
 pub mod nametags;
@@ -26,7 +28,7 @@ pub mod registry;
 pub mod scaffold;
 #[cfg(lua_mods)]
 pub mod script;
-mod sent;
+pub(crate) mod sent;
 pub mod sneak;
 pub mod spam;
 pub mod special;
@@ -44,5 +46,5 @@ pub mod velocity;
 pub mod zoom;
 
 pub use edge::{Edge, MS_PER_TICK, Phase, roll};
-pub use store::{Store, save, store};
+pub use store::{Store, flush_changed, save, store};
 pub use value::Value;

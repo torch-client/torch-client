@@ -12,11 +12,10 @@ const ROD_NAMES: [&str; 12] = [
 pub fn layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-4.0, -4.0, -4.0, 8.0, 8.0, 8.0),
+        (0, 0),
+        [-4.0, -4.0, -4.0, 8.0, 8.0, 8.0],
         PartPose::ZERO,
     );
     let rod = CubeList::new()

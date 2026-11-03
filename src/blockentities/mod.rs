@@ -5,7 +5,7 @@ pub mod render;
 pub mod sim;
 pub mod text;
 
-use std::collections::HashMap;
+use bevy::platform::collections::HashMap;
 use std::sync::Arc;
 
 use azalea_registry::builtin::BlockEntityKind;
@@ -927,11 +927,7 @@ fn set_layer_material(
     layer.material = Some(material.clone());
 }
 
-fn combined_openness(
-    info: &BlockEntityInfo,
-    all: &HashMap<[i32; 3], BlockEntityInfo>,
-    partial: f32,
-) -> f32 {
+fn combined_openness(info: &BlockEntityInfo, all: &feed::BlockEntityMap, partial: f32) -> f32 {
     let own = openness(info, partial);
     match info.partner.and_then(|pos| all.get(&pos)) {
         Some(other) => own.max(openness(other, partial)),

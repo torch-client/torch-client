@@ -43,7 +43,7 @@ impl Node {
 }
 
 struct Scene {
-    owners: BTreeMap<&'static str, Vec<Node>>,
+    owners: BTreeMap<&'static str, Arc<Vec<Node>>>,
     merged: Option<Arc<Vec<Node>>>,
 }
 
@@ -63,10 +63,15 @@ pub fn set(owner: &'static str, nodes: Vec<Node>) {
             return;
         }
     } else {
-        s.owners.insert(owner, nodes);
+        s.owners.insert(owner, Arc::new(nodes));
     }
-    let all: Vec<Node> = s.owners.values().flatten().copied().collect();
-    s.merged = (!all.is_empty()).then(|| Arc::new(all));
+    s.merged = match s.owners.len() {
+        0 => None,
+        1 => s.owners.values().next().cloned(),
+        _ => Some(Arc::new(
+            s.owners.values().flat_map(|n| n.iter().copied()).collect(),
+        )),
+    };
 }
 
 pub fn clear(owner: &'static str) {

@@ -38,11 +38,11 @@ fn base_armor_mesh(g: Grow) -> MeshDef {
     let mut mesh = humanoid::create_mesh(g, 0.0);
     let leg = g.extend(humanoid::LEGGINGS_OVERLAY_SCALE);
     let root = mesh.root();
-    root.child(
+    root.part_grow(
         "right_leg",
-        CubeList::new()
-            .tex_offs(0, 16)
-            .add_box_grow(-2.0, 0.0, -2.0, 4.0, 12.0, 4.0, leg),
+        (0, 16),
+        [-2.0, 0.0, -2.0, 4.0, 12.0, 4.0],
+        leg,
         PartPose::offset(-1.9, 12.0, 0.0),
     );
     root.child(
@@ -67,37 +67,25 @@ pub fn zombie_villager_armor_layer(slot: Slot, inner: Grow, outer: Grow) -> Laye
     let mut mesh = humanoid::create_mesh(g, 0.0);
     {
         let root = mesh.root();
-        root.child(
+        root.part_grow(
             "head",
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box_grow(-4.0, -10.0, -4.0, 8.0, 8.0, 8.0, g),
+            (0, 0),
+            [-4.0, -10.0, -4.0, 8.0, 8.0, 8.0],
+            g,
             PartPose::ZERO,
         );
-        root.child(
+        root.part_grow(
             "body",
-            CubeList::new().tex_offs(16, 16).add_box_grow(
-                -4.0,
-                0.0,
-                -2.0,
-                8.0,
-                12.0,
-                4.0,
-                g.extend(0.1),
-            ),
+            (16, 16),
+            [-4.0, 0.0, -2.0, 8.0, 12.0, 4.0],
+            g.extend(0.1),
             PartPose::ZERO,
         );
-        root.child(
+        root.part_grow(
             "right_leg",
-            CubeList::new().tex_offs(0, 16).add_box_grow(
-                -2.0,
-                0.0,
-                -2.0,
-                4.0,
-                12.0,
-                4.0,
-                g.extend(0.1),
-            ),
+            (0, 16),
+            [-2.0, 0.0, -2.0, 4.0, 12.0, 4.0],
+            g.extend(0.1),
             PartPose::offset(-2.0, 12.0, 0.0),
         );
         root.child(
@@ -125,32 +113,26 @@ pub fn armor_stand_armor_layer(slot: Slot, inner: Grow, outer: Grow) -> LayerDef
     let mut mesh = humanoid::create_mesh(g, 0.0);
     {
         let root = mesh.root();
-        let head = root.child(
+        let head = root.part_grow(
             "head",
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box_grow(-4.0, -8.0, -4.0, 8.0, 8.0, 8.0, g),
+            (0, 0),
+            [-4.0, -8.0, -4.0, 8.0, 8.0, 8.0],
+            g,
             PartPose::offset(0.0, 1.0, 0.0),
         );
-        head.child(
+        head.part_grow(
             "hat",
-            CubeList::new().tex_offs(32, 0).add_box_grow(
-                -4.0,
-                -8.0,
-                -4.0,
-                8.0,
-                8.0,
-                8.0,
-                g.extend(humanoid::HAT_OVERLAY_SCALE),
-            ),
+            (32, 0),
+            [-4.0, -8.0, -4.0, 8.0, 8.0, 8.0],
+            g.extend(humanoid::HAT_OVERLAY_SCALE),
             PartPose::ZERO,
         );
         let leg = g.extend(humanoid::LEGGINGS_OVERLAY_SCALE);
-        root.child(
+        root.part_grow(
             "right_leg",
-            CubeList::new()
-                .tex_offs(0, 16)
-                .add_box_grow(-2.0, 0.0, -2.0, 4.0, 12.0, 4.0, leg),
+            (0, 16),
+            [-2.0, 0.0, -2.0, 4.0, 12.0, 4.0],
+            leg,
             PartPose::offset(-1.9, 11.0, 0.0),
         );
         root.child(

@@ -529,7 +529,7 @@ async fn fetch(url: &str, hash: Option<&str>) -> Fetched {
             return Fetched::Failed;
         }
     };
-    let actual = crate::resourcepacks::sha1_hex(&bytes);
+    let actual = crate::util::hash::sha1_hex(&bytes);
     if let Some(expected) = hash
         && actual != expected
     {

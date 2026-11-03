@@ -101,7 +101,7 @@ pub fn draw_loom(
     let patterns: &[Box<str>] = match snap
         .menu_slots
         .get(2)
-        .and_then(|s| s.banner_patterns.as_deref())
+        .and_then(|s| s.extra.banner_patterns.as_deref())
     {
         Some(p) => p,
         None => banner::no_item_required(),

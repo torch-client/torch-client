@@ -99,8 +99,8 @@ pub struct StackedContents(Vec<(&'static str, u32)>);
 
 impl StackedContents {
     pub fn account_simple(&mut self, s: &SlotStack) {
-        let enchanted = !s.enchantments.is_empty() && s.item != "enchanted_book";
-        if s.damage == 0 && !enchanted && s.custom_name.is_none() {
+        let enchanted = !s.extra.enchantments.is_empty() && s.item != "enchanted_book";
+        if s.damage == 0 && !enchanted && s.extra.custom_name.is_none() {
             self.account(s);
         }
     }
@@ -294,13 +294,16 @@ mod tests {
             ..stack("wooden_sword", 1)
         });
         c.account_simple(&SlotStack {
-            enchantments: vec![("sharpness".into(), 1)],
+            extra: crate::session::StackExtra {
+                enchantments: vec![("sharpness".into(), 1)],
+                ..Default::default()
+            }
+            .into(),
             ..stack("iron_sword", 1)
         });
-        c.account_simple(&SlotStack {
-            custom_name: Some(Vec::new()),
-            ..stack("stick", 1)
-        });
+        let mut named = stack("stick", 1);
+        named.extra.make_mut().custom_name = Some(Vec::new());
+        c.account_simple(&named);
         c.account_simple(&stack("stick", 2));
         assert_eq!(c, contents(&[("stick", 2)]));
     }

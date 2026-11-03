@@ -8,6 +8,14 @@ pub fn clamp(value: f32, min: f32, max: f32) -> f32 {
     if value < min { min } else { value.min(max) }
 }
 
+pub fn positive_modulo(a: f32, b: f32) -> f32 {
+    (a % b + b) % b
+}
+
+pub fn frac(x: f32) -> f32 {
+    x - x.floor()
+}
+
 pub fn lerp(t: f32, a: f32, b: f32) -> f32 {
     a + t * (b - a)
 }

@@ -183,6 +183,16 @@ pub(super) fn place_position(
     None
 }
 
+pub(super) fn telly_position(c: &impl Cells, me: &Me, y: f64) -> Option<BlockPos> {
+    let below_y = y.floor() as i32 - 1;
+    let (bx, bz) = me.column();
+    let below = BlockPos::new(bx, below_y, bz);
+    if c.replaceable(below) && has_support_neighbor(c, below) {
+        return Some(below);
+    }
+    place_in_move_dir(c, me, below_y).filter(|&p| has_h_support(c, p))
+}
+
 pub(super) fn knockback_catch(c: &impl Cells, x: f64, z: f64, y: i32) -> Option<BlockPos> {
     let (bx, bz) = (x.floor() as i32, z.floor() as i32);
     for supported_pass in [true, false] {

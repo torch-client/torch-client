@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
+
+use crate::items::model::strip_namespace;
 
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_registry::identifier::Identifier;
@@ -361,9 +363,8 @@ fn is_valid_variable_name(name: &str) -> bool {
     name.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn tags() -> &'static Mutex<HashMap<String, Vec<i32>>> {
-    static TAGS: OnceLock<Mutex<HashMap<String, Vec<i32>>>> = OnceLock::new();
-    TAGS.get_or_init(Default::default)
+crate::util::global! {
+    fn tags() -> Mutex<HashMap<String, Vec<i32>>>
 }
 
 pub fn set_tags(entries: impl Iterator<Item = (String, Vec<i32>)>) {
@@ -543,10 +544,6 @@ fn width(tag: &NbtCompound, name: &str, default: f32) -> f32 {
 
 fn boolean(tag: &NbtCompound, name: &str, default: bool) -> bool {
     tag.byte(name).map(|b| b != 0).unwrap_or(default)
-}
-
-fn strip_namespace(id: &str) -> &str {
-    id.split_once(':').map(|(_, path)| path).unwrap_or(id)
 }
 
 fn component(tag: Option<&NbtTag>) -> Option<Vec<Span>> {

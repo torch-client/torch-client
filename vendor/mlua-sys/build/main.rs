@@ -73,6 +73,13 @@ fn main() {
         wasm32_cxx(&mut base, wasm, &shim);
     }
 
+    let file_map = format!("-fmacro-prefix-map={}=mlua-sys", manifest_dir.display());
+    if wasm.is_some() {
+        base.flag(&file_map);
+    } else {
+        base.flag_if_supported(&file_map);
+    }
+
     let mut objects = Vec::new();
     for (name, includes) in LIBRARIES {
         let mut build = base.clone();

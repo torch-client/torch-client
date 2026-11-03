@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -67,6 +68,8 @@ pub(super) struct Snapshot {
     pub profiles: Arc<Vec<Profile>>,
     pub op_level: u8,
     pub creative: bool,
+    pub dimension: String,
+    pub address: Option<String>,
 }
 
 impl Default for Snapshot {
@@ -81,18 +84,29 @@ impl Default for Snapshot {
             profiles: Arc::default(),
             op_level: 0,
             creative: false,
+            dimension: String::new(),
+            address: None,
         }
     }
 }
 
 impl Snapshot {
-    pub fn read(s: &SharedState) -> Snapshot {
-        let mut snap = SPARE
+    pub fn spare() -> Snapshot {
+        SPARE
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    pub fn recycle(self) {
+        *SPARE.lock().unwrap_or_else(PoisonError::into_inner) = Some(self);
+    }
+
+    pub fn read(&mut self, s: &SharedState) {
+        let snap = self;
         snap.pos = s.session.player_pos;
+        snap.address.clone_from(&s.session.current_address);
         snap.players.clone_from(&s.session.player_names);
         snap.waypoints = s.session.waypoints.clone();
         snap.profiles = s.session.player_profiles.clone();
@@ -129,20 +143,24 @@ impl Snapshot {
                 *slot = Item::of(stack);
             }
         }
-        snap
     }
 }
 
 pub(super) static SPARE: Mutex<Option<Snapshot>> = Mutex::new(None);
 
+pub(super) type WorldLock = Arc<parking_lot::RwLock<azalea_world::World>>;
+
 #[derive(Default)]
 pub(super) struct Game {
     pub bot: Option<Client>,
+    pub world: Option<WorldLock>,
     pub snap: Snapshot,
     pub drawing: Option<usize>,
-    pub hud: Vec<Vec<(Layer, Cmd)>>,
+    pub hud: Vec<ModHud>,
+    hud_spare: Option<HudFrame>,
     pub panel: Option<u8>,
-    pub canvas: bool,
+    pub canvas: Option<Layer>,
+    pub pin: bool,
     pub drawn: (usize, usize),
     pub panels: Vec<(usize, &'static str, u8)>,
     pub hud_dirty: bool,
@@ -151,12 +169,46 @@ pub(super) struct Game {
     pub placed: bool,
 }
 
+#[derive(Default, PartialEq)]
+pub(super) struct Drawn {
+    cmds: Vec<(Layer, Cmd)>,
+    text: String,
+}
+
+impl Drawn {
+    fn clear(&mut self) {
+        self.cmds.clear();
+        self.text.clear();
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ModHud {
+    now: Drawn,
+    before: Drawn,
+}
+
 impl Game {
     pub fn clear_hud(&mut self, k: usize) {
-        if let Some(list) = self.hud.get_mut(k)
-            && !list.is_empty()
+        if let Some(h) = self.hud.get_mut(k)
+            && !h.now.cmds.is_empty()
         {
-            list.clear();
+            h.now.clear();
+            self.hud_dirty = true;
+        }
+    }
+
+    pub fn begin_hud(&mut self, k: usize) {
+        if let Some(h) = self.hud.get_mut(k) {
+            std::mem::swap(&mut h.now, &mut h.before);
+            h.now.clear();
+        }
+    }
+
+    pub fn end_hud(&mut self, k: usize) {
+        if let Some(h) = self.hud.get(k)
+            && h.now != h.before
+        {
             self.hud_dirty = true;
         }
     }
@@ -165,9 +217,76 @@ impl Game {
         if !std::mem::take(&mut self.hud_dirty) {
             return;
         }
-        let all: Vec<(Layer, Cmd)> = self.hud.iter().flatten().cloned().collect();
-        *HUD.lock().unwrap_or_else(PoisonError::into_inner) =
-            (!all.is_empty()).then(|| Arc::new(all));
+        let mut frame = self.hud_spare.take().unwrap_or_default();
+        frame.fill(&self.hud);
+        let frame = (!frame.cmds.is_empty()).then(|| Arc::new(frame));
+        let old = std::mem::replace(
+            &mut *HUD.lock().unwrap_or_else(PoisonError::into_inner),
+            frame,
+        );
+        self.hud_spare = old.and_then(|a| Arc::try_unwrap(a).ok());
+    }
+}
+
+const LAYERS: usize = crate::gui::hud_layout::MOD_PANELS + 3;
+
+#[derive(Default)]
+pub(super) struct HudFrame {
+    cmds: Vec<Cmd>,
+    ranges: [(u32, u32); LAYERS],
+    text: String,
+}
+
+impl HudFrame {
+    fn fill(&mut self, hud: &[ModHud]) {
+        let mut counts = [0u32; LAYERS];
+        for (layer, _) in hud.iter().flat_map(|h| &h.now.cmds) {
+            if let Some(i) = layer.index() {
+                counts[i] += 1;
+            }
+        }
+        let mut at = 0;
+        for (range, n) in self.ranges.iter_mut().zip(counts) {
+            *range = (at, at);
+            at += n;
+        }
+        self.cmds.clear();
+        self.cmds.resize(
+            at as usize,
+            Cmd::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+                argb: 0,
+            },
+        );
+        self.text.clear();
+        for h in hud {
+            let base = self.text.len() as u32;
+            self.text.push_str(&h.now.text);
+            for &(layer, mut cmd) in &h.now.cmds {
+                let Some(i) = layer.index() else { continue };
+                if let Cmd::Text { text, .. } = &mut cmd {
+                    text[0] += base;
+                }
+                let slot = &mut self.ranges[i].1;
+                self.cmds[*slot as usize] = cmd;
+                *slot += 1;
+            }
+        }
+    }
+
+    fn layer(&self, layer: Layer) -> &[Cmd] {
+        layer.index().map_or(&[], |i| {
+            &self.cmds[self.ranges[i].0 as usize..self.ranges[i].1 as usize]
+        })
+    }
+
+    fn text(&self, [start, len]: [u32; 2]) -> &str {
+        self.text
+            .get(start as usize..(start + len) as usize)
+            .unwrap_or_default()
     }
 }
 
@@ -179,7 +298,7 @@ pub(super) enum Pending {
         key: &'static str,
         label: &'static str,
     },
-    Packet(super::packets::Packet),
+    Packet(Box<super::packets::Packet>),
     UiClick {
         owner: usize,
         row: usize,
@@ -207,7 +326,7 @@ pub(super) enum Pending {
         owner: usize,
         id: u64,
         generation: u64,
-        result: super::nbt::JobResult,
+        result: Box<super::nbt::JobResult>,
     },
     UiPrompt {
         owner: usize,
@@ -215,7 +334,7 @@ pub(super) enum Pending {
     },
     FileRequest {
         owner: usize,
-        file: Option<Imported>,
+        file: Option<Box<Imported>>,
     },
     Button {
         owner: usize,
@@ -376,7 +495,7 @@ pub(super) fn waypoint_fields(
 
 const PENDING_CAP: usize = 256;
 
-static PENDING: Mutex<Vec<(u64, Pending)>> = Mutex::new(Vec::new());
+static PENDING: Mutex<VecDeque<(u64, Pending)>> = Mutex::new(VecDeque::new());
 
 pub(super) static LISTEN: AtomicU32 = AtomicU32::new(0);
 
@@ -384,27 +503,28 @@ pub(super) fn push(p: Pending) {
     if !LIVE.load(Relaxed) {
         return;
     }
-    let epoch = crate::SHARED
-        .get()
-        .map_or(0, |s| s.lock().unwrap().session_epoch);
+    let epoch = crate::session::SESSION_EPOCH.load(Relaxed);
     let mut q = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
     if q.len() >= PENDING_CAP {
-        q.remove(0);
+        q.pop_front();
     }
-    q.push((epoch, p));
+    q.push_back((epoch, p));
     WANTS.fetch_or(QUEUED, Relaxed);
 }
 
-pub(super) fn take(epoch: u64) -> Vec<Pending> {
+pub(super) fn take(epoch: u64, out: &mut Vec<Pending>) {
     let mut q = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
     WANTS.fetch_and(!QUEUED, Relaxed);
     let generation = super::nbt::generation();
-    q.drain(..)
-        .filter(|(e, p)| {
-            *e == epoch && !matches!(p, Pending::Job { generation: g, .. } if *g != generation)
-        })
-        .map(|(_, p)| p)
-        .collect()
+    out.extend(
+        q.drain(..)
+            .filter(|(e, p)| {
+                *e == epoch && !matches!(p, Pending::Job { generation: g, .. } if *g != generation)
+            })
+            .map(|(_, p)| p),
+    );
+    drop(q);
+    super::image::drain(out);
 }
 
 pub(super) fn drop_owned() {
@@ -429,12 +549,12 @@ pub(super) fn listens(ev: usize) -> bool {
 pub(super) static TYPED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub(super) static TYPED_ANY: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq)]
 pub(super) enum Cmd {
     Text {
         x: f64,
         y: f64,
-        text: String,
+        text: [u32; 2],
         rgb: u32,
         shadow: bool,
         scale: f32,
@@ -461,6 +581,11 @@ pub(super) enum Cmd {
         key: u64,
         uv: [f32; 4],
     },
+    Pin {
+        x: f64,
+        y: f64,
+    },
+    Unpin,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -468,6 +593,20 @@ pub(super) enum Layer {
     Screen,
     Panel(u8),
     Canvas,
+    CanvasOverlay,
+}
+
+impl Layer {
+    fn index(self) -> Option<usize> {
+        match self {
+            Layer::Screen => Some(0),
+            Layer::Panel(s) => {
+                (usize::from(s) < crate::gui::hud_layout::MOD_PANELS).then_some(1 + usize::from(s))
+            }
+            Layer::Canvas => Some(LAYERS - 2),
+            Layer::CanvasOverlay => Some(LAYERS - 1),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -479,7 +618,7 @@ pub(super) enum Align {
 
 const TEXT_SCALE: std::ops::RangeInclusive<f64> = 0.25..=8.0;
 
-pub(super) static HUD: Mutex<Option<Arc<Vec<(Layer, Cmd)>>>> = Mutex::new(None);
+pub(super) static HUD: Mutex<Option<Arc<HudFrame>>> = Mutex::new(None);
 
 pub(super) static SCREEN: AtomicU64 = AtomicU64::new(0);
 
@@ -494,11 +633,15 @@ pub(super) fn screen() -> (f32, f32) {
 }
 
 pub fn draw_hud(p: &mut crate::gui::painter::Painter, vw: f32, vh: f32) {
+    note_screen(vw, vh);
+    paint_cmds(p, Layer::Screen, None);
+}
+
+fn note_screen(vw: f32, vh: f32) {
     SCREEN.store(
         u64::from(vw.to_bits()) << 32 | u64::from(vh.to_bits()),
         Relaxed,
     );
-    paint_cmds(p, Layer::Screen, None);
 }
 
 pub fn draw_panel(p: &mut crate::gui::painter::Painter, slot: usize) {
@@ -508,14 +651,19 @@ pub fn draw_panel(p: &mut crate::gui::painter::Painter, slot: usize) {
 }
 
 pub fn draw_canvas(p: &mut crate::gui::painter::Painter, cam: Camera, vw: f32, vh: f32) {
+    note_screen(vw, vh);
     paint_cmds(p, Layer::Canvas, Some((cam, vw, vh)));
 }
 
+pub fn draw_canvas_overlay(p: &mut crate::gui::painter::Painter) {
+    paint_cmds(p, Layer::CanvasOverlay, None);
+}
+
 fn paint_cmds(p: &mut crate::gui::painter::Painter, layer: Layer, cam: Option<(Camera, f32, f32)>) {
-    let Some(cmds) = HUD.lock().unwrap_or_else(PoisonError::into_inner).clone() else {
+    let Some(frame) = HUD.lock().unwrap_or_else(PoisonError::into_inner).clone() else {
         return;
     };
-    let at = |x: f64, y: f64| -> (f32, f32) {
+    let through = move |x: f64, y: f64| -> (f32, f32) {
         match cam {
             Some((c, vw, vh)) => (
                 (f64::from(vw) * 0.5 + (x - c.x) * c.scale) as f32,
@@ -524,11 +672,17 @@ fn paint_cmds(p: &mut crate::gui::painter::Painter, layer: Layer, cam: Option<(C
             None => (x as f32, y as f32),
         }
     };
-    let size = |w: f64, h: f64| -> (f32, f32) {
-        let s = cam.map_or(1.0, |(c, ..)| c.scale);
-        ((w * s) as f32, (h * s) as f32)
-    };
-    for (_, c) in cmds.iter().filter(|(l, _)| *l == layer) {
+    let scale = cam.map_or(1.0, |(c, ..)| c.scale);
+    let mut pin: Option<(f32, f32)> = None;
+    for c in frame.layer(layer) {
+        let at = move |x: f64, y: f64| match pin {
+            Some((px, py)) => (px + x as f32, py + y as f32),
+            None => through(x, y),
+        };
+        let size = move |w: f64, h: f64| {
+            let s = if pin.is_some() { 1.0 } else { scale };
+            ((w * s) as f32, (h * s) as f32)
+        };
         match c {
             Cmd::Text {
                 x,
@@ -539,6 +693,7 @@ fn paint_cmds(p: &mut crate::gui::painter::Painter, layer: Layer, cam: Option<(C
                 scale,
                 align,
             } => {
+                let text = frame.text(*text);
                 let (x, y) = at(*x, *y);
                 let dx = match align {
                     Align::Left => 0.0,
@@ -546,9 +701,9 @@ fn paint_cmds(p: &mut crate::gui::painter::Painter, layer: Layer, cam: Option<(C
                     Align::Right => -p.atlas.font.width_str(text),
                 };
                 if *scale == 1.0 {
-                    p.text_str(text, x + dx, y, *rgb, *shadow);
+                    p.text_plain(text, x + dx, y, *rgb, *shadow);
                 } else {
-                    p.scaled_in(*scale, x, y, |p| p.text_str(text, dx, 0.0, *rgb, *shadow));
+                    p.scaled_in(*scale, x, y, |p| p.text_plain(text, dx, 0.0, *rgb, *shadow));
                 }
             }
             Cmd::Rect { x, y, w, h, argb } => {
@@ -570,6 +725,8 @@ fn paint_cmds(p: &mut crate::gui::painter::Painter, layer: Layer, cam: Option<(C
                 let ((x, y), (w, h)) = (at(*x, *y), size(*w, *h));
                 p.image(*key, x, y, w, h, *uv, 0xFFFF_FFFF);
             }
+            Cmd::Pin { x, y } => pin = Some(through(*x, *y)),
+            Cmd::Unpin => pin = None,
         }
     }
 }
@@ -579,7 +736,7 @@ fn item_with_count(p: &mut crate::gui::painter::Painter, id: &str, x: f32, y: f3
     if count > 1 {
         let n = count.to_string();
         let w = p.atlas.font.width_str(&n);
-        p.text_str(&n, x + 17.0 - w, y + 9.0, 0xFF_FFFF, true);
+        p.text_plain(&n, x + 17.0 - w, y + 9.0, 0xFF_FFFF, true);
     }
 }
 
@@ -623,7 +780,24 @@ pub enum UiForm {
     Rows,
     Prompt(String),
     File(FileAsk),
-    Canvas,
+    Canvas(Option<OverPrompt>),
+}
+
+#[derive(Clone, Debug)]
+pub struct OverPrompt {
+    pub title: String,
+    pub default: String,
+}
+
+pub(super) fn reshow_canvas(list: &UiList, prompt: Option<OverPrompt>) -> Arc<UiList> {
+    Arc::new(UiList {
+        serial: UI_SERIAL.fetch_add(1, Relaxed),
+        owner: list.owner,
+        title: list.title.clone(),
+        footer: String::new(),
+        rows: Vec::new(),
+        form: UiForm::Canvas(prompt),
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -633,6 +807,7 @@ pub struct Camera {
     pub scale: f64,
     pub vw: f32,
     pub vh: f32,
+    pub mouse: Option<[f32; 2]>,
 }
 
 impl Camera {
@@ -642,6 +817,7 @@ impl Camera {
         scale: 1.0,
         vw: 0.0,
         vh: 0.0,
+        mouse: None,
     };
     pub const SCALE: std::ops::RangeInclusive<f64> = 0.0625..=64.0;
 
@@ -910,16 +1086,11 @@ pub(super) fn tables(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Tables> {
             |_, ctx, (x, y, z): (f64, f64, f64)| {
                 let what = "torch.world.block";
                 let pos = block_pos(x, y, z, what)?;
-                let bot = ctx.bot(what)?;
-                let Ok(world) = bot.world() else {
+                let Some(world) = ctx.world(what)? else {
                     return Ok(None);
                 };
                 let state = world.read().get_block_state(pos);
-                Ok(state.map(|s| {
-                    let block: Box<dyn azalea::block::BlockTrait> =
-                        Box::<dyn azalea::block::BlockTrait>::from(s);
-                    format!("minecraft:{}", block.id())
-                }))
+                Ok(state.map(|s| s.as_block_kind().to_str()))
             },
         )?,
     )?;
@@ -1307,15 +1478,19 @@ pub(super) fn tables(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Tables> {
              (x, y, text, c, shadow, scale, align): (
                 f64,
                 f64,
-                String,
+                mlua::String,
                 Option<f64>,
                 Option<bool>,
                 Option<f64>,
-                Option<String>,
+                Option<mlua::String>,
             )| {
                 let what = "torch.hud.text";
                 let rgb = color(c, what)? & 0xFF_FFFF;
-                let text: String = text.chars().take(HUD_TEXT).collect();
+                let text = text.to_str()?;
+                let text = text
+                    .char_indices()
+                    .nth(HUD_TEXT)
+                    .map_or(&*text, |(cut, _)| &text[..cut]);
                 let scale = scale.unwrap_or(1.0);
                 if !TEXT_SCALE.contains(&scale) {
                     return Err(Error::runtime(format!(
@@ -1324,29 +1499,27 @@ pub(super) fn tables(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Tables> {
                         TEXT_SCALE.end()
                     )));
                 }
-                let align = match align.as_deref() {
-                    None | Some("left") => Align::Left,
-                    Some("center") => Align::Center,
-                    Some("right") => Align::Right,
+                let align = match align.as_ref().map(|a| a.as_bytes()).as_deref() {
+                    None | Some(b"left") => Align::Left,
+                    Some(b"center") => Align::Center,
+                    Some(b"right") => Align::Right,
                     Some(other) => {
+                        let other = String::from_utf8_lossy(other);
                         return Err(Error::runtime(format!(
                             "{what}: align `{other}` is one of left, center, right"
                         )));
                     }
                 };
-                draw(
-                    ctx,
-                    what,
-                    Cmd::Text {
-                        x,
-                        y,
-                        text,
-                        rgb,
-                        shadow: shadow.unwrap_or(true),
-                        scale: scale as f32,
-                        align,
-                    },
-                )
+                let cmd = Cmd::Text {
+                    x,
+                    y,
+                    text: [0, 0],
+                    rgb,
+                    shadow: shadow.unwrap_or(true),
+                    scale: scale as f32,
+                    align,
+                };
+                draw_text(ctx, what, cmd, text)
             },
         )?,
     )?;
@@ -1533,7 +1706,46 @@ pub(super) fn tables(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Tables> {
     ui.raw_set(
         "draw",
         game_fn(lua, ctx, "torch.ui.draw", |_, ctx, f: mlua::Function| {
-            ui_draw(ctx, f)
+            canvas_layer(ctx, f, Layer::Canvas)
+        })?,
+    )?;
+    ui.raw_set(
+        "overlay",
+        game_fn(lua, ctx, "torch.ui.overlay", |_, ctx, f: mlua::Function| {
+            canvas_layer(ctx, f, Layer::CanvasOverlay)
+        })?,
+    )?;
+    ui.raw_set(
+        "pin",
+        game_fn(
+            lua,
+            ctx,
+            "torch.ui.pin",
+            |_, ctx, (x, y, f): (f64, f64, mlua::Function)| ui_pin(ctx, x, y, f),
+        )?,
+    )?;
+    ui.raw_set(
+        "mouse",
+        game_fn(lua, ctx, "torch.ui.mouse", |lua, ctx, ()| {
+            let (k, _) = ctx.caller("torch.ui.mouse")?;
+            if !canvas_open(k) {
+                return Ok(Value::Nil);
+            }
+            let c = *CAMERA.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some([sx, sy]) = c.mouse else {
+                return Ok(Value::Nil);
+            };
+            let [x, y] = c.canvas_at(sx, sy);
+            let t = lua.create_table()?;
+            for (key, v) in [
+                ("sx", f64::from(sx)),
+                ("sy", f64::from(sy)),
+                ("x", x),
+                ("y", y),
+            ] {
+                t.raw_set(key, v)?;
+            }
+            Ok(Value::Table(t))
         })?,
     )?;
     ui.raw_set(
@@ -1663,13 +1875,14 @@ fn row_buttons(t: &Table, what: &str) -> mlua::Result<Vec<String>> {
 
 fn ui_prompt(ctx: &Ctx, spec: Table) -> mlua::Result<()> {
     let what = "torch.ui.prompt";
+    const KEYS: [&str; 3] = ["title", "default", "over"];
     let (k, _) = ctx.caller(what)?;
     for pair in spec.pairs::<String, Value>() {
         let (key, _) = pair?;
-        if !["title", "default"].contains(&key.as_str()) {
+        if !KEYS.contains(&key.as_str()) {
             return Err(Error::runtime(format!(
-                "{what}: takes {{ title = ..., default = ... }}; `{key}` is not one of them{}",
-                super::api::suggest(&key, &["title", "default"])
+                "{what}: takes {{ title = ..., default = ..., over = ... }}; `{key}` is not one of them{}",
+                super::api::suggest(&key, &KEYS)
             )));
         }
     }
@@ -1677,6 +1890,16 @@ fn ui_prompt(ctx: &Ctx, spec: Table) -> mlua::Result<()> {
         |v: Option<String>| -> String { v.unwrap_or_default().chars().take(UI_TEXT).collect() };
     let title = text(spec.raw_get("title")?);
     let default = text(spec.raw_get("default")?);
+    if spec.raw_get::<Option<bool>>("over")?.unwrap_or(false) {
+        let mut ui = UI.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(list) = ui
+            .as_ref()
+            .filter(|l| l.owner == k && matches!(l.form, UiForm::Canvas(_)))
+        {
+            *ui = Some(reshow_canvas(list, Some(OverPrompt { title, default })));
+            return Ok(());
+        }
+    }
     show_ui(k, title, String::new(), Vec::new(), UiForm::Prompt(default));
     Ok(())
 }
@@ -1700,7 +1923,7 @@ pub(super) fn canvas_open(k: usize) -> bool {
     UI.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .as_ref()
-        .is_some_and(|l| l.owner == k && matches!(l.form, UiForm::Canvas))
+        .is_some_and(|l| l.owner == k && matches!(l.form, UiForm::Canvas(_)))
 }
 
 fn ui_canvas(ctx: &Ctx, spec: Option<Table>) -> mlua::Result<()> {
@@ -1747,9 +1970,10 @@ fn ui_canvas(ctx: &Ctx, spec: Option<Table>) -> mlua::Result<()> {
     }
     let open = {
         let ui = UI.lock().unwrap_or_else(PoisonError::into_inner);
-        ui.as_ref()
-            .filter(|l| l.owner == k && matches!(l.form, UiForm::Canvas))
-            .map(|l| l.title == title)
+        ui.as_ref().and_then(|l| match &l.form {
+            UiForm::Canvas(over) if l.owner == k => Some((l.title == title, over.clone())),
+            _ => None,
+        })
     };
     {
         let mut cam = CAMERA.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1757,6 +1981,7 @@ fn ui_canvas(ctx: &Ctx, spec: Option<Table>) -> mlua::Result<()> {
             *cam = Camera {
                 vw: cam.vw,
                 vh: cam.vh,
+                mouse: cam.mouse,
                 ..Camera::DEFAULT
             };
         }
@@ -1770,14 +1995,20 @@ fn ui_canvas(ctx: &Ctx, spec: Option<Table>) -> mlua::Result<()> {
             cam.scale = s;
         }
     }
-    if open != Some(true) {
-        show_ui(k, title, String::new(), Vec::new(), UiForm::Canvas);
+    match open {
+        Some((true, _)) => {}
+        Some((false, over)) => show_ui(k, title, String::new(), Vec::new(), UiForm::Canvas(over)),
+        None => show_ui(k, title, String::new(), Vec::new(), UiForm::Canvas(None)),
     }
     Ok(())
 }
 
-fn ui_draw(ctx: &Ctx, f: mlua::Function) -> mlua::Result<bool> {
-    let what = "torch.ui.draw";
+fn canvas_layer(ctx: &Ctx, f: mlua::Function, layer: Layer) -> mlua::Result<bool> {
+    let what = if layer == Layer::Canvas {
+        "torch.ui.draw"
+    } else {
+        "torch.ui.overlay"
+    };
     {
         let mut game = ctx.game.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(k) = game.drawing else {
@@ -1785,22 +2016,65 @@ fn ui_draw(ctx: &Ctx, f: mlua::Function) -> mlua::Result<bool> {
                 "{what} only works inside onrender2d"
             )));
         };
-        if game.panel.is_some() || game.canvas {
+        if game.panel.is_some() || game.canvas.is_some() {
             return Err(Error::runtime(format!(
-                "{what} cannot run inside torch.hud.panel or another torch.ui.draw"
+                "{what} cannot run inside torch.hud.panel, torch.ui.draw or torch.ui.overlay"
             )));
         }
         if !canvas_open(k) {
             return Ok(false);
         }
-        game.canvas = true;
+        game.canvas = Some(layer);
     }
     let r = f.call::<()>(());
     ctx.game
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .canvas = false;
+        .canvas = None;
     r.map(|()| true)
+}
+
+fn ui_pin(ctx: &Ctx, x: f64, y: f64, f: mlua::Function) -> mlua::Result<()> {
+    let what = "torch.ui.pin";
+    if !(x.is_finite() && y.is_finite()) {
+        return Err(Error::runtime(format!("{what}: x and y must be finite")));
+    }
+    {
+        let mut game = ctx.game.lock().unwrap_or_else(PoisonError::into_inner);
+        if game.canvas != Some(Layer::Canvas) {
+            return Err(Error::runtime(format!(
+                "{what} only works inside torch.ui.draw"
+            )));
+        }
+        if game.pin {
+            return Err(Error::runtime(format!(
+                "{what} cannot run inside another torch.ui.pin"
+            )));
+        }
+        game.pin = true;
+    }
+    let r = draw(ctx, what, Cmd::Pin { x, y }).map(|()| f.call::<()>(()));
+    let mut game = ctx.game.lock().unwrap_or_else(PoisonError::into_inner);
+    game.pin = false;
+    let r = r?;
+    let Game {
+        hud,
+        drawn,
+        drawing,
+        ..
+    } = &mut *game;
+    if let Some(cmds) = (*drawing)
+        .and_then(|k| hud.get_mut(k))
+        .map(|h| &mut h.now.cmds)
+    {
+        if matches!(cmds.last(), Some((_, Cmd::Pin { .. }))) {
+            cmds.pop();
+            drawn.1 -= 1;
+        } else {
+            cmds.push((Layer::Canvas, Cmd::Unpin));
+        }
+    }
+    r
 }
 
 const QUERY_CAP: usize = 64;
@@ -2015,6 +2289,10 @@ fn waypoints(lua: &Lua, ctx: &Ctx) -> mlua::Result<Table> {
 }
 
 fn draw(ctx: &Ctx, what: &str, cmd: Cmd) -> mlua::Result<()> {
+    draw_text(ctx, what, cmd, "")
+}
+
+fn draw_text(ctx: &Ctx, what: &str, mut cmd: Cmd, text: &str) -> mlua::Result<()> {
     if let Cmd::Text { x, y, .. }
     | Cmd::Rect { x, y, .. }
     | Cmd::Item { x, y, .. }
@@ -2030,11 +2308,12 @@ fn draw(ctx: &Ctx, what: &str, cmd: Cmd) -> mlua::Result<()> {
         )));
     };
     let layer = match (game.canvas, game.panel) {
-        (true, _) => Layer::Canvas,
-        (false, Some(slot)) => Layer::Panel(slot),
-        (false, None) => Layer::Screen,
+        (Some(layer), _) => layer,
+        (None, Some(slot)) => Layer::Panel(slot),
+        (None, None) => Layer::Screen,
     };
-    let (cap, count) = if game.canvas {
+    let canvas = game.canvas.is_some();
+    let (cap, count) = if canvas {
         (CANVAS_CAP, game.drawn.1)
     } else {
         (HUD_CAP, game.drawn.0)
@@ -2044,13 +2323,17 @@ fn draw(ctx: &Ctx, what: &str, cmd: Cmd) -> mlua::Result<()> {
             "{what}: more than {cap} draws in one onrender2d"
         )));
     }
-    if game.canvas {
+    if canvas {
         game.drawn.1 += 1;
     } else {
         game.drawn.0 += 1;
     }
-    game.hud[k].push((layer, cmd));
-    game.hud_dirty = true;
+    let drawn = &mut game.hud[k].now;
+    if let Cmd::Text { text: span, .. } = &mut cmd {
+        *span = [drawn.text.len() as u32, text.len() as u32];
+        drawn.text.push_str(text);
+    }
+    drawn.cmds.push((layer, cmd));
     Ok(())
 }
 
@@ -2070,9 +2353,9 @@ fn hud_panel(ctx: &Ctx, name: String, f: mlua::Function) -> mlua::Result<()> {
                 "{what} cannot run inside another torch.hud.panel"
             )));
         }
-        if game.canvas {
+        if game.canvas.is_some() {
             return Err(Error::runtime(format!(
-                "{what} cannot run inside torch.ui.draw"
+                "{what} cannot run inside torch.ui.draw or torch.ui.overlay"
             )));
         }
         let mine: Vec<&'static str> = game
@@ -2110,17 +2393,17 @@ fn hud_panel(ctx: &Ctx, name: String, f: mlua::Function) -> mlua::Result<()> {
 
 fn entities(lua: &Lua, ctx: &Ctx, arg: Option<Table>) -> mlua::Result<Table> {
     let what = "torch.world.entities";
-    let (mut radius, mut kinds): (f64, Vec<String>) = (16.0, Vec::new());
+    let (mut radius, mut names): (f64, Vec<String>) = (16.0, Vec::new());
     if let Some(arg) = &arg {
         for pair in arg.pairs::<String, Value>() {
             let (k, v) = pair?;
             match (k.as_str(), v) {
                 ("radius", Value::Integer(n)) => radius = n as f64,
                 ("radius", Value::Number(n)) => radius = n,
-                ("type", Value::String(s)) => kinds.push(s.to_string_lossy()),
+                ("type", Value::String(s)) => names.push(s.to_string_lossy()),
                 ("type", Value::Table(t)) => {
                     for s in t.sequence_values::<String>() {
-                        kinds.push(s?);
+                        names.push(s?);
                     }
                 }
                 (k, _) => {
@@ -2136,11 +2419,10 @@ fn entities(lua: &Lua, ctx: &Ctx, arg: Option<Table>) -> mlua::Result<Table> {
         return Err(Error::runtime(format!("{what}: radius must be above 0")));
     }
     let radius = radius.min(128.0);
-    for k in &mut kinds {
-        if let Some(bare) = k.strip_prefix("minecraft:") {
-            *k = bare.to_string();
-        }
-    }
+    let filtered = !names.is_empty();
+    let kinds: Vec<azalea_registry::builtin::EntityKind> = (names.iter())
+        .filter_map(|n| std::str::FromStr::from_str(n.strip_prefix("minecraft:").unwrap_or(n)).ok())
+        .collect();
     let bot = ctx.bot(what)?;
     let me = ctx
         .game
@@ -2161,12 +2443,8 @@ fn entities(lua: &Lua, ctx: &Ctx, arg: Option<Table>) -> mlua::Result<Table> {
         if d > radius {
             return;
         }
-        if !kinds.is_empty() {
-            let kind = seen.kind.to_string();
-            let bare = kind.strip_prefix("minecraft:").unwrap_or(&kind);
-            if !kinds.iter().any(|k| k == bare) {
-                return;
-            }
+        if filtered && !kinds.contains(&seen.kind) {
+            return;
         }
         let uuid = seen
             .world
@@ -2209,15 +2487,9 @@ fn entity_row(
     name: Option<String>,
     uuid: Option<u128>,
 ) -> mlua::Result<Table> {
-    let kind = kind.to_string();
-    let kind = if kind.starts_with("minecraft:") {
-        kind
-    } else {
-        format!("minecraft:{kind}")
-    };
     let e = lua.create_table()?;
     e.raw_set("id", id)?;
-    e.raw_set("type", kind)?;
+    e.raw_set("type", kind.to_str())?;
     e.raw_set("x", pos[0])?;
     e.raw_set("y", pos[1])?;
     e.raw_set("z", pos[2])?;
@@ -2254,15 +2526,10 @@ fn target(lua: &Lua, ctx: &Ctx) -> mlua::Result<Value> {
             if b.miss {
                 return Ok(Value::Nil);
             }
-            let state = bot
-                .world()
-                .ok()
+            let state = ctx
+                .world(what)?
                 .and_then(|w| w.read().get_block_state(b.block_pos));
-            let block = state.map(|s| {
-                let block: Box<dyn azalea::block::BlockTrait> =
-                    Box::<dyn azalea::block::BlockTrait>::from(s);
-                format!("minecraft:{}", block.id())
-            });
+            let block = state.map(|s| s.as_block_kind().to_str());
             let face = FACES
                 .iter()
                 .find(|(_, d)| *d == b.direction)
@@ -2321,4 +2588,84 @@ fn target(lua: &Lua, ctx: &Ctx) -> mlua::Result<Value> {
         }
     }
     Ok(Value::Table(t))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::size_of;
+
+    #[test]
+    fn pending_stays_small() {
+        let entry = size_of::<(u64, super::Pending)>();
+        let unboxed = [
+            ("Packet", size_of::<super::super::packets::Packet>()),
+            ("JobResult", size_of::<super::super::nbt::JobResult>()),
+            ("Imported", size_of::<super::Imported>()),
+        ];
+        eprintln!("(u64, Pending) = {entry} bytes; payloads it boxes: {unboxed:?}");
+        assert!(entry <= 96, "(u64, Pending) is {entry} bytes");
+    }
+
+    #[test]
+    fn a_frame_groups_layers_and_rebases_text() {
+        use super::{Align, Cmd, Drawn, HudFrame, Layer, ModHud};
+        let text = |x: f64| Cmd::Text {
+            x,
+            y: 0.0,
+            text: [0, 0],
+            rgb: 0,
+            shadow: false,
+            scale: 1.0,
+            align: Align::Left,
+        };
+        let rect = |x: f64| Cmd::Rect {
+            x,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            argb: 0,
+        };
+        let module = |items: &[(Layer, Cmd, &str)]| {
+            let mut now = Drawn::default();
+            for &(layer, mut cmd, s) in items {
+                if let Cmd::Text { text, .. } = &mut cmd {
+                    *text = [now.text.len() as u32, s.len() as u32];
+                    now.text.push_str(s);
+                }
+                now.cmds.push((layer, cmd));
+            }
+            ModHud {
+                now,
+                before: Drawn::default(),
+            }
+        };
+        let hud = [
+            module(&[
+                (Layer::Screen, text(1.0), "ab"),
+                (Layer::Panel(1), rect(2.0), ""),
+                (Layer::Screen, text(3.0), "c"),
+            ]),
+            module(&[
+                (Layer::Canvas, rect(4.0), ""),
+                (Layer::CanvasOverlay, rect(6.0), ""),
+                (Layer::Screen, text(5.0), "de"),
+            ]),
+        ];
+        let mut frame = HudFrame::default();
+        frame.fill(&hud);
+        let texts: Vec<(f64, &str)> = (frame.layer(Layer::Screen).iter())
+            .map(|c| match c {
+                Cmd::Text { x, text, .. } => (*x, frame.text(*text)),
+                _ => panic!("a rect on the screen layer"),
+            })
+            .collect();
+        assert_eq!(texts, [(1.0, "ab"), (3.0, "c"), (5.0, "de")]);
+        assert!(matches!(frame.layer(Layer::Panel(1)), [Cmd::Rect { x, .. }] if *x == 2.0));
+        assert!(frame.layer(Layer::Panel(0)).is_empty());
+        assert!(matches!(frame.layer(Layer::Canvas), [Cmd::Rect { x, .. }] if *x == 4.0));
+        assert!(matches!(frame.layer(Layer::CanvasOverlay), [Cmd::Rect { x, .. }] if *x == 6.0));
+        frame.fill(&hud[1..]);
+        assert_eq!(frame.layer(Layer::Screen).len(), 1);
+        assert!(frame.layer(Layer::Panel(1)).is_empty());
+    }
 }

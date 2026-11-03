@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use bevy::platform::collections::HashMap as FastMap;
 
 use azalea::block::{BlockState, BlockTrait};
 use azalea_core::direction::Direction;
@@ -73,12 +75,26 @@ pub struct BlockEntityInfo {
     pub rev: u64,
 }
 
+pub type BlockEntityMap = FastMap<[i32; 3], BlockEntityInfo>;
+
+impl BlockEntityInfo {
+    fn same_parts(
+        &self,
+        kind: BlockEntityKind,
+        state_id: u16,
+        data: &Arc<BlockEntityData>,
+        anim: &Anim,
+    ) -> bool {
+        self.kind == kind
+            && self.state.state_id == state_id
+            && (Arc::ptr_eq(&self.data, data) || *self.data == **data)
+            && self.anim == *anim
+    }
+}
+
 impl PartialEq for BlockEntityInfo {
     fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.state.state_id == other.state.state_id
-            && (Arc::ptr_eq(&self.data, &other.data) || self.data == other.data)
-            && self.anim == other.anim
+        self.same_parts(other.kind, other.state.state_id, &other.data, &other.anim)
             && self.partner == other.partner
     }
 }
@@ -143,6 +159,7 @@ struct Entry {
     data: Arc<BlockEntityData>,
     anim: Anim,
     private: sim::Private,
+    state: Option<Arc<BlockStateInfo>>,
     #[cfg(lua_mods)]
     raw: Option<Arc<Nbt>>,
 }
@@ -154,6 +171,7 @@ impl Entry {
             anim: Anim::new(kind, &data),
             data,
             private: sim::Private::None,
+            state: None,
             #[cfg(lua_mods)]
             raw: None,
         }
@@ -169,18 +187,18 @@ pub fn raw_at(pos: [i32; 3]) -> Option<(String, Arc<Nbt>)> {
 
 #[derive(Default)]
 struct Store {
-    entries: HashMap<[i32; 3], Entry>,
-    states: HashMap<u16, Arc<BlockStateInfo>>,
-    kinds: HashMap<u16, Option<BlockEntityKind>>,
-    published: Arc<HashMap<[i32; 3], BlockEntityInfo>>,
+    entries: FastMap<[i32; 3], Entry>,
+    states: FastMap<u16, Arc<BlockStateInfo>>,
+    kinds: FastMap<u16, Option<BlockEntityKind>>,
+    published: Arc<BlockEntityMap>,
     next_rev: u64,
     game_time: u64,
 }
 
-static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
+crate::util::global!(fn store_cell() -> Mutex<Store>);
 
 fn store() -> MutexGuard<'static, Store> {
-    match STORE.get_or_init(Default::default).lock() {
+    match store_cell().lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
@@ -257,7 +275,7 @@ impl Store {
         *self
             .kinds
             .entry(state.id())
-            .or_insert_with(|| kind_for_block(Box::<dyn BlockTrait>::from(state).id()))
+            .or_insert_with(|| kind_for_block(crate::blocks::block_name(state)))
     }
 
     fn insert(&mut self, pos: [i32; 3], kind: BlockEntityKind, tag: &Nbt) {
@@ -476,18 +494,15 @@ pub fn publish(
     world: &azalea_world::World,
     game_time: u64,
     players: &[[f64; 3]],
-) -> Option<Arc<HashMap<[i32; 3], BlockEntityInfo>>> {
+) -> Option<Arc<BlockEntityMap>> {
     let mut store = store();
     let store = &mut *store;
     store.game_time = game_time;
 
-    let mut snapshot: HashMap<[i32; 3], BlockEntityInfo> =
-        HashMap::with_capacity(store.entries.len());
     let mut changed = false;
     let states = &mut store.states;
     let kinds = &mut store.kinds;
     let published = &store.published;
-    let next_rev = &mut store.next_rev;
     store.entries.retain(|pos, entry| {
         let block_pos = BlockPos::new(pos[0], pos[1], pos[2]);
         let Some(state) = world.get_block_state(block_pos) else {
@@ -496,7 +511,7 @@ pub fn publish(
         };
         if kinds
             .entry(state.id())
-            .or_insert_with(|| kind_for_block(Box::<dyn BlockTrait>::from(state).id()))
+            .or_insert_with(|| kind_for_block(crate::blocks::block_name(state)))
             .is_none()
         {
             changed = true;
@@ -514,17 +529,43 @@ pub fn publish(
             },
             &mut entry.private,
         );
-        let info = BlockEntityInfo {
-            kind: entry.kind,
-            state: resolved_state,
-            data: entry.data.clone(),
-            anim: entry.anim.clone(),
-            partner: None,
-            rev: 0,
-        };
-        snapshot.insert(*pos, info);
+        if !changed
+            && !published.get(pos).is_some_and(|old| {
+                old.same_parts(
+                    entry.kind,
+                    resolved_state.state_id,
+                    &entry.data,
+                    &entry.anim,
+                )
+            })
+        {
+            changed = true;
+        }
+        entry.state = Some(resolved_state);
         true
     });
+    changed |= store.entries.len() != published.len();
+    if !changed {
+        return None;
+    }
+
+    let mut snapshot = BlockEntityMap::with_capacity(store.entries.len());
+    for (pos, entry) in &store.entries {
+        let Some(state) = entry.state.clone() else {
+            continue;
+        };
+        snapshot.insert(
+            *pos,
+            BlockEntityInfo {
+                kind: entry.kind,
+                state,
+                data: entry.data.clone(),
+                anim: entry.anim.clone(),
+                partner: None,
+                rev: 0,
+            },
+        );
+    }
 
     let halves: Vec<[i32; 3]> = snapshot
         .iter()
@@ -541,28 +582,25 @@ pub fn publish(
         }
     }
 
+    let published = &store.published;
+    let next_rev = &mut store.next_rev;
     for (pos, info) in snapshot.iter_mut() {
         match published.get(pos) {
             Some(old) if *old == *info => info.rev = old.rev,
             _ => {
                 *next_rev = next_rev.wrapping_add(1);
                 info.rev = *next_rev;
-                changed = true;
             }
         }
     }
-    changed |= snapshot.len() != published.len();
 
-    if !changed {
-        return None;
-    }
     let snapshot = Arc::new(snapshot);
     store.published = snapshot.clone();
     Some(snapshot)
 }
 
 fn resolve(
-    cache: &mut HashMap<u16, Arc<BlockStateInfo>>,
+    cache: &mut FastMap<u16, Arc<BlockStateInfo>>,
     state: BlockState,
 ) -> Arc<BlockStateInfo> {
     cache
@@ -582,11 +620,7 @@ fn resolve(
         .clone()
 }
 
-fn chest_partner(
-    pos: [i32; 3],
-    info: &BlockEntityInfo,
-    all: &HashMap<[i32; 3], BlockEntityInfo>,
-) -> Option<[i32; 3]> {
+fn chest_partner(pos: [i32; 3], info: &BlockEntityInfo, all: &BlockEntityMap) -> Option<[i32; 3]> {
     let left = match info.state.chest_half {
         ChestHalf::Left => true,
         ChestHalf::Right => false,
@@ -646,7 +680,7 @@ mod tests {
             partner: None,
             rev: 0,
         };
-        let all = HashMap::from([([0, 64, 0], info(left)), ([-1, 64, 0], info(right))]);
+        let all = BlockEntityMap::from([([0, 64, 0], info(left)), ([-1, 64, 0], info(right))]);
         assert_eq!(
             chest_partner([0, 64, 0], &all[&[0, 64, 0]], &all),
             Some([-1, 64, 0])
@@ -675,7 +709,7 @@ mod tests {
             partner: None,
             rev: 0,
         };
-        let all = HashMap::from([([0, 64, 0], info.clone())]);
+        let all = BlockEntityMap::from([([0, 64, 0], info.clone())]);
         assert_eq!(chest_partner([0, 64, 0], &info, &all), None);
     }
 

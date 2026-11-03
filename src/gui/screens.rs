@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::gui::hud_layout::{ElementId, Hud};
 use crate::gui::painter::Painter;
 use crate::gui::render::GuiInput;
-use crate::gui::slots::{self, CONTAINER_W, INV_H, INV_W, Layout, draw_stack};
+use crate::gui::slots::{self, CONTAINER_W, INV_H, INV_W, Layout, draw_stack, draw_stack_held};
 use crate::gui::{
     GuiState, Screen, ScreenCtx, Snapshot, book, chat, container, creative, focus, health, hud,
     multiplayer, options, pause, profile, sign_edit, sleep, spectator_menu, tablist, title, toast,
@@ -29,7 +29,7 @@ pub fn draw(
         let menu_slots = if state.screen.is_modal() {
             s.session.menu_slots.clone()
         } else {
-            Vec::new()
+            std::sync::Arc::default()
         };
         eye_height = crate::renderer::systems::session_eye_height(&s.session) as f64;
         eye_pos = s.session.player_pos;
@@ -48,6 +48,7 @@ pub fn draw(
             titles_clear: s.session.titles_clear.take(),
             menu_slots,
             hotbar: s.session.hotbar.clone(),
+            armor: s.session.armor_stacks.clone(),
             carried: s.session.carried.clone(),
             selected: s.session.hotbar_selected,
             gamemode: s.session.gamemode,
@@ -249,6 +250,7 @@ pub fn draw(
             show_fps,
             &mut elements,
         );
+        crate::modules::hud_panels::draw(p, ctx.vw, ctx.vh, &snap, &mut elements);
         elements.draw(p, ctx.vw, ctx.vh, ElementId::BossBars, |p| {
             hud::draw_boss_bars(p, &ctx, &snap.boss_bars);
         });
@@ -409,11 +411,7 @@ pub fn draw(
         | Screen::Controls
         | Screen::GameSettings
         | Screen::ManageStorage => {
-            if state.in_menu() {
-                crate::gui::menu::background(p, ctx.vw, ctx.vh);
-            } else {
-                dim_background(p, ctx.vw, ctx.vh);
-            }
+            backdrop(p, state, &ctx);
             match state.screen {
                 Screen::VideoSettings => options::draw_video(p, state, &ctx),
                 Screen::Controls => options::draw_controls(p, state, &ctx),
@@ -425,11 +423,7 @@ pub fn draw(
         }
         #[cfg(feature = "audio")]
         Screen::AudioSettings => {
-            if state.in_menu() {
-                crate::gui::menu::background(p, ctx.vw, ctx.vh);
-            } else {
-                dim_background(p, ctx.vw, ctx.vh);
-            }
+            backdrop(p, state, &ctx);
             options::draw_audio(p, state, &ctx);
             None
         }
@@ -447,11 +441,7 @@ pub fn draw(
         }
         #[cfg(feature = "shader_support")]
         Screen::ShaderPacks | Screen::ShaderOptions => {
-            if state.in_menu() {
-                crate::gui::menu::background(p, ctx.vw, ctx.vh);
-            } else {
-                dim_background(p, ctx.vw, ctx.vh);
-            }
+            backdrop(p, state, &ctx);
             match state.screen {
                 Screen::ShaderPacks => crate::gui::shaderpacks::draw_packs(p, state, &ctx, shared),
                 _ => crate::gui::shaderpacks::draw_options(p, state, &ctx),
@@ -505,11 +495,7 @@ pub fn draw(
             None
         }
         Screen::Credits => {
-            if state.in_menu() {
-                crate::gui::menu::background(p, ctx.vw, ctx.vh);
-            } else {
-                dim_background(p, ctx.vw, ctx.vh);
-            }
+            backdrop(p, state, &ctx);
             if let Some(next) = crate::gui::credits::draw(p, &ctx, state.credits_parent) {
                 state.nav = Some(next);
             }
@@ -758,7 +744,9 @@ pub fn draw(
         let mut s = shared.lock().unwrap();
         for action in &actions {
             if let InvAction::CreativeSet { slot, stack } = action
-                && let Some(dst) = s.session.menu_slots.get_mut(*slot as usize)
+                && (*slot as usize) < s.session.menu_slots.len()
+                && let Some(dst) =
+                    std::sync::Arc::make_mut(&mut s.session.menu_slots).get_mut(*slot as usize)
             {
                 *dst = local_stack(stack);
             }
@@ -787,10 +775,14 @@ fn local_stack(stack: &SlotStack) -> SlotStack {
         item: stack.item,
         count: stack.count,
         max_damage,
-        enchantments: stack.enchantments.clone(),
-        potion: stack.potion.clone(),
+        extra: crate::session::StackExtra {
+            enchantments: stack.extra.enchantments.clone(),
+            potion: stack.extra.potion.clone(),
+            ..Default::default()
+        }
+        .into(),
         glint: crate::items::glint::default_foil(stack.item)
-            || (stack.item != "enchanted_book" && !stack.enchantments.is_empty()),
+            || (stack.item != "enchanted_book" && !stack.extra.enchantments.is_empty()),
         ..Default::default()
     }
 }
@@ -901,6 +893,9 @@ fn draw_hud(
 ) {
     let (vw, vh) = (ctx.vw, ctx.vh);
 
+    if screen_effects.vignette != 0 {
+        p.vignette(vw, vh, screen_effects.vignette);
+    }
     health::draw_freeze_overlay(p, snap, vw, vh);
     crate::gui::screen_effects::draw_portal(p, screen_effects, vw, vh);
     crate::gui::screen_effects::draw_confusion(p, screen_effects, vw, vh);
@@ -952,10 +947,17 @@ fn draw_hotbar_cluster(
         }
 
         let item_y = g.item_y();
+        let use_of = |offhand: bool| {
+            p.item_use
+                .filter(|&(hand, _)| hand == offhand)
+                .map(|(_, t)| t)
+        };
+        let (main_use, off_use) = (use_of(false), use_of(true));
         for i in 0..9 {
             let stack = snap.hotbar(i);
             if !stack.is_empty() {
-                draw_stack(p, stack, g.item_x(i), item_y);
+                let using = main_use.filter(|_| i == snap.selected as usize);
+                draw_stack_held(p, stack, g.item_x(i), item_y, using);
             }
         }
         if !offhand.is_empty() {
@@ -964,7 +966,7 @@ fn draw_hotbar_cluster(
             } else {
                 left - 26.0
             };
-            draw_stack(p, offhand, x, item_y);
+            draw_stack_held(p, offhand, x, item_y, off_use);
         }
     }
 
@@ -1091,9 +1093,9 @@ fn draw_experience_level(p: &mut Painter, vw: f32, vh: f32, level: u32) {
     let x = p.centered_x(&text, vw / 2.0);
     let y = vh - 24.0 - 9.0 - 2.0;
     for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-        p.text_str(&text, x + dx, y + dy, 0x000000, false);
+        p.text_plain(&text, x + dx, y + dy, 0x000000, false);
     }
-    p.text_str(&text, x, y, 0x80FF20, false);
+    p.text_plain(&text, x, y, 0x80FF20, false);
 }
 
 fn draw_locator_bar(p: &mut Painter, vw: f32, vh: f32, snap: &Snapshot) {
@@ -1398,8 +1400,8 @@ pub(crate) fn draw_effects_panel(
         let text_x = x0 + 32.0;
         let text_y = y0 + 7.0;
         if texture_w - 32.0 - 7.0 > 0.0 {
-            p.text_str(&name, text_x.floor(), text_y.floor(), 0xFFFFFF, false);
-            p.text_str(
+            p.text_plain(&name, text_x.floor(), text_y.floor(), 0xFFFFFF, false);
+            p.text_plain(
                 &duration,
                 text_x.floor(),
                 (text_y + 9.0).floor(),
@@ -1433,6 +1435,14 @@ fn apply_book_out(out: book::BookOut, state: &mut GuiState, shared: &Arc<SharedM
 
 pub fn dim_background(p: &mut Painter, vw: f32, vh: f32) {
     p.gradient_v(0.0, 0.0, vw, vh, 0xC0101010, 0xD0101010);
+}
+
+fn backdrop(p: &mut Painter, state: &GuiState, ctx: &ScreenCtx) {
+    if state.in_menu() {
+        crate::gui::menu::background(p, ctx.vw, ctx.vh);
+    } else {
+        dim_background(p, ctx.vw, ctx.vh);
+    }
 }
 
 #[cfg(test)]

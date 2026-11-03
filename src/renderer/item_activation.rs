@@ -10,7 +10,7 @@ use crate::items::mesh::Transform as ItemTransform;
 use crate::items::model::DisplayContext;
 use crate::renderer::HeldItem;
 use crate::renderer::frame_view::{FrameView, FrameViewSystems};
-use crate::renderer::item_assets::ItemAssets;
+use crate::renderer::item_assets::{ItemAssets, ItemUse};
 use crate::util::javarandom::JavaRandom;
 
 const LENGTH_TICKS: f32 = 40.0;
@@ -171,7 +171,7 @@ fn sync_item_activation(
             let gpu = item_assets.get(
                 &running.item.model_key(),
                 DisplayContext::Fixed.name(),
-                false,
+                ItemUse::of(&running.item, false, 0.0),
                 &mut meshes,
                 &mut images,
             );

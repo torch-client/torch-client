@@ -681,7 +681,7 @@ fn break_block(ctx: &mut Emitter, cell: [i32; 3], state: azalea::block::BlockSta
         mining: false,
         face: [0.0, 1.0, 0.0],
     };
-    spawn_block_break(&spawn, ctx.status, Some(ctx.world), ctx.live, ctx.rng);
+    spawn_block_break(&spawn, Some(ctx.world), ctx.live, ctx.rng);
 
     #[cfg(feature = "audio")]
     {

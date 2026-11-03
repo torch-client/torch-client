@@ -915,6 +915,7 @@ impl ClickGuiState {
         }
         self.field.clear();
         self.field.focused = true;
+        crate::platform::keyboard::dismiss();
         self.matches.clear();
         self.selected = 0;
         self.match_top = 0;
@@ -1075,9 +1076,13 @@ impl ClickGuiState {
         if stale {
             self.owner = KeyOwner::None;
         }
-        if !matches!(self.keys(), Keys::Number | Keys::Overlay)
-            && crate::platform::keyboard::has_focus()
-        {
+        let tapped = crate::platform::keyboard::take_zone_tap();
+        self.field.browser_keyboard =
+            tapped || (self.field.browser_keyboard && crate::platform::keyboard::has_focus());
+        let owns_keyboard = matches!(self.keys(), Keys::Number | Keys::Overlay)
+            || (self.field.browser_keyboard && matches!(self.keys(), Keys::Search))
+            || (cfg!(target_os = "android") && matches!(self.keys(), Keys::Search | Keys::Field));
+        if !owns_keyboard && crate::platform::keyboard::has_focus() {
             crate::platform::keyboard::hide();
         }
         match self.keys() {
@@ -1123,6 +1128,12 @@ impl ClickGuiState {
                 n.commit |= ui.input.enter;
             }
             Keys::Search => self.search_keys(ui),
+        }
+    }
+
+    fn arm_search(&self, ui: &Ui, x: f32, y: f32, w: f32, h: f32) {
+        if matches!(self.keys(), Keys::Search) {
+            crate::platform::keyboard::arm_zone(x / ui.vw, y / ui.vh, w / ui.vw, h / ui.vh);
         }
     }
 

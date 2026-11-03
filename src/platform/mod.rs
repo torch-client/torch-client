@@ -6,6 +6,7 @@ pub(crate) mod env;
 pub(crate) mod executor;
 pub(crate) mod fullscreen;
 #[cfg(any(
+    target_arch = "wasm32",
     feature = "asset_download",
     feature = "skins",
     feature = "update_checker",

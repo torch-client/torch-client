@@ -996,7 +996,7 @@ fn table() -> &'static Table {
 
 pub struct Tints {
     ratios: Vec<BiomeRatio>,
-    #[cfg(any(feature = "shader_support", lua_mods))]
+    #[cfg(feature = "shader_support")]
     absolute: Vec<BiomeTint>,
     plains: BiomeTint,
 }
@@ -1045,7 +1045,7 @@ impl Tints {
             .collect();
         Some(Tints {
             ratios,
-            #[cfg(any(feature = "shader_support", lua_mods))]
+            #[cfg(feature = "shader_support")]
             absolute,
             plains,
         })
@@ -1144,27 +1144,6 @@ pub fn pack_dry_foliage(idx: u8) -> [f32; 3] {
     pack_colour(idx, |t| t.dry_foliage)
 }
 
-#[cfg(lua_mods)]
-#[derive(Clone, Copy)]
-pub enum TintSource {
-    Grass,
-    Foliage,
-    Water,
-}
-
-#[cfg(lua_mods)]
-pub fn biome_rgb(idx: u8, source: TintSource) -> Option<u32> {
-    with_tints(|t| {
-        let tint = t?.absolute.get(idx as usize)?;
-        let [r, g, b] = match source {
-            TintSource::Grass => tint.grass,
-            TintSource::Foliage => tint.foliage,
-            TintSource::Water => tint.water,
-        };
-        Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
-    })
-}
-
 pub fn grass_ratio(idx: u8) -> [f32; 3] {
     lookup(idx, |r| r.grass)
 }
@@ -1176,6 +1155,11 @@ pub fn water_ratio(idx: u8) -> [f32; 3] {
 }
 pub fn dry_foliage_ratio(idx: u8) -> [f32; 3] {
     lookup(idx, |r| r.dry_foliage)
+}
+
+pub fn stem_ratio(age: u8) -> [f32; 3] {
+    let age = age.min(7);
+    [age * 32, 255 - age * 8, age * 4].map(|c| f32::from(c) / 255.0)
 }
 
 pub fn redstone_ratio(power: u8) -> [f32; 3] {

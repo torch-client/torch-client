@@ -4,39 +4,34 @@ use crate::entities::geom::{
 use crate::entities::state::EntityState;
 
 fn boat_common_parts(root: &mut PartDef) {
-    root.child(
+    root.part(
         "bottom",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-14.0, -9.0, -3.0, 28.0, 16.0, 3.0),
+        (0, 0),
+        [-14.0, -9.0, -3.0, 28.0, 16.0, 3.0],
         PartPose::offset_rotation(0.0, 3.0, 1.0, 1.570_796_4, 0.0, 0.0),
     );
-    root.child(
+    root.part(
         "back",
-        CubeList::new()
-            .tex_offs(0, 19)
-            .add_box(-13.0, -7.0, -1.0, 18.0, 6.0, 2.0),
+        (0, 19),
+        [-13.0, -7.0, -1.0, 18.0, 6.0, 2.0],
         PartPose::offset_rotation(-15.0, 4.0, 4.0, 0.0, 4.712_389, 0.0),
     );
-    root.child(
+    root.part(
         "front",
-        CubeList::new()
-            .tex_offs(0, 27)
-            .add_box(-8.0, -7.0, -1.0, 16.0, 6.0, 2.0),
+        (0, 27),
+        [-8.0, -7.0, -1.0, 16.0, 6.0, 2.0],
         PartPose::offset_rotation(15.0, 4.0, 0.0, 0.0, 1.570_796_4, 0.0),
     );
-    root.child(
+    root.part(
         "right",
-        CubeList::new()
-            .tex_offs(0, 35)
-            .add_box(-14.0, -7.0, -1.0, 28.0, 6.0, 2.0),
+        (0, 35),
+        [-14.0, -7.0, -1.0, 28.0, 6.0, 2.0],
         PartPose::offset_rotation(0.0, 4.0, -9.0, 0.0, 3.141_592_7, 0.0),
     );
-    root.child(
+    root.part(
         "left",
-        CubeList::new()
-            .tex_offs(0, 43)
-            .add_box(-14.0, -7.0, -1.0, 28.0, 6.0, 2.0),
+        (0, 43),
+        [-14.0, -7.0, -1.0, 28.0, 6.0, 2.0],
         PartPose::offset(0.0, 4.0, 9.0),
     );
     root.child(
@@ -86,25 +81,22 @@ fn raft_common_parts(root: &mut PartDef) {
 }
 
 fn add_chest_parts(root: &mut PartDef, bottom_y: f32, lid_y: f32, lock_y: f32) {
-    root.child(
+    root.part(
         "chest_bottom",
-        CubeList::new()
-            .tex_offs(0, 76)
-            .add_box(0.0, 0.0, 0.0, 12.0, 8.0, 12.0),
+        (0, 76),
+        [0.0, 0.0, 0.0, 12.0, 8.0, 12.0],
         PartPose::offset_rotation(-2.0, bottom_y, -6.0, 0.0, -1.570_796_4, 0.0),
     );
-    root.child(
+    root.part(
         "chest_lid",
-        CubeList::new()
-            .tex_offs(0, 59)
-            .add_box(0.0, 0.0, 0.0, 12.0, 4.0, 12.0),
+        (0, 59),
+        [0.0, 0.0, 0.0, 12.0, 4.0, 12.0],
         PartPose::offset_rotation(-2.0, lid_y, -6.0, 0.0, -1.570_796_4, 0.0),
     );
-    root.child(
+    root.part(
         "chest_lock",
-        CubeList::new()
-            .tex_offs(0, 59)
-            .add_box(0.0, 0.0, 0.0, 2.0, 4.0, 1.0),
+        (0, 59),
+        [0.0, 0.0, 0.0, 2.0, 4.0, 1.0],
         PartPose::offset_rotation(-1.0, lock_y, -1.0, 0.0, -1.570_796_4, 0.0),
     );
 }
@@ -141,11 +133,10 @@ pub fn chest_raft_layer() -> LayerDef {
 )]
 pub fn water_patch_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
-    mesh.root().child(
+    mesh.root().part(
         "water_patch",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-14.0, -9.0, -3.0, 28.0, 16.0, 3.0),
+        (0, 0),
+        [-14.0, -9.0, -3.0, 28.0, 16.0, 3.0],
         PartPose::offset_rotation(0.0, -3.0, 1.0, 1.570_796_4, 0.0, 0.0),
     );
     LayerDef::create(mesh, 0, 0)

@@ -6,7 +6,7 @@ use crate::gui::clickgui::Look;
 use crate::gui::painter::{CORNERS_TOP, Painter};
 use crate::gui::widgets::TextBox;
 use crate::gui::{GuiState, Screen, ScreenCtx, options};
-use crate::modules::script::{self, FileAsk, UiButton, UiForm, UiList};
+use crate::modules::script::{self, FileAsk, OverPrompt, UiButton, UiForm, UiList};
 use crate::platform::packfs::{self, Kind};
 
 const PANEL_MAX_W: f32 = 260.0;
@@ -96,6 +96,25 @@ impl LuaListState {
             script::ui_closed(list.serial);
         }
     }
+
+    pub fn windowed(&self) -> bool {
+        self.list
+            .as_ref()
+            .is_some_and(|l| matches!(l.form, UiForm::Rows | UiForm::File(_)))
+    }
+
+    pub fn escape(&mut self) -> bool {
+        let Some(list) = self
+            .list
+            .as_ref()
+            .filter(|l| matches!(l.form, UiForm::Canvas(Some(_))))
+        else {
+            return false;
+        };
+        script::ui_prompt(list.serial, None);
+        release_field(self);
+        true
+    }
 }
 
 pub fn poll(state: &mut GuiState) {
@@ -156,19 +175,22 @@ fn fit<'a>(p: &Painter, s: &'a str, w: f32) -> Cow<'a, str> {
     Cow::Owned(format!("{}{ELLIPSIS}", &s[..end]))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_prompt(
     p: &mut Painter,
     st: &mut LuaListState,
     look: Look,
     ctx: &ScreenCtx,
-    list: &UiList,
+    serial: u64,
+    title: &str,
     default: &str,
-) {
-    if st.field_for != list.serial {
+    cancel: bool,
+) -> Option<Option<String>> {
+    if st.field_for != serial {
         st.field = TextBox::bordered(PROMPT_MAX, "");
         st.field.set_text(default);
         st.field.focus();
-        st.field_for = list.serial;
+        st.field_for = serial;
     }
     let panel_w = PANEL_MAX_W.min(ctx.vw - 2.0 * MARGIN).floor();
     let panel_h = HEAD_H + 3.0 * PAD + FIELD_H + ROW_H + 2.0;
@@ -185,7 +207,7 @@ fn draw_prompt(
         look.header(),
     );
     p.fill(x, y + HEAD_H - 1.0, panel_w, 1.0, look.accent());
-    let title = fit(p, &list.title, panel_w - 2.0 * PAD);
+    let title = fit(p, title, panel_w - 2.0 * PAD);
     p.text_centered(
         &title,
         x + panel_w / 2.0,
@@ -198,11 +220,21 @@ fn draw_prompt(
     st.field
         .update(p, ctx, x + PAD, fy, panel_w - 2.0 * PAD, FIELD_H);
     let by = fy + FIELD_H + PAD;
-    let (_, done) = card_button(p, look, ctx, x + panel_w - PAD, by, "Done");
+    let right = x + panel_w - PAD;
+    let (done_w, done) = card_button(p, look, ctx, right, by, "Done");
     if ctx.input.enter || done {
-        st.list = None;
-        script::ui_prompt(list.serial, st.field.text.clone());
+        return Some(Some(st.field.text.clone()));
     }
+    if cancel && card_button(p, look, ctx, right - done_w - BUTTON_GAP, by, "Cancel").1 {
+        return Some(None);
+    }
+    None
+}
+
+fn release_field(st: &mut LuaListState) {
+    st.field.focused = false;
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    st.field.sync_keyboard();
 }
 
 fn card_button(
@@ -369,16 +401,27 @@ pub struct CanvasPress {
     drag: bool,
 }
 
-fn draw_canvas(p: &mut Painter, st: &mut LuaListState, look: Look, ctx: &ScreenCtx, list: &UiList) {
+fn draw_canvas(
+    p: &mut Painter,
+    st: &mut LuaListState,
+    look: Look,
+    ctx: &ScreenCtx,
+    list: &UiList,
+    over: Option<&OverPrompt>,
+) {
     let input = ctx.input;
     let mut clicks: Vec<(UiButton, bevy::math::Vec2)> = Vec::new();
+    if over.is_some() {
+        st.canvas_press = None;
+    }
     let cam = {
         let mut cam = script::CANVAS_CAMERA
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         cam.vw = ctx.vw;
         cam.vh = ctx.vh;
-        if let Some(m) = ctx.mouse() {
+        cam.mouse = ctx.mouse().map(|m| [m.x, m.y]);
+        if let Some(m) = ctx.mouse().filter(|_| over.is_none()) {
             if input.left_click {
                 st.canvas_press = Some(CanvasPress {
                     start: m,
@@ -427,6 +470,7 @@ fn draw_canvas(p: &mut Painter, st: &mut LuaListState, look: Look, ctx: &ScreenC
 
     p.fill(0.0, 0.0, ctx.vw, ctx.vh, BACKDROP);
     script::draw_canvas(p, cam, ctx.vw, ctx.vh);
+    script::draw_canvas_overlay(p);
     p.fill(0.0, 0.0, ctx.vw, HEAD_H, look.header());
     p.fill(0.0, HEAD_H - 1.0, ctx.vw, 1.0, look.accent());
     let title = fit(p, &list.title, ctx.vw - 2.0 * PAD);
@@ -437,6 +481,22 @@ fn draw_canvas(p: &mut Painter, st: &mut LuaListState, look: Look, ctx: &ScreenC
         look.text_title(),
         look.shadow,
     );
+
+    if let Some(over) = over
+        && let Some(answer) = draw_prompt(
+            p,
+            st,
+            look,
+            ctx,
+            list.serial,
+            &over.title,
+            &over.default,
+            true,
+        )
+    {
+        script::ui_prompt(list.serial, answer);
+        release_field(st);
+    }
 }
 
 fn buttons_w(p: &Painter, labels: &[String]) -> f32 {
@@ -452,9 +512,17 @@ pub fn draw(p: &mut Painter, st: &mut LuaListState, look: Look, ctx: &ScreenCtx)
     };
     match &list.form {
         UiForm::Rows => {}
-        UiForm::Prompt(default) => return draw_prompt(p, st, look, ctx, &list, default),
+        UiForm::Prompt(default) => {
+            if let Some(answer) =
+                draw_prompt(p, st, look, ctx, list.serial, &list.title, default, false)
+            {
+                st.list = None;
+                script::ui_prompt(list.serial, answer);
+            }
+            return;
+        }
         UiForm::File(ask) => return draw_file(p, st, look, ctx, &list, ask),
-        UiForm::Canvas => return draw_canvas(p, st, look, ctx, &list),
+        UiForm::Canvas(over) => return draw_canvas(p, st, look, ctx, &list, over.as_ref()),
     }
     let rows = list.rows.len();
     let row_h = if list.rows.iter().any(|r| r.item.is_some()) {

@@ -63,7 +63,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         let splash_x = logo_x + LOGO_W * 0.7;
         let splash_y = LOGO_Y + LOGO_H - 3.0;
         p.scaled(1.5, splash_x, splash_y, |p| {
-            p.text_str(splash, 0.0, 0.0, 0xFFFF00, true);
+            p.text_plain(splash, 0.0, 0.0, 0xFFFF00, true);
         });
     }
 
@@ -105,15 +105,19 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         state.options_parent = Screen::Title;
         state.nav = Some(Screen::Options);
     }
-    if Button::new(
+    let quit = Button::new(
         (ctx.vw / 2.0).floor() + 2.0,
         bottom,
         HALF_WIDTH,
         WIDGET_HEIGHT,
         label!("menu.quit"),
-    )
-    .draw(p, ctx)
-    {
+    );
+    #[cfg(target_arch = "wasm32")]
+    let quit = Button {
+        active: false,
+        ..quit
+    };
+    if quit.draw(p, ctx) {
         state.quit = true;
     }
 
@@ -121,11 +125,11 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         "Minecraft {ASSET_VERSION} (protocol {})",
         azalea_protocol::packets::PROTOCOL_VERSION
     );
-    p.text_str(&version, 2.0, ctx.vh - 10.0, 0xFFFFFF, true);
+    p.text_plain(&version, 2.0, ctx.vh - 10.0, 0xFFFFFF, true);
 
     let disclaimer_y = ctx.vh - 20.0;
     let credits_x =
-        p.text_str(DISCLAIMER, 2.0, disclaimer_y, 0xA0A0A0, true) + p.atlas.font.width_str(" ");
+        p.text_plain(DISCLAIMER, 2.0, disclaimer_y, 0xA0A0A0, true) + p.atlas.font.width_str(" ");
     if credits_link(p, ctx, credits_x, disclaimer_y) {
         state.credits_parent = Screen::Title;
         state.nav = Some(Screen::Credits);
@@ -180,7 +184,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     if crate::platform::address::EAGLER {
         let w = p.atlas.font.width_str(EAGLER_MODE);
-        p.text_str(
+        p.text_plain(
             EAGLER_MODE,
             (ctx.vw - w - 2.0).floor(),
             ctx.vh - 10.0,

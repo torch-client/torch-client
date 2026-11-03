@@ -1,13 +1,14 @@
 use std::cell::OnceCell;
 
 use bevy::render::render_resource::{
-    BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
-    RenderPipeline, ShaderStages, TextureFormat, TextureSampleType, TextureView,
-    TextureViewDimension,
+    BindGroupEntry, BindGroupLayout, BindingResource, RenderPipeline, TextureFormat,
+    TextureSampleType, TextureView,
 };
 use bevy::render::renderer::RenderDevice;
 
-use super::fullscreen::{fullscreen_corner, fullscreen_pass, fullscreen_pipeline};
+use super::fullscreen::{
+    fullscreen_corner, fullscreen_pass, fullscreen_pipeline, pipeline_layout, single_texture_layout,
+};
 
 const REENCODE_WGSL: &str = concat!(
     fullscreen_corner!(),
@@ -49,28 +50,16 @@ thread_local! {
 }
 
 fn reencode(device: &RenderDevice) -> Reencode {
-    let layout = device.create_bind_group_layout(
+    let layout = single_texture_layout(
+        device,
         gpu_label!("entity reencode"),
-        &[BindGroupLayoutEntry {
-            binding: 0,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::Texture {
-                sample_type: TextureSampleType::Float { filterable: false },
-                view_dimension: TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        }],
+        TextureSampleType::Float { filterable: false },
     );
     let module = device.create_and_validate_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(gpu_label!("entity reencode")),
         source: wgpu::ShaderSource::Wgsl(REENCODE_WGSL.into()),
     });
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(gpu_label!("entity reencode")),
-        bind_group_layouts: &[&layout],
-        push_constant_ranges: &[],
-    });
+    let pipeline_layout = pipeline_layout(device, gpu_label!("entity reencode"), &layout);
     let pipeline = fullscreen_pipeline(
         device,
         gpu_label!("entity reencode"),

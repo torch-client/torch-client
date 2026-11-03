@@ -527,7 +527,7 @@ fn draw_row(p: &mut Painter, f: &mut Field, ctx: &ScreenCtx, st: Style) {
         } else {
             SUGGESTION_UNSELECTED
         };
-        p.text_str(
+        p.text_plain(
             &item.text,
             x + SUGGESTION_CHIP_PAD,
             rect_y + 2.0,
@@ -607,7 +607,7 @@ fn draw_column(p: &mut Painter, f: &mut Field, ctx: &ScreenCtx, st: Style) {
         } else {
             SUGGESTION_UNSELECTED
         };
-        p.text_str(
+        p.text_plain(
             &list.items[index].text,
             rect_x + 1.0,
             row_y + 2.0,
@@ -630,7 +630,7 @@ fn draw_tooltip(p: &mut Painter, text: &str, mx: f32, my: f32, ctx: &ScreenCtx) 
     let x = (mx + 12.0).min(ctx.vw - w - 6.0).max(0.0);
     let y = (my - 12.0).max(0.0);
     p.fill(x - 3.0, y - 3.0, w + 6.0, TOOLTIP_HEIGHT, 0xF0100010);
-    p.text_str(text, x, y, 0xFFFFFF, true);
+    p.text_plain(text, x, y, 0xFFFFFF, true);
 }
 
 fn draw_usage(p: &mut Painter, f: &Field, st: Style, a: Anchor) {
@@ -652,6 +652,6 @@ fn draw_usage(p: &mut Painter, f: &Field, st: Style, a: Anchor) {
         };
         p.fill(x - 1.0, y, width + 2.0, SUGGESTION_LINE_HEIGHT, st.fill);
         let color = if *is_error { 0xFFFFFF } else { USAGE_COLOR };
-        p.text_str(line, x, y + 2.0, color, true);
+        p.text_plain(line, x, y + 2.0, color, true);
     }
 }

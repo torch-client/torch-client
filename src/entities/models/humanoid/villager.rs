@@ -10,58 +10,42 @@ pub const VILLAGER_LIKE_SCALE: f32 = 0.937_5;
 pub fn villager_mesh() -> MeshDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    let head = root.child(
+    let head = root.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-4.0, -10.0, -4.0, 8.0, 10.0, 8.0),
+        (0, 0),
+        [-4.0, -10.0, -4.0, 8.0, 10.0, 8.0],
         PartPose::ZERO,
     );
-    head.child(
+    head.part_grow(
         "hat",
-        CubeList::new().tex_offs(32, 0).add_box_grow(
-            -4.0,
-            -10.0,
-            -4.0,
-            8.0,
-            10.0,
-            8.0,
-            Grow::all(0.51),
-        ),
+        (32, 0),
+        [-4.0, -10.0, -4.0, 8.0, 10.0, 8.0],
+        Grow::all(0.51),
         PartPose::ZERO,
     )
-    .child(
+    .part(
         "hat_rim",
-        CubeList::new()
-            .tex_offs(30, 47)
-            .add_box(-8.0, -8.0, -6.0, 16.0, 16.0, 1.0),
+        (30, 47),
+        [-8.0, -8.0, -6.0, 16.0, 16.0, 1.0],
         PartPose::rotation(-FRAC_PI_2, 0.0, 0.0),
     );
-    head.child(
+    head.part(
         "nose",
-        CubeList::new()
-            .tex_offs(24, 0)
-            .add_box(-1.0, -1.0, -6.0, 2.0, 4.0, 2.0),
+        (24, 0),
+        [-1.0, -1.0, -6.0, 2.0, 4.0, 2.0],
         PartPose::offset(0.0, -2.0, 0.0),
     );
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(16, 20)
-            .add_box(-4.0, 0.0, -3.0, 8.0, 12.0, 6.0),
+        (16, 20),
+        [-4.0, 0.0, -3.0, 8.0, 12.0, 6.0],
         PartPose::ZERO,
     )
-    .child(
+    .part_grow(
         "jacket",
-        CubeList::new().tex_offs(0, 38).add_box_grow(
-            -4.0,
-            0.0,
-            -3.0,
-            8.0,
-            20.0,
-            6.0,
-            Grow::all(0.5),
-        ),
+        (0, 38),
+        [-4.0, 0.0, -3.0, 8.0, 20.0, 6.0],
+        Grow::all(0.5),
         PartPose::ZERO,
     );
     root.child(
@@ -75,11 +59,10 @@ pub fn villager_mesh() -> MeshDef {
             .add_box(-4.0, 2.0, -2.0, 8.0, 4.0, 4.0),
         PartPose::offset_rotation(0.0, 3.0, -1.0, -0.75, 0.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(0, 22)
-            .add_box(-2.0, 0.0, -2.0, 4.0, 12.0, 4.0),
+        (0, 22),
+        [-2.0, 0.0, -2.0, 4.0, 12.0, 4.0],
         PartPose::offset(-2.0, 12.0, 0.0),
     );
     root.child(
@@ -123,79 +106,60 @@ pub fn baby_villager_mesh() -> MeshDef {
             .add_box(5.0, -2.4925, -1.8401, 2.0, 4.0, 2.0),
         PartPose::offset_rotation(-3.0, 1.4025, -0.9599, -1.047_2, 0.0, 0.0),
     );
-    arms.child(
+    arms.part(
         "middlearm_r1",
-        CubeList::new()
-            .tex_offs(24, 17)
-            .add_box(-2.0, -0.9924, -0.9825, 4.0, 2.0, 2.0),
+        (24, 17),
+        [-2.0, -0.9924, -0.9825, 4.0, 2.0, 2.0],
         PartPose::offset_rotation(0.0, 0.9024, -1.8175, -1.047_2, 0.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(8, 23)
-            .add_box(-1.0, -0.5, -1.0, 2.0, 3.0, 2.0),
+        (8, 23),
+        [-1.0, -0.5, -1.0, 2.0, 3.0, 2.0],
         PartPose::offset(-1.0, 21.5, 0.0),
     );
-    root.child(
+    root.part(
         "left_leg",
-        CubeList::new()
-            .tex_offs(0, 23)
-            .add_box(-1.0, -0.5, -1.0, 2.0, 3.0, 2.0),
+        (0, 23),
+        [-1.0, -0.5, -1.0, 2.0, 3.0, 2.0],
         PartPose::offset(1.0, 21.5, 0.0),
     );
-    let head = root.child(
+    let head = root.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-4.0, -8.0, -3.5, 8.0, 8.0, 7.0),
+        (0, 0),
+        [-4.0, -8.0, -3.5, 8.0, 8.0, 7.0],
         PartPose::offset(0.0, 16.0, 0.0),
     );
-    head.child(
+    head.part_grow(
         "hat",
-        CubeList::new().tex_offs(0, 30).add_box_grow(
-            -4.0,
-            -4.0,
-            -3.5,
-            8.0,
-            8.0,
-            7.0,
-            Grow::all(0.3),
-        ),
+        (0, 30),
+        [-4.0, -4.0, -3.5, 8.0, 8.0, 7.0],
+        Grow::all(0.3),
         PartPose::offset(0.0, -4.0, 0.0),
     );
-    head.child(
+    head.part(
         "hat_rim",
-        CubeList::new()
-            .tex_offs(0, 45)
-            .add_box(-7.0, -0.5, -6.0, 14.0, 1.0, 12.0),
+        (0, 45),
+        [-7.0, -0.5, -6.0, 14.0, 1.0, 12.0],
         PartPose::offset(0.0, -4.5, 0.0),
     );
-    head.child(
+    head.part(
         "nose",
-        CubeList::new()
-            .tex_offs(23, 0)
-            .add_box(-1.0, 0.0, -0.5, 2.0, 2.0, 1.0),
+        (23, 0),
+        [-1.0, 0.0, -0.5, 2.0, 2.0, 1.0],
         PartPose::offset(0.0, -2.0, -4.0),
     );
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 15)
-            .add_box(-2.0, -2.75, -1.5, 4.0, 5.0, 3.0),
+        (0, 15),
+        [-2.0, -2.75, -1.5, 4.0, 5.0, 3.0],
         PartPose::offset(0.0, 18.75, 0.0),
     );
-    root.child(
+    root.part_grow(
         "bb_main",
-        CubeList::new().tex_offs(16, 21).add_box_grow(
-            -2.5,
-            -8.0,
-            -1.5,
-            4.0,
-            6.0,
-            3.0,
-            Grow::all(0.2),
-        ),
+        (16, 21),
+        [-2.5, -8.0, -1.5, 4.0, 6.0, 3.0],
+        Grow::all(0.2),
         PartPose::offset(0.5, 24.0, 0.0),
     );
     mesh
@@ -237,59 +201,43 @@ pub fn witch_layer() -> LayerDef {
     let mut mesh = villager_mesh();
     {
         let root = mesh.root();
-        let head = root.child(
+        let head = root.part(
             "head",
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box(-4.0, -10.0, -4.0, 8.0, 10.0, 8.0),
+            (0, 0),
+            [-4.0, -10.0, -4.0, 8.0, 10.0, 8.0],
             PartPose::ZERO,
         );
-        let hat = head.child(
+        let hat = head.part(
             "hat",
-            CubeList::new()
-                .tex_offs(0, 64)
-                .add_box(0.0, 0.0, 0.0, 10.0, 2.0, 10.0),
+            (0, 64),
+            [0.0, 0.0, 0.0, 10.0, 2.0, 10.0],
             PartPose::offset(-5.0, -10.031_25, -5.0),
         );
-        let hat2 = hat.child(
+        let hat2 = hat.part(
             "hat2",
-            CubeList::new()
-                .tex_offs(0, 76)
-                .add_box(0.0, 0.0, 0.0, 7.0, 4.0, 7.0),
+            (0, 76),
+            [0.0, 0.0, 0.0, 7.0, 4.0, 7.0],
             PartPose::offset_rotation(1.75, -4.0, 2.0, -0.052_359_88, 0.0, 0.026_179_94),
         );
-        let hat3 = hat2.child(
+        let hat3 = hat2.part(
             "hat3",
-            CubeList::new()
-                .tex_offs(0, 87)
-                .add_box(0.0, 0.0, 0.0, 4.0, 4.0, 4.0),
+            (0, 87),
+            [0.0, 0.0, 0.0, 4.0, 4.0, 4.0],
             PartPose::offset_rotation(1.75, -4.0, 2.0, -0.104_719_76, 0.0, 0.052_359_88),
         );
-        hat3.child(
+        hat3.part_grow(
             "hat4",
-            CubeList::new().tex_offs(0, 95).add_box_grow(
-                0.0,
-                0.0,
-                0.0,
-                1.0,
-                2.0,
-                1.0,
-                Grow::all(0.25),
-            ),
+            (0, 95),
+            [0.0, 0.0, 0.0, 1.0, 2.0, 1.0],
+            Grow::all(0.25),
             PartPose::offset_rotation(1.75, -2.0, 2.0, -0.209_439_52, 0.0, 0.104_719_76),
         );
     }
-    mesh.root().get("head/nose").child(
+    mesh.root().get("head/nose").part_grow(
         "mole",
-        CubeList::new().tex_offs(0, 0).add_box_grow(
-            0.0,
-            3.0,
-            -6.75,
-            1.0,
-            1.0,
-            1.0,
-            Grow::all(-0.25),
-        ),
+        (0, 0),
+        [0.0, 3.0, -6.75, 1.0, 1.0, 1.0],
+        Grow::all(-0.25),
         PartPose::offset(0.0, -2.0, 0.0),
     );
     LayerDef::create(humanoid::scaling(mesh, VILLAGER_LIKE_SCALE), 64, 128)

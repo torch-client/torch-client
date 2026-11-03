@@ -125,7 +125,7 @@ self.onmessage = (e) => {
   if (workerBlob !== null) {
     window.Worker = class extends RealWorker {
       constructor(url, options) {
-        super(String(url).split("?")[0].endsWith("worker.js") ? workerBlob : url, options);
+        super(String(url) === %(worker_ref)s ? workerBlob : url, options);
       }
     };
   }
@@ -180,7 +180,11 @@ def main():
     if re.search(r"^import\s", glue, flags=re.M):
         sys.exit("glue still has an import after inlining snippets")
 
-    worker_path = os.path.join(site, "worker.js")
+    w = re.search(r"""globalThis\.torchWorker\s*=\s*["']\./(worker[^"']*\.js)["']""", page)
+    if not w:
+        sys.exit("page has no torchWorker line")
+    worker_name = w.group(1)
+    worker_path = os.path.join(site, worker_name)
     worker_src = read(worker_path) if os.path.exists(worker_path) else None
 
     imp = re.search(r"""import\s+init\s*,\s*\{([^}]*)\}\s*from\s*["']\./""" + re.escape(glue_name) + r"""["']\s*;?""", page)
@@ -193,7 +197,6 @@ def main():
         1,
     )
     page = page.replace('import("./%s")' % glue_name, "import(window.__glueUrl)")
-    page = page.replace('globalThis.torchGlue = "./%s";' % glue_name, "globalThis.torchGlue = window.__glueUrl;")
     if "./" + glue_name in page:
         sys.exit("page still names ./" + glue_name)
 
@@ -214,6 +217,7 @@ def main():
         "decoder": js_string(read(os.path.join(HERE, "lzma_dec.js"))),
         "wasm_name": js_string(wasm_name),
         "worker": js_string(worker_src) if worker_src is not None else "null",
+        "worker_ref": js_string("./" + worker_name),
         "glue_ref": js_string("./" + glue_name),
     }
 

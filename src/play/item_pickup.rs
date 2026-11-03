@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use azalea_protocol::packets::game::c_take_item_entity::ClientboundTakeItemEntity;
@@ -38,10 +37,8 @@ impl ItemPickup {
     }
 }
 
-static TAKEN: OnceLock<SideMutex<HashSet<i32>>> = OnceLock::new();
-
-pub(crate) fn taken() -> &'static SideMutex<HashSet<i32>> {
-    TAKEN.get_or_init(Default::default)
+crate::util::global! {
+    pub(crate) fn taken() -> SideMutex<HashSet<i32>>
 }
 
 fn ghost_id() -> i32 {

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+use std::f32::consts::{FRAC_PI_2, PI};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -7,17 +7,16 @@ use bevy::prelude::*;
 
 use super::anim::{AnimSample, ArmPose, Armor, HeldItem};
 use super::entity_material::{ALPHA_CUTOUT, EntityMaterial, LightMode, Lit, diffuse_lights};
-use super::item_assets::ItemAssets;
+use super::item_assets::{ItemAssets, ItemUse, Owner};
 use crate::entities::geom::{self, PartState};
 use crate::entities::models::humanoid::armor as armor_mesh;
 use crate::entities::models::humanoid::humanoid;
+use crate::entities::render::held;
 use crate::entities::render::humanoid::armor as armor_tex;
 use crate::items::mesh::Transform as ItemTransform;
 use crate::items::model::DisplayContext;
 
-use crate::util::mth::{DEG_TO_RAD, lerp, rot_lerp_rad};
-
-const DUCK_WALK_ROTATION: f32 = 0.005;
+use crate::util::mth::{DEG_TO_RAD, lerp};
 
 const FLIP_DEGREES: f32 = 90.0;
 
@@ -25,7 +24,7 @@ pub(crate) const AVATAR_SCALE: f32 = 0.937_5;
 
 pub(crate) const MODEL_Y_OFFSET: f32 = -1.501;
 
-const MAX_CROSSBOW_CHARGE_DURATION: f32 = 25.0;
+const MAX_CROSSBOW_CHARGE_DURATION: f32 = crate::items::kinetic::CROSSBOW_CHARGE_TICKS;
 
 fn part_at(pivot: [f32; 3]) -> PartState {
     PartState::from(geom::PartPose::offset(pivot[0], pivot[1], pivot[2]))
@@ -64,156 +63,53 @@ impl Pose {
 }
 
 pub fn pose_humanoid(s: &AnimSample) -> Pose {
-    let passenger = s.passenger;
-    let mut head = part_at(PARTS[0].pivot);
-    let mut body = part_at(PARTS[1].pivot);
-    let mut right_arm = part_at(PARTS[2].pivot);
-    let mut left_arm = part_at(PARTS[3].pivot);
-    let mut right_leg = part_at(PARTS[4].pivot);
-    let mut left_leg = part_at(PARTS[5].pivot);
-
-    head.x_rot = s.pitch * DEG_TO_RAD;
-    head.y_rot = s.head_yaw * DEG_TO_RAD;
-    if s.fall_flying {
-        head.x_rot = -FRAC_PI_4;
-    } else if s.swim_amount > 0.0 {
-        head.x_rot = rot_lerp_rad(s.swim_amount, head.x_rot, -FRAC_PI_4);
-    }
-
-    let pos = s.walk_pos;
-    let speed = s.walk_speed;
-    let speed_value = s.speed_value.max(1.0);
-    right_arm.x_rot = (pos * 0.6662 + PI).cos() * 2.0 * speed * 0.5 / speed_value;
-    left_arm.x_rot = (pos * 0.6662).cos() * 2.0 * speed * 0.5 / speed_value;
-    right_leg.x_rot = (pos * 0.6662).cos() * 1.4 * speed / speed_value;
-    left_leg.x_rot = (pos * 0.6662 + PI).cos() * 1.4 * speed / speed_value;
-    right_leg.y_rot = DUCK_WALK_ROTATION;
-    left_leg.y_rot = -DUCK_WALK_ROTATION;
-    right_leg.z_rot = DUCK_WALK_ROTATION;
-    left_leg.z_rot = -DUCK_WALK_ROTATION;
-
-    if passenger {
-        right_arm.x_rot += -0.628_318_55;
-        left_arm.x_rot += -0.628_318_55;
-        right_leg.x_rot = -1.413_716_7;
-        right_leg.y_rot = 0.314_159_27;
-        right_leg.z_rot = 0.078_539_82;
-        left_leg.x_rot = -1.413_716_7;
-        left_leg.y_rot = -0.314_159_27;
-        left_leg.z_rot = -0.078_539_82;
-    }
-
-    let right_handed = !s.main_arm_left;
-    let right_first = if s.using_item {
-        (!s.using_offhand) == right_handed
-    } else {
-        let two_handed = if right_handed {
-            s.left_arm_pose.two_handed()
-        } else {
-            s.right_arm_pose.two_handed()
-        };
-        right_handed == two_handed
+    let parts = player_parts(false);
+    let mut l = humanoid::Limbs::from_parts(std::array::from_fn(|i| part_at(parts[i].pivot)));
+    let poses = humanoid::ArmPoses {
+        right: s.right_arm_pose,
+        left: s.left_arm_pose,
     };
-    let inputs = humanoid::ArmInputs {
-        ticks_using_item: s.ticks_using_item,
-        max_crossbow_charge: MAX_CROSSBOW_CHARGE_DURATION,
-        crouching: s.crouching,
-        fall_flying: s.fall_flying,
-        swim_amount: s.swim_amount,
-        charging: s.charging(),
+    let input = humanoid::HumanoidIn {
+        x_rot: s.pitch,
+        y_rot: s.head_yaw,
+        walk_pos: s.walk_pos,
+        walk_speed: s.walk_speed,
+        speed_value: s.speed_value,
+        passenger: s.passenger,
+        left_handed: s.main_arm_left,
+        using_item: s.using_item,
+        use_offhand: s.using_offhand,
+        poses,
+        arm: humanoid::ArmInputs {
+            ticks_using_item: s.ticks_using_item,
+            max_crossbow_charge: MAX_CROSSBOW_CHARGE_DURATION,
+            crouching: s.crouching,
+            fall_flying: s.fall_flying,
+            swim_amount: s.swim_amount,
+            charging: {
+                let (right, left) = if s.main_arm_left {
+                    (&s.off_hand, &s.main_hand)
+                } else {
+                    (&s.main_hand, &s.off_hand)
+                };
+                crate::renderer::anim::sway_charging(s.using_item, s.using_offhand, right, left)
+            },
+        },
+        age_ticks: s.age_ticks,
+        attack_time: s.attack_time,
+        swing_left: s.attack_left,
     };
-    let (right, left) = (&mut right_arm, &mut left_arm);
-    if right_first {
-        humanoid::pose_arm(right, left, &head, &inputs, s.right_arm_pose, true);
-        if !s.right_arm_pose.affects_offhand_pose() {
-            humanoid::pose_arm(left, right, &head, &inputs, s.left_arm_pose, false);
-        }
-    } else {
-        humanoid::pose_arm(left, right, &head, &inputs, s.left_arm_pose, false);
-        if !s.left_arm_pose.affects_offhand_pose() {
-            humanoid::pose_arm(right, left, &head, &inputs, s.right_arm_pose, true);
-        }
-    }
-
-    if s.attack_time > 0.0 {
-        let stab = if s.attack_left {
-            s.left_arm_pose
-        } else {
-            s.right_arm_pose
-        } == ArmPose::Spear;
-        humanoid::attack_swing(
-            &mut body,
-            &mut right_arm,
-            &mut left_arm,
-            head.x_rot,
-            s.attack_time,
-            s.attack_left,
-            1.0,
-            stab,
-        );
-    }
-
-    if s.crouching {
-        body.x_rot = 0.5;
-        right_arm.x_rot += 0.4;
-        left_arm.x_rot += 0.4;
-        right_leg.z += 4.0;
-        left_leg.z += 4.0;
-        head.y += 4.2;
-        body.y += 3.2;
-        left_arm.y += 3.2;
-        right_arm.y += 3.2;
-    }
-
-    if s.right_arm_pose != ArmPose::Spyglass {
-        humanoid::bob_model_part(&mut right_arm, s.age_ticks, 1.0);
-    }
-    if s.left_arm_pose != ArmPose::Spyglass {
-        humanoid::bob_model_part(&mut left_arm, s.age_ticks, -1.0);
-    }
-
-    if s.swim_amount > 0.0 {
-        let swim_pos = pos % 26.0;
-        let right_swim =
-            if s.right_arm_pose != ArmPose::Spear && (s.attack_left || s.attack_time <= 0.0) {
-                s.swim_amount
-            } else {
-                0.0
-            };
-        let left_swim =
-            if s.left_arm_pose != ArmPose::Spear && (!s.attack_left || s.attack_time <= 0.0) {
-                s.swim_amount
-            } else {
-                0.0
-            };
-        if !s.using_item {
-            humanoid::swim_arms(
-                &mut right_arm,
-                &mut left_arm,
-                swim_pos,
-                right_swim,
-                left_swim,
-            );
-        }
-        left_leg.x_rot = lerp(
-            s.swim_amount,
-            left_leg.x_rot,
-            0.3 * (pos * 0.333_333_34 + PI).cos(),
-        );
-        right_leg.x_rot = lerp(
-            s.swim_amount,
-            right_leg.x_rot,
-            0.3 * (pos * 0.333_333_34).cos(),
-        );
-    }
+    humanoid::pose_core(&mut l, &input, |l| {
+        humanoid::attack_animation(l, s.attack_time, s.attack_left, 1.0, poses)
+    });
 
     Pose {
-        head,
-        body,
-        right_arm,
-        left_arm,
-        right_leg,
-        left_leg,
+        head: l.head,
+        body: l.body,
+        right_arm: l.right_arm,
+        left_arm: l.left_arm,
+        right_leg: l.right_leg,
+        left_leg: l.left_leg,
         #[cfg(feature = "skins")]
         cape: cape_rotation(s.cape),
         wings: wing_parts(s),
@@ -298,18 +194,13 @@ pub fn root_pose(s: &AnimSample, scale: f32) -> AvatarRoot {
 const MODEL_UNITS_PER_BLOCK: f32 = 16.0;
 
 fn held_item_transform(t: &ItemTransform, left_hand: bool, pose: Mat4) -> Transform {
-    let hand_rot = Quat::from_rotation_x(-FRAC_PI_2) * Quat::from_rotation_y(PI);
-    let hand_off = Vec3::new(if left_hand { -1.0 } else { 1.0 }, 2.0, -10.0);
-
-    let (tx, ry, rz) = if left_hand {
-        (-t.translation[0], -t.rotation[1], -t.rotation[2])
-    } else {
-        (t.translation[0], t.rotation[1], t.rotation[2])
-    };
+    let hand_rot = hand_rotation();
+    let hand_off = hand_offset(left_hand, false);
+    let t = handed(t, left_hand);
     let disp_rot = Quat::from_rotation_x(t.rotation[0] * DEG_TO_RAD)
-        * Quat::from_rotation_y(ry * DEG_TO_RAD)
-        * Quat::from_rotation_z(rz * DEG_TO_RAD);
-    let disp_off = Vec3::new(tx, t.translation[1], t.translation[2]) * MODEL_UNITS_PER_BLOCK;
+        * Quat::from_rotation_y(t.rotation[1] * DEG_TO_RAD)
+        * Quat::from_rotation_z(t.rotation[2] * DEG_TO_RAD);
+    let disp_off = Vec3::from(t.translation) * MODEL_UNITS_PER_BLOCK;
     let scale = Vec3::from(t.scale);
     let centre = disp_rot * (scale * -0.5) * MODEL_UNITS_PER_BLOCK;
 
@@ -335,17 +226,62 @@ fn held_item_transform(t: &ItemTransform, left_hand: bool, pose: Mat4) -> Transf
     )
 }
 
-fn spear_item_pose(s: &AnimSample, right: bool) -> Mat4 {
+pub(crate) fn hand_rotation() -> Quat {
+    Quat::from_rotation_x(-FRAC_PI_2) * Quat::from_rotation_y(PI)
+}
+
+pub(crate) fn hand_offset(left_hand: bool, baby: bool) -> Vec3 {
+    let (x, y, z) = if baby {
+        (0.0, 1.0, -4.5)
+    } else {
+        (1.0, 2.0, -10.0)
+    };
+    Vec3::new(if left_hand { -x } else { x }, y, z)
+}
+
+pub(crate) fn handed(t: &ItemTransform, left_hand: bool) -> ItemTransform {
+    if !left_hand {
+        return *t;
+    }
+    ItemTransform {
+        rotation: [t.rotation[0], -t.rotation[1], -t.rotation[2]],
+        translation: [-t.translation[0], t.translation[1], t.translation[2]],
+        scale: t.scale,
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SpearState {
+    pub arm_poses: [ArmPose; 2],
+    pub charging: [Option<crate::items::kinetic::Kinetic>; 2],
+    pub attack_time: f32,
+    pub attack_left: bool,
+    pub main_kinetic: Option<crate::items::kinetic::Kinetic>,
+    pub ticks_using_item: f32,
+    pub ticks_since_kinetic_hit: f32,
+}
+
+impl SpearState {
+    fn of(s: &AnimSample) -> SpearState {
+        SpearState {
+            arm_poses: [s.right_arm_pose, s.left_arm_pose],
+            charging: s.charging(),
+            attack_time: s.attack_time,
+            attack_left: s.attack_left,
+            main_kinetic: s.main_hand.kinetic,
+            ticks_using_item: s.ticks_using_item,
+            ticks_since_kinetic_hit: s.ticks_since_kinetic_hit,
+        }
+    }
+}
+
+pub(crate) fn spear_item_pose(s: &SpearState, right: bool) -> Mat4 {
     use crate::items::kinetic::hit_feedback_amount;
     use crate::util::mth::ease::{in_out_expo, in_quad, out_back};
     use crate::util::mth::progress;
 
-    let pose = if right {
-        s.right_arm_pose
-    } else {
-        s.left_arm_pose
-    };
-    let charging = s.charging()[usize::from(!right)];
+    let pose = s.arm_poses[usize::from(!right)];
+    let charging = s.charging[usize::from(!right)];
     let stabbing = s.attack_time > 0.0 && s.attack_left != right && pose == ArmPose::Spear;
     if !stabbing && charging.is_none() {
         return Mat4::IDENTITY;
@@ -357,7 +293,7 @@ fn spear_item_pose(s: &AnimSample, right: bool) -> Mat4 {
     let mut m = Mat4::IDENTITY;
 
     if stabbing {
-        let jet = s.main_hand.kinetic.map_or(0.0, |k| k.forward_movement);
+        let jet = s.main_kinetic.map_or(0.0, |k| k.forward_movement);
         m *= around(
             Quat::from_rotation_x(-70.0 * (attack - retract) * DEG_TO_RAD),
             Vec3::new(0.0, -0.125, 0.125),
@@ -394,6 +330,42 @@ fn spear_item_pose(s: &AnimSample, right: bool) -> Mat4 {
     m
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ItemSlot {
+    Hand { left: bool },
+    Head,
+}
+
+impl ItemSlot {
+    fn context(self) -> DisplayContext {
+        match self {
+            ItemSlot::Hand { left } => held_context(left),
+            ItemSlot::Head => DisplayContext::Head,
+        }
+    }
+
+    fn transform(self, display: &ItemTransform, pose: Mat4, skull: bool) -> Transform {
+        match self {
+            ItemSlot::Hand { left } => held_item_transform(display, left, pose),
+            ItemSlot::Head => {
+                let local = if skull {
+                    crate::entities::SKULL_ITEM_UNDO
+                } else {
+                    crate::entities::item_display_transform(display)
+                };
+                Transform::from_matrix(
+                    Mat4::from_scale(Vec3::splat(MODEL_UNITS_PER_BLOCK))
+                        * crate::entities::head_item_pose(
+                            crate::entities::HeadTransforms::DEFAULT,
+                            skull,
+                        )
+                        * local.to_matrix(),
+                )
+            }
+        }
+    }
+}
+
 fn held_context(left_hand: bool) -> DisplayContext {
     if left_hand {
         DisplayContext::ThirdPersonLeftHand
@@ -402,11 +374,15 @@ fn held_context(left_hand: bool) -> DisplayContext {
     }
 }
 
-fn display_transform(gpu: &super::item_assets::ItemGpu, left_hand: bool) -> ItemTransform {
-    gpu.for_context(held_context(left_hand))
+#[cfg(feature = "skins")]
+fn head_skin(item: &HeldItem, items: &mut ItemCtx) -> Option<Handle<Image>> {
+    let skin = item.profile_skin.as_ref()?;
+    items
+        .skins
+        .profile_texture(skin, items.entity_images, items.images)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct PartDef {
     name: &'static str,
     pub(crate) tex: [f32; 2],
@@ -417,123 +393,49 @@ pub(crate) struct PartDef {
     parent: Option<usize>,
 }
 
-pub(crate) const PARTS: [PartDef; 12] = [
-    PartDef {
-        name: "head",
-        tex: [0.0, 0.0],
-        origin: [-4.0, -8.0, -4.0],
-        size: [8.0, 8.0, 8.0],
-        grow: 0.0,
-        pivot: [0.0, 0.0, 0.0],
-        parent: None,
-    },
-    PartDef {
-        name: "body",
-        tex: [16.0, 16.0],
-        origin: [-4.0, 0.0, -2.0],
-        size: [8.0, 12.0, 4.0],
-        grow: 0.0,
-        pivot: [0.0, 0.0, 0.0],
-        parent: None,
-    },
-    PartDef {
-        name: "right_arm",
-        tex: [40.0, 16.0],
-        origin: [-3.0, -2.0, -2.0],
-        size: [4.0, 12.0, 4.0],
-        grow: 0.0,
-        pivot: [-5.0, 2.0, 0.0],
-        parent: None,
-    },
-    PartDef {
-        name: "left_arm",
-        tex: [32.0, 48.0],
-        origin: [-1.0, -2.0, -2.0],
-        size: [4.0, 12.0, 4.0],
-        grow: 0.0,
-        pivot: [5.0, 2.0, 0.0],
-        parent: None,
-    },
-    PartDef {
-        name: "right_leg",
-        tex: [0.0, 16.0],
-        origin: [-2.0, 0.0, -2.0],
-        size: [4.0, 12.0, 4.0],
-        grow: 0.0,
-        pivot: [-1.9, 12.0, 0.0],
-        parent: None,
-    },
-    PartDef {
-        name: "left_leg",
-        tex: [16.0, 48.0],
-        origin: [-2.0, 0.0, -2.0],
-        size: [4.0, 12.0, 4.0],
-        grow: 0.0,
-        pivot: [1.9, 12.0, 0.0],
-        parent: None,
-    },
-    PartDef {
-        name: "hat",
-        tex: [32.0, 0.0],
-        origin: [-4.0, -8.0, -4.0],
-        size: [8.0, 8.0, 8.0],
-        grow: 0.5,
-        pivot: [0.0, 0.0, 0.0],
-        parent: Some(0),
-    },
-    PartDef {
-        name: "jacket",
-        tex: [16.0, 32.0],
-        origin: [-4.0, 0.0, -2.0],
-        size: [8.0, 12.0, 4.0],
-        grow: 0.25,
-        pivot: [0.0, 0.0, 0.0],
-        parent: Some(1),
-    },
-    PartDef {
-        name: "right_sleeve",
-        tex: [40.0, 32.0],
-        origin: [-3.0, -2.0, -2.0],
-        size: [4.0, 12.0, 4.0],
-        grow: 0.25,
-        pivot: [0.0, 0.0, 0.0],
-        parent: Some(2),
-    },
-    PartDef {
-        name: "left_sleeve",
-        tex: [48.0, 48.0],
-        origin: [-1.0, -2.0, -2.0],
-        size: [4.0, 12.0, 4.0],
-        grow: 0.25,
-        pivot: [0.0, 0.0, 0.0],
-        parent: Some(3),
-    },
-    PartDef {
-        name: "right_pants",
-        tex: [0.0, 32.0],
-        origin: [-2.0, 0.0, -2.0],
-        size: [4.0, 12.0, 4.0],
-        grow: 0.25,
-        pivot: [0.0, 0.0, 0.0],
-        parent: Some(4),
-    },
-    PartDef {
-        name: "left_pants",
-        tex: [0.0, 48.0],
-        origin: [-2.0, 0.0, -2.0],
-        size: [4.0, 12.0, 4.0],
-        grow: 0.25,
-        pivot: [0.0, 0.0, 0.0],
-        parent: Some(5),
-    },
+const PART_TREE: [(&str, Option<usize>); 12] = [
+    ("head", None),
+    ("body", None),
+    ("right_arm", None),
+    ("left_arm", None),
+    ("right_leg", None),
+    ("left_leg", None),
+    ("hat", Some(0)),
+    ("jacket", Some(1)),
+    ("right_sleeve", Some(2)),
+    ("left_sleeve", Some(3)),
+    ("right_pants", Some(4)),
+    ("left_pants", Some(5)),
 ];
 
-pub(crate) const SLIM_ARMS: [(usize, [f32; 3], [f32; 3]); 4] = [
-    (2, [-2.0, -2.0, -2.0], [3.0, 12.0, 4.0]),
-    (3, [-1.0, -2.0, -2.0], [3.0, 12.0, 4.0]),
-    (8, [-2.0, -2.0, -2.0], [3.0, 12.0, 4.0]),
-    (9, [-1.0, -2.0, -2.0], [3.0, 12.0, 4.0]),
-];
+pub(crate) fn player_parts(slim: bool) -> &'static [PartDef; 12] {
+    static PARTS: std::sync::OnceLock<[[PartDef; 12]; 2]> = std::sync::OnceLock::new();
+    &PARTS.get_or_init(|| [flatten_player_mesh(false), flatten_player_mesh(true)])
+        [usize::from(slim)]
+}
+
+fn flatten_player_mesh(slim: bool) -> [PartDef; 12] {
+    let mesh = humanoid::player_mesh(geom::Grow::NONE, slim);
+    PART_TREE.map(|(name, parent)| {
+        let node = mesh
+            .find(name)
+            .unwrap_or_else(|| panic!("player_mesh has no {name}"));
+        let [cube] = node.cubes() else {
+            panic!("player_mesh's {name} is not one box")
+        };
+        debug_assert!(!cube.mirror && cube.grow.0 == cube.grow.1 && cube.grow.0 == cube.grow.2);
+        let pose = node.pose();
+        PartDef {
+            name,
+            tex: cube.tex,
+            origin: cube.origin,
+            size: cube.size,
+            grow: cube.grow.0,
+            pivot: [pose.x, pose.y, pose.z],
+            parent,
+        }
+    })
+}
 
 #[cfg(feature = "skins")]
 const CAPE: PartDef = PartDef {
@@ -565,13 +467,14 @@ fn box_mesh_on(sheet: [f32; 2], def: &PartDef) -> Mesh {
 #[cfg(feature = "skins")]
 fn slim_meshes(wide: &[Handle<Mesh>], meshes: &mut Assets<Mesh>) -> Vec<Handle<Mesh>> {
     let mut slim = wide.to_vec();
-    for (index, origin, size) in SLIM_ARMS {
-        let def = PartDef {
-            origin,
-            size,
-            ..PARTS[index]
-        };
-        slim[index] = meshes.add(box_mesh(&def));
+    for (i, (def, wide_def)) in player_parts(true)
+        .iter()
+        .zip(player_parts(false))
+        .enumerate()
+    {
+        if def != wide_def {
+            slim[i] = meshes.add(box_mesh(def));
+        }
     }
     slim
 }
@@ -668,7 +571,10 @@ struct PlayerModelAssets {
     skin: Handle<Image>,
     no_item: Handle<Mesh>,
     armor: [Vec<ArmorMesh>; 4],
+    skulls: [geom::BakedModel; 2],
 }
+
+const WORN_SKULLS: [&str; 2] = ["dragon", "piglin"];
 
 #[derive(Component)]
 struct RigRoot;
@@ -684,20 +590,22 @@ struct RigArmor;
 
 #[derive(Component)]
 struct HeldItemNode {
+    slot: ItemSlot,
     shown: HeldItem,
-    blocking: bool,
+    #[cfg(feature = "skins")]
+    skin_generation: u32,
+    branch: u32,
     display: Option<ItemTransform>,
     pose: Mat4,
 }
 
+const PART_HEAD: usize = 0;
 #[cfg(feature = "skins")]
 const PART_BODY: usize = 1;
-const PART_RIGHT_ARM: usize = 2;
-const PART_LEFT_ARM: usize = 3;
-#[cfg(feature = "skins")]
-const PART_RIGHT_SLEEVE: usize = 8;
-#[cfg(feature = "skins")]
-const PART_LEFT_SLEEVE: usize = 9;
+pub(crate) const PART_RIGHT_ARM: usize = 2;
+pub(crate) const PART_LEFT_ARM: usize = 3;
+pub(crate) const PART_RIGHT_SLEEVE: usize = 8;
+pub(crate) const PART_LEFT_SLEEVE: usize = 9;
 #[cfg(feature = "skins")]
 const FIRST_OVERLAY: usize = 6;
 
@@ -710,6 +618,15 @@ struct ArmorSlotRig {
 struct HeldRig {
     node: Entity,
     material: Handle<EntityMaterial>,
+}
+
+struct SkullRig {
+    node: Entity,
+    mesh: Handle<Mesh>,
+    material: Handle<EntityMaterial>,
+    shown: Option<(&'static str, f32)>,
+    states: Vec<PartState>,
+    posed: Vec<geom::PosedPart>,
 }
 
 #[cfg(feature = "skins")]
@@ -734,11 +651,14 @@ struct Rig {
     #[cfg(feature = "skins")]
     overlays: [Entity; 6],
     held: [HeldRig; 2],
+    head_item: HeldRig,
+    skull: SkullRig,
     base: Handle<EntityMaterial>,
     overlay: Handle<EntityMaterial>,
     armor: [ArmorSlotRig; 4],
     lit: Lit,
     body_hidden: bool,
+    glow: u32,
     #[cfg(feature = "skins")]
     cape: CapeRig,
     wings: WingsRig,
@@ -841,7 +761,10 @@ fn setup_player_model(
     empty.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
     empty.insert_indices(Indices::U32(Vec::new()));
 
-    let wide: Vec<Handle<Mesh>> = PARTS.iter().map(|def| meshes.add(box_mesh(def))).collect();
+    let wide: Vec<Handle<Mesh>> = player_parts(false)
+        .iter()
+        .map(|def| meshes.add(box_mesh(def)))
+        .collect();
     let assets = PlayerModelAssets {
         #[cfg(feature = "skins")]
         slim: slim_meshes(&wide, &mut meshes),
@@ -852,9 +775,16 @@ fn setup_player_model(
         skin,
         no_item: meshes.add(empty),
         armor: ARMOR_LAYERS.map(|layer| bake_armor(layer(), &mut meshes)),
+        skulls: WORN_SKULLS
+            .map(|kind| geom::bake(&crate::blockentities::render::skull::layer_for_type(kind))),
     };
 
-    rigs.local = Some(spawn_rig(&mut commands, &assets, &mut materials));
+    rigs.local = Some(spawn_rig(
+        &mut commands,
+        &assets,
+        &mut materials,
+        &mut meshes,
+    ));
     commands.insert_resource(assets);
 }
 
@@ -862,6 +792,7 @@ fn spawn_rig(
     commands: &mut Commands,
     assets: &PlayerModelAssets,
     materials: &mut Assets<EntityMaterial>,
+    meshes: &mut Assets<Mesh>,
 ) -> Rig {
     let lit = Lit::full_bright();
     let skin_material = |materials: &mut Assets<EntityMaterial>| {
@@ -874,7 +805,7 @@ fn spawn_rig(
     let base = skin_material(materials);
     let overlay = skin_material(materials);
     let held_materials =
-        [(); 2].map(|_| materials.add(EntityMaterial::cutout(None, LightMode::Flat, lit)));
+        [(); 3].map(|_| materials.add(EntityMaterial::cutout(None, LightMode::Flat, lit)));
 
     let root = commands
         .spawn((
@@ -900,8 +831,9 @@ fn spawn_rig(
         .id();
     commands.entity(root).add_child(flip);
 
-    let mut entities = Vec::with_capacity(PARTS.len());
-    for (i, def) in PARTS.iter().enumerate() {
+    let parts = player_parts(false);
+    let mut entities = Vec::with_capacity(parts.len());
+    for (i, def) in parts.iter().enumerate() {
         let entity = commands
             .spawn((
                 Mesh3d(assets.meshes[i].clone()),
@@ -924,33 +856,74 @@ fn spawn_rig(
         entities.push(entity);
     }
 
-    let held = [(PART_RIGHT_ARM, 0usize), (PART_LEFT_ARM, 1)].map(|(arm, hand)| {
-        let material = held_materials[hand].clone();
-        let entity = commands
-            .spawn((
-                Mesh3d(assets.no_item.clone()),
-                MeshMaterial3d(material.clone()),
-                Transform::default(),
-                Visibility::Hidden,
-                HeldItemNode {
-                    shown: HeldItem::default(),
-                    blocking: false,
-                    display: None,
-                    pose: Mat4::IDENTITY,
-                },
-                Name::new(if arm == PART_RIGHT_ARM {
-                    "right_hand_item"
-                } else {
-                    "left_hand_item"
-                }),
-            ))
-            .id();
-        commands.entity(entities[arm]).add_child(entity);
-        HeldRig {
-            node: entity,
-            material,
-        }
-    });
+    let mut item_node =
+        |part: usize, slot: ItemSlot, name: &'static str, material: &Handle<EntityMaterial>| {
+            let entity = commands
+                .spawn((
+                    Mesh3d(assets.no_item.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform::default(),
+                    Visibility::Hidden,
+                    HeldItemNode {
+                        slot,
+                        shown: HeldItem::default(),
+                        #[cfg(feature = "skins")]
+                        skin_generation: 0,
+                        branch: 0,
+                        display: None,
+                        pose: Mat4::IDENTITY,
+                    },
+                    Name::new(name),
+                ))
+                .id();
+            commands.entity(entities[part]).add_child(entity);
+            HeldRig {
+                node: entity,
+                material: material.clone(),
+            }
+        };
+    let [right_material, left_material, head_material] = &held_materials;
+    let held = [
+        item_node(
+            PART_RIGHT_ARM,
+            ItemSlot::Hand { left: false },
+            "right_hand_item",
+            right_material,
+        ),
+        item_node(
+            PART_LEFT_ARM,
+            ItemSlot::Hand { left: true },
+            "left_hand_item",
+            left_material,
+        ),
+    ];
+    let head_item = item_node(PART_HEAD, ItemSlot::Head, "head_item", head_material);
+
+    let skull_mesh = meshes.add(Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    ));
+    let skull_material = materials.add(EntityMaterial::cutout(None, LightMode::Cardinal, lit));
+    let skull_node = commands
+        .spawn((
+            Mesh3d(skull_mesh.clone()),
+            MeshMaterial3d(skull_material.clone()),
+            Transform::default(),
+            Visibility::Hidden,
+            bevy::camera::primitives::Aabb::from_min_max(Vec3::splat(-32.0), Vec3::splat(32.0)),
+            RigPart,
+            Name::new("head_skull"),
+        ))
+        .id();
+    commands.entity(entities[PART_HEAD]).add_child(skull_node);
+    let skull = SkullRig {
+        node: skull_node,
+        mesh: skull_mesh,
+        material: skull_material,
+        shown: None,
+        states: Vec::new(),
+        posed: Vec::new(),
+    };
 
     #[cfg(feature = "skins")]
     let cape_material = materials.add(EntityMaterial::cutout(None, LightMode::Cardinal, lit));
@@ -1037,11 +1010,14 @@ fn spawn_rig(
             entities[11],
         ],
         held,
+        head_item,
+        skull,
         base,
         overlay,
         armor,
         lit,
         body_hidden: false,
+        glow: 0,
         #[cfg(feature = "skins")]
         cape,
         wings: WingsRig {
@@ -1128,6 +1104,7 @@ struct ItemCtx<'a> {
     images: &'a mut Assets<Image>,
     entity_materials: &'a mut Assets<EntityMaterial>,
     no_item: Handle<Mesh>,
+    skulls: &'a [geom::BakedModel; 2],
     entity_images: &'a mut crate::entities::EntityImages,
     armor_glint: Option<Handle<Image>>,
     #[cfg(feature = "skins")]
@@ -1168,6 +1145,7 @@ fn sync_player_models(
         images: &mut item_images,
         entity_materials: &mut entity_materials,
         no_item: assets.no_item.clone(),
+        skulls: &assets.skulls,
         entity_images: &mut entity_images,
         armor_glint: armor_glint.map(|glint| glint.0.clone()),
         #[cfg(feature = "skins")]
@@ -1244,8 +1222,12 @@ fn sync_player_models(
         let slot = match free.pop() {
             Some(i) => i,
             None => {
-                rigs.entries
-                    .push(spawn_rig(&mut commands, &assets, items.entity_materials));
+                rigs.entries.push(spawn_rig(
+                    &mut commands,
+                    &assets,
+                    items.entity_materials,
+                    items.meshes,
+                ));
                 taken.push(false);
                 rigs.entries.len() - 1
             }
@@ -1259,10 +1241,17 @@ fn sync_player_models(
         let Some(slot) = *slot else { continue };
         rigs.entries[slot].id = Some(*id);
         let lit = player_lit(&lightmap.current, &light, *feet, sample, body.scale, dirs);
+        let owner = Owner {
+            pos: *feet,
+            yaw: sample.body_yaw,
+            local: false,
+            seed: *id,
+        };
         apply_rig(
             &mut rigs.entries[slot],
             origin.to_render_array(*feet),
             sample,
+            owner,
             worn,
             *body,
             RigVisibility::Shown,
@@ -1270,6 +1259,8 @@ fn sync_player_models(
             &mut queries,
             &mut items,
         );
+        let rig = &mut rigs.entries[slot];
+        super::outline::set_glowing(&mut commands, rig.root, &mut rig.glow, body.outline);
     }
 
     for i in 0..rigs.entries.len() {
@@ -1277,6 +1268,8 @@ fn sync_player_models(
             continue;
         }
         rigs.entries[i].id = None;
+        let rig = &mut rigs.entries[i];
+        super::outline::set_glowing(&mut commands, rig.root, &mut rig.glow, 0);
         if let Ok((_, mut vis)) = queries.0.get_mut(rigs.entries[i].root) {
             vis.set_if_neq(Visibility::Hidden);
         }
@@ -1303,17 +1296,21 @@ fn sync_player_models(
         } else {
             RigVisibility::Hidden
         };
+        let body = Body::of(&view.local_body, view.gamemode);
+        let owner = items.assets.local_owner().unwrap_or_default();
         apply_rig(
             local,
             origin.to_render_array(local_pos),
             &local_pose,
+            owner,
             &local_skin,
-            Body::of(&view.local_body, view.gamemode),
+            body,
             shown,
             lit,
             &mut queries,
             &mut items,
         );
+        super::outline::set_glowing(&mut commands, local.root, &mut local.glow, body.outline);
     }
     drop(light);
 
@@ -1338,12 +1335,10 @@ fn sync_player_models(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn update_held_item(
     entity: Entity,
     item: &HeldItem,
-    left_hand: bool,
-    blocking: bool,
+    use_: ItemUse,
     pose: Mat4,
     material: &Handle<EntityMaterial>,
     items: &mut ItemCtx,
@@ -1360,33 +1355,58 @@ fn update_held_item(
     let Ok((mut transform, mut vis, mut mesh, mut node)) = query.get_mut(entity) else {
         return;
     };
-    if node.blocking == blocking && node.shown.same_model(item) {
+    let skull = node.slot == ItemSlot::Head && crate::entities::is_skull(item.id);
+    let context = node.slot.context();
+    let slot = context.name();
+    let branch = items.assets.branch(item.id, slot, use_);
+    if node.branch == branch
+        && node.shown.same_model(item)
+        && node.shown.profile_skin == item.profile_skin
+    {
         if node.pose != pose {
             node.pose = pose;
             if let Some(display) = node.display {
-                *transform = held_item_transform(&display, left_hand, pose);
+                *transform = node.slot.transform(&display, pose, skull);
+            }
+        }
+        #[cfg(feature = "skins")]
+        if node.display.is_some()
+            && node.shown.profile_skin.is_some()
+            && node.skin_generation != items.skins.generation()
+        {
+            node.skin_generation = items.skins.generation();
+            if let Some(skin) = head_skin(&node.shown, items)
+                && let Some(material) = items.entity_materials.get_mut(material)
+                && material.texture.as_ref() != Some(&skin)
+            {
+                material.texture = Some(skin);
             }
         }
         return;
     }
     node.shown = item.clone();
-    node.blocking = blocking;
+    node.branch = branch;
     node.pose = pose;
     let key = item.model_key();
-
-    let slot = held_context(left_hand).name();
     let gpu = items
         .assets
-        .get(&key, slot, blocking, items.meshes, items.images)
+        .get(&key, slot, use_, items.meshes, items.images)
         .cloned();
     match gpu {
         Some(gpu) => {
-            let display = display_transform(&gpu, left_hand);
+            let display = gpu.for_context(context);
             node.display = Some(display);
-            *transform = held_item_transform(&display, left_hand, pose);
+            *transform = node.slot.transform(&display, pose, skull);
             mesh.0 = gpu.mesh;
+            #[cfg(feature = "skins")]
+            let texture = {
+                node.skin_generation = items.skins.generation();
+                head_skin(item, items).unwrap_or(gpu.texture)
+            };
+            #[cfg(not(feature = "skins"))]
+            let texture = gpu.texture;
             if let Some(material) = items.entity_materials.get_mut(material) {
-                material.texture = Some(gpu.texture);
+                material.texture = Some(texture);
             }
             *vis = Visibility::Inherited;
         }
@@ -1615,6 +1635,7 @@ enum RigVisibility {
 struct Body {
     hidden: bool,
     scale: f32,
+    outline: u32,
 }
 
 impl Body {
@@ -1622,6 +1643,7 @@ impl Body {
         Body {
             hidden: body.hidden_to(viewer),
             scale: body.scale,
+            outline: body.outline,
         }
     }
 }
@@ -1654,6 +1676,7 @@ fn apply_rig(
     rig: &mut Rig,
     feet: Vec3,
     sample: &AnimSample,
+    owner: Owner,
     worn: &WornSkin,
     body: Body,
     shown: RigVisibility,
@@ -1717,13 +1740,21 @@ fn apply_rig(
     } else {
         (&sample.main_hand, &sample.off_hand)
     };
+    let using_left = sample.using_offhand != sample.main_arm_left;
+    let use_of = |item: &HeldItem, left: bool| ItemUse {
+        owner: Some(owner),
+        ..ItemUse::of(
+            item,
+            sample.using_item && using_left == left,
+            sample.ticks_using_item,
+        )
+    };
     let [right_held, left_held] = &rig.held;
     update_held_item(
         right_held.node,
         right_item,
-        false,
-        sample.right_arm_pose == ArmPose::Block,
-        spear_item_pose(sample, true),
+        use_of(right_item, false),
+        spear_item_pose(&SpearState::of(sample), true),
         &right_held.material,
         items,
         &mut queries.3,
@@ -1731,12 +1762,37 @@ fn apply_rig(
     update_held_item(
         left_held.node,
         left_item,
-        true,
-        sample.left_arm_pose == ArmPose::Block,
-        spear_item_pose(sample, false),
+        use_of(left_item, true),
+        spear_item_pose(&SpearState::of(sample), false),
         &left_held.material,
         items,
         &mut queries.3,
+    );
+
+    let empty = HeldItem::default();
+    let head = if held::head_item_drawn(sample.head.id) {
+        &sample.head
+    } else {
+        &empty
+    };
+    update_held_item(
+        rig.head_item.node,
+        head,
+        ItemUse {
+            owner: Some(owner),
+            ..ItemUse::of(head, false, 0.0)
+        },
+        Mat4::IDENTITY,
+        &rig.head_item.material,
+        items,
+        &mut queries.3,
+    );
+    update_worn_skull(
+        &mut rig.skull,
+        sample.head.id,
+        sample.walk_pos,
+        items,
+        &mut queries.5,
     );
 
     update_armor(rig, &sample.armor, items, &mut queries.4);
@@ -1751,6 +1807,7 @@ fn apply_rig(
             .into_iter()
             .chain(cape)
             .chain(rig.held.iter().map(|held| &held.material))
+            .chain([&rig.head_item.material, &rig.skull.material])
             .chain(rig.armor.iter().map(|slot| &slot.material))
         {
             if let Some(material) = items.entity_materials.get_mut(handle) {
@@ -1799,6 +1856,54 @@ fn update_armor(
     }
 }
 
+fn update_worn_skull(
+    skull: &mut SkullRig,
+    head: &str,
+    animation: f32,
+    items: &mut ItemCtx,
+    layers: &mut LayerQuery<'_, '_>,
+) {
+    use crate::blockentities::render::skull as skulls;
+
+    let kind = held::animated_skull(head).then(|| skulls::skull_type(head));
+    let index = kind.and_then(|k| WORN_SKULLS.iter().position(|w| *w == k));
+    let Some((kind, index)) = kind.zip(index) else {
+        if skull.shown.take().is_some()
+            && let Ok((mut vis, _)) = layers.get_mut(skull.node)
+        {
+            *vis = Visibility::Hidden;
+        }
+        return;
+    };
+    let was = skull.shown.replace((kind, animation));
+    if was == Some((kind, animation)) {
+        return;
+    }
+    if was.is_none_or(|(k, _)| k != kind) {
+        let texture = items
+            .entity_images
+            .get(skulls::texture_for_type(kind), items.images);
+        if let Some(material) = items.entity_materials.get_mut(&skull.material) {
+            material.texture = texture;
+        }
+        if let Ok((mut vis, _)) = layers.get_mut(skull.node) {
+            *vis = Visibility::Inherited;
+        }
+    }
+    let model = &items.skulls[index];
+    skull.states.clear();
+    skull
+        .states
+        .extend(model.parts.iter().map(|p| PartState::from(p.initial)));
+    skulls::pose_for_type(kind, model, &mut skull.states, animation);
+    let base = Mat4::from_scale(Vec3::splat(MODEL_UNITS_PER_BLOCK))
+        * crate::entities::head_item_pose(crate::entities::HeadTransforms::DEFAULT, true);
+    model.pose_parts(&skull.states, base, &mut skull.posed);
+    if let Some(mesh) = items.meshes.get_mut(&skull.mesh) {
+        crate::entities::bake::layer(mesh, model, &skull.posed, &skull.states);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1809,7 +1914,7 @@ mod tests {
 
     #[test]
     fn body_front_face_lands_on_the_torso_texels() {
-        let body = &PARTS[1];
+        let body = &player_parts(false)[1];
         assert_eq!(body.name, "body");
         let mesh = box_mesh(body);
         let uvs = match mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap() {
@@ -1826,7 +1931,7 @@ mod tests {
 
     #[test]
     fn head_uvs_cover_the_first_thirty_two_columns() {
-        let mesh = box_mesh(&PARTS[0]);
+        let mesh = box_mesh(&player_parts(false)[0]);
         let uvs = match mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap() {
             bevy::mesh::VertexAttributeValues::Float32x2(v) => v.clone(),
             other => panic!("unexpected UV storage: {other:?}"),
@@ -1840,6 +1945,46 @@ mod tests {
         assert_eq!(min_u, 0.0);
         assert_eq!(max_u, 32.0);
         assert_eq!(max_v, 16.0);
+    }
+
+    #[test]
+    fn player_parts_match_create_mesh() {
+        let wide = player_parts(false);
+        let slim = player_parts(true);
+        let pivots: Vec<_> = wide[..6].iter().map(|d| d.pivot).collect();
+        assert_eq!(
+            pivots,
+            [
+                [0.0; 3],
+                [0.0; 3],
+                [-5.0, 2.0, 0.0],
+                [5.0, 2.0, 0.0],
+                [-1.9, 12.0, 0.0],
+                [1.9, 12.0, 0.0]
+            ]
+        );
+        assert_eq!(wide[6].grow, 0.5);
+        assert!(
+            wide[7..]
+                .iter()
+                .all(|d| d.grow == 0.25 && d.pivot == [0.0; 3])
+        );
+        assert_eq!(wide[PART_RIGHT_ARM].origin, [-3.0, -2.0, -2.0]);
+        assert_eq!(slim[PART_RIGHT_ARM].origin, [-2.0, -2.0, -2.0]);
+        assert_eq!(slim[PART_LEFT_SLEEVE].origin, [-1.0, -2.0, -2.0]);
+        assert_eq!(slim[PART_RIGHT_SLEEVE].size, [3.0, 12.0, 4.0]);
+        let differ: Vec<_> = (0..12).filter(|&i| wide[i] != slim[i]).collect();
+        assert_eq!(
+            differ,
+            [
+                PART_RIGHT_ARM,
+                PART_LEFT_ARM,
+                PART_RIGHT_SLEEVE,
+                PART_LEFT_SLEEVE
+            ]
+        );
+        assert_eq!(wide[PART_LEFT_ARM].tex, [32.0, 48.0]);
+        assert_eq!(wide[PART_LEFT_SLEEVE].tex, [48.0, 48.0]);
     }
 
     #[test]
@@ -2044,6 +2189,7 @@ mod tests {
             ticks_using_item: 10.0,
             ..AnimSample::default()
         };
+        let s = SpearState::of(&s);
         assert_eq!(spear_item_pose(&s, true), Mat4::IDENTITY);
         assert_eq!(spear_item_pose(&s, false), Mat4::IDENTITY);
     }

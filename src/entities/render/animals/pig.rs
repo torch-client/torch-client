@@ -4,6 +4,7 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::quadruped;
 use crate::entities::registry::Registry;
+use crate::entities::render::saddle_spec;
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
@@ -39,14 +40,12 @@ pub fn register(registry: &mut Registry) {
     );
     registry.add(
         EntityKind::Pig,
-        RenderSpec::new(
+        saddle_spec(
             "pig_saddle",
             quadruped::pig_saddle_layer,
             saddle_texture,
             quadruped::setup_anim,
-        )
-        .with_visible(|st| is_adult(st) && st.extras.saddled)
-        .ignoring_invisibility(),
+        ),
     );
 }
 

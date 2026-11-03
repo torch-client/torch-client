@@ -93,6 +93,12 @@ pub fn save() {
     }
 }
 
+pub fn flush_changed() {
+    if let Some(s) = MODULES_STORE.get() {
+        super::persist::flush_changed(s);
+    }
+}
+
 impl Store {
     pub(super) fn from_registry() -> Store {
         let mut allowed = [[0u64; WORDS]; Mode::ALL.len()];

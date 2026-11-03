@@ -21,7 +21,7 @@ pub fn draw(
     let pages = snap
         .menu_slots
         .first()
-        .and_then(|s| s.book.as_deref())
+        .and_then(|s| s.extra.book.as_deref())
         .map(|b| &*b.pages);
     let num_pages = pages.map_or(0, |p| p.len());
 

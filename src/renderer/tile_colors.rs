@@ -1,11 +1,4 @@
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(feature = "render_lod"),
-    allow(
-        dead_code,
-        reason = "the LOD picks the other modes; a mod reads Default"
-    )
-)]
 pub(crate) enum ColorMode {
     Default,
     Flower,

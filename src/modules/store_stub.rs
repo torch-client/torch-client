@@ -13,6 +13,8 @@ pub fn store() -> &'static Store {
 
 pub fn save() {}
 
+pub fn flush_changed() {}
+
 #[inline(always)]
 fn bits(slot: u16) -> u64 {
     value::default_bits(SETTINGS[slot as usize].kind)

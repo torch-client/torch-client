@@ -15,7 +15,7 @@ use azalea_protocol::packets::game::{
     s_sign_update::ServerboundSignUpdate,
     s_teleport_to_entity::ServerboundTeleportToEntity,
 };
-use std::collections::HashSet;
+use bevy::platform::collections::HashSet;
 use std::sync::Arc;
 
 use crate::client::tracking::{
@@ -41,9 +41,11 @@ struct TickSnapshot {
     #[cfg(feature = "skins")]
     local_skin: crate::client::skins::SkinState,
     entity_anims: std::sync::Arc<Vec<crate::entities::feed::EntityAnim>>,
-    menu_slots: Vec<SlotStack>,
+    menu_slots: Arc<[SlotStack]>,
     hotbar: Arc<[SlotStack]>,
     armor: crate::renderer::Armor,
+    head: renderer::HeldItem,
+    armor_stacks: Arc<[SlotStack]>,
     carried: SlotStack,
     container_id: i32,
     container_kind: ContainerKind,
@@ -72,6 +74,7 @@ struct TickSnapshot {
     fov_modifier: f32,
     xp_progress: f32,
     xp_level: u32,
+    border: azalea::world::WorldBorder,
 }
 
 fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSnapshot> {
@@ -99,14 +102,17 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
     #[cfg(feature = "render_lod")]
     crate::client::lod::cache::tick(bot, shared, pos);
 
-    let (other_positions, seen_players) = collect_other_players(bot);
+    let (mut other_positions, seen_players) = collect_other_players(bot);
 
     let (local_anim, reads) = tick_local_anim(bot, shared, pos);
     #[cfg(feature = "skins")]
     let local_skin = local_skin(bot, reads.skin_parts);
-    let entity_anims = collect_entities(bot, &seen_players);
+    let entity_anims = collect_entities(bot, &seen_players, &mut other_positions);
     crate::play::tracking_emitter::tick(bot, shared);
     crate::play::effect_particles::tick(bot, shared);
+    crate::play::item_use::tick(bot, shared);
+    #[cfg(feature = "audio")]
+    crate::play::riding::sound::tick(bot);
 
     GAME_TIME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -182,7 +188,7 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
     let (
         menu_slots,
         hotbar,
-        armor,
+        (armor, head, armor_stacks),
         armor_value,
         carried,
         container_id,
@@ -191,7 +197,10 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
     ) = {
         let world_guard = world.as_ref().map(|w| w.read());
         let registries = world_guard.as_ref().map(|g| &g.registries);
-        let menu_slots: Vec<SlotStack> = bot
+        if let Some(registries) = registries {
+            crate::items::dispatch::refresh_trims(registries);
+        }
+        let menu_slots: Arc<[SlotStack]> = bot
             .menu()
             .map(|menu| {
                 menu.slots()
@@ -223,6 +232,16 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
                     .is_some_and(crate::items::glint::has_foil)
             }),
         };
+        let head = armor_slot(0)
+            .map(|s| held_item_patterned(s, registries))
+            .unwrap_or_default();
+        let armor_stacks: Arc<[SlotStack]> = match player_slots.get(5..9) {
+            Some(slots) if crate::modules::extra_hud::enabled() => slots
+                .iter()
+                .map(|s| slot_stack(s, registries, advanced_tooltips))
+                .collect(),
+            _ => Arc::default(),
+        };
         let carried = inventory
             .as_ref()
             .map(|inv| slot_stack(&inv.carried, registries, advanced_tooltips))
@@ -252,7 +271,7 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
         (
             menu_slots,
             hotbar,
-            armor,
+            (armor, head, armor_stacks),
             armor_value,
             carried,
             container_id,
@@ -276,9 +295,11 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
             blockentities::feed::publish(&world, game_time, &players)
         };
         if let Some(snapshot) = snapshot {
-            let mut s = shared.lock().unwrap();
-            s.session.block_entities = snapshot;
-            s.session.block_entities_version = s.session.block_entities_version.wrapping_add(1);
+            let _old = {
+                let mut s = shared.lock().unwrap();
+                s.session.block_entities_version = s.session.block_entities_version.wrapping_add(1);
+                std::mem::replace(&mut s.session.block_entities, snapshot)
+            };
         }
     }
 
@@ -345,10 +366,20 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
         } else {
             bot.component::<Pose>().map(|p| *p).unwrap_or_default()
         };
-        player_body(bot, pose, scale, gamemode == Gamemode::Spectator, || {
-            let me = crate::client::bot::username();
-            crate::client::tablist::with_lookup(|tab| tab.sees_friendly_invisible(&me, &me))
-        })
+        player_body(
+            bot,
+            pose,
+            scale,
+            gamemode == Gamemode::Spectator,
+            || {
+                let me = crate::client::bot::username();
+                crate::client::tablist::with_lookup(|tab| tab.sees_friendly_invisible(&me, &me))
+            },
+            || {
+                let me = crate::client::bot::username();
+                crate::client::tablist::with_lookup(|tab| tab.team_color(&me))
+            },
+        )
     };
 
     let attack_delay = {
@@ -366,11 +397,12 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
 
     let experience = bot.experience().unwrap_or_default();
 
+    let use_hand = interaction::using_hand().unwrap_or(crate::session::InteractionHand::Main);
     let fov_modifier = tick_fov(
         bot,
         &reads,
         hotbar
-            .get(hotbar_sel as usize)
+            .get(use_hand.hotbar_index(hotbar_sel))
             .map_or("", |stack| stack.item),
         local_anim.use_ticks(),
     );
@@ -385,6 +417,8 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
         menu_slots,
         hotbar,
         armor,
+        head,
+        armor_stacks,
         carried,
         container_id,
         container_kind,
@@ -413,6 +447,10 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
         fov_modifier,
         xp_progress: experience.progress,
         xp_level: experience.level,
+        border: bot
+            .component::<azalea::world::WorldBorder>()
+            .map(|b| *b)
+            .unwrap_or_default(),
     })
 }
 
@@ -556,6 +594,13 @@ static TICKER: std::sync::OnceLock<std::sync::Mutex<Ticker>> = std::sync::OnceLo
 static TRAVELLED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 #[cfg(feature = "audio")]
 static LAST_XZ: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+#[cfg(feature = "audio")]
+pub(crate) fn forget_step_origin() {
+    if let Ok(mut last) = LAST_XZ.lock() {
+        *last = None;
+    }
+}
 
 pub(crate) fn reset_session_locals(blocking: bool) {
     let ticker = TICKER.get_or_init(Default::default);
@@ -757,6 +802,8 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         menu_slots,
         hotbar,
         armor,
+        head,
+        armor_stacks,
         carried,
         container_id,
         container_kind,
@@ -785,11 +832,18 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         fov_modifier,
         xp_progress,
         xp_level,
+        border,
     } = snapshot;
 
     let env =
         crate::client::envprobe::sample(bot, [pos.x, pos.y + local_body.eye_height as f64, pos.z]);
 
+    let _old_others;
+    let _old_entities;
+    let mut _old_menu = None;
+    let mut _old_hotbar = None;
+    let mut _old_armor = None;
+    let mut _old_effects = None;
     let (
         flags,
         auto_jump_enabled,
@@ -797,7 +851,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         pitch,
         hotbar_target,
         spectator_teleport_target,
-        pending_drop,
+        drops,
         sign_update,
         command_block_update,
         command_block_pos,
@@ -818,7 +872,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
             s.session.env_prev = s.session.env.or(Some(env));
             s.session.env = Some(env);
         }
-        s.session.other_players = other_positions;
+        _old_others = std::mem::replace(&mut s.session.other_players, other_positions);
         s.session.local_anim = local_anim;
         #[cfg(feature = "skins")]
         {
@@ -826,7 +880,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         }
         s.session.fov.prev = s.session.fov.cur;
         s.session.fov.cur = fov_modifier;
-        s.session.entities = entity_anims;
+        _old_entities = std::mem::replace(&mut s.session.entities, entity_anims);
         s.session.status = None;
         let click_in_flight = !s.session.inv_actions.is_empty();
         let horse_open = s
@@ -842,39 +896,63 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
                 &carried,
                 applied_clicks,
             );
-            s.session.menu_slots = menu_slots;
+            _old_menu = Some(std::mem::replace(&mut s.session.menu_slots, menu_slots));
         }
         if !hotbar.is_empty() && !click_in_flight {
-            s.session.hotbar = hotbar;
+            _old_hotbar = Some(std::mem::replace(&mut s.session.hotbar, hotbar));
         }
         if !click_in_flight {
             s.session.armor = armor;
+            s.session.head = head;
+            _old_armor = Some(std::mem::replace(&mut s.session.armor_stacks, armor_stacks));
         }
-        if let Some(drop) = s.session.pending_drop {
-            let remove_from = |slot: &mut SlotStack| {
-                if slot.count == 0 {
-                    return;
-                }
-                let remove = match drop {
-                    DropRequest::HeldItem => 1,
-                    DropRequest::HeldStack => slot.count,
+        let queued = if s.session.hotbar_target.is_some() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut s.session.pending_drops)
+        };
+        let mut drops: Vec<(DropRequest, bool)> = Vec::new();
+        if gamemode != Gamemode::Spectator {
+            drops.reserve(queued.len());
+            let menu_at = 36 + hotbar_sel as usize;
+            for drop in queued {
+                let remove_from = |slot: &mut SlotStack| {
+                    if slot.count == 0 {
+                        return;
+                    }
+                    let remove = match drop {
+                        DropRequest::HeldItem => 1,
+                        DropRequest::HeldStack => slot.count,
+                    };
+                    slot.count -= remove;
+                    if slot.count == 0 {
+                        *slot = SlotStack::default();
+                    }
                 };
-                slot.count -= remove;
-                if slot.count == 0 {
-                    *slot = SlotStack::default();
+                let held = s
+                    .session
+                    .hotbar
+                    .get(hotbar_sel as usize)
+                    .or_else(|| s.session.menu_slots.get(menu_at))
+                    .is_some_and(|st| st.count != 0);
+                if s.session
+                    .menu_slots
+                    .get(menu_at)
+                    .is_some_and(|st| st.count != 0)
+                    && let Some(slot) = Arc::make_mut(&mut s.session.menu_slots).get_mut(menu_at)
+                {
+                    remove_from(slot);
                 }
-            };
-            if let Some(slot) = s.session.menu_slots.get_mut(36 + hotbar_sel as usize) {
-                remove_from(slot);
-            }
-            if s.session
-                .hotbar
-                .get(hotbar_sel as usize)
-                .is_some_and(|st| st.count != 0)
-                && let Some(slot) =
-                    Arc::make_mut(&mut s.session.hotbar).get_mut(hotbar_sel as usize)
-            {
-                remove_from(slot);
+                if s.session
+                    .hotbar
+                    .get(hotbar_sel as usize)
+                    .is_some_and(|st| st.count != 0)
+                    && let Some(slot) =
+                        Arc::make_mut(&mut s.session.hotbar).get_mut(hotbar_sel as usize)
+                {
+                    remove_from(slot);
+                }
+                drops.push((drop, held));
             }
         }
         if !click_in_flight {
@@ -894,8 +972,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
                     || s.session.menu_slots.len() != horse.slots.len();
                 if changed && !click_in_flight {
                     s.session.horse_published_state_id = horse.state_id;
-                    s.session.menu_slots.clear();
-                    s.session.menu_slots.extend_from_slice(&horse.slots);
+                    s.session.menu_slots = Arc::from(horse.slots.as_slice());
                     let hotbar = Arc::make_mut(&mut s.session.hotbar);
                     for (i, slot) in horse.player_slots().iter().skip(27).take(9).enumerate() {
                         if let Some(dst) = hotbar.get_mut(i) {
@@ -931,7 +1008,10 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         s.session.saturation = saturation;
         s.session.air_supply = air_supply;
         s.session.health_display = health_display;
-        s.session.active_effects = active_effects;
+        _old_effects = Some(std::mem::replace(
+            &mut s.session.active_effects,
+            active_effects,
+        ));
         s.session.gamemode = gamemode;
         s.session.previous_gamemode = previous_gamemode;
         s.session.crouching = crouching;
@@ -967,6 +1047,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         }
         s.session.xp_progress = xp_progress;
         s.session.xp_level = xp_level;
+        s.session.border = border;
         (
             s.move_keys,
             s.session.auto_jump,
@@ -974,7 +1055,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
             s.camera_pitch,
             s.session.hotbar_target.take(),
             s.session.spectator_teleport_target.take(),
-            s.session.pending_drop.take(),
+            drops,
             s.session.sign_update.take(),
             s.session.command_block_update.take(),
             s.session.command_block_pos,
@@ -1023,7 +1104,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         });
     }
 
-    if let Some(drop) = pending_drop {
+    for (drop, held) in drops {
         bot.write_packet(ServerboundPlayerAction {
             action: match drop {
                 DropRequest::HeldItem => Action::DropItem,
@@ -1033,20 +1114,25 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
             direction: Direction::Down,
             seq: 0,
         });
-        let idx = 36 + hotbar_sel as usize;
-        let mut ecs = bot.ecs.write();
-        if let Some(mut inv) = ecs.get_mut::<azalea::entity::inventory::Inventory>(bot.entity)
-            && let Some(slot) = inv.inventory_menu.slot_mut(idx)
-            && let ItemStack::Present(data) = slot
         {
-            let remove = match drop {
-                DropRequest::HeldItem => 1,
-                DropRequest::HeldStack => data.count,
-            };
-            data.count -= remove.min(data.count);
-            if data.count == 0 {
-                *slot = ItemStack::Empty;
+            let idx = 36 + hotbar_sel as usize;
+            let mut ecs = bot.ecs.write();
+            if let Some(mut inv) = ecs.get_mut::<azalea::entity::inventory::Inventory>(bot.entity)
+                && let Some(slot) = inv.inventory_menu.slot_mut(idx)
+                && let ItemStack::Present(data) = slot
+            {
+                let remove = match drop {
+                    DropRequest::HeldItem => 1,
+                    DropRequest::HeldStack => data.count,
+                };
+                data.count -= remove.min(data.count);
+                if data.count == 0 {
+                    *slot = ItemStack::Empty;
+                }
             }
+        }
+        if held {
+            interaction::swing_hand(bot, shared, crate::session::InteractionHand::Main);
         }
     }
 
@@ -1070,14 +1156,12 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
     }
 
     if let Some(sign_pos) = sign_edit_open_pos {
-        use azalea::block::BlockTrait;
         let still_sign = bot
             .world()
             .ok()
             .and_then(|world| world.read().get_block_state(sign_pos))
             .is_some_and(|state| {
-                crate::session::SignEditKind::from_block(Box::<dyn BlockTrait>::from(state).id())
-                    .is_some()
+                crate::session::SignEditKind::from_block(crate::blocks::block_name(state)).is_some()
             });
         let range = bot
             .component::<azalea::entity::Attributes>()
@@ -1345,7 +1429,8 @@ fn collect_other_players(bot: &Client) -> (Vec<OtherPlayerInfo>, HashSet<i32>) {
                 .unwrap_or((0.0, 0.0));
             let pose = eref.get_component::<Pose>().map(|p| *p).unwrap_or_default();
 
-            let worn = equip.get(&id).cloned().unwrap_or_default();
+            let empty = crate::client::tracking::Equipment::default();
+            let worn = equip.get(&id).unwrap_or(&empty);
             let health = eref.get_component::<metadata::Health>().map(|c| c.0);
             let input = AnimInput {
                 pos: [p.x, p.y, p.z],
@@ -1353,12 +1438,13 @@ fn collect_other_players(bot: &Client) -> (Vec<OtherPlayerInfo>, HashSet<i32>) {
                 head_yaw: heads.get(&id).copied().unwrap_or(y_rot),
                 y_rot,
                 interpolated: true,
-                main_hand: worn.main_hand,
-                off_hand: worn.off_hand,
+                main_hand: worn.main_hand.clone(),
+                off_hand: worn.off_hand.clone(),
                 armor: crate::renderer::Armor {
-                    items: [worn.helmet, worn.chestplate, worn.leggings, worn.boots],
+                    items: [worn.helmet(), worn.chestplate, worn.leggings, worn.boots],
                     foil: worn.armor_foil,
                 },
+                head: worn.head.clone(),
                 using_offhand: flag::<metadata::AbstractLivingUsingOffhand>(eref),
                 #[cfg(feature = "skins")]
                 on_ground: eref
@@ -1408,12 +1494,17 @@ fn collect_other_players(bot: &Client) -> (Vec<OtherPlayerInfo>, HashSet<i32>) {
                 attrs.scale(),
                 gamemode == Some(Gamemode::Spectator),
                 || tab.sees_friendly_invisible(&username, &viewer),
+                || tab.team_color(&username),
             );
             out.push(OtherPlayerInfo {
                 id,
                 username,
-                name_tag: tag.name,
-                below_name: tag.below,
+                name_tag: tag.name.into(),
+                below_name: if tag.below.is_empty() {
+                    Arc::default()
+                } else {
+                    tag.below.into()
+                },
                 hidden_by_team: tag.hidden_by_team,
                 health,
                 max_health: attrs.max_health(),
@@ -1456,7 +1547,7 @@ fn tick_local_anim(
     use azalea::entity::Pose;
     use azalea::entity::metadata;
 
-    let (yaw, camera_pitch, sprinting, attacking, main_hand, off_hand, armor, prefs, reads) = {
+    let (yaw, camera_pitch, sprinting, attacking, main_hand, off_hand, armor, head, prefs, reads) = {
         let s = shared.lock().unwrap();
         let hand = |i: usize| {
             s.session
@@ -1466,13 +1557,18 @@ fn tick_local_anim(
                     id: st.item,
                     charged: st.charged,
                     count: st.count,
-                    tint: st.potion.as_ref().map(|c| c.color()),
+                    tint: st.extra.potion.as_ref().map(|c| c.color()),
                     map_id: st.map_id,
-                    layers: st.banner_layers.clone(),
+                    layers: st.extra.banner_layers.clone(),
                     glint: st.glint,
                     death_protection: st.death_protection,
                     kinetic: st.kinetic,
                     swing_ticks: st.swing_ticks,
+                    rocket: st.rocket,
+                    profile_skin: None,
+                    trim: st.trim,
+                    has_lodestone: st.has_lodestone,
+                    lodestone: st.lodestone,
                 })
                 .unwrap_or_default()
         };
@@ -1484,6 +1580,7 @@ fn tick_local_anim(
             hand(s.session.hotbar_selected.min(8) as usize),
             hand(9),
             s.session.armor,
+            s.session.head.clone(),
             s.skin_prefs,
             TickReads {
                 #[cfg(feature = "skins")]
@@ -1501,6 +1598,7 @@ fn tick_local_anim(
         .ok()
         .and_then(|c| c.0);
     let head_yaw = -yaw - 180.0;
+    let using = interaction::using_hand();
     let input = AnimInput {
         pos: [pos.x, pos.y, pos.z],
         pitch: -camera_pitch,
@@ -1510,7 +1608,8 @@ fn tick_local_anim(
         main_hand,
         off_hand,
         armor,
-        using_offhand: false,
+        head,
+        using_offhand: using == Some(crate::session::InteractionHand::Off),
         main_arm_left: prefs.main_hand_left,
         crouching: pose == Pose::Crouching,
         sprinting,
@@ -1519,7 +1618,7 @@ fn tick_local_anim(
         spin_attack: pose == Pose::SpinAttack,
         sleeping: local_sleeping_pos.is_some(),
         bed_orientation: local_sleeping_pos.and_then(|pos| bed_orientation_at(bot, pos)),
-        using_item: interaction::is_using_item(),
+        using_item: using.is_some(),
         passenger: false,
         #[cfg(feature = "skins")]
         on_ground: bot
@@ -1579,7 +1678,8 @@ fn local_skin(bot: &Client, parts: u8) -> crate::client::skins::SkinState {
     }
 }
 
-pub(crate) fn swing_local_player(left_arm: bool, shared: &Arc<SharedMutex>) {
+pub(crate) fn swing_local_player(off_hand: bool, shared: &Arc<SharedMutex>) {
+    let left_arm = shared.lock().unwrap().skin_prefs.main_hand_left != off_hand;
     let snapshot = {
         let mut anims = anim_states().lock().unwrap();
         let anim = anims.entry(LOCAL_ANIM_ID).or_default();
@@ -1595,7 +1695,11 @@ pub(crate) fn held_item(stack: &ItemStack) -> renderer::HeldItem {
         return renderer::HeldItem::default();
     };
     let id = data.kind.to_str().trim_start_matches("minecraft:");
+    let (has_lodestone, lodestone) = crate::items::dispatch::lodestone_of(data);
     renderer::HeldItem {
+        trim: crate::items::dispatch::trim_of(data),
+        has_lodestone,
+        lodestone,
         tint: potion_contents(data).map(|c| c.color()),
         id,
         charged: data
@@ -1608,7 +1712,25 @@ pub(crate) fn held_item(stack: &ItemStack) -> renderer::HeldItem {
         death_protection: crate::play::inventory_bridge::death_protection(data),
         kinetic: crate::items::kinetic::kinetic(data),
         swing_ticks: crate::items::kinetic::swing_ticks(data),
+        rocket: crate::play::inventory_bridge::charged_rocket(data),
+        #[cfg(feature = "skins")]
+        profile_skin: data
+            .get_component::<comp::Profile>()
+            .and_then(|p| crate::client::skins::profile_skin(&p)),
+        #[cfg(not(feature = "skins"))]
+        profile_skin: None,
     }
+}
+
+pub(crate) fn held_item_patterned(
+    stack: &ItemStack,
+    registries: Option<&azalea_core::registry_holder::RegistryHolder>,
+) -> renderer::HeldItem {
+    let mut item = held_item(stack);
+    item.layers = stack
+        .as_present()
+        .and_then(|d| crate::play::inventory_bridge::banner_layers(d, registries));
+    item
 }
 
 pub(crate) fn item_id(stack: &ItemStack) -> Option<&'static str> {
@@ -1704,11 +1826,18 @@ fn player_body(
     scale: f32,
     spectator: bool,
     team_sees: impl FnOnce() -> bool,
+    team_color: impl FnOnce() -> Option<u32>,
 ) -> crate::session::PlayerBody {
     use azalea::entity::metadata;
     let d = crate::session::player_dimensions(pose, scale);
     let invisible = flag::<metadata::Invisible>(player);
+    let outline = if flag::<metadata::CurrentlyGlowing>(player) {
+        0xFF00_0000 | team_color().unwrap_or(0xFF_FFFF)
+    } else {
+        0
+    };
     crate::session::PlayerBody {
+        outline,
         invisible,
         team_sees: invisible && team_sees(),
         on_fire: flag::<metadata::OnFire>(player) && !spectator,

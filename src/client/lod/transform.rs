@@ -530,11 +530,10 @@ mod tests {
     }
 
     fn state_named(name: &str) -> u16 {
-        use azalea::block::{BlockState, BlockTrait};
+        use azalea::block::BlockState;
         (0..=u16::MAX)
             .find(|&id| {
-                BlockState::try_from(id as u32)
-                    .is_ok_and(|s| Box::<dyn BlockTrait>::from(s).id() == name)
+                BlockState::try_from(id as u32).is_ok_and(|s| crate::blocks::block_name(s) == name)
             })
             .expect(name)
     }

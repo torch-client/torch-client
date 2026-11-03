@@ -86,7 +86,7 @@ impl LightMap {
         )
     }
 
-    #[cfg(feature = "render_lod")]
+    #[cfg(any(feature = "render_lod", lua_mods))]
     pub fn is_lit(&self, col: ColumnPos) -> bool {
         self.lit.contains(&col)
     }
@@ -540,7 +540,6 @@ where
                 on_dirty: Box::new(on_dirty),
             });
         });
-        return LightThread { tx };
     }
 
     #[cfg(not(target_arch = "wasm32"))]

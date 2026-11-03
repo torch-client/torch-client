@@ -319,6 +319,39 @@ impl PartDef {
         &mut self.children[last].1
     }
 
+    pub fn part(
+        &mut self,
+        name: &str,
+        tex: (i32, i32),
+        b: [f32; 6],
+        pose: PartPose,
+    ) -> &mut PartDef {
+        self.child(
+            name,
+            CubeList::new()
+                .tex_offs(tex.0, tex.1)
+                .add_box(b[0], b[1], b[2], b[3], b[4], b[5]),
+            pose,
+        )
+    }
+
+    pub fn part_grow(
+        &mut self,
+        name: &str,
+        tex: (i32, i32),
+        b: [f32; 6],
+        grow: Grow,
+        pose: PartPose,
+    ) -> &mut PartDef {
+        self.child(
+            name,
+            CubeList::new()
+                .tex_offs(tex.0, tex.1)
+                .add_box_grow(b[0], b[1], b[2], b[3], b[4], b[5], grow),
+            pose,
+        )
+    }
+
     #[allow(dead_code, reason = "PartDefinition methods no ported model needs yet")]
     pub fn child_def(&mut self, name: &str, mut child: PartDef) -> &mut PartDef {
         if let Some(idx) = self.children.iter().position(|(n, _)| n == name) {
@@ -354,6 +387,10 @@ impl PartDef {
 
     pub fn cubes(&self) -> &[CubeDef] {
         &self.cubes
+    }
+
+    pub fn pose(&self) -> PartPose {
+        self.pose
     }
 
     fn find(&self, name: &str) -> Option<&PartDef> {
@@ -607,6 +644,20 @@ impl BakedModel {
 
     pub fn find(&self, name: &str) -> Option<PartId> {
         self.lookup.get(name).copied()
+    }
+
+    pub fn chain_with(&self, states: &[PartState], id: PartId, local: Mat4) -> Mat4 {
+        let mut mat = local;
+        let mut at = self.parts[id].parent;
+        while let Some(p) = at {
+            mat = states[p].transform().to_matrix() * mat;
+            at = self.parts[p].parent;
+        }
+        mat
+    }
+
+    pub fn chain(&self, states: &[PartState], id: PartId) -> Mat4 {
+        self.chain_with(states, id, states[id].transform().to_matrix())
     }
 
     pub fn rest_pose(&self) -> Vec<PartState> {

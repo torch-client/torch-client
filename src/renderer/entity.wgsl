@@ -21,6 +21,7 @@ const MODE_CARDINAL: u32 = 0u;
 const MODE_FLAT: u32 = 1u;
 const MODE_EMISSIVE: u32 = 2u;
 const MODE_TEXT: u32 = 3u;
+const MODE_OUTLINE: u32 = 4u;
 
 struct Params {
     tint: vec4<f32>,
@@ -148,6 +149,12 @@ fn lighting(in: VertexOutput, is_front: bool, shade: f32) -> vec3<f32> {
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @location(0) vec4<f32> {
     var color = textureSampleLevel(entity_texture, entity_sampler, in.uv, 0.0);
+    if params.mode == MODE_OUTLINE {
+        if color.a == 0.0 {
+            discard;
+        }
+        return vec4(params.tint.rgb, 1.0);
+    }
     if color.a < params.light.a {
         discard;
     }

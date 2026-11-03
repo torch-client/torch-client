@@ -3,9 +3,9 @@ use std::collections::VecDeque;
 use crate::blocks::direction::Direction;
 use crate::diag::Stat;
 use crate::gui::ScreenCtx;
-use crate::gui::chat::argb;
 use crate::gui::hud_layout::{ElementId, Hud, Rect};
-use crate::gui::painter::Painter;
+use crate::gui::painter::{Painter, argb};
+use crate::gui::tooltip::label;
 use crate::session::{ChunkProfiling, Gamemode};
 use crate::text::LINE_HEIGHT;
 use crate::util::bytes::Bytes;
@@ -61,8 +61,8 @@ const BELOW_NAME_GAP: f32 = LINE_HEIGHT * 1.15;
 
 #[derive(Clone, Debug, Default)]
 pub struct NameTag {
-    pub name: Vec<crate::text::Span>,
-    pub below: Vec<crate::text::Span>,
+    pub name: std::sync::Arc<[crate::text::Span]>,
+    pub below: std::sync::Arc<[crate::text::Span]>,
     pub x: f32,
     pub y: f32,
     pub scale: f32,
@@ -172,10 +172,10 @@ fn facing_from_bevy_yaw(yaw: f32) -> Direction {
 
 fn gamemode_name(g: Gamemode) -> &'static str {
     match g {
-        Gamemode::Survival => "Survival",
-        Gamemode::Creative => "Creative",
-        Gamemode::Adventure => "Adventure",
-        Gamemode::Spectator => "Spectator",
+        Gamemode::Survival => label!("selectWorld.gameMode.survival"),
+        Gamemode::Creative => label!("selectWorld.gameMode.creative"),
+        Gamemode::Adventure => label!("selectWorld.gameMode.adventure"),
+        Gamemode::Spectator => label!("selectWorld.gameMode.spectator"),
     }
 }
 
@@ -389,9 +389,9 @@ pub fn draw(
             _ => 0.0,
         };
         hud.draw_at(p, id, natural, slot, false, |p| {
-            let end = p.text_str(&l.text, x, 0.0, l.color, true);
+            let end = p.text_plain(&l.text, x, 0.0, l.color, true);
             if let Some((tag, ..)) = &l.tag {
-                p.text_str(tag, end, 0.0, GOLD, true);
+                p.text_plain(tag, end, 0.0, GOLD, true);
             }
         });
         if let Some((_, _, w)) = l.tag {
@@ -404,7 +404,7 @@ pub fn draw(
     }
 
     #[cfg(lua_mods)]
-    for i in 0..crate::gui::hud_layout::MOD_PANELS {
+    for i in crate::gui::hud_layout::LUA_FIRST..crate::gui::hud_layout::MOD_PANELS {
         let id = ElementId::mod_panel_slot(i);
         hud.draw(p, vw, vh, id, |p| crate::modules::script::draw_panel(p, i));
     }
@@ -506,7 +506,7 @@ fn draw_section(p: &mut Painter, title: &str, items: &[Item], right_x: f32, top_
     let box_h = (PAD_Y + LINE_HEIGHT + 2.0 + content_h + PAD_Y).floor();
 
     p.fill(box_x, top_y.floor(), box_w, box_h, DEBUG_BG);
-    p.text_str(
+    p.text_plain(
         title,
         (box_x + PAD_X).floor(),
         (top_y + PAD_Y).floor(),
@@ -519,7 +519,7 @@ fn draw_section(p: &mut Painter, title: &str, items: &[Item], right_x: f32, top_
     for item in items {
         match item {
             Item::Row(r) => {
-                p.text_str(
+                p.text_plain(
                     r.label,
                     (box_x + PAD_X).floor(),
                     y.floor(),
@@ -527,7 +527,7 @@ fn draw_section(p: &mut Painter, title: &str, items: &[Item], right_x: f32, top_
                     true,
                 );
                 let vw = p.atlas.font.width_str(&r.value);
-                p.text_str(
+                p.text_plain(
                     &r.value,
                     (right_x - PAD_X - vw).floor(),
                     y.floor(),
@@ -604,7 +604,7 @@ pub fn draw_debug(p: &mut Painter, ctx: &ScreenCtx, info: &HudInfo, d: &DebugInf
 
 fn draw_footnote(p: &mut Painter, text: &str, right_x: f32, top_y: f32) {
     let w = p.atlas.font.width_str(text);
-    p.text_str(
+    p.text_plain(
         text,
         (right_x - w).floor(),
         top_y.floor(),
@@ -1213,7 +1213,7 @@ const HELD_NAME_TICKS: f32 = 40.0;
 const TICKS_PER_SECOND: f32 = 20.0;
 
 pub struct HudOverlays {
-    title: Vec<crate::text::Span>,
+    title: Option<Vec<crate::text::Span>>,
     subtitle: Vec<crate::text::Span>,
     fade_in: f32,
     stay: f32,
@@ -1231,7 +1231,7 @@ pub struct HudOverlays {
 impl Default for HudOverlays {
     fn default() -> Self {
         HudOverlays {
-            title: Vec::new(),
+            title: None,
             subtitle: Vec::new(),
             fade_in: TITLE_FADE_IN,
             stay: TITLE_STAY,
@@ -1256,7 +1256,7 @@ impl HudOverlays {
     pub fn update(&mut self, snap: &mut crate::gui::Snapshot, time_secs: f32) {
         let now = time_secs * TICKS_PER_SECOND;
         if let Some(reset_times) = snap.titles_clear.take() {
-            self.title.clear();
+            self.title = None;
             self.subtitle.clear();
             self.title_ends = 0.0;
             if reset_times {
@@ -1280,14 +1280,14 @@ impl HudOverlays {
             }
         }
         if let Some(title) = snap.title_text.take() {
-            self.title = title;
+            self.title = Some(title);
             self.title_ends = now + self.title_total();
         }
         if let Some(subtitle) = snap.subtitle_text.take() {
             self.subtitle = subtitle;
         }
-        if self.title_ends <= now && !self.title.is_empty() {
-            self.title.clear();
+        if self.title_ends <= now && self.title.is_some() {
+            self.title = None;
             self.subtitle.clear();
         }
         if let Some(text) = snap.action_bar.take() {
@@ -1306,14 +1306,14 @@ impl HudOverlays {
             return;
         }
         if self.held_item == stack.item
-            && self.held_custom == stack.custom_name
-            && self.held_potion == stack.potion
+            && self.held_custom == stack.extra.custom_name
+            && self.held_potion == stack.extra.potion
         {
             return;
         }
         self.held_item = stack.item;
-        self.held_custom.clone_from(&stack.custom_name);
-        self.held_potion.clone_from(&stack.potion);
+        self.held_custom.clone_from(&stack.extra.custom_name);
+        self.held_potion.clone_from(&stack.extra.potion);
         self.held = crate::gui::tooltip::styled_hover_name(stack);
         self.held_ends = now + HELD_NAME_TICKS;
     }
@@ -1381,13 +1381,13 @@ pub fn draw_overlays(
         }
     });
 
-    if !ov.title.is_empty() {
+    if let Some(title) = &ov.title {
         let alpha = title_alpha(ov.title_ends - now, ov.fade_in, ov.stay, ov.fade_out);
         if alpha > 0.0 {
             let (cx, cy) = ((vw / 2.0).floor(), (vh / 2.0).floor());
-            let width = p.atlas.font.width(&ov.title).ceil();
+            let width = p.atlas.font.width(title).ceil();
             p.scaled(4.0, cx, cy, |p| {
-                p.text_faded(&ov.title, -(width / 2.0).floor(), -10.0, true, alpha);
+                p.text_faded(title, -(width / 2.0).floor(), -10.0, true, alpha);
             });
             if !ov.subtitle.is_empty() {
                 let width = p.atlas.font.width(&ov.subtitle).ceil();
@@ -1671,7 +1671,7 @@ mod tests {
         let mut ov = HudOverlays::default();
         let mut snap = snapshot_of(&mut session);
         ov.update(&mut snap, 0.0);
-        assert!(ov.title.is_empty());
+        assert!(ov.title.is_none());
         assert!(ov.subtitle.is_empty());
         assert_eq!(ov.title_ends, 0.0);
     }
@@ -1685,7 +1685,7 @@ mod tests {
         let mut ov = HudOverlays::default();
         let mut snap = snapshot_of(&mut session);
         ov.update(&mut snap, 1.0);
-        assert!(!ov.title.is_empty());
+        assert!(ov.title.is_some());
         assert_eq!(ov.title_ends, 20.0 + 100.0);
     }
 
@@ -1780,7 +1780,7 @@ mod tests {
         ov.update_held(&renamed, 0.0);
         assert_eq!(ov.held_ends, 40.0);
 
-        renamed.custom_name = Some(text("Bob"));
+        renamed.extra.make_mut().custom_name = Some(text("Bob"));
         ov.update_held(&renamed, 5.0);
         assert_eq!(ov.held_ends, 45.0);
         ov.update_held(&renamed, 6.0);

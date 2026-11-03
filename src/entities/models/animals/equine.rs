@@ -18,79 +18,60 @@ const LIVING_HORSE_SCALE: f32 = 1.1;
 fn body_mesh(g: Grow) -> MeshDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    let body = root.child(
+    let body = root.part_grow(
         "body",
-        CubeList::new().tex_offs(0, 32).add_box_grow(
-            -5.0,
-            -8.0,
-            -17.0,
-            10.0,
-            10.0,
-            22.0,
-            Grow::all(0.05),
-        ),
+        (0, 32),
+        [-5.0, -8.0, -17.0, 10.0, 10.0, 22.0],
+        Grow::all(0.05),
         PartPose::offset(0.0, 11.0, 5.0),
     );
-    body.child(
+    body.part_grow(
         "tail",
-        CubeList::new()
-            .tex_offs(42, 36)
-            .add_box_grow(-1.5, 0.0, 0.0, 3.0, 14.0, 4.0, g),
+        (42, 36),
+        [-1.5, 0.0, 0.0, 3.0, 14.0, 4.0],
+        g,
         PartPose::offset_rotation(0.0, -5.0, 2.0, DEG_30, 0.0, 0.0),
     );
-    let head_parts = root.child(
+    let head_parts = root.part(
         "head_parts",
-        CubeList::new()
-            .tex_offs(0, 35)
-            .add_box(-2.05, -6.0, -2.0, 4.0, 12.0, 7.0),
+        (0, 35),
+        [-2.05, -6.0, -2.0, 4.0, 12.0, 7.0],
         PartPose::offset_rotation(0.0, 4.0, -12.0, DEG_30, 0.0, 0.0),
     );
-    let head = head_parts.child(
+    let head = head_parts.part_grow(
         "head",
-        CubeList::new()
-            .tex_offs(0, 13)
-            .add_box_grow(-3.0, -11.0, -2.0, 6.0, 5.0, 7.0, g),
+        (0, 13),
+        [-3.0, -11.0, -2.0, 6.0, 5.0, 7.0],
+        g,
         PartPose::ZERO,
     );
-    head.child(
+    head.part_grow(
         "left_ear",
-        CubeList::new().tex_offs(19, 16).add_box_grow(
-            0.55,
-            -13.0,
-            4.0,
-            2.0,
-            3.0,
-            1.0,
-            Grow::all(-0.001),
-        ),
+        (19, 16),
+        [0.55, -13.0, 4.0, 2.0, 3.0, 1.0],
+        Grow::all(-0.001),
         PartPose::ZERO,
     );
-    head.child(
+    head.part_grow(
         "right_ear",
-        CubeList::new().tex_offs(19, 16).add_box_grow(
-            -2.55,
-            -13.0,
-            4.0,
-            2.0,
-            3.0,
-            1.0,
-            Grow::all(-0.001),
-        ),
+        (19, 16),
+        [-2.55, -13.0, 4.0, 2.0, 3.0, 1.0],
+        Grow::all(-0.001),
         PartPose::ZERO,
     );
     let head_parts = root.get("head_parts");
-    head_parts.child(
+    head_parts.part_grow(
         "mane",
-        CubeList::new()
-            .tex_offs(56, 36)
-            .add_box_grow(-1.0, -11.0, 5.01, 2.0, 16.0, 2.0, g),
+        (56, 36),
+        [-1.0, -11.0, 5.01, 2.0, 16.0, 2.0],
+        g,
         PartPose::ZERO,
     );
-    head_parts.child(
+    head_parts.part_grow(
         "upper_mouth",
-        CubeList::new()
-            .tex_offs(0, 25)
-            .add_box_grow(-2.0, -11.0, -7.0, 4.0, 5.0, 5.0, g),
+        (0, 25),
+        [-2.0, -11.0, -7.0, 4.0, 5.0, 5.0],
+        g,
         PartPose::ZERO,
     );
     root.child(
@@ -101,11 +82,11 @@ fn body_mesh(g: Grow) -> MeshDef {
             .add_box_grow(-3.0, -1.01, -1.0, 4.0, 11.0, 4.0, g),
         PartPose::offset(4.0, 14.0, 7.0),
     );
-    root.child(
+    root.part_grow(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(48, 21)
-            .add_box_grow(-1.0, -1.01, -1.0, 4.0, 11.0, 4.0, g),
+        (48, 21),
+        [-1.0, -1.01, -1.0, 4.0, 11.0, 4.0],
+        g,
         PartPose::offset(-4.0, 14.0, 7.0),
     );
     root.child(
@@ -116,11 +97,11 @@ fn body_mesh(g: Grow) -> MeshDef {
             .add_box_grow(-3.0, -1.01, -1.9, 4.0, 11.0, 4.0, g),
         PartPose::offset(4.0, 14.0, -10.0),
     );
-    root.child(
+    root.part_grow(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(48, 21)
-            .add_box_grow(-1.0, -1.01, -1.9, 4.0, 11.0, 4.0, g),
+        (48, 21),
+        [-1.0, -1.01, -1.9, 4.0, 11.0, 4.0],
+        g,
         PartPose::offset(-4.0, 14.0, -10.0),
     );
     mesh
@@ -129,72 +110,50 @@ fn body_mesh(g: Grow) -> MeshDef {
 fn saddle_mesh() -> MeshDef {
     let mut mesh = body_mesh(Grow::NONE);
     let root = mesh.root();
-    root.get("body").child(
+    root.get("body").part_grow(
         "saddle",
-        CubeList::new().tex_offs(26, 0).add_box_grow(
-            -5.0,
-            -8.0,
-            -9.0,
-            10.0,
-            9.0,
-            9.0,
-            Grow::all(0.5),
-        ),
+        (26, 0),
+        [-5.0, -8.0, -9.0, 10.0, 9.0, 9.0],
+        Grow::all(0.5),
         PartPose::ZERO,
     );
     let head_parts = root.get("head_parts");
-    head_parts.child(
+    head_parts.part(
         "left_saddle_mouth",
-        CubeList::new()
-            .tex_offs(29, 5)
-            .add_box(2.0, -9.0, -6.0, 1.0, 2.0, 2.0),
+        (29, 5),
+        [2.0, -9.0, -6.0, 1.0, 2.0, 2.0],
         PartPose::ZERO,
     );
-    head_parts.child(
+    head_parts.part(
         "right_saddle_mouth",
-        CubeList::new()
-            .tex_offs(29, 5)
-            .add_box(-3.0, -9.0, -6.0, 1.0, 2.0, 2.0),
+        (29, 5),
+        [-3.0, -9.0, -6.0, 1.0, 2.0, 2.0],
         PartPose::ZERO,
     );
-    head_parts.child(
+    head_parts.part(
         "left_saddle_line",
-        CubeList::new()
-            .tex_offs(32, 2)
-            .add_box(3.1, -6.0, -8.0, 0.0, 3.0, 16.0),
+        (32, 2),
+        [3.1, -6.0, -8.0, 0.0, 3.0, 16.0],
         PartPose::rotation(-DEG_30, 0.0, 0.0),
     );
-    head_parts.child(
+    head_parts.part(
         "right_saddle_line",
-        CubeList::new()
-            .tex_offs(32, 2)
-            .add_box(-3.1, -6.0, -8.0, 0.0, 3.0, 16.0),
+        (32, 2),
+        [-3.1, -6.0, -8.0, 0.0, 3.0, 16.0],
         PartPose::rotation(-DEG_30, 0.0, 0.0),
     );
-    head_parts.child(
+    head_parts.part_grow(
         "head_saddle",
-        CubeList::new().tex_offs(1, 1).add_box_grow(
-            -3.0,
-            -11.0,
-            -1.9,
-            6.0,
-            5.0,
-            6.0,
-            Grow::all(0.22),
-        ),
+        (1, 1),
+        [-3.0, -11.0, -1.9, 6.0, 5.0, 6.0],
+        Grow::all(0.22),
         PartPose::ZERO,
     );
-    head_parts.child(
+    head_parts.part_grow(
         "mouth_saddle_wrap",
-        CubeList::new().tex_offs(19, 0).add_box_grow(
-            -2.0,
-            -11.0,
-            -4.0,
-            4.0,
-            5.0,
-            2.0,
-            Grow::all(0.2),
-        ),
+        (19, 0),
+        [-2.0, -11.0, -4.0, 4.0, 5.0, 2.0],
+        Grow::all(0.2),
         PartPose::ZERO,
     );
     mesh
@@ -235,74 +194,74 @@ fn donkey_modify(mesh: &mut MeshDef) {
 fn baby_horse_mesh(g: Grow) -> MeshDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    let body = root.child(
+    let body = root.part_grow(
         "body",
-        CubeList::new()
-            .tex_offs(0, 13)
-            .add_box_grow(-4.0, -3.5, -7.0, 8.0, 7.0, 14.0, g),
+        (0, 13),
+        [-4.0, -3.5, -7.0, 8.0, 7.0, 14.0],
+        g,
         PartPose::offset(0.0, 12.5, 0.0),
     );
-    body.child(
+    body.part_grow(
         "tail",
-        CubeList::new()
-            .tex_offs(24, 34)
-            .add_box_grow(-1.5, -1.5, -1.0, 3.0, 3.0, 8.0, g),
+        (24, 34),
+        [-1.5, -1.5, -1.0, 3.0, 3.0, 8.0],
+        g,
         PartPose::offset_rotation(0.0, -1.0, 7.0, -0.7418, 0.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "left_hind_leg",
-        CubeList::new()
-            .tex_offs(12, 46)
-            .add_box_grow(-1.5, -1.0, -1.5, 3.0, 9.0, 3.0, g),
+        (12, 46),
+        [-1.5, -1.0, -1.5, 3.0, 9.0, 3.0],
+        g,
         PartPose::offset(2.4, 16.0, 5.4),
     );
-    root.child(
+    root.part_grow(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(0, 46)
-            .add_box_grow(-1.5, -1.0, -1.5, 3.0, 9.0, 3.0, g),
+        (0, 46),
+        [-1.5, -1.0, -1.5, 3.0, 9.0, 3.0],
+        g,
         PartPose::offset(-2.4, 16.0, 5.4),
     );
-    root.child(
+    root.part_grow(
         "left_front_leg",
-        CubeList::new()
-            .tex_offs(12, 34)
-            .add_box_grow(-1.5, -1.0, -1.5, 3.0, 9.0, 3.0, g),
+        (12, 34),
+        [-1.5, -1.0, -1.5, 3.0, 9.0, 3.0],
+        g,
         PartPose::offset(2.4, 16.0, -5.4),
     );
-    root.child(
+    root.part_grow(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(0, 34)
-            .add_box_grow(-1.5, -1.0, -1.5, 3.0, 9.0, 3.0, g),
+        (0, 34),
+        [-1.5, -1.0, -1.5, 3.0, 9.0, 3.0],
+        g,
         PartPose::offset(-2.4, 16.0, -5.4),
     );
-    let neck = root.child(
+    let neck = root.part_grow(
         "head_parts",
-        CubeList::new()
-            .tex_offs(30, 0)
-            .add_box_grow(-2.0, -6.0, -2.0, 4.0, 8.0, 4.0, g),
+        (30, 0),
+        [-2.0, -6.0, -2.0, 4.0, 8.0, 4.0],
+        g,
         PartPose::offset_rotation(0.0, 10.0, -6.0, 0.6109, 0.0, 0.0),
     );
-    let head = neck.child(
+    let head = neck.part_grow(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box_grow(-3.0, -3.9484, -6.705, 6.0, 4.0, 9.0, g),
+        (0, 0),
+        [-3.0, -3.9484, -6.705, 6.0, 4.0, 9.0],
+        g,
         PartPose::offset(0.0, -6.0516, -0.2951),
     );
-    head.child(
+    head.part_grow(
         "left_ear",
-        CubeList::new()
-            .tex_offs(0, 4)
-            .add_box_grow(-1.0, -2.5, -0.8, 2.0, 3.0, 1.0, g),
+        (0, 4),
+        [-1.0, -2.5, -0.8, 2.0, 3.0, 1.0],
+        g,
         PartPose::offset_rotation(2.0, -4.2484, 1.9451, 0.0, 0.0, 0.2618),
     );
-    head.child(
+    head.part_grow(
         "right_ear",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box_grow(-1.0, -2.5, -0.5, 2.0, 3.0, 1.0, g),
+        (0, 0),
+        [-1.0, -2.5, -0.5, 2.0, 3.0, 1.0],
+        g,
         PartPose::offset_rotation(-2.0, -4.2484, 1.645, 0.0, 0.0, -0.2618),
     );
     mesh
@@ -311,48 +270,42 @@ fn baby_horse_mesh(g: Grow) -> MeshDef {
 pub fn baby_donkey_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    let body = root.child(
+    let body = root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 13)
-            .add_box(-5.0, -3.0, -7.0, 8.0, 6.0, 14.0),
+        (0, 13),
+        [-5.0, -3.0, -7.0, 8.0, 6.0, 14.0],
         PartPose::offset(1.0, 14.0, 0.0),
     );
     let tail = body.child("tail", CubeList::new(), PartPose::offset(0.0, -1.5, 6.5));
-    tail.child(
+    tail.part(
         "tail_r1",
-        CubeList::new()
-            .tex_offs(24, 33)
-            .add_box(-2.5, -1.0, -0.5, 3.0, 3.0, 8.0),
+        (24, 33),
+        [-2.5, -1.0, -0.5, 3.0, 3.0, 8.0],
         PartPose::offset_rotation(0.0, 0.0, 0.0, -0.7418, 0.0, 0.0),
     );
     let body = root.get("body");
-    body.child(
+    body.part(
         "left_hind_leg",
-        CubeList::new()
-            .tex_offs(12, 44)
-            .add_box(-2.5, -1.5, -1.5, 3.0, 8.0, 3.0),
+        (12, 44),
+        [-2.5, -1.5, -1.5, 3.0, 8.0, 3.0],
         PartPose::offset(2.25, 3.5, 5.25),
     );
-    body.child(
+    body.part(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(0, 44)
-            .add_box(-2.5, -1.5, -1.5, 3.0, 8.0, 3.0),
+        (0, 44),
+        [-2.5, -1.5, -1.5, 3.0, 8.0, 3.0],
         PartPose::offset(-2.4, 3.5, 5.4),
     );
-    body.child(
+    body.part(
         "left_front_leg",
-        CubeList::new()
-            .tex_offs(12, 33)
-            .add_box(-2.5, -1.5, -1.5, 3.0, 8.0, 3.0),
+        (12, 33),
+        [-2.5, -1.5, -1.5, 3.0, 8.0, 3.0],
         PartPose::offset(2.4, 3.5, -5.3),
     );
-    body.child(
+    body.part(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(0, 33)
-            .add_box(-2.5, -1.5, -1.5, 3.0, 8.0, 3.0),
+        (0, 33),
+        [-2.5, -1.5, -1.5, 3.0, 8.0, 3.0],
         PartPose::offset(-2.4, 3.5, -5.4),
     );
     let neck = body.child(
@@ -360,26 +313,23 @@ pub fn baby_donkey_layer() -> LayerDef {
         CubeList::new(),
         PartPose::offset(0.0, -3.0, -5.0),
     );
-    neck.child(
+    neck.part(
         "neck_r1",
-        CubeList::new()
-            .tex_offs(30, 9)
-            .add_box(-3.0, -6.0, -3.0, 4.0, 8.0, 4.0),
+        (30, 9),
+        [-3.0, -6.0, -3.0, 4.0, 8.0, 4.0],
         PartPose::offset_rotation(0.0, 0.0, 0.0, 0.3927, 0.0, 0.0),
     );
     let head = neck.child("head", CubeList::new(), PartPose::offset(0.0, -5.0, -3.0));
-    head.child(
+    head.part(
         "head_r1",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-4.0, -3.6, -8.4, 6.0, 4.0, 9.0),
+        (0, 0),
+        [-4.0, -3.6, -8.4, 6.0, 4.0, 9.0],
         PartPose::offset_rotation(0.0, -1.0, 1.0, 0.3927, 0.0, 0.0),
     );
-    head.child(
+    head.part(
         "left_ear",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-2.0, -6.5, -0.3, 2.0, 7.0, 1.0),
+        (0, 0),
+        [-2.0, -6.5, -0.3, 2.0, 7.0, 1.0],
         PartPose::offset_rotation(2.0, -3.5, -1.0, 0.48, 0.0, 0.48),
     );
     head.child(

@@ -1,6 +1,8 @@
 use crate::client::chat_text;
 use crate::items::potions;
-use crate::session::{Book, ContainerKind, FurnaceKind, HorseMenu, InvAction, SlotStack};
+use crate::session::{
+    Book, ContainerKind, FurnaceKind, HorseMenu, InvAction, SlotStack, StackExtra,
+};
 use azalea::inventory::ContainerClickEvent;
 use azalea::prelude::*;
 use azalea_inventory::{ItemStack, Menu};
@@ -90,15 +92,8 @@ pub(crate) fn slot_stack(
     };
 
     let item = data.kind.to_str().trim_start_matches("minecraft:");
-    let cooldown = if crate::client::cooldowns::any_active() {
-        let use_cooldown = data.get_component::<comp::UseCooldown>();
-        let group = use_cooldown
-            .as_ref()
-            .and_then(|c| c.cooldown_group.as_ref());
-        crate::client::cooldowns::percent(group, item)
-    } else {
-        0
-    };
+    let (has_lodestone, lodestone) = crate::items::dispatch::lodestone_of(data);
+    let cooldown = crate::client::cooldowns::stack_percent(data);
 
     SlotStack {
         item,
@@ -106,24 +101,31 @@ pub(crate) fn slot_stack(
         cooldown,
         damage,
         max_damage,
-        custom_name,
-        lore,
-        enchantments,
-        potion: potion_contents(data),
+        extra: StackExtra {
+            custom_name,
+            lore,
+            enchantments,
+            potion: potion_contents(data),
+            banner_patterns: banner_patterns(data, registries),
+            banner_layers: banner_layers(data, registries),
+            book: book(data).map(Box::new),
+        }
+        .into(),
         unbreakable: data.get_component::<comp::Unbreakable>().is_some(),
         glint: crate::items::glint::has_foil(data),
         charged: data
             .get_component::<comp::ChargedProjectiles>()
             .is_some_and(|c| !c.items.is_empty()),
+        rocket: charged_rocket(data),
+        trim: crate::items::dispatch::trim_of(data),
+        has_lodestone,
+        lodestone,
         death_protection: death_protection(data),
         kinetic: crate::items::kinetic::kinetic(data),
         swing_ticks: crate::items::kinetic::swing_ticks(data),
         map_id: data.get_component::<comp::MapId>().map(|m| m.id),
         component_count: data.component_patch.iter().count() as u16,
         nbt_bytes,
-        banner_patterns: banner_patterns(data, registries),
-        banner_layers: banner_layers(data, registries),
-        book: book(data).map(Box::new),
         raw: (data.component_patch.iter().next().is_some()).then(|| {
             let mut data = data.clone();
             data.count = 1;
@@ -170,22 +172,32 @@ pub(crate) fn slot_stack_nbt(item: &simdnbt::owned::NbtCompound) -> Option<SlotS
         count: item.int("count").unwrap_or(1).clamp(1, 99) as u8,
         damage: int("damage").unwrap_or(0).clamp(0, u16::MAX as i32) as u16,
         max_damage: int("max_damage").unwrap_or(0).clamp(0, u16::MAX as i32) as u16,
-        custom_name: spans(component(components, "custom_name")),
-        lore: match component(components, "lore") {
-            Some(NbtTag::List(NbtList::String(lines))) => lines
-                .iter()
-                .filter_map(|line| spans(Some(&NbtTag::String(line.clone()))))
-                .collect(),
-            Some(NbtTag::List(NbtList::Compound(lines))) => lines
-                .iter()
-                .filter_map(|line| spans(Some(&NbtTag::Compound(line.clone()))))
-                .collect(),
-            _ => Vec::new(),
-        },
+        extra: StackExtra {
+            custom_name: spans(component(components, "custom_name")),
+            lore: match component(components, "lore") {
+                Some(NbtTag::List(NbtList::String(lines))) => lines
+                    .iter()
+                    .filter_map(|line| spans(Some(&NbtTag::String(line.clone()))))
+                    .collect(),
+                Some(NbtTag::List(NbtList::Compound(lines))) => lines
+                    .iter()
+                    .filter_map(|line| spans(Some(&NbtTag::Compound(line.clone()))))
+                    .collect(),
+                _ => Vec::new(),
+            },
+            enchantments,
+            ..StackExtra::default()
+        }
+        .into(),
         glint: crate::items::glint::codec_foil(id, components),
-        enchantments,
         unbreakable: component(components, "unbreakable").is_some(),
         component_count: components.map(|c| c.len()).unwrap_or(0) as u16,
+        trim: component(components, "trim")
+            .and_then(NbtTag::compound)
+            .and_then(|trim| trim.string("material"))
+            .map_or(0, |m| {
+                crate::items::dispatch::trim_index(strip_namespace(&m.to_str()))
+            }),
         ..SlotStack::default()
     })
 }
@@ -214,7 +226,7 @@ fn banner_patterns(
     (!out.is_empty()).then(|| out.into_boxed_slice())
 }
 
-fn banner_layers(
+pub(crate) fn banner_layers(
     data: &azalea_inventory::ItemStackData,
     registries: Option<&azalea_core::registry_holder::RegistryHolder>,
 ) -> Option<Box<[crate::blockentities::banner::BannerLayer]>> {
@@ -299,6 +311,12 @@ const MAX_GENERATION: u8 = 3;
 
 pub(crate) fn death_protection(data: &azalea_inventory::ItemStackData) -> bool {
     crate::items::component::<azalea_inventory::components::DeathProtection>(data).is_some()
+}
+
+pub(crate) fn charged_rocket(data: &azalea_inventory::ItemStackData) -> bool {
+    use azalea_registry::builtin::ItemKind;
+    data.get_component::<azalea_inventory::components::ChargedProjectiles>()
+        .is_some_and(|c| c.items.iter().any(|i| i.kind() == ItemKind::FireworkRocket))
 }
 
 pub(crate) fn potion_contents(
@@ -390,8 +408,8 @@ fn creative_stack(
         return ItemStack::Present(data);
     }
     let mut out = ItemStack::new(kind, stack.count as i32);
-    if !stack.enchantments.is_empty() {
-        let levels = resolve_enchantments(registries, &stack.enchantments);
+    if !stack.extra.enchantments.is_empty() {
+        let levels = resolve_enchantments(registries, &stack.extra.enchantments);
         if !levels.is_empty() {
             use azalea_inventory::components as comp;
             out = if kind == ItemKind::EnchantedBook {
@@ -403,7 +421,7 @@ fn creative_stack(
             };
         }
     }
-    if let Some(contents) = &stack.potion {
+    if let Some(contents) = &stack.extra.potion {
         use azalea_inventory::components as comp;
         use azalea_registry::builtin::{MobEffect, Potion};
 
@@ -597,10 +615,14 @@ mod tests {
         SlotStack {
             item: "potion",
             count: 1,
-            potion: Some(potions::PotionContents {
-                potion: Some("water".into()),
+            extra: StackExtra {
+                potion: Some(potions::PotionContents {
+                    potion: Some("water".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
+            }
+            .into(),
             ..Default::default()
         }
     }
@@ -627,16 +649,20 @@ mod tests {
         for stack in [
             water_bottle(),
             SlotStack {
-                potion: Some(potions::PotionContents {
-                    potion: Some("strong_healing".into()),
-                    custom_color: Some(0x123456),
-                    custom_effects: vec![potions::PotionEffectInstance {
-                        effect: "poison".into(),
-                        duration: 200,
-                        amplifier: 1,
-                    }],
-                    custom_name: None,
-                }),
+                extra: StackExtra {
+                    potion: Some(potions::PotionContents {
+                        potion: Some("strong_healing".into()),
+                        custom_color: Some(0x123456),
+                        custom_effects: vec![potions::PotionEffectInstance {
+                            effect: "poison".into(),
+                            duration: 200,
+                            amplifier: 1,
+                        }],
+                        custom_name: None,
+                    }),
+                    ..Default::default()
+                }
+                .into(),
                 ..water_bottle()
             },
             SlotStack {

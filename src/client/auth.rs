@@ -1,6 +1,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use crate::gui::accountlist::{self, AccountKind};
+use crate::util::global;
 use crate::{log_error, log_info, log_warn};
 
 #[derive(Clone)]
@@ -54,10 +55,7 @@ struct Slot {
     state: Option<Auth>,
 }
 
-fn slot() -> &'static Mutex<Slot> {
-    static SLOT: OnceLock<Mutex<Slot>> = OnceLock::new();
-    SLOT.get_or_init(Default::default)
-}
+global!(fn slot() -> Mutex<Slot>);
 
 pub fn begin() {
     let generation = {

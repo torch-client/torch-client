@@ -277,7 +277,7 @@ fn draw_cost_a(p: &mut Painter, offer: &MerchantOffer, x: f32, y: f32) {
     if offer.cost_a.is_empty() {
         return;
     }
-    p.item_icon_glint(&offer.cost_a.model_key(), x, y, offer.cost_a.glint);
+    p.stack_icon_as(&offer.cost_a, x, y, offer.cost_a.item_use());
     draw_price(p, offer.base_cost_a.count, x, y);
     draw_price(p, offer.cost_a.count, x + 14.0, y);
     p.sprite(

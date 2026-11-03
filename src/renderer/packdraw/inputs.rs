@@ -133,13 +133,7 @@ fn fading(duration: i32) -> f32 {
     }
 }
 
-fn night_vision_scale(duration: i32, partial: f32) -> f32 {
-    if duration < 0 || duration > 200 {
-        1.0
-    } else {
-        0.7 + ((duration as f32 - partial) * std::f32::consts::PI * 0.2).sin() * 0.3
-    }
-}
+use crate::play::mob_effects::night_vision_scale;
 
 fn held_block_light(item: &str) -> i32 {
     use std::str::FromStr;

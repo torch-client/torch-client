@@ -9,7 +9,7 @@ use azalea_protocol::packets::game::c_waypoint::ClientboundWaypoint;
 use std::sync::Arc;
 
 use crate::blockentities;
-use crate::client::tick::{held_item, item_id};
+use crate::client::tick::{held_item_patterned, item_id};
 use crate::client::tracking::{
     GAME_TIME, LOCAL_VEHICLE_ID, add_entity_data, anim_states, apply_map_patch, entity_anims,
     equipment, head_yaws, mark_meta_dirty, meta_index_18, on_grounds, on_living_anim,
@@ -61,12 +61,18 @@ pub(crate) fn handle_packet(
         s.session.remote_breaking.clear();
         s.session.item_pickups.clear();
         s.session.item_activation = None;
+        s.session
+            .last_death
+            .clone_from(&p.common.last_death_location);
         drop(s);
         crate::play::tracking_emitter::reset();
         unsecure_server_warning(shared, p.enforces_secure_chat);
     }
-    if let ClientboundGamePacket::Respawn(_) = packet {
+    if let ClientboundGamePacket::Respawn(p) = packet {
         let mut s = shared.lock().unwrap();
+        s.session
+            .last_death
+            .clone_from(&p.common.last_death_location);
         s.session.health_epoch = s.session.health_epoch.wrapping_add(1);
         s.session.death_cause = None;
         s.session.remote_breaking.clear();
@@ -74,6 +80,13 @@ pub(crate) fn handle_packet(
         s.session.item_activation = None;
         drop(s);
         crate::play::tracking_emitter::reset();
+    }
+    if let ClientboundGamePacket::SetDefaultSpawnPosition(p) = packet {
+        shared.lock().unwrap().session.spawn_pos = Some(p.global_pos.clone());
+    }
+    #[cfg(feature = "audio")]
+    if matches!(packet, ClientboundGamePacket::PlayerPosition(_)) {
+        crate::client::tick::forget_step_origin();
     }
     if let ClientboundGamePacket::PlayerPosition(p) = packet
         && !p.relative.x
@@ -573,16 +586,21 @@ fn animations(packet: &ClientboundGamePacket) {
                 AnimationAction::SwingOffHand => Some(true),
                 _ => None,
             };
-            if let Some(left) = left {
+            if let Some(off_hand) = left {
                 anim_states()
                     .lock()
                     .unwrap()
                     .entry(p.id.0)
                     .or_default()
-                    .swing(left);
+                    .swing_hand(off_hand);
                 if let Some(anim) = entity_anims().lock().unwrap().get_mut(&p.id.0) {
-                    anim.swing(left);
+                    anim.swing_hand(off_hand);
                 }
+            }
+        }
+        ClientboundGamePacket::ProjectilePower(p) => {
+            if let Some(anim) = entity_anims().lock().unwrap().get_mut(&p.id.0) {
+                anim.set_acceleration_power(p.acceleration_power);
             }
         }
         ClientboundGamePacket::HurtAnimation(p) => {
@@ -593,6 +611,12 @@ fn animations(packet: &ClientboundGamePacket) {
         }
         ClientboundGamePacket::EntityEvent(p) if p.event_id == entity_event::KINETIC_HIT => {
             crate::play::spear::kinetic_hit(p.entity_id.0);
+        }
+        ClientboundGamePacket::EntityEvent(p)
+            if p.event_id == entity_event::USE_ITEM_COMPLETE
+                && p.entity_id.0 == crate::client::tracking::local_entity_id() =>
+        {
+            crate::play::interaction::note_use_completed();
         }
         ClientboundGamePacket::EntityEvent(p) => {
             if let Some(anim) = entity_anims().lock().unwrap().get_mut(&p.entity_id.0) {
@@ -682,6 +706,13 @@ fn entity_state(packet: &ClientboundGamePacket) {
             for id in old.into_iter().flatten() {
                 mark_meta_dirty(id);
             }
+        }
+        ClientboundGamePacket::SetEntityLink(p) => {
+            let mut map = crate::client::tracking::leashes().lock().unwrap();
+            match p.dest_id.0 {
+                0 => map.remove(&p.source_id.0),
+                holder => map.insert(p.source_id.0, holder),
+            };
         }
         ClientboundGamePacket::UpdateAttributes(p) => {
             crate::client::tracking::update_attributes(p);
@@ -833,14 +864,11 @@ fn session_state(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &Client
         ClientboundGamePacket::OpenSignEditor(p) => {
             use crate::blockentities::feed::{BlockEntityData, SignFace};
             use crate::session::SignEditKind;
-            let world_block = {
-                use azalea::block::BlockTrait;
-                world
-                    .shared
-                    .read()
-                    .get_block_state(p.pos)
-                    .map(|state| Box::<dyn BlockTrait>::from(state).id().to_string())
-            };
+            let world_block = world
+                .shared
+                .read()
+                .get_block_state(p.pos)
+                .map(|state| crate::blocks::block_name(state).to_string());
             let mut s = shared.lock().unwrap();
             let key = [p.pos.x, p.pos.y, p.pos.z];
             let entry = s.session.block_entities.get(&key);
@@ -976,8 +1004,27 @@ fn session_state(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &Client
             }
         }
         ClientboundGamePacket::SetEquipment(p) => {
-            use azalea_inventory::components::EquipmentSlot;
+            use azalea_inventory::components::{BannerPatterns, EquipmentSlot};
             mark_meta_dirty(p.entity_id.0);
+            let patterned = p.slots.slots.iter().any(|(_, s)| {
+                s.as_present()
+                    .is_some_and(|d| d.get_component::<BannerPatterns>().is_some())
+            });
+            let (mut main_hand, mut off_hand, mut head) = (None, None, None);
+            {
+                let guard = patterned.then(|| world.shared.read());
+                let registries = guard.as_deref().map(|w| &w.registries);
+                let item =
+                    |stack: &azalea_inventory::ItemStack| held_item_patterned(stack, registries);
+                for (slot, stack) in &p.slots.slots {
+                    match slot {
+                        EquipmentSlot::Mainhand => main_hand = Some(item(stack)),
+                        EquipmentSlot::Offhand => off_hand = Some(item(stack)),
+                        EquipmentSlot::Head => head = Some(item(stack)),
+                        _ => {}
+                    }
+                }
+            }
             let mut map = equipment().lock().unwrap();
             let entry = map.entry(p.entity_id.0).or_default();
             let foil = |stack: &azalea_inventory::ItemStack| {
@@ -985,12 +1032,23 @@ fn session_state(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &Client
                     .as_present()
                     .is_some_and(crate::items::glint::has_foil)
             };
+            let consume = |stack: &azalea_inventory::ItemStack| {
+                stack
+                    .as_present()
+                    .and_then(crate::items::consume::Consumption::of)
+            };
             for (slot, stack) in &p.slots.slots {
                 match slot {
-                    EquipmentSlot::Mainhand => entry.main_hand = held_item(stack),
-                    EquipmentSlot::Offhand => entry.off_hand = held_item(stack),
+                    EquipmentSlot::Mainhand => {
+                        entry.main_hand = main_hand.take().unwrap_or_default();
+                        entry.consume[0] = consume(stack);
+                    }
+                    EquipmentSlot::Offhand => {
+                        entry.off_hand = off_hand.take().unwrap_or_default();
+                        entry.consume[1] = consume(stack);
+                    }
                     EquipmentSlot::Head => {
-                        entry.helmet = item_id(stack);
+                        entry.head = head.take().unwrap_or_default();
                         entry.armor_foil[0] = foil(stack);
                     }
                     EquipmentSlot::Chest => {
@@ -1166,11 +1224,11 @@ fn level_lifecycle(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &Clie
             worldsync::forget_chunk(world, shared, p.pos.x, p.pos.z);
         }
         ClientboundGamePacket::Respawn(p) => {
-            worldsync::set_dimension(&p.common);
+            worldsync::set_dimension(world, &p.common);
             worldsync::reset_level(shared);
         }
         ClientboundGamePacket::Login(p) => {
-            worldsync::set_dimension(&p.common);
+            worldsync::set_dimension(world, &p.common);
             worldsync::reset_level(shared);
         }
         _ => {}

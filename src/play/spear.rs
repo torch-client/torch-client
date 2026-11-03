@@ -44,15 +44,19 @@ pub(crate) fn stab(bot: &Client, shared: &Arc<SharedMutex>, sound: Option<SoundE
     });
     crate::client::tick::request_attack_ticker_reset();
     play_at_player(shared, sound);
-    crate::play::interaction::swing_main_hand(bot, shared);
+    crate::play::interaction::swing_hand(bot, shared, crate::session::InteractionHand::Main);
 }
 
-pub(crate) fn charge_started(bot: &Client, shared: &Arc<SharedMutex>) {
+pub(crate) fn charge_started(
+    bot: &Client,
+    shared: &Arc<SharedMutex>,
+    hand: crate::session::InteractionHand,
+) {
     let sound = bot
         .component::<azalea::entity::inventory::Inventory>()
         .ok()
         .and_then(|inventory| {
-            let held = inventory.held_item();
+            let held = inventory.get_equipment(hand.equipment())?;
             crate::items::kinetic::kinetic(held.as_present()?)?.use_sound
         });
     play_at_player(shared, sound);
@@ -64,18 +68,29 @@ pub(crate) fn kinetic_hit(entity_id: i32) {
     } else {
         entity_id
     };
-    let (sound, _at) = {
-        let mut anims = anim_states().lock().unwrap();
-        let Some(anim) = anims.get_mut(&id) else {
-            return;
-        };
-        (anim.kinetic_hit(), anim.position(1.0))
+    let player = anim_states()
+        .lock()
+        .unwrap()
+        .get_mut(&id)
+        .map(|anim| (anim.kinetic_hit(), anim.position(1.0), None));
+    let hit = player.or_else(|| {
+        crate::client::tracking::entity_anims()
+            .lock()
+            .unwrap()
+            .get_mut(&entity_id)
+            .map(|anim| (anim.kinetic_hit(), anim.position(1.0), Some(anim.kind)))
+    });
+    let Some((sound, _at, _kind)) = hit else {
+        return;
     };
     #[cfg(feature = "audio")]
     if let Some(event) = sound {
+        let category = _kind.map_or(crate::audio::SoundCategory::Players, |kind| {
+            crate::play::tracking_emitter::sound_source(kind)
+        });
         crate::audio::play_at(
             crate::items::kinetic::sound_name(event),
-            crate::audio::SoundCategory::Players,
+            category,
             _at,
             1.0,
             1.0,

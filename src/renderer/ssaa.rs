@@ -69,7 +69,15 @@ fn apply_ssaa(
     mut target: ResMut<SsaaTarget>,
     windows: Query<&Window, With<PrimaryWindow>>,
     state: Res<crate::gui::GuiState>,
-    scene_cameras: Query<Entity, Or<(With<PanoramaCamera>, With<WorldCamera>, With<HandCamera>)>>,
+    scene_cameras: Query<
+        Entity,
+        Or<(
+            With<PanoramaCamera>,
+            With<WorldCamera>,
+            With<HandCamera>,
+            With<super::outline::GlowCompositeCamera>,
+        )>,
+    >,
 ) {
     let Ok(window) = windows.single() else { return };
     let window_size = UVec2::new(

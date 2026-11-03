@@ -1,5 +1,10 @@
 #import bevy_pbr::mesh_view_bindings::{view, fog}
 #import bevy_pbr::view_transformations::position_world_to_clip
+#import client::terrain_common::{
+    atlas_texture, atlas_sampler, lightmap_texture, lightmap_sampler, params, section_origin, MATERIAL_LEAF,
+    MATERIAL_PLANT, WIND_SPEED, wind_offset, wind_frequency, wind_phase, wind_weight, vanilla_fog,
+    encode_srgb, decode_srgb, sample_lightmap, decode_tint
+}
 
 #ifdef FANCY_SHADERS
 #import bevy_pbr::mesh_view_bindings::{lights, globals}
@@ -11,61 +16,6 @@
 #import bevy_core_pipeline::tonemapping::tone_mapping
 #endif
 
-fn vanilla_fog_ramp(distance: f32, ramp: vec2<f32>) -> f32 {
-    return saturate((distance - ramp.x) * ramp.y);
-}
-
-fn vanilla_fog(color: vec4<f32>, distance: vec2<f32>) -> vec4<f32> {
-    let value = max(
-        vanilla_fog_ramp(distance.x, params.fog_ramps.xy),
-        vanilla_fog_ramp(distance.y, params.fog_ramps.zw),
-    );
-    let mixed = mix(encode_srgb(color.rgb), params.fog_color.rgb, value * params.fog_color.a);
-    return vec4(decode_srgb(mixed), color.a);
-}
-
-fn encode_srgb(c: vec3<f32>) -> vec3<f32> {
-    return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
-}
-
-fn decode_srgb(c: vec3<f32>) -> vec3<f32> {
-    return pow(c, vec3(2.2));
-}
-
-@group(2) @binding(0) var atlas_texture: texture_2d<f32>;
-@group(2) @binding(1) var atlas_sampler: sampler;
-@group(2) @binding(2) var lightmap_texture: texture_2d<f32>;
-@group(2) @binding(3) var lightmap_sampler: sampler;
-struct TerrainParams {
-    misc: vec4<f32>,
-    fog_color: vec4<f32>,
-    fog_ramps: vec4<f32>,
-    origin: vec4<i32>,
-    wave_phase: vec4<f32>,
-    wind_plant_phase: vec4<f32>,
-    wind_leaf_phase: vec4<f32>,
-}
-@group(2) @binding(4) var<uniform> params: TerrainParams;
-
-struct SlotMeta { min: vec3<f32>, first_index: u32, max: vec3<f32>, index_count: u32, origin: vec3<i32>, base_vertex: u32, solid_count: u32, flags: u32, pool: u32, cutout_first: u32, faces: array<vec4<u32>, 2>, }
-#ifdef META_TEXTURE
-const ORIGIN_ROW: i32 = 256;
-@group(2) @binding(5) var origins: texture_2d<i32>;
-#else
-@group(2) @binding(5) var<storage, read> metas: array<SlotMeta>;
-#endif
-fn section_origin(instance_index: u32, slot_lane: i32) -> vec3<f32> {
-#ifdef META_TEXTURE
-    let slot = slot_lane & 0xFFFF;
-    let texel = textureLoad(origins, vec2<i32>(slot % ORIGIN_ROW, slot / ORIGIN_ROW), 0);
-    return vec3<f32>(texel.xyz - params.origin.xyz);
-#else
-    return vec3<f32>(metas[instance_index].origin - params.origin.xyz);
-#endif
-}
-
-const MATERIAL_LEAF: f32 = 1.0;
-const MATERIAL_PLANT: f32 = 2.0;
 const MATERIAL_WATER: f32 = 3.0;
 const MATERIAL_LAVA: f32 = 4.0;
 const MATERIAL_EMISSIVE_BASE: f32 = 5.0;
@@ -91,11 +41,6 @@ struct VertexOutput {
     @location(7) world_position: vec4<f32>,
 #endif
 };
-
-fn sample_lightmap(uv: vec2<f32>) -> vec4<f32> {
-    let coord = clamp(uv / 256.0 + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0));
-    return textureSampleLevel(lightmap_texture, lightmap_sampler, coord, 0.0);
-}
 
 #ifdef FANCY_SHADERS
 
@@ -133,38 +78,6 @@ const HEIGHT_FOG_FALLOFF: f32 = 0.045;
 const HEIGHT_FOG_DENSITY: f32 = 0.00085;
 
 const FOG_SUN_TINT: f32 = 0.55;
-
-const WIND_LEAF: f32 = 0.045;
-const WIND_PLANT: f32 = 0.115;
-const WIND_SPEED: f32 = 1.0;
-
-const WIND_FREQ_PLANT: f32 = 0.42;
-const WIND_FREQ_LEAF: f32 = 0.05;
-
-fn wind_offset(world_position: vec3<f32>, t: f32, freq: f32, phase: vec3<f32>) -> vec3<f32> {
-    let p = world_position * freq;
-    let sway = sin(p.x + p.z + phase.x + t * 1.7) + 0.5 * sin(p.x * 1.7 - p.z * 1.1 + phase.y + t * 2.6);
-    let lift = cos(p.z * 0.9 - p.x * 0.4 + phase.z + t * 1.3);
-    return vec3(sway, lift * 0.25, lift * 0.8);
-}
-
-fn wind_frequency(material: f32) -> f32 {
-    return select(WIND_FREQ_PLANT, WIND_FREQ_LEAF, material == MATERIAL_LEAF);
-}
-
-fn wind_phase(material: f32) -> vec3<f32> {
-    return select(params.wind_plant_phase.xyz, params.wind_leaf_phase.xyz, material == MATERIAL_LEAF);
-}
-
-fn wind_weight(material: f32, anchor: f32) -> f32 {
-    if material == MATERIAL_PLANT {
-        return WIND_PLANT * anchor;
-    }
-    if material == MATERIAL_LEAF {
-        return WIND_LEAF;
-    }
-    return 0.0;
-}
 
 fn wave_height(xz: vec2<f32>, t: f32) -> f32 {
     let ph = params.wave_phase.xyz;
@@ -225,7 +138,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     out.uv = vertex.uv;
 
 #ifdef FANCY_SHADERS
-    out.color = vertex.color;
+    out.color = vec4(decode_tint(vertex.color.rgb), vertex.color.a);
 
     let light_level = vertex.light.xy * 255.0;
     let floor_light = sample_lightmap(vec2(0.0)).rgb;
@@ -233,7 +146,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     out.torch = floor_light + block_light * BLOCK_GAIN;
     out.sky = max(sample_lightmap(vec2(0.0, light_level.y)).rgb - floor_light, vec3(0.0));
 #else
-    let shaded = vec4(vertex.color.rgb * vertex.color.a, 1.0);
+    let shaded = vec4(decode_tint(vertex.color.rgb) * vertex.color.a, 1.0);
     out.color = shaded * sample_lightmap(vertex.light.xy * 255.0);
 #endif
 

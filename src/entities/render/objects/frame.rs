@@ -23,8 +23,17 @@ pub fn register(registry: &mut Registry) {
             .with_root(frame_map_root)
             .with_visible(has_map)
             .with_light(LightMode::Text)
+            .with_levels(map_levels)
             .ignoring_invisibility(),
     );
+}
+
+fn map_levels(st: &EntityState, levels: (u8, u8)) -> (u8, u8) {
+    if st.kind == EntityKind::GlowItemFrame {
+        (13, 15)
+    } else {
+        levels
+    }
 }
 
 fn frame_model(st: &EntityState) -> Option<BlockRef> {

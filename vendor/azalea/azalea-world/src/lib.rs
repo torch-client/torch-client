@@ -1,5 +1,6 @@
 mod bit_storage;
 pub mod block_change;
+pub mod border;
 pub mod chunk;
 mod container;
 pub mod find_blocks;
@@ -10,6 +11,7 @@ pub mod retain;
 mod world;
 
 pub use bit_storage::BitStorage;
+pub use border::WorldBorder;
 pub use chunk::{Chunk, Section, partial::PartialChunkStorage, storage::ChunkStorage};
 pub use container::{WorldName, Worlds};
 pub use world::*;

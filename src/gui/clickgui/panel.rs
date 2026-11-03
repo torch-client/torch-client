@@ -399,6 +399,7 @@ impl ClickGuiState {
         let aw = x + w - PAD - ax;
         self.sync_pointer(ui, active);
         let sw = aw - FIELD_H - PAD;
+        self.arm_search(ui, ax, y + PAD, sw, FIELD_H);
         search_field(
             p,
             look,

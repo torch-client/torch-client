@@ -33,7 +33,7 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, shared: &Arc<SharedMutex>) -> Opti
     let cy = (ctx.vh / 2.0).floor();
     for (i, line) in BODY.iter().enumerate() {
         let w = p.atlas.font.width_str(line);
-        p.text_str(
+        p.text_plain(
             line,
             ((ctx.vw - w) / 2.0).floor(),
             cy - 40.0 + i as f32 * crate::text::LINE_HEIGHT,

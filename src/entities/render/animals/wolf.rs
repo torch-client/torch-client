@@ -4,7 +4,7 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::wolf;
 use crate::entities::registry::Registry;
-use crate::entities::render::add_adult_and_baby;
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 use crate::entities::state::EntityState;
 
 use super::dye;
@@ -89,9 +89,9 @@ fn armor_texture(_st: &EntityState) -> TexturePath {
 }
 
 fn collar_texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/wolf/wolf_collar_baby".into()
-    } else {
-        "entity/wolf/wolf_collar".into()
-    }
+    aged_texture(
+        st,
+        "entity/wolf/wolf_collar",
+        "entity/wolf/wolf_collar_baby",
+    )
 }

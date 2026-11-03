@@ -30,96 +30,79 @@ pub fn frog_layer() -> LayerDef {
             PartPose::offset(0.0, -2.0, -1.0),
         )
         .child("eyes", CubeList::new(), PartPose::offset(-0.5, 0.0, 2.0));
-    eyes.child(
+    eyes.part(
         "right_eye",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-1.5, -1.0, -1.5, 3.0, 2.0, 3.0),
+        (0, 0),
+        [-1.5, -1.0, -1.5, 3.0, 2.0, 3.0],
         PartPose::offset(-1.5, -3.0, -6.5),
     );
-    eyes.child(
+    eyes.part(
         "left_eye",
-        CubeList::new()
-            .tex_offs(0, 5)
-            .add_box(-1.5, -1.0, -1.5, 3.0, 2.0, 3.0),
+        (0, 5),
+        [-1.5, -1.0, -1.5, 3.0, 2.0, 3.0],
         PartPose::offset(2.5, -3.0, -6.5),
     );
-    body.child(
+    body.part_grow(
         "croaking_body",
-        CubeList::new().tex_offs(26, 5).add_box_grow(
-            -3.5,
-            -0.1,
-            -2.9,
-            7.0,
-            2.0,
-            3.0,
-            Grow::all(-0.1),
-        ),
+        (26, 5),
+        [-3.5, -0.1, -2.9, 7.0, 2.0, 3.0],
+        Grow::all(-0.1),
         PartPose::offset(0.0, -1.0, -5.0),
     );
-    body.child(
+    body.part(
         "tongue",
-        CubeList::new()
-            .tex_offs(17, 13)
-            .add_box(-2.0, 0.0, -7.1, 4.0, 0.0, 7.0),
+        (17, 13),
+        [-2.0, 0.0, -7.1, 4.0, 0.0, 7.0],
         PartPose::offset(0.0, -1.01, 1.0),
     );
-    body.child(
+    body.part(
         "left_arm",
-        CubeList::new()
-            .tex_offs(0, 32)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 3.0, 3.0),
+        (0, 32),
+        [-1.0, 0.0, -1.0, 2.0, 3.0, 3.0],
         PartPose::offset(4.0, -1.0, -6.5),
     )
-    .child(
+    .part(
         "left_hand",
-        CubeList::new()
-            .tex_offs(18, 40)
-            .add_box(-4.0, 0.01, -4.0, 8.0, 0.0, 8.0),
+        (18, 40),
+        [-4.0, 0.01, -4.0, 8.0, 0.0, 8.0],
         PartPose::offset(0.0, 3.0, -1.0),
     );
-    body.child(
+    body.part(
         "right_arm",
-        CubeList::new()
-            .tex_offs(0, 38)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 3.0, 3.0),
+        (0, 38),
+        [-1.0, 0.0, -1.0, 2.0, 3.0, 3.0],
         PartPose::offset(-4.0, -1.0, -6.5),
     )
-    .child(
+    .part(
         "right_hand",
-        CubeList::new()
-            .tex_offs(2, 40)
-            .add_box(-4.0, 0.01, -5.0, 8.0, 0.0, 8.0),
+        (2, 40),
+        [-4.0, 0.01, -5.0, 8.0, 0.0, 8.0],
         PartPose::offset(0.0, 3.0, 0.0),
     );
     model_root
-        .child(
+        .part(
             "left_leg",
-            CubeList::new()
-                .tex_offs(14, 25)
-                .add_box(-1.0, 0.0, -2.0, 3.0, 3.0, 4.0),
+            (14, 25),
+            [-1.0, 0.0, -2.0, 3.0, 3.0, 4.0],
             PartPose::offset(3.5, -3.0, 4.0),
         )
-        .child(
+        .part(
             "left_foot",
-            CubeList::new()
-                .tex_offs(2, 32)
-                .add_box(-4.0, 0.01, -4.0, 8.0, 0.0, 8.0),
+            (2, 32),
+            [-4.0, 0.01, -4.0, 8.0, 0.0, 8.0],
             PartPose::offset(2.0, 3.0, 0.0),
         );
     model_root
-        .child(
+        .part(
             "right_leg",
-            CubeList::new()
-                .tex_offs(0, 25)
-                .add_box(-2.0, 0.0, -2.0, 3.0, 3.0, 4.0),
+            (0, 25),
+            [-2.0, 0.0, -2.0, 3.0, 3.0, 4.0],
             PartPose::offset(-3.5, -3.0, 4.0),
         )
-        .child(
+        .part(
             "right_foot",
-            CubeList::new()
-                .tex_offs(18, 32)
-                .add_box(-4.0, 0.01, -4.0, 8.0, 0.0, 8.0),
+            (18, 32),
+            [-4.0, 0.01, -4.0, 8.0, 0.0, 8.0],
             PartPose::offset(-2.0, 3.0, 0.0),
         );
     LayerDef::create(mesh, 48, 48)
@@ -172,18 +155,16 @@ pub fn frog_setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
 pub fn tadpole_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-1.5, -1.0, 0.0, 3.0, 2.0, 3.0),
+        (0, 0),
+        [-1.5, -1.0, 0.0, 3.0, 2.0, 3.0],
         PartPose::offset(0.0, 22.0, -3.0),
     );
-    root.child(
+    root.part(
         "tail",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(0.0, -1.0, 0.0, 0.0, 2.0, 7.0),
+        (0, 0),
+        [0.0, -1.0, 0.0, 0.0, 2.0, 7.0],
         PartPose::offset(0.0, 22.0, 0.0),
     );
     LayerDef::create(mesh, 16, 16)

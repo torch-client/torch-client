@@ -7,7 +7,7 @@ use crate::entities::registry::Registry;
 use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 use crate::entities::{RenderSpec, RootPose, default_root};
-use crate::util::mth::lerp;
+use crate::util::mth::{frac, lerp};
 
 pub fn register(registry: &mut Registry) {
     add_adult_and_baby(
@@ -51,10 +51,6 @@ fn texture(st: &EntityState) -> TexturePath {
     } else {
         format!("entity/panda/panda_{gene}").into()
     }
-}
-
-fn frac(x: f32) -> f32 {
-    x - x.floor()
 }
 
 fn angle_of(this_angle: f32, next_angle: f32, next_roll_pos: i32, t: f32, threshold: f32) -> f32 {

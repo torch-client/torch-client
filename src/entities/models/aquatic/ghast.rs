@@ -1,6 +1,6 @@
 #![allow(clippy::approx_constant)]
 
-use crate::entities::geom::{BakedModel, CubeList, Grow, LayerDef, MeshDef, PartPose, PartState};
+use crate::entities::geom::{BakedModel, Grow, LayerDef, MeshDef, PartPose, PartState};
 use crate::entities::models::aquatic::scaling;
 use crate::entities::state::EntityState;
 
@@ -24,21 +24,19 @@ const GHAST_TENTACLE_LENGTHS: [f32; 9] = [8.0, 13.0, 9.0, 11.0, 11.0, 10.0, 12.0
 pub fn ghast_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-8.0, -8.0, -8.0, 16.0, 16.0, 16.0),
+        (0, 0),
+        [-8.0, -8.0, -8.0, 16.0, 16.0, 16.0],
         PartPose::offset(0.0, 17.6, 0.0),
     );
     for (i, len) in GHAST_TENTACLE_LENGTHS.iter().enumerate() {
         let xo = (((i % 3) as f32 - (i / 3 % 2) as f32 * 0.5 + 0.25) / 2.0 * 2.0 - 1.0) * 5.0;
         let yo = ((i / 3) as f32 / 2.0 * 2.0 - 1.0) * 5.0;
-        root.child(
+        root.part(
             tentacle_name(i),
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box(-1.0, 0.0, -1.0, 2.0, *len, 2.0),
+            (0, 0),
+            [-1.0, 0.0, -1.0, 2.0, *len, 2.0],
             PartPose::offset(xo, 24.6, yo),
         );
     }
@@ -64,31 +62,19 @@ const BABY_SCALE: f32 = 0.2375;
 
 fn happy_ghast_mesh(is_baby: bool, deformation: Grow) -> MeshDef {
     let mut mesh = MeshDef::new();
-    let body = mesh.root().child(
+    let body = mesh.root().part_grow(
         "body",
-        CubeList::new().tex_offs(0, 0).add_box_grow(
-            -8.0,
-            -8.0,
-            -8.0,
-            16.0,
-            16.0,
-            16.0,
-            deformation,
-        ),
+        (0, 0),
+        [-8.0, -8.0, -8.0, 16.0, 16.0, 16.0],
+        deformation,
         PartPose::offset(0.0, 16.0, 0.0),
     );
     if is_baby {
-        body.child(
+        body.part_grow(
             "inner_body",
-            CubeList::new().tex_offs(0, 32).add_box_grow(
-                -8.0,
-                -16.0,
-                -8.0,
-                16.0,
-                16.0,
-                16.0,
-                deformation.extend(-0.5),
-            ),
+            (0, 32),
+            [-8.0, -16.0, -8.0, 16.0, 16.0, 16.0],
+            deformation.extend(-0.5),
             PartPose::offset(0.0, 8.0, 0.0),
         );
     }
@@ -104,11 +90,11 @@ fn happy_ghast_mesh(is_baby: bool, deformation: Grow) -> MeshDef {
         (2.0, 5.0, 6.25, 5.0),
     ];
     for (i, (w, h, x, z)) in TENTACLES.iter().enumerate() {
-        body.child(
+        body.part_grow(
             tentacle_name(i),
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box_grow(-1.0, 0.0, -1.0, *w, *h, 2.0, deformation),
+            (0, 0),
+            [-1.0, 0.0, -1.0, *w, *h, 2.0],
+            deformation,
             PartPose::offset(*x, 7.0, *z),
         );
     }
@@ -154,24 +140,17 @@ pub fn happy_ghast_setup(model: &BakedModel, parts: &mut [PartState], st: &Entit
 fn harness_mesh() -> MeshDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "harness",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-8.0, -16.0, -8.0, 16.0, 16.0, 16.0),
+        (0, 0),
+        [-8.0, -16.0, -8.0, 16.0, 16.0, 16.0],
         PartPose::offset(0.0, 24.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "goggles",
-        CubeList::new().tex_offs(0, 32).add_box_grow(
-            -8.0,
-            -2.5,
-            -2.5,
-            16.0,
-            5.0,
-            5.0,
-            Grow::all(0.15),
-        ),
+        (0, 32),
+        [-8.0, -2.5, -2.5, 16.0, 5.0, 5.0],
+        Grow::all(0.15),
         PartPose::offset(0.0, 14.0, -5.5),
     );
     scaling(mesh, 4.0)

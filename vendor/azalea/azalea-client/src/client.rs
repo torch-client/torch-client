@@ -65,6 +65,8 @@ pub struct JoinedClientBundle {
     pub attack: attack::AttackBundle,
 
     pub in_game_state: InGameState,
+
+    pub world_border: azalea_world::WorldBorder,
 }
 
 #[derive(Clone, Component, Debug, Default)]

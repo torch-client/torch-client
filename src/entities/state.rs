@@ -60,6 +60,7 @@ pub struct Display {
     pub background: u32,
     pub opacity: u8,
     pub flags: u8,
+    pub item_context: &'static str,
 }
 
 impl Display {
@@ -92,6 +93,7 @@ impl Default for Display {
             background: 0x4000_0000,
             opacity: 255,
             flags: 0,
+            item_context: "none",
         }
     }
 }
@@ -101,6 +103,7 @@ pub struct Extras {
     pub swell: f32,
     pub peek: f32,
     pub render_offset: [f32; 3],
+    pub ticks_since_kinetic_hit: f32,
     pub eating: bool,
     pub jump_progress: f32,
     pub paddle_left: f32,
@@ -242,7 +245,7 @@ pub struct ExtrasShared {
     pub stand_pose: [[f32; 3]; 6],
     pub main_hand: HeldItem,
     pub off_hand: HeldItem,
-    pub helmet: Option<&'static str>,
+    pub head: HeldItem,
     pub chestplate: Option<&'static str>,
     pub leggings: Option<&'static str>,
     pub boots: Option<&'static str>,
@@ -250,7 +253,7 @@ pub struct ExtrasShared {
     pub body_armor: Option<&'static str>,
     pub left_handed: bool,
     pub name: Option<String>,
-    pub name_spans: Vec<crate::text::Span>,
+    pub name_spans: std::sync::Arc<[crate::text::Span]>,
     pub name_visible: bool,
     pub tail_angle: f32,
     pub sprinting: bool,
@@ -285,6 +288,10 @@ pub struct ExtrasShared {
 }
 
 impl ExtrasShared {
+    pub fn helmet(&self) -> Option<&'static str> {
+        (!self.head.is_empty()).then_some(self.head.id)
+    }
+
     pub fn bee_angry(&self) -> bool {
         self.anger_ticks > 0
     }
@@ -318,6 +325,7 @@ impl Extras {
             peek: 0.0,
             render_offset: [0.0; 3],
             eating: false,
+            ticks_since_kinetic_hit: 0.0,
             jump_progress: 0.0,
             paddle_left: 0.0,
             paddle_right: 0.0,
@@ -468,7 +476,7 @@ impl Default for ExtrasShared {
             stand_pose: [[0.0; 3]; 6],
             main_hand: HeldItem::default(),
             off_hand: HeldItem::default(),
-            helmet: None,
+            head: HeldItem::default(),
             chestplate: None,
             leggings: None,
             boots: None,
@@ -476,7 +484,7 @@ impl Default for ExtrasShared {
             body_armor: None,
             left_handed: false,
             name: None,
-            name_spans: Vec::new(),
+            name_spans: std::sync::Arc::default(),
             name_visible: false,
             tail_angle: 0.628_318_55,
             sprinting: false,
@@ -495,7 +503,7 @@ impl Default for ExtrasShared {
             speed_value: 1.0,
             using_item: false,
             use_offhand: false,
-            max_crossbow_charge: 25.0,
+            max_crossbow_charge: crate::items::kinetic::CROSSBOW_CHARGE_TICKS,
             aggressive: false,
             charging: false,
             admiring: false,

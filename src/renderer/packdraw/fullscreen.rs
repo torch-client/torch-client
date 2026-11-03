@@ -23,6 +23,38 @@ pub(super) fn opaque_target(format: TextureFormat) -> Option<ColorTargetState> {
     })
 }
 
+pub(super) fn single_texture_layout(
+    device: &RenderDevice,
+    label: &str,
+    sample_type: TextureSampleType,
+) -> BindGroupLayout {
+    device.create_bind_group_layout(
+        label,
+        &[BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Texture {
+                sample_type,
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    )
+}
+
+pub(super) fn pipeline_layout(
+    device: &RenderDevice,
+    label: &str,
+    layout: &BindGroupLayout,
+) -> wgpu::PipelineLayout {
+    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[layout],
+        push_constant_ranges: &[],
+    })
+}
+
 pub(super) fn fullscreen_pipeline(
     device: &RenderDevice,
     label: &str,
@@ -132,18 +164,10 @@ pub(super) struct Blit {
 impl Blit {
     pub(super) fn new(device: &RenderDevice) -> Blit {
         Blit {
-            layout: device.create_bind_group_layout(
+            layout: single_texture_layout(
+                device,
                 gpu_label!("blit"),
-                &[BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: false },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                }],
+                TextureSampleType::Float { filterable: false },
             ),
             pipelines: Vec::new(),
         }
@@ -162,11 +186,7 @@ impl Blit {
             label: Some(gpu_label!("blit")),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(gpu_label!("blit")),
-            bind_group_layouts: &[&self.layout],
-            push_constant_ranges: &[],
-        });
+        let layout = pipeline_layout(device, gpu_label!("blit"), &self.layout);
         let pipeline = fullscreen_pipeline(device, gpu_label!("blit"), &module, &layout, format);
         self.pipelines
             .push((format, RenderPipeline::from(pipeline)));

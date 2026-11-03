@@ -226,10 +226,6 @@ impl DisplayTransforms {
         self.0[ctx.index()]
     }
 
-    pub fn get_named(&self, name: &str) -> Option<Transform> {
-        DisplayContext::parse(name).and_then(|ctx| self.get(ctx))
-    }
-
     pub fn is_empty(&self) -> bool {
         self.0.iter().all(Option::is_none)
     }
@@ -314,6 +310,14 @@ pub struct Assets {
     files: Mutex<HashMap<String, Option<Arc<Json>>>>,
     models: Mutex<HashMap<String, Arc<Resolved>>>,
     textures: Mutex<HashMap<String, Option<Arc<Tex>>>>,
+    permutations: std::sync::OnceLock<Box<[Permutations]>>,
+}
+
+struct Permutations {
+    textures: Vec<String>,
+    key: String,
+    permutations: Vec<(String, String)>,
+    separator: String,
 }
 
 impl Assets {
@@ -323,7 +327,101 @@ impl Assets {
             files: Mutex::new(HashMap::new()),
             models: Mutex::new(HashMap::new()),
             textures: Mutex::new(HashMap::new()),
+            permutations: std::sync::OnceLock::new(),
         }
+    }
+
+    fn read_permutations(&self) -> Box<[Permutations]> {
+        let mut out = Vec::new();
+        for text in crate::platform::assets::read_stack(self.root.join("atlases/items.json")) {
+            let Some(doc) = Json::parse(&text) else {
+                continue;
+            };
+            let id = |json: &Json| json.as_str().map(|s| strip_namespace(s).to_string());
+            for source in doc.get("sources").map(Json::arr).unwrap_or_default() {
+                let kind = source
+                    .get("type")
+                    .and_then(Json::as_str)
+                    .map(strip_namespace);
+                if kind != Some("paletted_permutations") {
+                    continue;
+                }
+                let Some(key) = source.get("palette_key").and_then(id) else {
+                    continue;
+                };
+                let permutations = match source.get("permutations") {
+                    Some(Json::Obj(entries)) => entries
+                        .iter()
+                        .filter_map(|(suffix, palette)| Some((suffix.clone(), id(palette)?)))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                out.push(Permutations {
+                    textures: source
+                        .get("textures")
+                        .map(Json::arr)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(id)
+                        .collect(),
+                    key,
+                    permutations,
+                    separator: source
+                        .get("separator")
+                        .and_then(Json::as_str)
+                        .unwrap_or("_")
+                        .to_string(),
+                });
+            }
+        }
+        out.into_boxed_slice()
+    }
+
+    fn permuted(&self, path: &str) -> Option<Tex> {
+        let sources = self.permutations.get_or_init(|| self.read_permutations());
+        let (base, key, palette) = sources.iter().find_map(|source| {
+            source.textures.iter().find_map(|texture| {
+                let suffix = path
+                    .strip_prefix(texture.as_str())?
+                    .strip_prefix(source.separator.as_str())?;
+                let (_, palette) = source
+                    .permutations
+                    .iter()
+                    .find(|(name, _)| name == suffix)?;
+                Some((texture, &source.key, palette))
+            })
+        })?;
+        let (base, key, values) = (
+            self.texture(base)?,
+            self.texture(key)?,
+            self.texture(palette)?,
+        );
+        if key.px.len() != values.px.len() {
+            return None;
+        }
+        let rgb = |p: [u8; 4]| [p[0], p[1], p[2]];
+        let px = base
+            .px
+            .iter()
+            .map(|&pixel| {
+                if pixel[3] == 0 {
+                    return pixel;
+                }
+                let value = key
+                    .px
+                    .iter()
+                    .zip(&values.px)
+                    .find(|(k, _)| k[3] != 0 && rgb(**k) == rgb(pixel))
+                    .map_or([pixel[0], pixel[1], pixel[2], 255], |(_, v)| *v);
+                let alpha = (u32::from(pixel[3]) * u32::from(value[3]) / 255) as u8;
+                [value[0], value[1], value[2], alpha]
+            })
+            .collect();
+        Some(Tex {
+            w: base.w,
+            h: base.h,
+            px,
+        })
     }
 
     pub fn json(&self, relative: &str) -> Option<Arc<Json>> {
@@ -354,7 +452,10 @@ impl Assets {
 
     fn decode_texture(&self, path: &str) -> Option<Tex> {
         let file = self.root.join(format!("textures/{}.png", path));
-        let img = crate::platform::assets::open_image(&file).ok()?.to_rgba8();
+        let Ok(img) = crate::platform::assets::open_image(&file) else {
+            return self.permuted(path);
+        };
+        let img = img.to_rgba8();
         let (w, mut h) = (img.width(), img.height());
         if w == 0 || h == 0 {
             return None;

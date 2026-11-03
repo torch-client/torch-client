@@ -7,6 +7,8 @@ pub struct VehicleLook {
     pub boat_yaw: f32,
 }
 
+pub static SESSION_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Default)]
 pub struct SharedState {
     pub camera_yaw: f32,
@@ -55,6 +57,7 @@ impl SharedState {
     pub fn clear_session(&mut self, status: String) {
         self.in_world = false;
         self.session_epoch = self.session_epoch.wrapping_add(1);
+        SESSION_EPOCH.store(self.session_epoch, std::sync::atomic::Ordering::Relaxed);
         let health_epoch = self.session.health_epoch;
         let block_entities_version = self.session.block_entities_version;
         self.session = SessionState::default();

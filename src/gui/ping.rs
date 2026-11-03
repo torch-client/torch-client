@@ -1,10 +1,12 @@
 use crate::platform::time::Instant;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::gui::atlas::{PACK_ICON_SLOTS, SERVER_ICON_PX, SERVER_ICON_SLOTS};
-use crate::text::Span;
+use crate::text::{Span, Style};
+
+pub const MOTD_COLOR: u32 = 0x80_8080;
 
 pub type IconPixels = std::sync::Arc<Vec<u8>>;
 
@@ -19,7 +21,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 pub enum PingState {
     Pinging,
     Ok(Box<PingInfo>),
-    Failed(String),
+    Failed(Failure),
 }
 
 #[derive(Clone, Debug)]
@@ -27,13 +29,10 @@ pub struct PingInfo {
     pub motd: Vec<Span>,
     pub online: i32,
     pub max: i32,
-    #[allow(
-        dead_code,
-        reason = "the status reply's version string, decoded but not drawn yet"
-    )]
     pub version: String,
     pub protocol: i32,
     pub latency_ms: u32,
+    pub players: std::sync::Arc<[String]>,
 }
 
 impl PingInfo {
@@ -76,10 +75,7 @@ pub(crate) struct Status {
     pub sample: Vec<String>,
 }
 
-fn table() -> &'static Mutex<HashMap<String, PingState>> {
-    static TABLE: OnceLock<Mutex<HashMap<String, PingState>>> = OnceLock::new();
-    TABLE.get_or_init(Default::default)
-}
+crate::util::global!(fn table() -> Mutex<HashMap<String, PingState>>);
 
 #[derive(Default)]
 struct Icons {
@@ -92,10 +88,7 @@ struct Icons {
     clock: u64,
 }
 
-fn icons() -> &'static Mutex<Icons> {
-    static ICONS: OnceLock<Mutex<Icons>> = OnceLock::new();
-    ICONS.get_or_init(Default::default)
-}
+crate::util::global!(fn icons() -> Mutex<Icons>);
 
 fn is_pack_key(key: &str) -> bool {
     key.starts_with('\0')
@@ -232,15 +225,52 @@ async fn ping_once(address: &str) -> PingState {
                 version: status.version,
                 protocol: status.protocol,
                 latency_ms: status.latency_ms,
+                players: status.sample.into(),
             }))
         }
-        Err(message) => PingState::Failed(message),
+        Err(failure) => PingState::Failed(failure),
     }
 }
 
-pub(crate) async fn status_once(address: &str, icon: bool) -> Result<Status, String> {
+#[derive(Clone, Debug)]
+pub struct Failure {
+    pub message: String,
+    pub unresolved: bool,
+}
+
+impl Failure {
+    fn other(message: String) -> Failure {
+        Failure {
+            message,
+            unresolved: false,
+        }
+    }
+
+    fn timeout() -> Failure {
+        Failure::other(format!("No answer in {}s", TIMEOUT.as_secs()))
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+pub(crate) async fn status_once(address: &str, icon: bool) -> Result<Status, Failure> {
     let started = Instant::now();
     let dial = crate::platform::address::normalize(address);
+
+    #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+    if crate::platform::address::is_java_tunnel(&dial) {
+        return match crate::platform::time::timeout(TIMEOUT, crate::eagler::tunnel_status(&dial))
+            .await
+        {
+            Ok(Ok(status)) => Ok(from_vanilla(address, status, icon, started)),
+            Ok(Err(e)) => Err(Failure::other(e.to_string())),
+            Err(_) => Err(Failure::timeout()),
+        };
+    }
 
     #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
     if crate::platform::address::is_websocket(&dial) {
@@ -255,11 +285,13 @@ pub(crate) async fn status_once(address: &str, icon: bool) -> Result<Status, Str
                     motd: status
                         .lines
                         .iter()
-                        .map(|line| crate::text::parse_formatted(line))
+                        .map(|line| {
+                            crate::text::parse_formatted_from(line, Style::colored(MOTD_COLOR))
+                        })
                         .collect::<Vec<_>>()
                         .join(&crate::text::Span {
-                            text: " ".to_string(),
-                            style: Default::default(),
+                            text: "\n".to_string(),
+                            style: Style::colored(MOTD_COLOR),
                         }),
                     online: status.online,
                     max: status.max,
@@ -269,35 +301,48 @@ pub(crate) async fn status_once(address: &str, icon: bool) -> Result<Status, Str
                     sample: Vec::new(),
                 })
             }
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(_) => Err(format!("No answer in {}s", TIMEOUT.as_secs())),
+            Ok(Err(e)) => Err(Failure::other(e.to_string())),
+            Err(_) => Err(Failure::timeout()),
         };
     }
 
     let result =
         crate::platform::time::timeout(TIMEOUT, azalea::ping::ping_server(dial.clone())).await;
     match result {
-        Ok(Ok(status)) => {
-            if icon && let Some(pixels) = status.favicon.as_deref().and_then(decode_favicon) {
-                note_icon(address, pixels);
-            }
-            Ok(Status {
-                motd: crate::client::chat_text::to_spans(&status.description),
-                online: status.players.online,
-                max: status.players.max,
-                version: status.version.name,
-                protocol: status.version.protocol,
-                latency_ms: elapsed_ms(started),
-                sample: status
-                    .players
-                    .sample
-                    .into_iter()
-                    .map(|player| player.name)
-                    .collect(),
-            })
-        }
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err(format!("No answer in {}s", TIMEOUT.as_secs())),
+        Ok(Ok(status)) => Ok(from_vanilla(address, status, icon, started)),
+        Ok(Err(e)) => Err(Failure {
+            unresolved: matches!(e, azalea::ping::PingError::Resolve(_)),
+            message: e.to_string(),
+        }),
+        Err(_) => Err(Failure::timeout()),
+    }
+}
+
+fn from_vanilla(
+    address: &str,
+    status: azalea_protocol::packets::status::c_status_response::ClientboundStatusResponse,
+    icon: bool,
+    started: Instant,
+) -> Status {
+    if icon && let Some(pixels) = status.favicon.as_deref().and_then(decode_favicon) {
+        note_icon(address, pixels);
+    }
+    Status {
+        motd: crate::client::chat_text::to_spans_styled(
+            &status.description,
+            Style::colored(MOTD_COLOR),
+        ),
+        online: status.players.online,
+        max: status.players.max,
+        version: status.version.name,
+        protocol: status.version.protocol,
+        latency_ms: elapsed_ms(started),
+        sample: status
+            .players
+            .sample
+            .into_iter()
+            .map(|player| player.name)
+            .collect(),
     }
 }
 
@@ -353,6 +398,7 @@ mod tests {
             version: "test".into(),
             protocol,
             latency_ms,
+            players: Vec::new().into(),
         }
     }
 

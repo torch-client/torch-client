@@ -5,18 +5,18 @@ use crate::util::mth::DEG_TO_RAD;
 pub fn body_mesh(leg_size: i32, mirror_left_leg: bool, mirror_right_leg: bool, g: Grow) -> MeshDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part_grow(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box_grow(-4.0, -4.0, -8.0, 8.0, 8.0, 8.0, g),
+        (0, 0),
+        [-4.0, -4.0, -8.0, 8.0, 8.0, 8.0],
+        g,
         PartPose::offset(0.0, (18 - leg_size) as f32, -6.0),
     );
-    root.child(
+    root.part_grow(
         "body",
-        CubeList::new()
-            .tex_offs(28, 8)
-            .add_box_grow(-5.0, -10.0, -7.0, 10.0, 16.0, 8.0, g),
+        (28, 8),
+        [-5.0, -10.0, -7.0, 10.0, 16.0, 8.0],
+        g,
         PartPose::offset_rotation(
             0.0,
             (17 - leg_size) as f32,
@@ -120,11 +120,10 @@ pub fn cold_pig_layer() -> LayerDef {
 pub fn baby_pig_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-3.5, -3.0, -4.5, 7.0, 6.0, 9.0),
+        (0, 0),
+        [-3.5, -3.0, -4.5, 7.0, 6.0, 9.0],
         PartPose::offset(0.0, 19.0, 0.5),
     );
     root.child(
@@ -136,32 +135,28 @@ pub fn baby_pig_layer() -> LayerDef {
             .add_box_grow(-1.5, -1.975, -6.0, 3.0, 2.0, 1.0, Grow::all(0.015)),
         PartPose::offset(0.0, 19.0, -2.0),
     );
-    root.child(
+    root.part(
         "left_front_leg",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 2.0, 2.0),
+        (0, 0),
+        [-1.0, 0.0, -1.0, 2.0, 2.0, 2.0],
         PartPose::offset(2.5, 22.0, -3.0),
     );
-    root.child(
+    root.part(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(23, 0)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 2.0, 2.0),
+        (23, 0),
+        [-1.0, 0.0, -1.0, 2.0, 2.0, 2.0],
         PartPose::offset(-2.5, 22.0, -3.0),
     );
-    root.child(
+    root.part(
         "left_hind_leg",
-        CubeList::new()
-            .tex_offs(0, 4)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 2.0, 2.0),
+        (0, 4),
+        [-1.0, 0.0, -1.0, 2.0, 2.0, 2.0],
         PartPose::offset(2.5, 22.0, 4.0),
     );
-    root.child(
+    root.part(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(23, 4)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 2.0, 2.0),
+        (23, 4),
+        [-1.0, 0.0, -1.0, 2.0, 2.0, 2.0],
         PartPose::offset(-2.5, 22.0, 4.0),
     );
     LayerDef::create(mesh, 32, 32)

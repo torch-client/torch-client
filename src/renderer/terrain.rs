@@ -504,6 +504,7 @@ pub struct TerrainMaterialPlugin;
 
 impl Plugin for TerrainMaterialPlugin {
     fn build(&self, app: &mut App) {
+        bevy::shader::load_shader_library!(app, "terrain_common.wgsl");
         embedded_asset!(app, "terrain.wgsl");
         embedded_asset!(app, "terrain_prepass.wgsl");
 

@@ -4,10 +4,10 @@ pub enum InvAction {
     Click(azalea_inventory::operations::ClickOperation),
     CreativeSet {
         slot: u16,
-        stack: SlotStack,
+        stack: Box<SlotStack>,
     },
     CreativeDrop {
-        stack: SlotStack,
+        stack: Box<SlotStack>,
     },
     ButtonClick(u8),
     SelectTrade(u32),
@@ -104,6 +104,31 @@ pub enum InteractionHand {
 }
 
 impl InteractionHand {
+    pub const BOTH: [Self; 2] = [Self::Main, Self::Off];
+
+    pub fn packet(self) -> azalea_protocol::packets::game::s_interact::InteractionHand {
+        use azalea_protocol::packets::game::s_interact::InteractionHand as Az;
+        match self {
+            Self::Main => Az::MainHand,
+            Self::Off => Az::OffHand,
+        }
+    }
+
+    pub fn equipment(self) -> azalea_inventory::components::EquipmentSlot {
+        use azalea_inventory::components::EquipmentSlot;
+        match self {
+            Self::Main => EquipmentSlot::Mainhand,
+            Self::Off => EquipmentSlot::Offhand,
+        }
+    }
+
+    pub fn menu_slot(self, selected: u8) -> usize {
+        match self {
+            Self::Main => 36 + selected as usize,
+            Self::Off => 45,
+        }
+    }
+
     pub fn edit_book_slot(self, selected: u8) -> u32 {
         match self {
             InteractionHand::Main => selected as u32,

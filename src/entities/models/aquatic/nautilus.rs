@@ -31,37 +31,24 @@ pub fn body_mesh() -> MeshDef {
             .add_box(-5.0, -4.51, 7.0, 10.0, 8.0, 0.0),
         PartPose::offset(0.0, -8.5, 12.3),
     );
-    body.child(
+    body.part_grow(
         "upper_mouth",
-        CubeList::new().tex_offs(54, 54).add_box_grow(
-            -5.0,
-            -2.0,
-            0.0,
-            10.0,
-            4.0,
-            4.0,
-            Grow::all(-0.001),
-        ),
+        (54, 54),
+        [-5.0, -2.0, 0.0, 10.0, 4.0, 4.0],
+        Grow::all(-0.001),
         PartPose::offset(0.0, -2.51, 7.0),
     );
-    body.child(
+    body.part(
         "inner_mouth",
-        CubeList::new()
-            .tex_offs(54, 70)
-            .add_box(-3.0, -2.0, -0.5, 6.0, 4.0, 4.0),
+        (54, 70),
+        [-3.0, -2.0, -0.5, 6.0, 4.0, 4.0],
         PartPose::offset(0.0, -0.51, 7.5),
     );
-    body.child(
+    body.part_grow(
         "lower_mouth",
-        CubeList::new().tex_offs(54, 62).add_box_grow(
-            -5.0,
-            -1.98,
-            0.0,
-            10.0,
-            4.0,
-            4.0,
-            Grow::all(-0.001),
-        ),
+        (54, 62),
+        [-5.0, -1.98, 0.0, 10.0, 4.0, 4.0],
+        Grow::all(-0.001),
         PartPose::offset(0.0, 1.49, 7.0),
     );
     mesh
@@ -96,37 +83,24 @@ pub fn baby_layer() -> LayerDef {
             .add_box(-2.5, -3.01, 4.1, 5.0, 4.0, 0.0),
         PartPose::offset(0.5, -5.0, 3.0),
     );
-    body.child(
+    body.part_grow(
         "upper_mouth",
-        CubeList::new().tex_offs(24, 24).add_box_grow(
-            -2.5,
-            -1.0,
-            0.0,
-            5.0,
-            2.0,
-            2.0,
-            Grow::all(-0.001),
-        ),
+        (24, 24),
+        [-2.5, -1.0, 0.0, 5.0, 2.0, 2.0],
+        Grow::all(-0.001),
         PartPose::offset(0.0, -2.01, 3.9),
     );
-    body.child(
+    body.part(
         "inner_mouth",
-        CubeList::new()
-            .tex_offs(24, 32)
-            .add_box(-1.5, -1.0, -1.0, 3.0, 2.0, 2.0),
+        (24, 32),
+        [-1.5, -1.0, -1.0, 3.0, 2.0, 2.0],
         PartPose::offset(0.0, -1.01, 4.9),
     );
-    body.child(
+    body.part_grow(
         "lower_mouth",
-        CubeList::new().tex_offs(24, 28).add_box_grow(
-            -2.5,
-            -1.0,
-            0.0,
-            5.0,
-            2.0,
-            2.0,
-            Grow::all(-0.001),
-        ),
+        (24, 28),
+        [-2.5, -1.0, 0.0, 5.0, 2.0, 2.0],
+        Grow::all(-0.001),
         PartPose::offset(0.0, -0.01, 3.9),
     );
     LayerDef::create(mesh, 64, 64)
@@ -156,17 +130,11 @@ pub fn saddle_layer() -> LayerDef {
     let nautilus = mesh
         .root()
         .child("root", CubeList::new(), PartPose::offset(0.0, 29.0, -6.0));
-    nautilus.child(
+    nautilus.part_grow(
         "shell",
-        CubeList::new().tex_offs(0, 0).add_box_grow(
-            -7.0,
-            -10.0,
-            -7.0,
-            14.0,
-            10.0,
-            16.0,
-            Grow::all(0.2),
-        ),
+        (0, 0),
+        [-7.0, -10.0, -7.0, 14.0, 10.0, 16.0],
+        Grow::all(0.2),
         PartPose::offset(0.0, -13.0, 5.0),
     );
     LayerDef::create(mesh, 128, 128)
@@ -184,33 +152,29 @@ pub fn zombie_coral_layer() -> LayerDef {
         CubeList::new(),
         PartPose::offset(0.0, -11.0, 11.0),
     );
-    yellow.child(
+    yellow.part(
         "yellow_coral_second",
-        CubeList::new()
-            .tex_offs(0, 85)
-            .add_box(-4.5, -3.5, 0.0, 6.0, 8.0, 0.0),
+        (0, 85),
+        [-4.5, -3.5, 0.0, 6.0, 8.0, 0.0],
         PartPose::offset_rotation(0.0, 0.0, 2.0, 0.0, -0.7854, 0.0),
     );
-    yellow.child(
+    yellow.part(
         "yellow_coral_first",
-        CubeList::new()
-            .tex_offs(0, 85)
-            .add_box(-4.5, -3.5, 0.0, 6.0, 8.0, 0.0),
+        (0, 85),
+        [-4.5, -3.5, 0.0, 6.0, 8.0, 0.0],
         PartPose::offset_rotation(0.0, 0.0, 0.0, 0.0, 0.7854, 0.0),
     );
     corals
-        .child(
+        .part(
             "pink_coral",
-            CubeList::new()
-                .tex_offs(-8, 94)
-                .add_box(-4.5, 4.5, 0.0, 6.0, 0.0, 8.0),
+            (-8, 94),
+            [-4.5, 4.5, 0.0, 6.0, 0.0, 8.0],
             PartPose::offset(-12.5, -18.0, 11.0),
         )
-        .child(
+        .part(
             "pink_coral_second",
-            CubeList::new()
-                .tex_offs(-8, 94)
-                .add_box(-3.0, 0.0, -4.0, 6.0, 0.0, 8.0),
+            (-8, 94),
+            [-3.0, 0.0, -4.0, 6.0, 0.0, 8.0],
             PartPose::offset_rotation(-1.5, 4.5, 4.0, 0.0, 0.0, 1.5708),
         );
     let blue = corals.child(
@@ -218,18 +182,16 @@ pub fn zombie_coral_layer() -> LayerDef {
         CubeList::new(),
         PartPose::offset(-14.0, 0.0, 5.5),
     );
-    blue.child(
+    blue.part(
         "blue_second",
-        CubeList::new()
-            .tex_offs(0, 102)
-            .add_box(-3.5, -5.5, 0.0, 5.0, 10.0, 0.0),
+        (0, 102),
+        [-3.5, -5.5, 0.0, 5.0, 10.0, 0.0],
         PartPose::offset_rotation(0.0, 0.0, -2.0, 0.0, 0.7854, 0.0),
     );
-    blue.child(
+    blue.part(
         "blue_first",
-        CubeList::new()
-            .tex_offs(0, 102)
-            .add_box(-3.5, -5.5, 0.0, 5.0, 10.0, 0.0),
+        (0, 102),
+        [-3.5, -5.5, 0.0, 5.0, 10.0, 0.0],
         PartPose::offset_rotation(0.0, 0.0, 0.0, 0.0, -0.7854, 0.0),
     );
     let red = corals.child(
@@ -237,18 +199,16 @@ pub fn zombie_coral_layer() -> LayerDef {
         CubeList::new(),
         PartPose::offset(0.0, 0.0, 0.0),
     );
-    red.child(
+    red.part(
         "red_coral_second",
-        CubeList::new()
-            .tex_offs(0, 112)
-            .add_box(-2.5, -5.5, 0.0, 4.0, 10.0, 0.0),
+        (0, 112),
+        [-2.5, -5.5, 0.0, 4.0, 10.0, 0.0],
         PartPose::offset_rotation(-0.5, -1.0, 1.5, 0.0, -0.829, 0.0),
     );
-    red.child(
+    red.part(
         "red_coral_first",
-        CubeList::new()
-            .tex_offs(0, 112)
-            .add_box(-4.5, -5.5, 0.0, 6.0, 10.0, 0.0),
+        (0, 112),
+        [-4.5, -5.5, 0.0, 6.0, 10.0, 0.0],
         PartPose::offset_rotation(0.0, 0.0, 0.0, 0.0, 0.7854, 0.0),
     );
     LayerDef::create(mesh, 128, 128)

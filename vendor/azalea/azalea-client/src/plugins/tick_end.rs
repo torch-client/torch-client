@@ -2,7 +2,7 @@ use azalea_core::tick::GameTick;
 use azalea_entity::LocalEntity;
 use azalea_physics::PhysicsSystems;
 use azalea_protocol::packets::game::ServerboundClientTickEnd;
-use azalea_world::WorldName;
+use azalea_world::{WorldBorder, WorldName};
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
 
@@ -18,6 +18,15 @@ impl Plugin for TickEndPlugin {
                 .after(MiningSystems)
                 .after(crate::movement::send_position),
         );
+        app.add_systems(GameTick, tick_world_border.after(PhysicsSystems));
+    }
+}
+
+fn tick_world_border(mut query: Query<&mut WorldBorder>) {
+    for mut border in &mut query {
+        if border.is_moving() {
+            border.tick();
+        }
     }
 }
 

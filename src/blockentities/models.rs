@@ -283,27 +283,22 @@ fn banner_flag(standing: bool) -> LayerDef {
     LayerDef::create(mesh, 64, 64)
 }
 
-pub fn bed_head() -> LayerDef {
-    let visible_body = Faces::of(&[
-        Direction::Down,
-        Direction::North,
-        Direction::South,
-        Direction::West,
-        Direction::East,
-    ]);
-    let visible_legs = Faces::of(&[
-        Direction::Up,
-        Direction::North,
-        Direction::South,
-        Direction::West,
-        Direction::East,
-    ]);
+pub fn bed_half(head: bool) -> LayerDef {
+    use Direction::{Down, East, North, South, Up, West};
+    let body_face = if head { Down } else { Up };
+    let visible_body = Faces::of(&[body_face, North, South, West, East]);
+    let visible_legs = Faces::of(&[Up, North, South, West, East]);
+    let (main_v, left_v, right_v, leg_z, left_roll, right_roll) = if head {
+        (0, 6, 18, 0.0, FRAC_PI_2, PI)
+    } else {
+        (22, 0, 12, -16.0, 0.0, 1.5 * PI)
+    };
     let mut mesh = MeshDef::new();
     {
         let root = mesh.root();
         root.child(
             "main",
-            CubeList::new().tex_offs(0, 0).add_box_faces(
+            CubeList::new().tex_offs(0, main_v).add_box_faces(
                 0.0,
                 0.0,
                 0.0,
@@ -316,90 +311,29 @@ pub fn bed_head() -> LayerDef {
         );
         root.child(
             "left_leg",
-            CubeList::new().tex_offs(50, 6).add_box_faces(
+            CubeList::new().tex_offs(50, left_v).add_box_faces(
                 0.0,
                 6.0,
-                0.0,
+                leg_z,
                 3.0,
                 3.0,
                 3.0,
                 visible_legs,
             ),
-            PartPose::rotation(FRAC_PI_2, 0.0, FRAC_PI_2),
+            PartPose::rotation(FRAC_PI_2, 0.0, left_roll),
         );
         root.child(
             "right_leg",
-            CubeList::new().tex_offs(50, 18).add_box_faces(
+            CubeList::new().tex_offs(50, right_v).add_box_faces(
                 -16.0,
                 6.0,
-                0.0,
+                leg_z,
                 3.0,
                 3.0,
                 3.0,
                 visible_legs,
             ),
-            PartPose::rotation(FRAC_PI_2, 0.0, PI),
-        );
-    }
-    LayerDef::create(mesh, 64, 64)
-}
-
-pub fn bed_foot() -> LayerDef {
-    let visible_body = Faces::of(&[
-        Direction::Up,
-        Direction::North,
-        Direction::South,
-        Direction::West,
-        Direction::East,
-    ]);
-    let visible_legs = Faces::of(&[
-        Direction::Up,
-        Direction::North,
-        Direction::South,
-        Direction::West,
-        Direction::East,
-    ]);
-    let mut mesh = MeshDef::new();
-    {
-        let root = mesh.root();
-        root.child(
-            "main",
-            CubeList::new().tex_offs(0, 22).add_box_faces(
-                0.0,
-                0.0,
-                0.0,
-                16.0,
-                16.0,
-                6.0,
-                visible_body,
-            ),
-            PartPose::ZERO,
-        );
-        root.child(
-            "left_leg",
-            CubeList::new().tex_offs(50, 0).add_box_faces(
-                0.0,
-                6.0,
-                -16.0,
-                3.0,
-                3.0,
-                3.0,
-                visible_legs,
-            ),
-            PartPose::rotation(FRAC_PI_2, 0.0, 0.0),
-        );
-        root.child(
-            "right_leg",
-            CubeList::new().tex_offs(50, 12).add_box_faces(
-                -16.0,
-                6.0,
-                -16.0,
-                3.0,
-                3.0,
-                3.0,
-                visible_legs,
-            ),
-            PartPose::rotation(FRAC_PI_2, 0.0, 1.5 * PI),
+            PartPose::rotation(FRAC_PI_2, 0.0, right_roll),
         );
     }
     LayerDef::create(mesh, 64, 64)

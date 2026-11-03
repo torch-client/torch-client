@@ -15,7 +15,7 @@ pub fn register(registry: &mut BeRegistry) {
     );
 }
 
-fn skull_type(block: &str) -> &'static str {
+pub(crate) fn skull_type(block: &str) -> &'static str {
     match block {
         "skeleton_skull" | "skeleton_wall_skull" => "skeleton",
         "wither_skeleton_skull" | "wither_skeleton_wall_skull" => "wither_skeleton",
@@ -65,13 +65,25 @@ fn texture(st: &BeState) -> String {
 }
 
 fn setup(model: &BakedModel, parts: &mut [PartState], st: &BeState) {
-    match skull_type(&st.state.block) {
+    pose_for_type(skull_type(&st.state.block), model, parts, animation(st));
+}
+
+pub(crate) fn animates(kind: &str) -> bool {
+    matches!(kind, "dragon" | "piglin")
+}
+
+pub(crate) fn pose_for_type(
+    kind: &str,
+    model: &BakedModel,
+    parts: &mut [PartState],
+    animation: f32,
+) {
+    let t = animation * PI * 0.2;
+    match kind {
         "dragon" => {
-            let t = animation(st) * PI * 0.2;
             parts[model.id("jaw")].x_rot = (t.sin() + 1.0) * 0.2;
         }
         "piglin" => {
-            let t = animation(st) * PI * 0.2;
             parts[model.id("left_ear")].z_rot = -((t * 1.2).cos() + 2.5) * 0.2;
             parts[model.id("right_ear")].z_rot = (t.cos() + 2.5) * 0.2;
         }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::gui::atlas::BANNER_ICON_SLOTS;
 
@@ -40,10 +40,10 @@ impl Icons {
     }
 }
 
-static ICONS: OnceLock<Mutex<Icons>> = OnceLock::new();
+crate::util::global!(fn icons_cell() -> Mutex<Icons>);
 
 fn icons() -> MutexGuard<'static, Icons> {
-    match ICONS.get_or_init(Default::default).lock() {
+    match icons_cell().lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }

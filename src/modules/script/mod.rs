@@ -13,6 +13,7 @@ use crate::text::Span;
 mod api;
 mod author;
 mod blocks;
+mod capture;
 mod chunk;
 mod fs;
 mod game;
@@ -36,10 +37,9 @@ pub use author::{
 };
 pub use chunk::{arrived as chunk_arrived, changed as block_changed};
 pub use game::{
-    CAMERA as CANVAS_CAMERA, Camera, FileAsk, UiButton, UiForm, UiList, UiRow, draw_canvas,
-    draw_hud, draw_panel,
+    CAMERA as CANVAS_CAMERA, Camera, FileAsk, OverPrompt, UiButton, UiForm, UiList, UiRow,
+    draw_canvas, draw_canvas_overlay, draw_hud, draw_panel,
 };
-pub use image::shared as image_pixels;
 pub use install::uninstall;
 pub use install::{
     Candidate, Verdict, check as check_drop, clear_note as clear_install_note, install,
@@ -103,6 +103,8 @@ pub struct ModInfo {
     pub version: Option<String>,
     pub license: Option<String>,
     pub description: Option<String>,
+    pub author: Option<String>,
+    pub source: Option<String>,
     pub modules: Vec<ModuleInfo>,
     pub error: Option<String>,
     pub last_error: Option<String>,
@@ -140,6 +142,8 @@ impl ModInfo {
             version: None,
             license: None,
             description: None,
+            author: None,
+            source: None,
             modules: Vec::new(),
             error: None,
             last_error: None,
@@ -220,6 +224,8 @@ pub fn folder() -> PathBuf {
 }
 
 pub fn init() {
+    #[cfg(target_arch = "wasm32")]
+    bevy::reflect::TypeRegistry::empty().register_derived_types();
     load(false, true);
 }
 
@@ -484,15 +490,19 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) -> Option<(f32, f32)> {
     let (yaw, pitch) = bot
         .component::<azalea::entity::LookDirection>()
         .map_or((0.0, 0.0), |l| (l.y_rot(), l.x_rot()));
-    let dimension = bot
-        .component::<azalea::world::WorldName>()
-        .map_or_else(|_| String::new(), |n| n.to_string());
+    let mut snap = game::Snapshot::spare();
+    snap.dimension.clear();
+    if let Ok(name) = bot.component::<azalea::world::WorldName>() {
+        use std::fmt::Write as _;
+        let _ = write!(snap.dimension, "{}", name.0);
+    }
     let read = {
         let s = shared.lock().unwrap();
         body.crouching = s.session.crouching;
         body.flying = s.session.flying;
         s.in_world.then(|| {
-            let world = run::World {
+            snap.read(&s);
+            run::World {
                 epoch: s.session_epoch,
                 pos: s.session.player_pos,
                 health: s.session.health,
@@ -503,18 +513,16 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) -> Option<(f32, f32)> {
                 camera: [-s.camera_yaw - 180.0, -s.camera_pitch],
                 on_ground,
                 physics: body,
-                dimension,
                 gamemode: game::gamemode_name(s.session.gamemode),
                 xp: s.session.xp_level,
                 dead: s.session.dead,
                 op_level: s.session.op_level,
                 selected: s.session.hotbar_selected,
-                address: s.session.current_address.clone(),
-            };
-            (world, game::Snapshot::read(&s))
+            }
         })
     };
-    let Some((world, snap)) = read else {
+    let Some(world) = read else {
+        snap.recycle();
         return None;
     };
     let commands = if WANTS.fetch_and(!COMMAND, Relaxed) & COMMAND != 0 {
@@ -608,18 +616,13 @@ pub fn attack(
         .map_or(-1, |id| id.0);
     let kind = bot
         .get_entity_component::<azalea::entity::EntityKindComponent>(entity)
-        .map(|k| k.0.to_string())
-        .unwrap_or_default();
-    let kind = format!(
-        "minecraft:{}",
-        kind.strip_prefix("minecraft:").unwrap_or(&kind)
-    );
+        .map(|k| k.0.to_str());
     match RUNTIME
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .as_mut()
     {
-        Some(rt) => rt.attack(id, &kind, bot),
+        Some(rt) => rt.attack(id, kind.unwrap_or("minecraft:"), bot),
         None => false,
     }
 }
@@ -731,7 +734,7 @@ pub fn tag_query(packet: &azalea_protocol::packets::game::c_tag_query::Clientbou
             owner,
             id,
             generation: nbt::generation(),
-            result: nbt::JobResult::Tag(packet.tag.clone()),
+            result: Box::new(nbt::JobResult::Tag(packet.tag.clone())),
         });
     }
 }
@@ -758,7 +761,7 @@ pub fn key_down(key: &'static str, label: &'static str) {
 
 pub fn packet(packet: &azalea_protocol::packets::game::ClientboundGamePacket) {
     if let Some(converted) = packets::convert(packet) {
-        game::push(game::Pending::Packet(converted));
+        game::push(game::Pending::Packet(Box::new(converted)));
     }
 }
 
@@ -796,7 +799,7 @@ pub fn ui_click(serial: u64, row: usize, button: UiButton, action: Option<usize>
 fn canvas_owner() -> Option<usize> {
     let ui = game::UI.lock().unwrap_or_else(PoisonError::into_inner);
     ui.as_ref()
-        .filter(|l| matches!(l.form, UiForm::Canvas))
+        .filter(|l| matches!(l.form, UiForm::Canvas(None)))
         .map(|l| l.owner)
 }
 
@@ -805,7 +808,7 @@ pub fn ui_canvas_click(serial: u64, button: UiButton, sx: f32, sy: f32) {
         let ui = game::UI.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(list) = ui
             .as_ref()
-            .filter(|l| l.serial == serial && matches!(l.form, UiForm::Canvas))
+            .filter(|l| l.serial == serial && matches!(l.form, UiForm::Canvas(None)))
         else {
             return;
         };
@@ -835,21 +838,32 @@ pub fn ui_closed(serial: u64) {
         return;
     };
     let owner = list.owner;
-    game::push(match list.form {
+    game::push(match &list.form {
         UiForm::Rows => game::Pending::UiClose { owner },
         UiForm::Prompt(_) => game::Pending::UiPrompt { owner, text: None },
         UiForm::File(_) => game::Pending::FileRequest { owner, file: None },
-        UiForm::Canvas => game::Pending::UiClose { owner },
+        UiForm::Canvas(over) => {
+            if over.is_some() {
+                game::push(game::Pending::UiPrompt { owner, text: None });
+            }
+            game::Pending::UiClose { owner }
+        }
     });
 }
 
-pub fn ui_prompt(serial: u64, text: String) {
-    if let Some(list) = take_ui(serial).filter(|l| matches!(l.form, UiForm::Prompt(_))) {
-        game::push(game::Pending::UiPrompt {
-            owner: list.owner,
-            text: Some(text),
-        });
-    }
+pub fn ui_prompt(serial: u64, text: Option<String>) {
+    let mut ui = game::UI.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(list) = ui.as_ref().filter(|l| l.serial == serial) else {
+        return;
+    };
+    let owner = list.owner;
+    let next = match &list.form {
+        UiForm::Prompt(_) => None,
+        UiForm::Canvas(Some(_)) => Some(game::reshow_canvas(list, None)),
+        _ => return,
+    };
+    *ui = next;
+    game::push(game::Pending::UiPrompt { owner, text });
 }
 
 pub fn ui_file(serial: u64, name: &str, bytes: &[u8]) -> Result<(), String> {
@@ -863,7 +877,7 @@ pub fn ui_file(serial: u64, name: &str, bytes: &[u8]) -> Result<(), String> {
     if take_ui(serial).is_some() {
         game::push(game::Pending::FileRequest {
             owner: list.owner,
-            file: Some(file),
+            file: Some(Box::new(file)),
         });
     }
     Ok(())

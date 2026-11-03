@@ -25,5 +25,5 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(fetch(request).catch(() => caches.match("./")));
     return;
   }
-  event.respondWith(caches.match(request, { ignoreSearch: true }).then((hit) => hit ?? fetch(request)));
+  event.respondWith(caches.match(request).then((hit) => hit ?? fetch(request)));
 });

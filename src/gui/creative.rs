@@ -6,6 +6,7 @@ use crate::gui::container::LABEL_COLOR;
 use crate::gui::painter::Painter;
 use crate::gui::screens::dim_background;
 use crate::gui::slots::{self, Drag, Layout, MenuModel, Mode, SlotClick, SlotState};
+use crate::gui::tooltip::label;
 use crate::gui::widgets::TextBox;
 use crate::gui::{ScreenCtx, Snapshot};
 use crate::items::potions;
@@ -98,7 +99,7 @@ struct TabInfo {
 fn tab_info(i: usize) -> TabInfo {
     match i {
         TAB_SEARCH => TabInfo {
-            title: "Search Items",
+            title: label!("itemGroup.search"),
             icon: "compass",
             top_row: true,
             column: 6,
@@ -108,7 +109,7 @@ fn tab_info(i: usize) -> TabInfo {
             show_title: true,
         },
         TAB_INVENTORY => TabInfo {
-            title: "Survival Inventory",
+            title: label!("itemGroup.inventory"),
             icon: "chest",
             top_row: false,
             column: 6,
@@ -415,15 +416,15 @@ fn list_stack(it: &ListItem, count: u8) -> SlotStack {
         item: id,
         count,
         max_damage,
-        enchantments: it.enchantments(),
-        potion: it.potion(),
+        extra: crate::session::StackExtra {
+            enchantments: it.enchantments(),
+            potion: it.potion(),
+            ..Default::default()
+        }
+        .into(),
         glint: crate::items::glint::default_foil(id),
         ..Default::default()
     }
-}
-
-fn first_free_slot(snap: &Snapshot) -> Option<usize> {
-    (36..45).chain(9..36).find(|i| snap.slot(*i).is_empty())
 }
 
 pub fn draw(
@@ -533,7 +534,7 @@ pub fn draw(
             out,
         )
     } else {
-        draw_item_grid(p, st, ctx, snap, left, top, &mut cursor, &mut hovered, out);
+        draw_item_grid(p, st, ctx, left, top, &mut cursor, &mut hovered, out);
         draw_hotbar_row(
             p,
             ctx,
@@ -721,7 +722,7 @@ fn draw_tab_tooltip(p: &mut Painter, title: &str, mx: f32, my: f32, vw: f32) {
     let w = p.atlas.font.width_str(title);
     let (x, y) = crate::gui::tooltip::position_flat(mx, my, vw, w);
     p.fill(x - 3.0, y - 3.0, w + 6.0, 14.0, 0xF0100010);
-    p.text_str(title, x, y, 0xFFFFFF, false);
+    p.text_plain(title, x, y, 0xFFFFFF, false);
 }
 
 fn scrollbar_input(st: &mut CreativeState, ctx: &ScreenCtx, left: f32, top: f32, scrollable: bool) {
@@ -754,7 +755,6 @@ fn draw_item_grid(
     p: &mut Painter,
     st: &mut CreativeState,
     ctx: &ScreenCtx,
-    snap: &Snapshot,
     left: f32,
     top: f32,
     cursor: &mut SlotStack,
@@ -777,36 +777,33 @@ fn draw_item_grid(
         let x = left + GRID_X + (cell % COLS) as f32 * PITCH;
         let y = top + GRID_Y + (cell / COLS) as f32 * PITCH;
         let glint = crate::items::glint::default_foil(it.base_id());
-        p.item_icon_glint(&it.model_key(), x, y, glint);
+        let use_ = crate::items::dispatch::ItemUse {
+            owner: p.owner_at(x, y),
+            ..Default::default()
+        };
+        p.item_icon_for(&it.model_key(), it.base_id(), use_, x, y, glint);
         if hover_cell == Some(cell) {
             p.slot_highlight(x, y);
             *hovered = Some(list_stack(&it, 1));
-            let idle_cursor = cursor.is_empty();
             list_click(&it, ctx, cursor, out);
-            if ctx.input.left_click && ctx.input.shift && idle_cursor {
-                list_shift_click(&it, snap, out);
-            }
         }
     }
 }
 
 fn same_item(cursor: &SlotStack, it: &ListItem) -> bool {
     cursor.item == it.base_id()
-        && cursor.enchantments == it.enchantments()
-        && cursor.potion == it.potion()
+        && cursor.extra.enchantments == it.enchantments()
+        && cursor.extra.potion == it.potion()
 }
 
 fn list_click(it: &ListItem, ctx: &ScreenCtx, cursor: &mut SlotStack, out: &mut Vec<InvAction>) {
     let input = ctx.input;
     let max = max_stack(it);
     let idle = cursor.is_empty();
-    if input.left_click {
-        if cursor.is_empty() {
-            if input.shift {
-                return;
-            }
-            *cursor = list_stack(it, max);
-        } else if same_item(cursor, it) {
+    if (input.left_click || input.right_click) && idle {
+        *cursor = list_stack(it, if input.shift { max } else { 1 });
+    } else if input.left_click {
+        if same_item(cursor, it) {
             cursor.count = if input.shift {
                 max
             } else {
@@ -815,11 +812,8 @@ fn list_click(it: &ListItem, ctx: &ScreenCtx, cursor: &mut SlotStack, out: &mut 
         } else {
             *cursor = SlotStack::default();
         }
-    }
-    if input.right_click {
-        if cursor.is_empty() {
-            *cursor = list_stack(it, 1);
-        } else if cursor.count > 1 {
+    } else if input.right_click {
+        if cursor.count > 1 {
             cursor.count -= 1;
         } else {
             *cursor = SlotStack::default();
@@ -832,23 +826,14 @@ fn list_click(it: &ListItem, ctx: &ScreenCtx, cursor: &mut SlotStack, out: &mut 
         if *pressed {
             out.push(InvAction::CreativeSet {
                 slot: (36 + i) as u16,
-                stack: list_stack(it, max),
+                stack: list_stack(it, max).into(),
             });
         }
     }
     if input.drop_key {
         let count = if input.ctrl { max } else { 1 };
         out.push(InvAction::CreativeDrop {
-            stack: list_stack(it, count),
-        });
-    }
-}
-
-fn list_shift_click(it: &ListItem, snap: &Snapshot, out: &mut Vec<InvAction>) {
-    if let Some(slot) = first_free_slot(snap) {
-        out.push(InvAction::CreativeSet {
-            slot: slot as u16,
-            stack: list_stack(it, max_stack(it)),
+            stack: list_stack(it, count).into(),
         });
     }
 }
@@ -1166,77 +1151,5 @@ mod tests {
         assert_eq!(inventory_tab_slot_pos(9), Some((9.0, 54.0)));
         assert_eq!(inventory_tab_slot_pos(36), Some((9.0, 112.0)));
         assert_eq!(inventory_tab_slot_pos(45), Some((35.0, 20.0)));
-    }
-}
-
-#[cfg(test)]
-mod visual {
-    use std::sync::Arc;
-
-    use super::*;
-    use crate::gui::atlas::build_gui_atlas;
-    use crate::gui::preview::save_upscaled;
-    use crate::gui::render::GuiInput;
-    use crate::gui::{GuiState, Screen};
-    use crate::session::{Gamemode, SessionState, SharedMutex, SharedState};
-    use bevy::prelude::Vec2;
-
-    #[test]
-    fn preview_creative_states() {
-        let atlas = build_gui_atlas(&crate::assets_root());
-        let (vw, vh) = (427.0_f32, 240.0_f32);
-        let shared: Arc<SharedMutex> = Arc::new(SharedMutex::new(SharedState {
-            in_world: true,
-            session: SessionState {
-                menu_slots: vec![SlotStack::default(); 46],
-                gamemode: Gamemode::Creative,
-                ..Default::default()
-            },
-            ..Default::default()
-        }));
-        let mk = |mouse: Option<Vec2>| GuiInput {
-            size: Vec2::new(vw, vh),
-            scale: 3.0,
-            mouse,
-            ..Default::default()
-        };
-        let cases: Vec<(usize, f32, Option<Vec2>, &str)> = vec![
-            (
-                TAB_SEARCH,
-                0.0,
-                Some(Vec2::new(vw / 2.0 + 80.0, vh / 2.0 - 80.0)),
-                "cr_search.png",
-            ),
-            (TAB_INVENTORY, 0.0, None, "cr_inventory.png"),
-            (0, 1.0, None, "cr_scrolled.png"),
-        ];
-        for (tab, scroll, mouse, name) in cases {
-            let mut state = GuiState {
-                screen: Screen::Creative,
-                ..Default::default()
-            };
-            state.creative.tab = tab;
-            state.creative.scroll = scroll;
-            let mut p = Painter::new(&atlas, 0);
-            crate::gui::screens::draw(
-                &mut p,
-                &mut state,
-                &mk(mouse),
-                &shared,
-                #[cfg(feature = "skins")]
-                &mut Default::default(),
-            );
-            state.creative.scroll = scroll;
-            let mut p = Painter::new(&atlas, 0);
-            crate::gui::screens::draw(
-                &mut p,
-                &mut state,
-                &mk(mouse),
-                &shared,
-                #[cfg(feature = "skins")]
-                &mut Default::default(),
-            );
-            save_upscaled(&p, vw as u32, vh as u32, name);
-        }
     }
 }

@@ -21,31 +21,23 @@ pub enum IllagerArmPose {
 pub fn illager_mesh() -> MeshDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    let head = root.child(
+    let head = root.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-4.0, -10.0, -4.0, 8.0, 10.0, 8.0),
+        (0, 0),
+        [-4.0, -10.0, -4.0, 8.0, 10.0, 8.0],
         PartPose::offset(0.0, 0.0, 0.0),
     );
-    head.child(
+    head.part_grow(
         "hat",
-        CubeList::new().tex_offs(32, 0).add_box_grow(
-            -4.0,
-            -10.0,
-            -4.0,
-            8.0,
-            12.0,
-            8.0,
-            Grow::all(0.45),
-        ),
+        (32, 0),
+        [-4.0, -10.0, -4.0, 8.0, 12.0, 8.0],
+        Grow::all(0.45),
         PartPose::ZERO,
     );
-    head.child(
+    head.part(
         "nose",
-        CubeList::new()
-            .tex_offs(24, 0)
-            .add_box(-1.0, -1.0, -6.0, 2.0, 4.0, 2.0),
+        (24, 0),
+        [-1.0, -1.0, -6.0, 2.0, 4.0, 2.0],
         PartPose::offset(0.0, -2.0, 0.0),
     );
     root.child(
@@ -74,11 +66,10 @@ pub fn illager_mesh() -> MeshDef {
             .add_box(4.0, -2.0, -2.0, 4.0, 8.0, 4.0),
         PartPose::ZERO,
     );
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(0, 22)
-            .add_box(-2.0, 0.0, -2.0, 4.0, 12.0, 4.0),
+        (0, 22),
+        [-2.0, 0.0, -2.0, 4.0, 12.0, 4.0],
         PartPose::offset(-2.0, 12.0, 0.0),
     );
     root.child(
@@ -89,11 +80,10 @@ pub fn illager_mesh() -> MeshDef {
             .add_box(-2.0, 0.0, -2.0, 4.0, 12.0, 4.0),
         PartPose::offset(2.0, 12.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_arm",
-        CubeList::new()
-            .tex_offs(40, 46)
-            .add_box(-3.0, -2.0, -2.0, 4.0, 12.0, 4.0),
+        (40, 46),
+        [-3.0, -2.0, -2.0, 4.0, 12.0, 4.0],
         PartPose::offset(-5.0, 2.0, 0.0),
     );
     root.child(

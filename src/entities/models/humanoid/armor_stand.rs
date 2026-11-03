@@ -19,25 +19,22 @@ const BODY_PARTS: [&str; 10] = [
 pub fn armor_stand_mesh() -> MeshDef {
     let mut mesh = humanoid::create_mesh(Grow::NONE, 0.0);
     let root = mesh.root();
-    root.child(
+    root.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-1.0, -7.0, -1.0, 2.0, 7.0, 2.0),
+        (0, 0),
+        [-1.0, -7.0, -1.0, 2.0, 7.0, 2.0],
         PartPose::offset(0.0, 1.0, 0.0),
     );
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 26)
-            .add_box(-6.0, 0.0, -1.5, 12.0, 3.0, 3.0),
+        (0, 26),
+        [-6.0, 0.0, -1.5, 12.0, 3.0, 3.0],
         PartPose::ZERO,
     );
-    root.child(
+    root.part(
         "right_arm",
-        CubeList::new()
-            .tex_offs(24, 0)
-            .add_box(-2.0, -2.0, -1.0, 2.0, 12.0, 2.0),
+        (24, 0),
+        [-2.0, -2.0, -1.0, 2.0, 12.0, 2.0],
         PartPose::offset(-5.0, 2.0, 0.0),
     );
     root.child(
@@ -48,11 +45,10 @@ pub fn armor_stand_mesh() -> MeshDef {
             .add_box(0.0, -2.0, -1.0, 2.0, 12.0, 2.0),
         PartPose::offset(5.0, 2.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(8, 0)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 11.0, 2.0),
+        (8, 0),
+        [-1.0, 0.0, -1.0, 2.0, 11.0, 2.0],
         PartPose::offset(-1.9, 12.0, 0.0),
     );
     root.child(
@@ -63,32 +59,28 @@ pub fn armor_stand_mesh() -> MeshDef {
             .add_box(-1.0, 0.0, -1.0, 2.0, 11.0, 2.0),
         PartPose::offset(1.9, 12.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_body_stick",
-        CubeList::new()
-            .tex_offs(16, 0)
-            .add_box(-3.0, 3.0, -1.0, 2.0, 7.0, 2.0),
+        (16, 0),
+        [-3.0, 3.0, -1.0, 2.0, 7.0, 2.0],
         PartPose::ZERO,
     );
-    root.child(
+    root.part(
         "left_body_stick",
-        CubeList::new()
-            .tex_offs(48, 16)
-            .add_box(1.0, 3.0, -1.0, 2.0, 7.0, 2.0),
+        (48, 16),
+        [1.0, 3.0, -1.0, 2.0, 7.0, 2.0],
         PartPose::ZERO,
     );
-    root.child(
+    root.part(
         "shoulder_stick",
-        CubeList::new()
-            .tex_offs(0, 48)
-            .add_box(-4.0, 10.0, -1.0, 8.0, 2.0, 2.0),
+        (0, 48),
+        [-4.0, 10.0, -1.0, 8.0, 2.0, 2.0],
         PartPose::ZERO,
     );
-    root.child(
+    root.part(
         "base_plate",
-        CubeList::new()
-            .tex_offs(0, 32)
-            .add_box(-6.0, 11.0, -6.0, 12.0, 1.0, 12.0),
+        (0, 32),
+        [-6.0, 11.0, -6.0, 12.0, 1.0, 12.0],
         PartPose::offset(0.0, 12.0, 0.0),
     );
     mesh

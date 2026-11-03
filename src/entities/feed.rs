@@ -61,6 +61,8 @@ pub struct TickInput {
     pub shared: std::sync::Arc<ExtrasShared>,
     pub eating: bool,
     pub driven: bool,
+    pub leash_holder: Option<i32>,
+    pub outline: u32,
 }
 
 impl TickInput {
@@ -109,6 +111,8 @@ impl TickInput {
             shared: std::sync::Arc::new(ExtrasShared::default()),
             eating: false,
             driven: false,
+            leash_holder: None,
+            outline: 0,
         }
     }
 }
@@ -443,6 +447,8 @@ struct Sampled {
     display_fire: bool,
     pose: Pose,
     bed_orientation: Option<Direction>,
+    leash_holder: Option<i32>,
+    outline: u32,
 }
 
 impl Sampled {
@@ -464,8 +470,19 @@ impl Sampled {
             display_fire: input.display_fire,
             pose: input.pose,
             bed_orientation: input.bed_orientation,
+            leash_holder: input.leash_holder,
+            outline: input.outline,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SeatBody {
+    pub pos: [f64; 3],
+    pub y_rot: f32,
+    pub scale: f64,
+    pub width: f64,
+    pub stand: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -479,6 +496,7 @@ pub struct EntityAnim {
     velocity_seq: u64,
     vehicle_body_rot: Option<(f32, f32)>,
     ticks: u32,
+    kinetic_hit_at: Option<u32>,
     rng: JavaRandom,
     speed_sqr: f32,
     sampled: Sampled,
@@ -487,6 +505,25 @@ pub struct EntityAnim {
 }
 
 impl EntityAnim {
+    pub fn kinetic_hit(&mut self) -> Option<azalea_registry::builtin::SoundEvent> {
+        if self.kinetic_hit_at.is_some_and(|at| {
+            self.ticks.wrapping_sub(at) <= crate::items::kinetic::HIT_FEEDBACK_TICKS
+        }) {
+            return None;
+        }
+        self.kinetic_hit_at = Some(self.ticks);
+        let shared = &self.sampled.shared;
+        if !shared.using_item {
+            return None;
+        }
+        let item = if shared.use_offhand {
+            &shared.off_hand
+        } else {
+            &shared.main_hand
+        };
+        item.kinetic.and_then(|k| k.hit_sound)
+    }
+
     pub fn new(id: i32, kind: EntityKind) -> EntityAnim {
         let mut rng = JavaRandom::new(id as i64);
         let tentacle_speed = 1.0 / (rng.next_f32() + 1.0) * 0.2;
@@ -497,111 +534,27 @@ impl EntityAnim {
             core: LivingCore::default(),
             is_living: false,
             motion: Motion::for_kind(kind),
-            body: Body::default(),
+            body: Body {
+                acceleration_power: super::physics::INITIAL_ACCELERATION_POWER,
+                ..Body::default()
+            },
             velocity_seq: 0,
             vehicle_body_rot: None,
             ticks: 0,
+            kinetic_hit_at: None,
             rng,
             speed_sqr: 0.0,
             sampled: Sampled::from_input(&TickInput::new()),
             started: false,
             kind_state: has_kind_state(kind).then(|| {
                 Box::new(KindAnim {
-                    attach_pos: None,
-                    teleport_interp: 0,
-                    swell: 0.0,
-                    swell_old: 0.0,
-                    peek: 0.0,
-                    peek_old: 0.0,
-                    jump: 0.0,
-                    jump_old: 0.0,
-                    swell_counter: 0,
-                    paddle: [0.0; 2],
-                    paddle_old: [0.0; 2],
-                    bubble_multiplier: 0.0,
-                    bubble_angle: 0.0,
-                    bubble_angle_old: 0.0,
-                    eat_ticks: 0,
-                    shaking: false,
-                    shake_anim: 0.0,
-                    shake_anim_old: 0.0,
-                    interest: 0.0,
-                    interest_old: 0.0,
-                    attack_ticks: 0,
-                    stunned_ticks: 0,
-                    roar_ticks: 0,
-                    offer_flower_ticks: 0,
-                    tendril_ticks: 0,
-                    tendril_ticks_old: 0,
-                    heart_ticks: 0,
-                    heart_ticks_old: 0,
                     wiggle_ticks: WIGGLE_TICKS,
-                    swim: SwimAmount::new(),
-                    elytra: [0.0; 3],
-                    elytra_old: [0.0; 3],
-                    use_ticks: 0,
-                    crouch: 0.0,
-                    crouch_old: 0.0,
-                    bear_stand: 0.0,
-                    bear_stand_old: 0.0,
-                    panda: [0.0; 3],
-                    panda_old: [0.0; 3],
-                    cat: [0.0; 3],
-                    cat_old: [0.0; 3],
-                    horse_eat: 0.0,
-                    horse_eat_old: 0.0,
-                    mouth_anim: 0.0,
-                    mouth_anim_old: 0.0,
                     tentacle_speed,
-                    tentacle_movement: 0.0,
-                    tentacle_angle: 0.0,
-                    tentacle_angle_old: 0.0,
-                    squid_x_rot: 0.0,
-                    squid_x_rot_old: 0.0,
-                    squid_z_rot: 0.0,
-                    squid_z_rot_old: 0.0,
-                    squid_rotate_speed: 0.0,
-                    squish: 0.0,
-                    squish_old: 0.0,
-                    target_squish: 0.0,
-                    was_on_ground: false,
                     tail_anim,
                     tail_anim_old: tail_anim,
-                    tail_anim_speed: 0.0,
-                    spikes_anim: 0.0,
-                    spikes_anim_old: 0.0,
-                    flap_time: 0.0,
-                    flap_time_old: 0.0,
-                    flap: 0.0,
-                    flap_old: 0.0,
-                    flap_speed: 0.0,
-                    flap_speed_old: 0.0,
                     flapping: 1.0,
-                    bee_roll: 0.0,
-                    bee_roll_old: 0.0,
-                    axolotl: [0; 4],
-                    axolotl_old: [0; 4],
-                    roll_counter: 0,
-                    jump_ticks: 0,
-                    jump_duration: 0,
-                    lowering_head: false,
-                    lower_head_ticks: 0,
-                    holding_ticks: 0.0,
-                    holding_ticks_old: 0.0,
-                    dancing_ticks: 0.0,
-                    spinning_ticks: 0.0,
-                    spinning_ticks_old: 0.0,
-                    spinning: false,
-                    dash_cooldown: 0,
-                    dash_old: false,
-                    shake_time: 0,
-                    was_in_ground: false,
-                    fangs_started: false,
                     fangs_life: EVOKER_FANGS_LIFE,
-                    head_y_rots: [0.0; 2],
-                    head_y_rots_old: [0.0; 2],
-                    head_x_rots: [0.0; 2],
-                    head_x_rots_old: [0.0; 2],
+                    ..KindAnim::EMPTY
                 })
             }),
         }
@@ -1146,7 +1099,7 @@ impl EntityAnim {
         }
 
         self.ticks = self.ticks.wrapping_add(1);
-        let swing_ticks = if self.core.swing_left() {
+        let swing_ticks = if self.core.swing_left() != input.shared.left_handed {
             0
         } else {
             input.shared.main_hand.swing_ticks
@@ -1171,8 +1124,12 @@ impl EntityAnim {
         }
     }
 
-    pub fn swing(&mut self, left_arm: bool) {
-        self.core.swing(left_arm);
+    pub fn set_acceleration_power(&mut self, power: f64) {
+        self.body.acceleration_power = power;
+    }
+
+    pub fn swing_hand(&mut self, off_hand: bool) {
+        self.core.swing(off_hand != self.sampled.shared.left_handed);
     }
 
     pub fn hurt(&mut self) {
@@ -1272,6 +1229,46 @@ impl EntityAnim {
         self.sampled.display_fire
     }
 
+    pub fn leash_holder(&self) -> Option<i32> {
+        self.sampled.leash_holder
+    }
+
+    pub fn outline(&self) -> u32 {
+        self.sampled.outline
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.sampled.scale
+    }
+
+    pub fn age_scale(&self) -> f32 {
+        if !self.sampled.shared.is_baby {
+            return 1.0;
+        }
+        match self.kind {
+            EntityKind::Turtle => 0.3,
+            EntityKind::HappyGhast => 0.2375,
+            EntityKind::Goat => 0.55,
+            EntityKind::Camel | EntityKind::CamelHusk | EntityKind::Armadillo => 0.6,
+            EntityKind::Dolphin => 0.65,
+            _ => 0.5,
+        }
+    }
+
+    pub fn seat_body(&self) -> SeatBody {
+        SeatBody {
+            pos: self.core.pos,
+            y_rot: self.core.y_rot,
+            scale: (self.sampled.scale * self.age_scale()) as f64,
+            width: self.sampled.bounding_box_width as f64,
+            stand: self.kind_state.as_deref().map_or(0.0, |k| k.jump_old),
+        }
+    }
+
+    pub fn set_seated_pos(&mut self, pos: [f64; 3]) {
+        self.core.seat(pos);
+    }
+
     pub fn shared(&self) -> &crate::entities::state::ExtrasShared {
         &self.sampled.shared
     }
@@ -1297,6 +1294,9 @@ impl EntityAnim {
         let x_rot = lerp(partial, self.core.x_rot_old, self.core.x_rot);
         let mut extras = Extras::with_shared(self.sampled.shared.clone());
         extras.eating = self.sampled.eating;
+        extras.ticks_since_kinetic_hit = self
+            .kinetic_hit_at
+            .map_or(0.0, |at| self.ticks.wrapping_sub(at) as f32 + partial);
         extras.vehicle_hurt = extras.hurt_time - partial;
         extras.vehicle_damage = (extras.damage - partial).max(0.0);
         extras.parrot_pose = if self.sampled.shared.sitting {
@@ -1740,7 +1740,7 @@ mod tests {
     #[test]
     fn a_swing_lasts_six_ticks_and_can_be_restarted_halfway() {
         let mut anim = EntityAnim::new(1, EntityKind::Zombie);
-        anim.swing(false);
+        anim.swing_hand(false);
         for expected in [0.0, 1.0, 2.0, 3.0, 4.0, 5.0] {
             anim.tick(TickInput::new());
             let st = anim.sample(1.0);
@@ -1758,15 +1758,15 @@ mod tests {
     #[test]
     fn a_restart_before_the_halfway_point_is_ignored() {
         let mut anim = EntityAnim::new(1, EntityKind::Zombie);
-        anim.swing(false);
+        anim.swing_hand(false);
         anim.tick(TickInput::new());
         anim.tick(TickInput::new());
-        anim.swing(true);
+        anim.swing_hand(true);
         assert!(!anim.sample(1.0).swing_left);
         for _ in 0..3 {
             anim.tick(TickInput::new());
         }
-        anim.swing(true);
+        anim.swing_hand(true);
         assert!(anim.sample(1.0).swing_left);
     }
 

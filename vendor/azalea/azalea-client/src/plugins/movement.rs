@@ -16,6 +16,7 @@ use azalea_physics::{
     PhysicsSystems, ai_step,
     client_movement::{ClientMovementState, SprintDirection, WalkDirection},
     collision::{
+        BorderSource,
         entity_collisions::{AabbQuery, CollidableEntityQuery, update_last_bounding_box},
         world_collisions::PowderSnowCollision,
     },
@@ -293,7 +294,7 @@ pub fn local_player_ai_step(
             Option<&Hunger>,
             Option<&LastSentInput>,
             Option<&ItemInUse>,
-            Option<&metadata::FallFlying>,
+            (Option<&metadata::FallFlying>, Option<&azalea_world::WorldBorder>, Option<&Pose>),
             &mut Physics,
             &mut Sprinting,
             &mut Crouching,
@@ -315,7 +316,7 @@ pub fn local_player_ai_step(
         hunger,
         last_sent_input,
         item_in_use,
-        fall_flying,
+        (fall_flying, border, pose),
         mut physics,
         mut sprinting,
         mut crouching,
@@ -334,7 +335,7 @@ pub fn local_player_ai_step(
             position: *position,
             aabb_query: &aabb_query,
             collidable_entity_query: &collidable_entity_query,
-            physics: &physics,
+            border: BorderSource::at(border, position.x, position.z),
         };
 
         let new_crouching = !abilities.flying
@@ -379,12 +380,14 @@ pub fn local_player_ai_step(
                 && (allowed_in_shallow_water || !is_in_shallow_water)
         };
 
+        let moving_slowly = is_moving_slowly(&crouching, pose.copied(), is_in_water);
+
         let can_start_sprinting = !**sprinting
             && has_forward_impulse
             && is_sprinting_possible(abilities.flying)
             && !slow_due_to_using_item
             && (!is_fall_flying || is_underwater)
-            && (!is_moving_slowly(&crouching) || is_underwater);
+            && (!moving_slowly || is_underwater);
         if trying_to_sprint && can_start_sprinting {
             set_sprinting(true, &mut sprinting, &mut attributes);
         }
@@ -410,7 +413,7 @@ pub fn local_player_ai_step(
             physics_state.move_vector,
             item_in_use.map(|u| u.speed_multiplier),
             false,
-            **crouching,
+            moving_slowly,
             &attributes,
         );
         physics.x_acceleration = move_vector.x;
@@ -418,8 +421,8 @@ pub fn local_player_ai_step(
     }
 }
 
-fn is_moving_slowly(crouching: &Crouching) -> bool {
-    **crouching
+fn is_moving_slowly(crouching: &Crouching, pose: Option<Pose>, is_in_water: bool) -> bool {
+    **crouching || (pose == Some(Pose::Swimming) && !is_in_water)
 }
 
 #[derive(Clone, Component, Copy, Debug, Default)]
@@ -481,14 +484,12 @@ pub struct StartWalkEvent {
 
 pub fn handle_walk(
     mut events: MessageReader<StartWalkEvent>,
-    mut query: Query<(&mut ClientMovementState, &mut Sprinting, &mut Attributes)>,
+    mut query: Query<&mut ClientMovementState>,
 ) {
     for event in events.read() {
-        if let Ok((mut physics_state, mut sprinting, mut attributes)) = query.get_mut(event.entity)
-        {
+        if let Ok(mut physics_state) = query.get_mut(event.entity) {
             physics_state.move_direction = event.direction;
             physics_state.trying_to_sprint = false;
-            set_sprinting(false, &mut sprinting, &mut attributes);
         }
     }
 }
@@ -577,7 +578,7 @@ pub fn update_pose(
     mut query: Query<(
         Entity,
         &mut Pose,
-        &Physics,
+        Option<&azalea_world::WorldBorder>,
         &ClientMovementState,
         &GameMode,
         &WorldHolder,
@@ -591,7 +592,7 @@ pub fn update_pose(
     for (
         entity,
         mut pose,
-        physics,
+        border,
         physics_state,
         &game_mode,
         world_holder,
@@ -608,7 +609,7 @@ pub fn update_pose(
             position: *position,
             aabb_query: &aabb_query,
             collidable_entity_query: &collidable_entity_query,
-            physics,
+            border: BorderSource::at(border, position.x, position.z),
         };
 
         if !can_player_fit_within_blocks_and_entities_when(&ctx, Pose::Swimming) {
@@ -650,7 +651,7 @@ struct CanPlayerFitCtx<'world, 'state, 'a, 'b> {
     position: Position,
     aabb_query: &'a AabbQuery<'world, 'state, 'b>,
     collidable_entity_query: &'a CollidableEntityQuery<'world, 'state>,
-    physics: &'a Physics,
+    border: Option<BorderSource<'a>>,
 }
 fn can_player_fit_within_blocks_and_entities_when(ctx: &CanPlayerFitCtx, pose: Pose) -> bool {
     no_collision(
@@ -658,7 +659,7 @@ fn can_player_fit_within_blocks_and_entities_when(ctx: &CanPlayerFitCtx, pose: P
         Some(ctx.entity),
         ctx.aabb_query,
         ctx.collidable_entity_query,
-        ctx.physics,
+        ctx.border,
         &calculate_dimensions(EntityKind::Player, pose)
             .make_bounding_box(*ctx.position)
             .deflate_all(1.0e-7),

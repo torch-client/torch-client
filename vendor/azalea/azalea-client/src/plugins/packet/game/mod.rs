@@ -388,6 +388,11 @@ impl GamePacketHandler<'_> {
 
     pub fn set_cursor_item(&mut self, p: &ClientboundSetCursorItem) {
         debug!("Got set cursor item packet {p:?}");
+        as_system::<Query<&mut Inventory>>(self.ecs, |mut query| {
+            if let Ok(mut inventory) = query.get_mut(self.player) {
+                inventory.carried = p.contents.clone();
+            }
+        });
     }
 
     pub fn update_tags(&mut self, _p: &ClientboundUpdateTags) {
@@ -746,6 +751,26 @@ impl GamePacketHandler<'_> {
 
     pub fn initialize_border(&mut self, p: &ClientboundInitializeBorder) {
         debug!("Got initialize border packet {p:?}");
+        self.with_border(|border| {
+            border.set_center(p.new_center_x, p.new_center_z);
+            let lerp_time = p.lerp_time as i64;
+            if lerp_time > 0 {
+                border.lerp_size_between(p.old_size, p.new_size, lerp_time);
+            } else {
+                border.set_size(p.new_size);
+            }
+            border.absolute_max_size = p.new_absolute_max_size as i32;
+            border.warning_blocks = p.warning_blocks as i32;
+            border.warning_time = p.warning_time as i32;
+        });
+    }
+
+    fn with_border(&mut self, f: impl FnOnce(&mut azalea_world::WorldBorder)) {
+        as_system::<Query<&mut azalea_world::WorldBorder>>(self.ecs, |mut query| {
+            if let Ok(mut border) = query.get_mut(self.player) {
+                f(&mut border);
+            }
+        });
     }
 
     pub fn set_time(&mut self, _p: &ClientboundSetTime) {
@@ -1378,6 +1403,12 @@ impl GamePacketHandler<'_> {
 
                 let new_world_name = WorldName(p.common.dimension.clone());
 
+                if world_name.as_deref() != Some(&new_world_name) {
+                    commands
+                        .entity(self.player)
+                        .insert(azalea_world::WorldBorder::default());
+                }
+
                 if let Some(mut world_name) = world_name {
                     *world_name = new_world_name.clone();
                 } else {
@@ -1524,11 +1555,21 @@ impl GamePacketHandler<'_> {
 
     pub fn select_advancements_tab(&mut self, _p: &ClientboundSelectAdvancementsTab) {}
     pub fn set_action_bar_text(&mut self, _p: &ClientboundSetActionBarText) {}
-    pub fn set_border_center(&mut self, _p: &ClientboundSetBorderCenter) {}
-    pub fn set_border_lerp_size(&mut self, _p: &ClientboundSetBorderLerpSize) {}
-    pub fn set_border_size(&mut self, _p: &ClientboundSetBorderSize) {}
-    pub fn set_border_warning_delay(&mut self, _p: &ClientboundSetBorderWarningDelay) {}
-    pub fn set_border_warning_distance(&mut self, _p: &ClientboundSetBorderWarningDistance) {}
+    pub fn set_border_center(&mut self, p: &ClientboundSetBorderCenter) {
+        self.with_border(|b| b.set_center(p.new_center_x, p.new_center_z));
+    }
+    pub fn set_border_lerp_size(&mut self, p: &ClientboundSetBorderLerpSize) {
+        self.with_border(|b| b.lerp_size_between(p.old_size, p.new_size, p.lerp_time as i64));
+    }
+    pub fn set_border_size(&mut self, p: &ClientboundSetBorderSize) {
+        self.with_border(|b| b.set_size(p.size));
+    }
+    pub fn set_border_warning_delay(&mut self, p: &ClientboundSetBorderWarningDelay) {
+        self.with_border(|b| b.warning_time = p.warning_delay as i32);
+    }
+    pub fn set_border_warning_distance(&mut self, p: &ClientboundSetBorderWarningDistance) {
+        self.with_border(|b| b.warning_blocks = p.warning_blocks as i32);
+    }
     pub fn set_camera(&mut self, _p: &ClientboundSetCamera) {}
     pub fn set_display_objective(&mut self, _p: &ClientboundSetDisplayObjective) {}
     pub fn set_objective(&mut self, _p: &ClientboundSetObjective) {}

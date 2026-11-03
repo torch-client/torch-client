@@ -125,28 +125,33 @@ pub struct ModPanel {
 }
 
 static MOD_PANEL_DEFS: Mutex<[Option<ModPanel>; MOD_PANELS]> = Mutex::new([None; MOD_PANELS]);
-static MOD_PANEL_GEN: AtomicU32 = AtomicU32::new(0);
+static MOD_PANEL_GEN: AtomicU32 = AtomicU32::new(1);
+
+#[cfg_attr(not(lua_mods), allow(dead_code))]
+pub const LUA_FIRST: usize = crate::modules::hud_panels::COUNT;
 
 pub fn set_mod_panels(panels: &[ModPanel]) -> usize {
     let mut defs = MOD_PANEL_DEFS
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     *defs = [None; MOD_PANELS];
-    for (slot, p) in defs.iter_mut().zip(panels) {
+    for (slot, p) in defs[LUA_FIRST..].iter_mut().zip(panels) {
         *slot = Some(*p);
     }
     drop(defs);
     MOD_PANEL_GEN.fetch_add(1, Relaxed);
-    panels.len().saturating_sub(MOD_PANELS)
+    panels.len().saturating_sub(MOD_PANELS - LUA_FIRST)
 }
 
 pub fn mod_panel(i: usize) -> Option<ModPanel> {
-    MOD_PANEL_DEFS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(i)
-        .copied()
-        .flatten()
+    crate::modules::hud_panels::def(i).or_else(|| {
+        MOD_PANEL_DEFS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(i)
+            .copied()
+            .flatten()
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

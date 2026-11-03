@@ -1,10 +1,12 @@
 use bevy::render::render_resource::{
-    BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
-    ShaderStages, TextureFormat, TextureSampleType, TextureView, TextureViewDimension,
+    BindGroup, BindGroupEntry, BindGroupLayout, BindingResource, TextureFormat, TextureSampleType,
+    TextureView,
 };
 use bevy::render::renderer::RenderDevice;
 
-use super::fullscreen::{fullscreen_corner, fullscreen_pass, fullscreen_pipeline};
+use super::fullscreen::{
+    fullscreen_corner, fullscreen_pass, fullscreen_pipeline, pipeline_layout, single_texture_layout,
+};
 
 pub(super) const FORMAT: TextureFormat = TextureFormat::R32Float;
 
@@ -43,24 +45,9 @@ impl DepthCopy {
             label: Some(gpu_label!("depth copy")),
             source: wgpu::ShaderSource::Wgsl(COPY_WGSL.into()),
         });
-        let layout = device.create_bind_group_layout(
-            gpu_label!("depth copy"),
-            &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::FRAGMENT,
-                ty: BindingType::Texture {
-                    sample_type: TextureSampleType::Depth,
-                    view_dimension: TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            }],
-        );
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(gpu_label!("depth copy")),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
-        });
+        let layout =
+            single_texture_layout(device, gpu_label!("depth copy"), TextureSampleType::Depth);
+        let pipeline_layout = pipeline_layout(device, gpu_label!("depth copy"), &layout);
         let pipeline = fullscreen_pipeline(
             device,
             gpu_label!("depth copy"),

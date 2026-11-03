@@ -7,28 +7,24 @@ use crate::entities::registry::Registry;
 use crate::entities::state::EntityState;
 
 use super::armor;
-use super::zombie::{is_adult, is_baby};
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 
 pub fn register(registry: &mut Registry) {
-    registry.add_many(
+    add_adult_and_baby(
+        registry,
         &[EntityKind::Piglin, EntityKind::PiglinBrute],
         RenderSpec::new(
             "piglin",
             piglin::adult_piglin_layer,
             piglin_texture,
             piglin::piglin_setup_anim,
-        )
-        .with_visible(is_adult),
-    );
-    registry.add_many(
-        &[EntityKind::Piglin, EntityKind::PiglinBrute],
+        ),
         RenderSpec::new(
             "piglin_baby",
             piglin::baby_piglin_layer,
             piglin_texture,
             piglin::piglin_setup_anim,
-        )
-        .with_visible(is_baby),
+        ),
     );
     armor::register_set(
         registry,
@@ -44,25 +40,21 @@ pub fn register(registry: &mut Registry) {
         armor::ADULT,
     );
 
-    registry.add(
-        EntityKind::ZombifiedPiglin,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::ZombifiedPiglin],
         RenderSpec::new(
             "zombified_piglin",
             piglin::adult_piglin_layer,
             zombified_piglin_texture,
             piglin::zombified_piglin_setup_anim,
-        )
-        .with_visible(is_adult),
-    );
-    registry.add(
-        EntityKind::ZombifiedPiglin,
+        ),
         RenderSpec::new(
             "zombified_piglin_baby",
             piglin::baby_piglin_layer,
             zombified_piglin_texture,
             piglin::zombified_piglin_setup_anim,
-        )
-        .with_visible(is_baby),
+        ),
     );
     armor::register_set(
         registry,
@@ -90,9 +82,9 @@ fn piglin_texture(st: &EntityState) -> TexturePath {
 }
 
 fn zombified_piglin_texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/piglin/zombified_piglin_baby".into()
-    } else {
-        "entity/piglin/zombified_piglin".into()
-    }
+    aged_texture(
+        st,
+        "entity/piglin/zombified_piglin",
+        "entity/piglin/zombified_piglin_baby",
+    )
 }

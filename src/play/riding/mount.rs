@@ -227,17 +227,58 @@ pub(crate) struct SeatPose {
     pub camel_pose_time: i64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Passenger {
+    pub kind: EntityKind,
+    pub animal: bool,
+    pub index: usize,
+    pub of: usize,
+}
+
 pub(crate) fn passenger_attachment(
     kind: EntityKind,
     yaw: f32,
-    index: usize,
-    riders: usize,
+    scale: f64,
+    p: Passenger,
     pose: SeatPose,
 ) -> Vec3 {
     use EntityKind as K;
 
+    let (index, riders) = (p.index, p.of);
+    let animal = if riders > 1 && p.animal { 0.2 } else { 0.0 };
     let height = azalea::entity::dimensions::EntityDimensions::from(kind).height as f64;
     let mut seat = match kind {
+        K::Cat => Vec3::new(0.0, 0.5125, 0.0),
+        K::Chicken => Vec3::new(0.0, 0.7, -0.1),
+        K::Cow | K::Mooshroom => Vec3::new(0.0, 1.36875, 0.0),
+        K::Zombie | K::Drowned | K::Piglin | K::PiglinBrute => Vec3::new(0.0, 2.0125, 0.0),
+        K::Husk => Vec3::new(0.0, 2.075, 0.0),
+        K::ZombieVillager => Vec3::new(0.0, 2.125, 0.0),
+        K::ZombifiedPiglin | K::Evoker | K::Illusioner | K::Pillager | K::Vindicator => {
+            Vec3::new(0.0, 2.0, 0.0)
+        }
+        K::ElderGuardian => Vec3::new(0.0, 2.350625, 0.0),
+        K::Guardian => Vec3::new(0.0, 0.975, 0.0),
+        K::Enderman => Vec3::new(0.0, 2.80625, 0.0),
+        K::Endermite | K::Silverfish => Vec3::new(0.0, 0.2375, 0.0),
+        K::EnderDragon => Vec3::new(0.0, 3.0, 0.0),
+        K::Fox => Vec3::new(0.0, 0.6375, -0.25),
+        K::Frog => Vec3::new(0.0, 0.375, -0.25),
+        K::Turtle => Vec3::new(0.0, 0.55625, -0.25),
+        K::Ghast => Vec3::new(0.0, 4.0625, 0.0),
+        K::Goat => Vec3::new(0.0, 1.1125, 0.0),
+        K::Hoglin | K::Zoglin => Vec3::new(0.0, 1.49375, 0.0),
+        K::Ocelot => Vec3::new(0.0, 0.6375, 0.0),
+        K::Parrot => Vec3::new(0.0, 0.4625, 0.0),
+        K::Phantom => Vec3::new(0.0, 0.3375, 0.0),
+        K::Ravager => Vec3::new(0.0, 2.2625, -0.0625),
+        K::Sheep => Vec3::new(0.0, 1.2375, 0.0),
+        K::Sniffer => Vec3::new(0.0, 2.09375, 0.0),
+        K::Spider => Vec3::new(0.0, 0.765, 0.0),
+        K::Vex => Vec3::new(0.0, 0.7375, 0.0),
+        K::Warden => Vec3::new(0.0, 3.15, 0.0),
+        K::Witch => Vec3::new(0.0, 2.2625, 0.0),
+        K::Wolf => Vec3::new(0.0, 0.81875, -0.0625),
         K::Horse => Vec3::new(0.0, 1.44375, 0.0),
         K::SkeletonHorse | K::ZombieHorse => Vec3::new(0.0, 1.31875, 0.0),
         K::Donkey => Vec3::new(0.0, 1.1125, 0.0),
@@ -253,7 +294,7 @@ pub(crate) fn passenger_attachment(
         K::Camel | K::CamelHusk => Vec3::new(
             0.0,
             camel_body_anchor(index == 0, height, pose),
-            if riders > 1 && index > 0 { -0.7 } else { 0.5 },
+            (if riders > 1 && index > 0 { -0.7 } else { 0.5 }) + animal,
         ),
         K::Minecart
         | K::ChestMinecart
@@ -261,7 +302,10 @@ pub(crate) fn passenger_attachment(
         | K::TntMinecart
         | K::HopperMinecart
         | K::SpawnerMinecart
-        | K::CommandBlockMinecart => Vec3::new(0.0, 0.1875, 0.0),
+        | K::CommandBlockMinecart => match p.kind {
+            K::Villager | K::WanderingTrader => Vec3::ZERO,
+            _ => Vec3::new(0.0, 0.1875, 0.0),
+        },
         _ => match Hull::of(kind) {
             Some(hull) => {
                 let z = match (riders, index) {
@@ -269,7 +313,7 @@ pub(crate) fn passenger_attachment(
                     (_, 0) => 0.2,
                     _ => -0.6,
                 };
-                Vec3::new(0.0, hull.ride_height(height), z)
+                Vec3::new(0.0, hull.ride_height(height), z + animal)
             }
             None => Vec3::new(0.0, height, 0.0),
         },
@@ -278,7 +322,41 @@ pub(crate) fn passenger_attachment(
         seat.y += 0.15 * pose.stand as f64;
         seat.z -= 0.7 * pose.stand as f64;
     }
-    seat.y_rot(-yaw * DEG_TO_RAD)
+    (seat * scale).y_rot(-yaw * DEG_TO_RAD)
+}
+
+pub(crate) fn vehicle_attachment(
+    rider: EntityKind,
+    scale: f64,
+    width: f64,
+    vehicle_width: f64,
+) -> f64 {
+    use EntityKind as K;
+
+    let y = match rider {
+        K::Player | K::Mannequin => 0.6,
+        K::Spider if vehicle_width <= width => 0.3125,
+        K::CaveSpider if vehicle_width <= width => 0.21875,
+        K::Zombie
+        | K::Husk
+        | K::Drowned
+        | K::ZombieVillager
+        | K::ZombifiedPiglin
+        | K::Piglin
+        | K::PiglinBrute
+        | K::Skeleton
+        | K::Stray
+        | K::Bogged
+        | K::Parched => 0.7,
+        K::WitherSkeleton => 0.875,
+        K::Evoker | K::Illusioner | K::Pillager | K::Vindicator => 0.6,
+        K::Phantom => 0.125,
+        K::Giant => 3.75,
+        K::Allay | K::Vex => -0.04,
+        K::Ghast | K::HappyGhast => -0.5,
+        _ => 0.0,
+    };
+    y * scale
 }
 
 fn camel_body_anchor(front: bool, height: f64, pose: SeatPose) -> f64 {

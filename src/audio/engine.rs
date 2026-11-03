@@ -226,9 +226,10 @@ struct LoopVoice {
 
 impl LoopVoice {
     fn apply(&self, volume: f32, pitch: f32) {
-        let gain = volume * self.entry_volume * super::bus_gain(self.tag.1);
-        self.sink.set_volume(gain.clamp(0.0, 1.0));
-        self.sink.set_speed((pitch * self.entry_pitch).max(0.01));
+        let gain = (volume * self.entry_volume).clamp(0.0, 1.0) * super::bus_gain(self.tag.1);
+        self.sink.set_volume(gain);
+        self.sink
+            .set_speed((pitch * self.entry_pitch).clamp(0.5, 2.0));
     }
 }
 
@@ -276,3 +277,5 @@ fn reap_ended(loops: &mut HashMap<u64, LoopVoice>, early_ends: &mut Vec<u64>, la
 const MAX_VOICES: usize = 32;
 
 const EAR_OFFSET: f32 = 0.125;
+
+pub const PAN_RADIUS: f32 = 1.0 - EAR_OFFSET;

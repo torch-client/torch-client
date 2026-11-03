@@ -849,7 +849,9 @@ pub fn emit_outside_click(
     let count = if right { 1 } else { cursor.count };
     let mut stack = cursor.clone();
     stack.count = count;
-    out.push(InvAction::CreativeDrop { stack });
+    out.push(InvAction::CreativeDrop {
+        stack: stack.into(),
+    });
     cursor.count -= count;
     if cursor.count == 0 {
         *cursor = SlotStack::default();
@@ -869,7 +871,7 @@ pub fn stow_creative_cursor(mut cursor: SlotStack, slots: &[SlotStack], out: &mu
             merged.count += moved;
             out.push(InvAction::CreativeSet {
                 slot: i as u16,
-                stack: merged,
+                stack: merged.into(),
             });
             cursor.count -= moved;
             if cursor.count == 0 {
@@ -879,12 +881,14 @@ pub fn stow_creative_cursor(mut cursor: SlotStack, slots: &[SlotStack], out: &mu
         if let Some(i) = HOTBAR_SLOTS.chain(INV_SLOTS).find(|i| slots[*i].is_empty()) {
             out.push(InvAction::CreativeSet {
                 slot: i as u16,
-                stack: cursor,
+                stack: cursor.into(),
             });
             return;
         }
     }
-    out.push(InvAction::CreativeDrop { stack: cursor });
+    out.push(InvAction::CreativeDrop {
+        stack: cursor.into(),
+    });
 }
 
 const BEACON_PAYMENT_ITEMS: [&str; 5] = [
@@ -995,7 +999,11 @@ impl MenuModel {
     }
 
     fn same_item(a: &SlotStack, b: &SlotStack) -> bool {
-        !a.is_empty() && !b.is_empty() && a.item == b.item && a.potion == b.potion && a.raw == b.raw
+        !a.is_empty()
+            && !b.is_empty()
+            && a.item == b.item
+            && a.extra.potion == b.extra.potion
+            && a.raw == b.raw
     }
 
     pub fn pickup(&mut self, slot: usize, right: bool) {
@@ -1209,6 +1217,9 @@ impl MenuModel {
             self.slots[slot] = SlotStack::default();
             return;
         }
+        if !self.layout.may_place(slot, source.item) {
+            return;
+        }
         let max = self.slot_max(slot, &source);
         if source.count > max {
             if clicked.is_empty() {
@@ -1243,7 +1254,7 @@ impl MenuModel {
             if self.slots[i] != *snap.slot(i) {
                 out.push(InvAction::CreativeSet {
                     slot: i as u16,
-                    stack: self.slots[i].clone(),
+                    stack: self.slots[i].clone().into(),
                 });
             }
         }
@@ -1315,7 +1326,9 @@ pub fn apply_click(
         SlotClick::Throw { all } => {
             let dropped = menu.throw(slot, all);
             if mode == Mode::Local && !dropped.is_empty() {
-                out.push(InvAction::CreativeDrop { stack: dropped });
+                out.push(InvAction::CreativeDrop {
+                    stack: dropped.into(),
+                });
             }
         }
     }
@@ -1580,7 +1593,7 @@ pub(crate) fn drag_step(
         let target = snap.slot(slot);
         let replaceable = target.is_empty()
             || (target.item == cursor.item
-                && target.potion == cursor.potion
+                && target.extra.potion == cursor.extra.potion
                 && target.count < slot_capacity(layout, slot, cursor.item));
         if room && replaceable && layout.may_place(slot, cursor.item) {
             state.drag.slots.push(slot);
@@ -1805,7 +1818,7 @@ pub fn draw_menu_slot(
     match drag.slot_preview(layout, i, snap, cursor) {
         Some((preview, capped)) => {
             let color = if capped { CAPPED_COUNT_COLOR } else { 0xFFFFFF };
-            p.item_icon_glint(&preview.model_key(), x, y, preview.glint);
+            p.stack_icon(&preview, x, y);
             p.item_decorations_colored(x, y, preview.count, 0, 0, color);
         }
         None => draw_slot(
@@ -1838,10 +1851,20 @@ pub fn draw_slot(p: &mut Painter, layout: Layout, i: usize, stack: &SlotStack, x
 }
 
 pub fn draw_stack(p: &mut Painter, stack: &SlotStack, x: f32, y: f32) {
+    draw_stack_held(p, stack, x, y, None);
+}
+
+pub fn draw_stack_held(p: &mut Painter, stack: &SlotStack, x: f32, y: f32, use_ticks: Option<f32>) {
     if stack.is_empty() {
         return;
     }
-    p.item_icon_glint(&stack.model_key(), x, y, stack.glint);
+    let use_ = crate::items::dispatch::ItemUse {
+        using: use_ticks.is_some(),
+        use_ticks: use_ticks.unwrap_or(0.0),
+        owner: p.owner_at(x, y),
+        ..stack.item_use()
+    };
+    p.stack_icon_as(stack, x, y, use_);
     p.item_decorations(x, y, stack.count, stack.damage, stack.max_damage);
     p.item_cooldown(x, y, stack.cooldown);
 }
@@ -1864,7 +1887,7 @@ mod tests {
             menu_slots[*i] = s.clone();
         }
         Snapshot {
-            menu_slots,
+            menu_slots: menu_slots.into(),
             gamemode,
             ..Default::default()
         }
@@ -3293,7 +3316,9 @@ mod tests {
         assert!(state.menu_preview.slot(9).is_some(), "still waiting");
 
         let mut applied = snap(Gamemode::Survival, &[(9, stack("stone", 8))]);
-        applied.menu_slots.resize(count, SlotStack::default());
+        let mut resized = applied.menu_slots.to_vec();
+        resized.resize(count, SlotStack::default());
+        applied.menu_slots = resized.into();
         retire_menu_preview(&mut state.menu_preview, &applied, count);
         assert!(state.menu_preview.slot(9).is_none());
     }
@@ -3366,7 +3391,7 @@ mod tests {
     fn a_preview_yields_to_any_change_in_the_snapshot() {
         let before = snap(Gamemode::Survival, &[(0, stack("stick", 4))]);
         let mut preview = MenuPreview::default();
-        let mut predicted = before.menu_slots.clone();
+        let mut predicted = before.menu_slots.to_vec();
         predicted[0] = SlotStack::default();
         preview.set(predicted, &before);
 

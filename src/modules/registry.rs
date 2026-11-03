@@ -3,6 +3,7 @@ use std::ops::Range;
 use super::auto_mace::{AimPoint, MaceSlot};
 use super::auto_totem::TotemMode;
 use super::esp::Shape;
+use super::extra_hud::{Durability, Shown};
 use super::flight::AntiKick;
 use super::list::BitList;
 use super::nametags::{Health, Sizing};
@@ -272,19 +273,22 @@ pub(super) struct Scripts {
 }
 
 #[cfg(lua_mods)]
-static SCRIPTS: std::sync::RwLock<&'static Scripts> = std::sync::RwLock::new(&Scripts {
+static SCRIPTS: std::sync::atomic::AtomicPtr<Scripts> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+#[cfg(lua_mods)]
+static NO_SCRIPTS: Scripts = Scripts {
     modules: &[],
     settings: &[],
-});
+};
 
 #[cfg(lua_mods)]
 static GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 #[cfg(lua_mods)]
 pub(super) fn scripts() -> &'static Scripts {
-    *SCRIPTS
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    let table = SCRIPTS.load(std::sync::atomic::Ordering::Acquire);
+    unsafe { table.as_ref() }.unwrap_or(&NO_SCRIPTS)
 }
 
 #[cfg(lua_mods)]
@@ -325,13 +329,11 @@ pub(super) fn install(extra: Vec<Extra>) {
         });
         at += len;
     }
-    let table: &'static Scripts = Box::leak(Box::new(Scripts {
+    let table = Box::into_raw(Box::new(Scripts {
         modules: modules.leak(),
         settings,
     }));
-    *SCRIPTS
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = table;
+    SCRIPTS.store(table, std::sync::atomic::Ordering::Release);
     GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
 }
 
@@ -459,6 +461,12 @@ const SCAFFOLD_TELLY: Show = Show::is(scaffold::MODE.0, &[ScaffoldMode::TellyBri
 const SCAFFOLD_FILTERED: Show = Show::is(
     scaffold::BLOCKS.0,
     &[BlockFilter::Blacklist as u8, BlockFilter::Whitelist as u8],
+);
+
+const EXTRA_HUD_WARN: Show = Show::On(offset_of(extra_hud::WARNING.0));
+const EXTRA_HUD_EMPTY: Show = Show::is(
+    extra_hud::SHOWN.0,
+    &[Shown::Always as u8, Shown::IfAny as u8],
 );
 
 modules! {
@@ -642,6 +650,32 @@ modules! {
             Slider { min: 0.05, max: 2.0, value: 0.15, decimals: 2 };
     }
 
+    ExtraHud / extra_hud: Render, Legit,
+        "Adds HUD panels: your armor, its durability and a low durability warning" {
+        SHOWN: "Shown",
+            "Which armor slots get a box: all four, all four while any is worn, worn pieces, or pieces below the warning",
+            Enum<Shown> { default: Shown::NotEmpty };
+        VERTICAL: "Vertical", "Stack the slots in a column instead of a row",
+            Toggle { on: false };
+        REVERSED: "Reversed", "Boots first instead of the helmet",
+            Toggle { on: false };
+        BACKGROUND: "Background", "Draw the hotbar's slot frame behind the pieces",
+            Toggle { on: true };
+        EMPTY_ICONS: "Empty icons", "Draw the inventory's outline icon in an empty slot",
+            Toggle { on: true } if EXTRA_HUD_EMPTY;
+        DURABILITY: "Durability",
+            "The item's own bar only, or the bar with the uses left or the percentage left written beside it",
+            Enum<Durability> { default: Durability::Bar };
+        WARNING: "Warning", "Show a warning icon over a piece about to break",
+            Toggle { on: true };
+        MIN_LEFT: "Uses left", "Warn at or below this many uses left",
+            Slider { min: 0.0, max: 500.0, value: 20.0, decimals: 0 } if EXTRA_HUD_WARN;
+        MIN_PERCENT: "Percent left", "Warn at or below this percentage of durability left",
+            Slider { min: 0.0, max: 100.0, value: 10.0, decimals: 0 } if EXTRA_HUD_WARN;
+        BOB: "Bob", "How many pixels the warning icon jitters by, 0 for still",
+            Slider { min: 0.0, max: 8.0, value: 3.0, decimals: 0 } if EXTRA_HUD_WARN;
+    }
+
     Fullbright / fullbright: Render, Legit,
         "Draws the world at full light, overriding the Lighting option" {}
 
@@ -740,7 +774,7 @@ modules! {
             "Ticks of flight between resets, well under the 80 a server allows",
             Slider { min: 1.0, max: 200.0, value: 20.0, decimals: 0 };
         FOR: "Anti kick for",
-            "Ticks each reset lasts, which under Drop is how far you sag",
+            "Ticks each reset lasts, which under Drop is how far you sag. Packet always uses at least 3",
             Slider { min: 1.0, max: 20.0, value: 1.0, decimals: 0 };
     }
 

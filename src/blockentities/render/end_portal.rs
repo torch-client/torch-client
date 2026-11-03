@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use azalea_registry::builtin::BlockEntityKind;
 use bevy::asset::{RenderAssetUsages, embedded_asset};
 use bevy::mesh::{MeshVertexBufferLayoutRef, PrimitiveTopology};
@@ -10,7 +8,7 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
-use crate::blockentities::feed::BlockEntityInfo;
+use crate::blockentities::feed::BlockEntityMap;
 use crate::entities::quads::quad_indices;
 use crate::items::model::face_positions;
 use crate::renderer::RenderOrigin;
@@ -28,21 +26,8 @@ pub struct EndPortalMaterial {
 }
 
 impl Material for EndPortalMaterial {
-    fn vertex_shader() -> ShaderRef {
-        shader()
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        shader()
-    }
-
-    fn enable_prepass() -> bool {
-        false
-    }
-
-    fn enable_shadows() -> bool {
-        false
-    }
+    crate::renderer::material_shader_fns!();
+    crate::renderer::material_no_prepass_no_shadows!();
 
     fn specialize(
         _pipeline: &MaterialPipeline,
@@ -202,7 +187,7 @@ fn sync_portals(
 }
 
 impl Batch {
-    fn collect(&mut self, cube: &Cube, snapshot: &HashMap<[i32; 3], BlockEntityInfo>) -> bool {
+    fn collect(&mut self, cube: &Cube, snapshot: &BlockEntityMap) -> bool {
         self.scratch.clear();
         self.scratch.extend(
             snapshot
@@ -281,6 +266,7 @@ mod tests {
     use bevy::mesh::VertexAttributeValues;
 
     use super::*;
+    use crate::blockentities::feed::BlockEntityInfo;
 
     fn positions(mesh: &Mesh) -> Vec<[f32; 3]> {
         match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
@@ -311,7 +297,7 @@ mod tests {
     #[test]
     fn a_batch_rebuilds_only_when_its_blocks_move() {
         let mut batch = Batch::default();
-        let empty = HashMap::new();
+        let empty = BlockEntityMap::new();
         assert!(!batch.collect(&CUBES[0], &empty));
         let mut st = super::super::test_state("end_portal", &[]);
         st.pos = [1, 2, 3];
@@ -323,7 +309,7 @@ mod tests {
             partner: None,
             rev: 0,
         };
-        let one = HashMap::from([(st.pos, info)]);
+        let one = BlockEntityMap::from([(st.pos, info)]);
         assert!(batch.collect(&CUBES[0], &one));
         assert!(!batch.collect(&CUBES[0], &one));
         assert!(!Batch::default().collect(&CUBES[1], &one));

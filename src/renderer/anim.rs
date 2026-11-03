@@ -137,24 +137,67 @@ pub struct HeldItem {
     pub death_protection: bool,
     pub kinetic: Option<crate::items::kinetic::Kinetic>,
     pub swing_ticks: u8,
+    pub rocket: bool,
+    pub profile_skin: Option<ProfileSkin>,
+    pub trim: u8,
+    pub has_lodestone: bool,
+    pub lodestone: Option<[i32; 3]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProfileSkin {
+    Url(std::sync::Arc<str>),
+    Resource(std::sync::Arc<str>),
+    Default(u8),
+    Lookup { key: ProfileKey, fallback: u8 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ProfileKey {
+    Name(std::sync::Arc<str>),
+    Id(u128),
 }
 
 impl AnimSample {
     pub fn charging(&self) -> [Option<crate::items::kinetic::Kinetic>; 2] {
-        if !self.using_item {
-            return [None; 2];
-        }
-        let item = if self.using_offhand {
-            &self.off_hand
-        } else {
-            &self.main_hand
-        };
-        let left = self.using_offhand != self.main_arm_left;
-        if left {
-            [None, item.kinetic]
-        } else {
-            [item.kinetic, None]
-        }
+        charging_arms(
+            self.using_item,
+            self.using_offhand,
+            self.main_arm_left,
+            &self.main_hand,
+            &self.off_hand,
+        )
+    }
+}
+
+pub fn sway_charging(
+    using_item: bool,
+    using_offhand: bool,
+    right: &HeldItem,
+    left: &HeldItem,
+) -> [Option<crate::items::kinetic::Kinetic>; 2] {
+    match (using_item, using_offhand) {
+        (false, _) => [None; 2],
+        (true, false) => [right.kinetic, None],
+        (true, true) => [None, left.kinetic],
+    }
+}
+
+pub fn charging_arms(
+    using_item: bool,
+    using_offhand: bool,
+    main_arm_left: bool,
+    main_hand: &HeldItem,
+    off_hand: &HeldItem,
+) -> [Option<crate::items::kinetic::Kinetic>; 2] {
+    if !using_item {
+        return [None; 2];
+    }
+    let item = if using_offhand { off_hand } else { main_hand };
+    if using_offhand != main_arm_left {
+        [None, item.kinetic]
+    } else {
+        [item.kinetic, None]
     }
 }
 
@@ -270,6 +313,7 @@ pub struct AnimSample {
     pub main_hand: HeldItem,
     pub off_hand: HeldItem,
     pub armor: Armor,
+    pub head: HeldItem,
     pub using_offhand: bool,
     pub ticks_since_kinetic_hit: f32,
     #[cfg(feature = "skins")]
@@ -297,6 +341,7 @@ pub struct AnimInput {
     pub main_hand: HeldItem,
     pub off_hand: HeldItem,
     pub armor: Armor,
+    pub head: HeldItem,
     pub main_arm_left: bool,
     pub interpolated: bool,
     #[cfg(feature = "skins")]
@@ -459,6 +504,10 @@ impl HumanoidAnim {
         self.core.swing(left_arm);
     }
 
+    pub fn swing_hand(&mut self, off_hand: bool) {
+        self.core.swing(off_hand != self.flags.main_arm_left);
+    }
+
     pub fn kinetic_hit(&mut self) -> Option<azalea_registry::builtin::SoundEvent> {
         if self.kinetic_hit_at.is_some_and(|at| {
             self.ticks.wrapping_sub(at) <= crate::items::kinetic::HIT_FEEDBACK_TICKS
@@ -487,6 +536,20 @@ impl HumanoidAnim {
 
     pub fn position(&self, partial: f32) -> [f64; 3] {
         self.core.position(partial.clamp(0.0, 1.0))
+    }
+
+    pub fn seat_body(&self, scale: f64) -> crate::entities::feed::SeatBody {
+        crate::entities::feed::SeatBody {
+            pos: self.core.pos,
+            y_rot: self.core.y_rot,
+            scale,
+            width: 0.6 * scale,
+            stand: 0.0,
+        }
+    }
+
+    pub fn set_seated_pos(&mut self, pos: [f64; 3]) {
+        self.core.seat(pos);
     }
 
     #[cfg(feature = "skins")]
@@ -633,6 +696,7 @@ impl HumanoidAnim {
             main_hand: self.flags.main_hand.clone(),
             off_hand: self.flags.off_hand.clone(),
             armor: self.flags.armor,
+            head: self.flags.head.clone(),
             using_offhand: self.flags.using_offhand,
             ticks_since_kinetic_hit: self
                 .kinetic_hit_at

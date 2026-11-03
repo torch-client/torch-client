@@ -92,17 +92,6 @@ pub fn play(event: &str, category: SoundCategory, volume: f32, pitch: f32) {
     submit(event, category, volume, pitch, None, &mut roll);
 }
 
-pub fn audible_at(at: [f64; 3]) -> bool {
-    if DEFS.get().is_none() {
-        return false;
-    }
-    let Ok(listener) = LISTENER.lock() else {
-        return false;
-    };
-    let [dx, dy, dz] = listener.offset_to(at);
-    dx * dx + dy * dy + dz * dz <= ATTENUATION_DISTANCE * ATTENUATION_DISTANCE
-}
-
 pub fn play_at(event: &str, category: SoundCategory, at: [f64; 3], volume: f32, pitch: f32) {
     debug_assert_ne!(category, SoundCategory::Master, "{event} played on Master");
     play_placed(event, category, at, volume, pitch, &mut roll);
@@ -220,14 +209,39 @@ fn submit(
     let Some((name, entry)) = defs.resolve(event, roll) else {
         return;
     };
+    let instance_volume = volume * entry.volume;
+    let (attenuation, relative) = match relative {
+        None => (1.0, None),
+        Some(offset) => {
+            let (gain, pan) =
+                linear_attenuation(offset, ATTENUATION_DISTANCE * instance_volume.max(1.0));
+            (gain, Some(pan))
+        }
+    };
+    if attenuation <= 0.0 {
+        return;
+    }
     engine::play(engine::Play {
         key: entry.object_key(),
         event: name,
         category,
-        volume: (volume * entry.volume * bus).clamp(0.0, 1.0),
-        pitch: pitch * entry.pitch,
+        volume: instance_volume.clamp(0.0, 1.0) * bus * attenuation,
+        pitch: (pitch * entry.pitch).clamp(0.5, 2.0),
         relative,
     });
+}
+
+fn linear_attenuation(offset: [f32; 3], max: f32) -> (f32, [f32; 3]) {
+    let distance = (offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2]).sqrt();
+    let gain = (1.0 - (distance - 1.0) / (max - 1.0)).clamp(0.0, 1.0);
+    if distance <= f32::EPSILON {
+        return (gain, [0.0; 3]);
+    }
+    let scale = engine::PAN_RADIUS / distance;
+    (
+        gain,
+        [offset[0] * scale, offset[1] * scale, offset[2] * scale],
+    )
 }
 
 fn with_rng<R>(f: impl FnOnce(&mut crate::util::javarandom::JavaRandom) -> R) -> Option<R> {

@@ -41,11 +41,11 @@ pub fn giant_layer() -> LayerDef {
 pub fn baby_zombie_layer_grow(g: Grow) -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part_grow(
         "body",
-        CubeList::new()
-            .tex_offs(16, 16)
-            .add_box_grow(-2.0, -2.5, -1.0, 4.0, 5.0, 2.0, g),
+        (16, 16),
+        [-2.0, -2.5, -1.0, 4.0, 5.0, 2.0],
+        g,
         PartPose::offset(0.0, 17.5, 0.0),
     );
     let head = root.child(
@@ -58,32 +58,32 @@ pub fn baby_zombie_layer_grow(g: Grow) -> LayerDef {
         PartPose::offset(0.0, 15.25, 0.0),
     );
     head.child("hat", CubeList::new(), PartPose::ZERO);
-    root.child(
+    root.part_grow(
         "right_arm",
-        CubeList::new()
-            .tex_offs(36, 16)
-            .add_box_grow(-1.0, -0.5, -1.0, 2.0, 5.0, 2.0, g),
+        (36, 16),
+        [-1.0, -0.5, -1.0, 2.0, 5.0, 2.0],
+        g,
         PartPose::offset(-3.0, 15.5, 0.0),
     );
-    root.child(
+    root.part_grow(
         "left_arm",
-        CubeList::new()
-            .tex_offs(28, 16)
-            .add_box_grow(-1.0, -0.5, -1.0, 2.0, 5.0, 2.0, g),
+        (28, 16),
+        [-1.0, -0.5, -1.0, 2.0, 5.0, 2.0],
+        g,
         PartPose::offset(3.0, 15.5, 0.0),
     );
-    root.child(
+    root.part_grow(
         "right_leg",
-        CubeList::new()
-            .tex_offs(8, 16)
-            .add_box_grow(-1.0, 0.0, -1.0, 2.0, 4.0, 2.0, g),
+        (8, 16),
+        [-1.0, 0.0, -1.0, 2.0, 4.0, 2.0],
+        g,
         PartPose::offset(-1.0, 20.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "left_leg",
-        CubeList::new()
-            .tex_offs(0, 16)
-            .add_box_grow(-1.0, 0.0, -1.0, 2.0, 4.0, 2.0, g),
+        (0, 16),
+        [-1.0, 0.0, -1.0, 2.0, 4.0, 2.0],
+        g,
         PartPose::offset(1.0, 20.0, 0.0),
     );
     LayerDef::create(mesh, 64, 64)
@@ -96,18 +96,18 @@ pub fn baby_zombie_layer() -> LayerDef {
 pub fn drowned_layer_grow(g: Grow) -> LayerDef {
     let mut mesh = humanoid::create_mesh(g, 0.0);
     let root = mesh.root();
-    root.child(
+    root.part_grow(
         "left_arm",
-        CubeList::new()
-            .tex_offs(32, 48)
-            .add_box_grow(-1.0, -2.0, -2.0, 4.0, 12.0, 4.0, g),
+        (32, 48),
+        [-1.0, -2.0, -2.0, 4.0, 12.0, 4.0],
+        g,
         PartPose::offset(5.0, 2.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "left_leg",
-        CubeList::new()
-            .tex_offs(16, 48)
-            .add_box_grow(-2.0, 0.0, -2.0, 4.0, 12.0, 4.0, g),
+        (16, 48),
+        [-2.0, 0.0, -2.0, 4.0, 12.0, 4.0],
+        g,
         PartPose::offset(1.9, 12.0, 0.0),
     );
     LayerDef::create(mesh, 64, 64)
@@ -183,24 +183,17 @@ pub fn zombie_villager_layer() -> LayerDef {
             .add_box(-1.0, -3.0, -6.0, 2.0, 4.0, 2.0),
         PartPose::ZERO,
     );
-    let hat = head.child(
+    let hat = head.part_grow(
         "hat",
-        CubeList::new().tex_offs(32, 0).add_box_grow(
-            -4.0,
-            -10.0,
-            -4.0,
-            8.0,
-            10.0,
-            8.0,
-            Grow::all(0.5),
-        ),
+        (32, 0),
+        [-4.0, -10.0, -4.0, 8.0, 10.0, 8.0],
+        Grow::all(0.5),
         PartPose::ZERO,
     );
-    hat.child(
+    hat.part(
         "hat_rim",
-        CubeList::new()
-            .tex_offs(30, 47)
-            .add_box(-8.0, -8.0, -6.0, 16.0, 16.0, 1.0),
+        (30, 47),
+        [-8.0, -8.0, -6.0, 16.0, 16.0, 1.0],
         PartPose::rotation(-FRAC_PI_2, 0.0, 0.0),
     );
     root.child(
@@ -212,11 +205,10 @@ pub fn zombie_villager_layer() -> LayerDef {
             .add_box_grow(-4.0, 0.0, -3.0, 8.0, 20.0, 6.0, Grow::all(0.05)),
         PartPose::ZERO,
     );
-    root.child(
+    root.part(
         "right_arm",
-        CubeList::new()
-            .tex_offs(44, 22)
-            .add_box(-3.0, -2.0, -2.0, 4.0, 12.0, 4.0),
+        (44, 22),
+        [-3.0, -2.0, -2.0, 4.0, 12.0, 4.0],
         PartPose::offset(-5.0, 2.0, 0.0),
     );
     root.child(
@@ -227,11 +219,10 @@ pub fn zombie_villager_layer() -> LayerDef {
             .add_box(-1.0, -2.0, -2.0, 4.0, 12.0, 4.0),
         PartPose::offset(5.0, 2.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(0, 22)
-            .add_box(-2.0, 0.0, -2.0, 4.0, 12.0, 4.0),
+        (0, 22),
+        [-2.0, 0.0, -2.0, 4.0, 12.0, 4.0],
         PartPose::offset(-2.0, 12.0, 0.0),
     );
     root.child(
@@ -263,66 +254,53 @@ pub fn baby_zombie_villager_layer() -> LayerDef {
             .add_box_grow(-2.0, -2.75, -1.5, 4.0, 6.0, 3.0, Grow::all(0.1)),
         PartPose::offset(0.0, 18.75, 0.0),
     );
-    let head = root.child(
+    let head = root.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-4.0, -8.0, -3.5, 8.0, 8.0, 7.0),
+        (0, 0),
+        [-4.0, -8.0, -3.5, 8.0, 8.0, 7.0],
         PartPose::offset(0.0, 16.0, 0.0),
     );
-    head.child(
+    head.part_grow(
         "hat",
-        CubeList::new().tex_offs(0, 31).add_box_grow(
-            -4.0,
-            -4.0,
-            -3.5,
-            8.0,
-            8.0,
-            7.0,
-            Grow::all(0.3),
-        ),
+        (0, 31),
+        [-4.0, -4.0, -3.5, 8.0, 8.0, 7.0],
+        Grow::all(0.3),
         PartPose::offset(0.0, -4.0, 0.0),
     );
-    head.child(
+    head.part(
         "hat_rim",
-        CubeList::new()
-            .tex_offs(0, 46)
-            .add_box(-7.0, -0.5, -6.0, 14.0, 1.0, 12.0),
+        (0, 46),
+        [-7.0, -0.5, -6.0, 14.0, 1.0, 12.0],
         PartPose::offset(0.0, -4.5, 0.0),
     );
-    head.child(
+    head.part(
         "nose",
-        CubeList::new()
-            .tex_offs(23, 0)
-            .add_box(-1.0, -1.0, -0.5, 2.0, 2.0, 1.0),
+        (23, 0),
+        [-1.0, -1.0, -0.5, 2.0, 2.0, 1.0],
         PartPose::offset(0.0, -1.0, -4.0),
     );
-    root.child(
+    root.part(
         "right_arm",
-        CubeList::new()
-            .tex_offs(24, 15)
-            .add_box(-1.0, -0.5, -1.0, 2.0, 5.0, 2.0),
+        (24, 15),
+        [-1.0, -0.5, -1.0, 2.0, 5.0, 2.0],
         PartPose::offset(-3.0, 15.5, 0.0),
     );
-    root.child(
+    root.part(
         "left_arm",
-        CubeList::new()
-            .tex_offs(16, 15)
-            .add_box(-1.0, -0.5, -1.0, 2.0, 5.0, 2.0),
+        (16, 15),
+        [-1.0, -0.5, -1.0, 2.0, 5.0, 2.0],
         PartPose::offset(3.0, 15.5, 0.0),
     );
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(8, 23)
-            .add_box(-1.0, -0.5, -1.0, 2.0, 3.0, 2.0),
+        (8, 23),
+        [-1.0, -0.5, -1.0, 2.0, 3.0, 2.0],
         PartPose::offset(-1.0, 21.5, 0.0),
     );
-    root.child(
+    root.part(
         "left_leg",
-        CubeList::new()
-            .tex_offs(0, 23)
-            .add_box(-1.0, -0.5, -1.0, 2.0, 3.0, 2.0),
+        (0, 23),
+        [-1.0, -0.5, -1.0, 2.0, 3.0, 2.0],
         PartPose::offset(1.0, 21.5, 0.0),
     );
     LayerDef::create(mesh, 64, 64)

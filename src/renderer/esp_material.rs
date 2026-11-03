@@ -51,25 +51,13 @@ impl Default for EspMaterial {
 }
 
 impl Material for EspMaterial {
-    fn vertex_shader() -> ShaderRef {
-        shader()
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        shader()
-    }
+    crate::renderer::material_shader_fns!();
 
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Blend
     }
 
-    fn enable_prepass() -> bool {
-        false
-    }
-
-    fn enable_shadows() -> bool {
-        false
-    }
+    crate::renderer::material_no_prepass_no_shadows!();
 
     fn specialize(
         _pipeline: &MaterialPipeline,

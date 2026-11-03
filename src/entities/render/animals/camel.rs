@@ -4,7 +4,7 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::camel;
 use crate::entities::registry::Registry;
-use crate::entities::render::add_adult_and_baby;
+use crate::entities::render::{add_adult_and_baby, saddle_spec};
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
@@ -21,14 +21,12 @@ pub fn register(registry: &mut Registry) {
     );
     registry.add(
         EntityKind::Camel,
-        RenderSpec::new(
+        saddle_spec(
             "camel_saddle",
             camel::saddle_layer,
             saddle_texture,
             camel::saddle_setup_anim,
-        )
-        .with_visible(|st| !st.extras.is_baby && st.extras.saddled)
-        .ignoring_invisibility(),
+        ),
     );
     registry.add(
         EntityKind::CamelHusk,

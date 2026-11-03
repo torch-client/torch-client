@@ -35,6 +35,14 @@ pub fn effect_blend_factor(effects: &[MobEffectInstance], id: &str, partial: f32
     find(effects, id).map_or(0.0, |e| e.blend_factor(partial))
 }
 
+pub fn night_vision_scale(duration: i32, partial: f32) -> f32 {
+    if duration < 0 || duration > 200 {
+        1.0
+    } else {
+        0.7 + ((duration as f32 - partial) * std::f32::consts::PI * 0.2).sin() * 0.3
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct BlendState {
     previous: f32,

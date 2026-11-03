@@ -14,12 +14,13 @@ use std::num::NonZeroU64;
 
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
 use bevy::render::render_resource::{
-    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendState,
-    CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, IndexFormat, LoadOp,
-    Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipelineDescriptor, Sampler, SamplerBindingType, ShaderStages, SpecializedRenderPipeline,
-    SpecializedRenderPipelines, StoreOp, TextureFormat, TextureSampleType, TextureView,
-    TextureViewId, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent,
+    BlendFactor, BlendOperation, BlendState, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+    FragmentState, IndexFormat, LoadOp, Operations, PipelineCache, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType, ShaderStages,
+    SpecializedRenderPipeline, SpecializedRenderPipelines, StoreOp, TextureFormat,
+    TextureSampleType, TextureView, TextureViewId, VertexAttribute, VertexFormat, VertexState,
+    VertexStepMode,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::texture::{GpuImage, OutputColorAttachment};
@@ -69,7 +70,7 @@ pub struct GuiBindGroup {
 pub struct GuiImageViews(pub std::collections::HashMap<u64, (TextureView, Sampler)>);
 
 #[derive(Resource, Default)]
-struct GuiImageGroups(std::collections::HashMap<u64, (TextureViewId, BindGroup)>);
+pub(crate) struct GuiImageGroups(std::collections::HashMap<u64, (TextureViewId, BindGroup)>);
 
 #[derive(Resource, Default)]
 struct SceneBlitBindGroup(Option<(TextureViewId, BindGroup)>);
@@ -85,6 +86,7 @@ pub struct GuiPipeline {
 pub enum GuiPipelineKind {
     Gui,
     Blit,
+    Vignette,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,6 +124,12 @@ impl SpecializedRenderPipeline for GuiPipeline {
     type Key = GuiPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        let glint_def = || {
+            vec![ShaderDefVal::UInt(
+                "GLINT_ROTATION_BITS".into(),
+                crate::items::glint::ROTATION.to_bits(),
+            )]
+        };
         let (label, shader, layout, vertex_entry, fragment_entry, buffers, blend, defs) =
             match key.kind {
                 GuiPipelineKind::Gui => (
@@ -132,10 +140,28 @@ impl SpecializedRenderPipeline for GuiPipeline {
                     "fragment",
                     vec![gui_vertex_layout()],
                     Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    vec![ShaderDefVal::UInt(
-                        "GLINT_ROTATION_BITS".into(),
-                        crate::items::glint::ROTATION.to_bits(),
-                    )],
+                    glint_def(),
+                ),
+                GuiPipelineKind::Vignette => (
+                    "gui_vignette",
+                    &self.shaders.gui,
+                    self.gui_layout.clone(),
+                    "vertex",
+                    "vignette_fragment",
+                    vec![gui_vertex_layout()],
+                    Some(BlendState {
+                        color: BlendComponent {
+                            src_factor: BlendFactor::Zero,
+                            dst_factor: BlendFactor::OneMinusSrc,
+                            operation: BlendOperation::Add,
+                        },
+                        alpha: BlendComponent {
+                            src_factor: BlendFactor::Zero,
+                            dst_factor: BlendFactor::One,
+                            operation: BlendOperation::Add,
+                        },
+                    }),
+                    glint_def(),
                 ),
                 GuiPipelineKind::Blit => (
                     "gui_scene_blit",
@@ -178,6 +204,7 @@ struct WindowPass {
     clear: LinearRgba,
     blit: Option<CachedRenderPipelineId>,
     gui: Option<CachedRenderPipelineId>,
+    vignette: Option<CachedRenderPipelineId>,
 }
 
 #[derive(Resource, Default)]
@@ -220,7 +247,7 @@ fn prepare_gui_bind_group(
 }
 
 #[allow(clippy::too_many_arguments, reason = "one system, flat arguments")]
-fn prepare_gui_image_groups(
+pub(crate) fn prepare_gui_image_groups(
     device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<GuiPipeline>,
@@ -354,6 +381,12 @@ fn plan_gui_passes(
                 None => continue,
             }
         };
+        let vignette = pool
+            .ranges
+            .iter()
+            .any(|r| r.window == window && r.texture == super::painter::VIGNETTE_TEXTURE)
+            .then(|| specialize(GuiPipelineKind::Vignette))
+            .flatten();
 
         plan.0.push(WindowPass {
             window,
@@ -365,6 +398,7 @@ fn plan_gui_passes(
             },
             blit,
             gui,
+            vignette,
         });
     }
 }
@@ -444,7 +478,7 @@ impl Node for GuiCameraDriverNode {
 }
 
 #[derive(RenderLabel, Debug, Hash, PartialEq, Eq, Clone)]
-struct GuiLabel;
+pub(crate) struct GuiLabel;
 
 struct GuiNode;
 
@@ -502,8 +536,27 @@ impl Node for GuiNode {
                 render_pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
                 let atlas = crate::gui::painter::ATLAS_TEXTURE;
                 let mut bound = atlas;
+                let vignette = pass
+                    .vignette
+                    .and_then(|id| pipeline_cache.get_render_pipeline(id));
                 for range in &pool.ranges {
                     if range.window != pass.window || range.index_count == 0 {
+                        continue;
+                    }
+                    if range.texture == crate::gui::painter::VIGNETTE_TEXTURE {
+                        if let Some(vignette) = vignette {
+                            if bound != atlas {
+                                render_pass.set_bind_group(0, group, &[]);
+                                bound = atlas;
+                            }
+                            render_pass.set_render_pipeline(vignette);
+                            render_pass.draw_indexed(
+                                range.first_index..range.first_index + range.index_count,
+                                range.base_vertex,
+                                0..1,
+                            );
+                            render_pass.set_render_pipeline(pipeline);
+                        }
                         continue;
                     }
                     if range.texture != bound {

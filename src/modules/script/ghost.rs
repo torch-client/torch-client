@@ -108,7 +108,12 @@ pub fn block_changed(x: i32, y: i32, z: i32) {
     }
     let s = [x >> 4, y >> 4, z >> 4];
     let mut d = DIRTY.lock().unwrap_or_else(PoisonError::into_inner);
-    d.push(s);
+    let mut push = |sec: [i32; 3]| {
+        if !d.iter().rev().take(RECENT).any(|&q| q == sec) {
+            d.push(sec);
+        }
+    };
+    push(s);
     for (axis, v) in [x, y, z].into_iter().enumerate() {
         let mut n = s;
         match v & 15 {
@@ -116,9 +121,11 @@ pub fn block_changed(x: i32, y: i32, z: i32) {
             15 => n[axis] += 1,
             _ => continue,
         }
-        d.push(n);
+        push(n);
     }
 }
+
+const RECENT: usize = 4;
 
 pub fn chunk_changed(cx: i32, cz: i32) {
     if ACTIVE.load(Relaxed) {
@@ -184,7 +191,15 @@ pub(super) fn tick(bot: &Client) {
 
     let mut guard = STORE.lock().unwrap_or_else(PoisonError::into_inner);
     let s = &mut *guard;
-    if !dirty.is_empty() || !columns.is_empty() {
+    if columns.is_empty() && dirty.len() * s.regions.len() < s.built.len() {
+        for sec in &dirty {
+            for &id in s.regions.keys() {
+                if let Some(b) = s.built.get_mut(&(id, *sec)) {
+                    b.fresh = false;
+                }
+            }
+        }
+    } else if !dirty.is_empty() || !columns.is_empty() {
         for (key, b) in s.built.iter_mut() {
             if dirty.contains(&key.1) || columns.contains(&[key.1[0], key.1[2]]) {
                 b.fresh = false;
@@ -423,9 +438,8 @@ fn stats(lua: &Lua, id: u64) -> mlua::Result<Option<Table>> {
         let Ok(state) = BlockState::try_from(u32::from(state)) else {
             continue;
         };
-        let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
-        let name = format!("minecraft:{}", block.id());
-        let before = missing.raw_get::<Option<u32>>(name.as_str())?.unwrap_or(0);
+        let name = state.as_block_kind().to_str();
+        let before = missing.raw_get::<Option<u32>>(name)?.unwrap_or(0);
         missing.raw_set(name, before + n)?;
     }
     let sections: i64 = (0..3)
@@ -539,10 +553,7 @@ fn int3(v: Value, key: &str, what: &str) -> mlua::Result<[i64; 3]> {
     };
     let mut out = [0; 3];
     for (i, (name, slot)) in ["x", "y", "z"].iter().zip(&mut out).enumerate() {
-        let n = t
-            .raw_get::<Option<f64>>(*name)?
-            .or(t.raw_get::<Option<f64>>(i + 1)?)
-            .ok_or_else(bad)?;
+        let n = super::render::number_at(&t, name, i + 1)?.ok_or_else(bad)?;
         if !n.is_finite() || n.fract() != 0.0 {
             return Err(bad());
         }

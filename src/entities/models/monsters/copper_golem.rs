@@ -11,11 +11,11 @@ const Z_FIGHT_MITIGATION: f32 = 0.015;
 pub fn layer() -> LayerDef {
     let mut mesh = MeshDef::new().transformed(|pose| pose.translated(0.0, 24.0, 0.0));
     let root = mesh.root();
-    let body = root.child(
+    let body = root.part_grow(
         "body",
-        CubeList::new()
-            .tex_offs(0, 15)
-            .add_box_grow(-4.0, -6.0, -3.0, 8.0, 6.0, 6.0, Grow::NONE),
+        (0, 15),
+        [-4.0, -6.0, -3.0, 8.0, 6.0, 6.0],
+        Grow::NONE,
         PartPose::offset(0.0, -5.0, 0.0),
     );
     body.child(
@@ -55,32 +55,32 @@ pub fn layer() -> LayerDef {
             ),
         PartPose::offset(0.0, -6.0, 0.0),
     );
-    body.child(
+    body.part_grow(
         "right_arm",
-        CubeList::new()
-            .tex_offs(36, 16)
-            .add_box_grow(-3.0, -1.0, -2.0, 3.0, 10.0, 4.0, Grow::NONE),
+        (36, 16),
+        [-3.0, -1.0, -2.0, 3.0, 10.0, 4.0],
+        Grow::NONE,
         PartPose::offset(-4.0, -6.0, 0.0),
     );
-    body.child(
+    body.part_grow(
         "left_arm",
-        CubeList::new()
-            .tex_offs(50, 16)
-            .add_box_grow(0.0, -1.0, -2.0, 3.0, 10.0, 4.0, Grow::NONE),
+        (50, 16),
+        [0.0, -1.0, -2.0, 3.0, 10.0, 4.0],
+        Grow::NONE,
         PartPose::offset(4.0, -6.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "right_leg",
-        CubeList::new()
-            .tex_offs(0, 27)
-            .add_box_grow(-4.0, 0.0, -2.0, 4.0, 5.0, 4.0, Grow::NONE),
+        (0, 27),
+        [-4.0, 0.0, -2.0, 4.0, 5.0, 4.0],
+        Grow::NONE,
         PartPose::offset(0.0, -5.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "left_leg",
-        CubeList::new()
-            .tex_offs(16, 27)
-            .add_box_grow(0.0, 0.0, -2.0, 4.0, 5.0, 4.0, Grow::NONE),
+        (16, 27),
+        [0.0, 0.0, -2.0, 4.0, 5.0, 4.0],
+        Grow::NONE,
         PartPose::offset(0.0, -5.0, 0.0),
     );
     LayerDef::create(mesh, 64, 64)

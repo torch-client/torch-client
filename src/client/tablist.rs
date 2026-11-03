@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use azalea_chat::style::ChatFormatting;
 use azalea_core::objectives::ObjectiveCriteria;
@@ -10,6 +10,7 @@ use bevy::platform::collections::HashMap;
 use crate::client::chat_text::{to_spans, to_spans_styled};
 use crate::session::{Gamemode, SharedMutex};
 use crate::text::{Span, Style};
+use crate::util::global;
 
 #[derive(Default)]
 pub struct TabList {
@@ -151,11 +152,7 @@ const BELOW_NAME: usize = 2;
 const TEAM_SLOT_BASE: usize = 3;
 const SLOT_COUNT: usize = TEAM_SLOT_BASE + 16;
 
-static STATE: OnceLock<Mutex<State>> = OnceLock::new();
-
-fn state() -> &'static Mutex<State> {
-    STATE.get_or_init(Default::default)
-}
+global!(fn state() -> Mutex<State>);
 
 fn player_names(s: &State) -> Vec<String> {
     let mut names: Vec<String> = s
@@ -691,6 +688,11 @@ impl Lookup<'_> {
         name_tag(self.0, scoreboard_name, base, viewer)
     }
 
+    pub(crate) fn team_color(&self, scoreboard_name: &str) -> Option<u32> {
+        let team = self.0.team_of.get(scoreboard_name)?;
+        self.0.teams.get(team)?.color
+    }
+
     pub(crate) fn sees_friendly_invisible(&self, scoreboard_name: &str, viewer: &str) -> bool {
         self.0
             .allied(scoreboard_name, viewer)
@@ -757,11 +759,25 @@ fn is_upside_down_name(name: &str) -> bool {
     name == "Dinnerbone" || name == "Grumm"
 }
 
-fn default_skin(uuid: u128) -> u8 {
+pub(crate) fn default_skin(uuid: u128) -> u8 {
     let (hi, lo) = ((uuid >> 64) as u64, uuid as u64);
     let hilo = hi ^ lo;
     let hash = ((hilo >> 32) as u32 ^ hilo as u32) as i32;
     hash.rem_euclid(crate::gui::tablist::DEFAULT_SKINS.len() as i32) as u8
+}
+
+#[cfg(feature = "skins")]
+pub(crate) fn uuid_by_name(name: &str) -> Option<u128> {
+    let s = state().lock().unwrap();
+    s.players
+        .iter()
+        .find(|(_, e)| e.name.eq_ignore_ascii_case(name))
+        .map(|(uuid, _)| *uuid)
+}
+
+#[cfg(feature = "skins")]
+pub(crate) fn has_player(uuid: u128) -> bool {
+    state().lock().unwrap().players.contains_key(&uuid)
 }
 
 #[cfg(test)]

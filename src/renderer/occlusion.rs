@@ -26,33 +26,34 @@ const TERRAIN_REFILL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 struct Grid {
+    window: Window,
+    sources: Vec<u8>,
+    directions: Vec<u8>,
+    seen: Bits,
+    reached: Bits,
+    list: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Window {
     origin: (i32, i32, i32),
     dim_x: usize,
     dim_y: usize,
     dim_z: usize,
-    sources: Vec<u8>,
-    directions: Vec<u8>,
-    seen: Vec<bool>,
-    reached: Vec<bool>,
-    list: Vec<(i32, i32, i32)>,
 }
 
-impl Grid {
-    fn resize(&mut self, here: (i32, i32, i32), radius: i32, y_lo: i32, y_hi: i32) {
-        self.origin = (here.0 - radius, y_lo, here.2 - radius);
-        self.dim_x = (2 * radius + 1) as usize;
-        self.dim_z = (2 * radius + 1) as usize;
-        self.dim_y = (((y_hi - y_lo) / 16) + 1).max(1) as usize;
-        let cells = self.dim_x * self.dim_y * self.dim_z;
-        self.sources.clear();
-        self.sources.resize(cells, 0);
-        self.directions.clear();
-        self.directions.resize(cells, 0);
-        self.seen.clear();
-        self.seen.resize(cells, false);
-        self.reached.clear();
-        self.reached.resize(cells, false);
-        self.list.clear();
+impl Window {
+    fn new(here: (i32, i32, i32), radius: i32, y_lo: i32, y_hi: i32) -> Window {
+        Window {
+            origin: (here.0 - radius, y_lo, here.2 - radius),
+            dim_x: (2 * radius + 1) as usize,
+            dim_z: (2 * radius + 1) as usize,
+            dim_y: (((y_hi - y_lo) / 16) + 1).max(1) as usize,
+        }
+    }
+
+    fn cells(&self) -> usize {
+        self.dim_x * self.dim_y * self.dim_z
     }
 
     fn index(&self, pos: (i32, i32, i32)) -> Option<usize> {
@@ -69,6 +70,53 @@ impl Grid {
         Some((y * self.dim_z + z) * self.dim_x + x)
     }
 
+    fn pos(&self, i: usize) -> (i32, i32, i32) {
+        let x = i % self.dim_x;
+        let z = (i / self.dim_x) % self.dim_z;
+        let y = i / (self.dim_x * self.dim_z);
+        (
+            self.origin.0 + x as i32,
+            self.origin.1 + y as i32 * 16,
+            self.origin.2 + z as i32,
+        )
+    }
+}
+
+#[derive(Default)]
+struct Bits(Vec<u64>);
+
+impl Bits {
+    fn reset(&mut self, cells: usize) {
+        self.0.clear();
+        self.0.resize(cells.div_ceil(64), 0);
+    }
+
+    fn get(&self, i: usize) -> bool {
+        self.0[i / 64] & (1 << (i % 64)) != 0
+    }
+
+    fn set(&mut self, i: usize) {
+        self.0[i / 64] |= 1 << (i % 64);
+    }
+}
+
+impl Grid {
+    fn resize(&mut self, here: (i32, i32, i32), radius: i32, y_lo: i32, y_hi: i32) {
+        self.window = Window::new(here, radius, y_lo, y_hi);
+        let cells = self.window.cells();
+        self.sources.clear();
+        self.sources.resize(cells, 0);
+        self.directions.clear();
+        self.directions.resize(cells, 0);
+        self.seen.reset(cells);
+        self.reached.reset(cells);
+        self.list.clear();
+    }
+
+    fn index(&self, pos: (i32, i32, i32)) -> Option<usize> {
+        self.window.index(pos)
+    }
+
     fn fill<F>(&mut self, here: (i32, i32, i32), radius: i32, y_lo: i32, y_hi: i32, vis_at: F)
     where
         F: Fn((i32, i32, i32)) -> VisibilitySet,
@@ -78,7 +126,7 @@ impl Grid {
 
         match self.index(here) {
             Some(i) => {
-                self.seen[i] = true;
+                self.seen.set(i);
                 queue.push_back(here);
             }
             None => {
@@ -106,7 +154,7 @@ impl Grid {
                         }
                         let pos = (here.0 + dx, plane, here.2 + dz);
                         let Some(i) = self.index(pos) else { continue };
-                        self.seen[i] = true;
+                        self.seen.set(i);
                         self.sources[i] = source;
                         self.directions[i] = directions;
                         seeds.push(pos);
@@ -124,8 +172,8 @@ impl Grid {
         while let Some(pos) = queue.pop_front() {
             let Some(i) = self.index(pos) else { continue };
             let (sources, directions) = (self.sources[i], self.directions[i]);
-            self.reached[i] = true;
-            self.list.push(pos);
+            self.reached.set(i);
+            self.list.push(i as u32);
             let vis = vis_at(pos);
             for face in Direction::ALL {
                 if directions & (1 << face.opposite().index()) != 0 {
@@ -142,11 +190,11 @@ impl Grid {
                 }
                 let next = step(pos, face);
                 let Some(j) = self.index(next) else { continue };
-                if self.seen[j] {
+                if self.seen.get(j) {
                     self.sources[j] |= 1 << face.index();
                     continue;
                 }
-                self.seen[j] = true;
+                self.seen.set(j);
                 self.sources[j] = 1 << face.index();
                 self.directions[j] = directions | (1 << face.index());
                 queue.push_back(next);
@@ -155,16 +203,13 @@ impl Grid {
     }
 
     fn visible_sections(&self) -> impl Iterator<Item = (i32, i32, i32)> + '_ {
-        self.list.iter().copied()
+        self.list.iter().map(|&i| self.window.pos(i as usize))
     }
 }
 
 #[derive(Default)]
 struct VisSnapshot {
-    origin: (i32, i32, i32),
-    dim_x: usize,
-    dim_y: usize,
-    dim_z: usize,
+    window: Window,
     cells: Vec<VisibilitySet>,
 }
 
@@ -173,36 +218,18 @@ impl VisSnapshot {
     where
         I: Iterator<Item = ((i32, i32, i32), VisibilitySet)>,
     {
-        self.origin = (here.0 - radius, y_lo, here.2 - radius);
-        self.dim_x = (2 * radius + 1) as usize;
-        self.dim_z = (2 * radius + 1) as usize;
-        self.dim_y = (((y_hi - y_lo) / 16) + 1).max(1) as usize;
-        let cells = self.dim_x * self.dim_y * self.dim_z;
+        self.window = Window::new(here, radius, y_lo, y_hi);
         self.cells.clear();
-        self.cells.resize(cells, VisibilitySet::all());
+        self.cells.resize(self.window.cells(), VisibilitySet::all());
         for (pos, vis) in sections {
-            if let Some(i) = self.index(pos) {
+            if let Some(i) = self.window.index(pos) {
                 self.cells[i] = vis;
             }
         }
     }
 
-    fn index(&self, pos: (i32, i32, i32)) -> Option<usize> {
-        let x = pos.0 - self.origin.0;
-        let z = pos.2 - self.origin.2;
-        let y = (pos.1 - self.origin.1).div_euclid(16);
-        if x < 0 || z < 0 || y < 0 {
-            return None;
-        }
-        let (x, y, z) = (x as usize, y as usize, z as usize);
-        if x >= self.dim_x || y >= self.dim_y || z >= self.dim_z {
-            return None;
-        }
-        Some((y * self.dim_z + z) * self.dim_x + x)
-    }
-
     fn at(&self, pos: (i32, i32, i32)) -> VisibilitySet {
-        match self.index(pos) {
+        match self.window.index(pos) {
             Some(i) => self.cells[i],
             None => VisibilitySet::all(),
         }
@@ -526,16 +553,17 @@ mod tests {
         let world = surface_world(64);
         let mut grid = Grid::default();
         grid.fill((0, 80, 0), 4, -64, 320, &world);
-        for pos in grid.list.clone() {
-            assert!(
-                grid.index(pos).is_some(),
+        for (&i, pos) in grid.list.iter().zip(grid.visible_sections()) {
+            assert_eq!(
+                grid.index(pos),
+                Some(i as usize),
                 "{pos:?} reached but outside the grid"
             );
             assert!(
-                grid.reached[grid.index(pos).unwrap()],
+                grid.reached.get(i as usize),
                 "{pos:?} listed but not marked"
             );
         }
-        assert!(!grid.reached[grid.index((0, -32, 0)).unwrap()]);
+        assert!(!grid.reached.get(grid.index((0, -32, 0)).unwrap()));
     }
 }

@@ -185,6 +185,11 @@ pub fn block_visual_in(state: azalea::block::BlockState, blocks: &Blocks) -> Ren
         TintKind::DryFoliage
     } else if name == "water_cauldron" {
         TintKind::Water
+    } else if matches!(name, "melon_stem" | "pumpkin_stem") {
+        let age = props.get("age").and_then(|v| v.parse().ok()).unwrap_or(0);
+        TintKind::Stem(age)
+    } else if matches!(name, "attached_melon_stem" | "attached_pumpkin_stem") {
+        TintKind::Stem(7)
     } else if name == "redstone_wire" {
         let power: u8 = props.get("power").and_then(|v| v.parse().ok()).unwrap_or(0);
         TintKind::Redstone(power)
@@ -408,11 +413,7 @@ pub fn eye_fluid_at(x: f64, y: f64, z: f64) -> Option<EyeFluid> {
         })
         .is_some_and(|(above_kind, _)| above_kind == kind);
 
-    let height = if amount == 8 || same_above {
-        1.0
-    } else {
-        amount as f32 / 9.0
-    };
+    let height = if same_above { 1.0 } else { amount as f32 / 9.0 };
     let frac_y = (y - pos.y as f64) as f32;
     crate::log_debug!(
         "fog",

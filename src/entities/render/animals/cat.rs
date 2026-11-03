@@ -4,7 +4,7 @@ use bevy::prelude::{Quat, Vec3};
 use crate::entities::TexturePath;
 use crate::entities::models::animals::feline;
 use crate::entities::registry::Registry;
-use crate::entities::render::add_adult_and_baby;
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 use crate::entities::state::EntityState;
 use crate::entities::{RenderSpec, RootPose, default_root};
 use crate::util::mth;
@@ -81,9 +81,5 @@ fn texture(st: &EntityState) -> TexturePath {
 }
 
 fn collar_texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/cat/cat_collar_baby".into()
-    } else {
-        "entity/cat/cat_collar".into()
-    }
+    aged_texture(st, "entity/cat/cat_collar", "entity/cat/cat_collar_baby")
 }

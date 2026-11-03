@@ -27,25 +27,22 @@ pub fn layer() -> LayerDef {
             .add_box_grow(-4.5, 10.0, -3.0, 9.0, 5.0, 6.0, Grow::all(0.5)),
         PartPose::offset(0.0, -7.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_arm",
-        CubeList::new()
-            .tex_offs(60, 21)
-            .add_box(-13.0, -2.5, -3.0, 4.0, 30.0, 6.0),
+        (60, 21),
+        [-13.0, -2.5, -3.0, 4.0, 30.0, 6.0],
         PartPose::offset(0.0, -7.0, 0.0),
     );
-    root.child(
+    root.part(
         "left_arm",
-        CubeList::new()
-            .tex_offs(60, 58)
-            .add_box(9.0, -2.5, -3.0, 4.0, 30.0, 6.0),
+        (60, 58),
+        [9.0, -2.5, -3.0, 4.0, 30.0, 6.0],
         PartPose::offset(0.0, -7.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(37, 0)
-            .add_box(-3.5, -3.0, -3.0, 6.0, 16.0, 5.0),
+        (37, 0),
+        [-3.5, -3.0, -3.0, 6.0, 16.0, 5.0],
         PartPose::offset(-4.0, 11.0, 0.0),
     );
     root.child(

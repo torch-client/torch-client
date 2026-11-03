@@ -2,19 +2,25 @@ use crate::gui::painter::Painter;
 use crate::gui::widgets::{Button, WIDGET_HEIGHT};
 use crate::gui::{GuiState, Screen, ScreenCtx};
 
-const TITLE: &str = "Game Menu";
+mod tr {
+    use crate::gui::tooltip::label;
 
-const RETURN_TO_GAME: &str = "Back to Game";
+    macro_rules! keys {
+        ($($name:ident = $key:literal),* $(,)?) => {
+            $(pub fn $name() -> &'static str { label!($key) })*
+        };
+    }
 
-const ADVANCEMENTS: &str = "Advancements";
-
-const STATISTICS: &str = "Statistics";
-
-const OPTIONS: &str = "Options...";
-
-const REPORT_BUGS: &str = "Report Bugs";
-
-const DISCONNECT: &str = "Disconnect";
+    keys! {
+        title = "menu.game",
+        return_to_game = "menu.returnToGame",
+        advancements = "gui.advancements",
+        statistics = "gui.stats",
+        options = "menu.options",
+        report_bugs = "menu.reportBugs",
+        disconnect = "menu.disconnect",
+    }
+}
 
 const BUTTON_WIDTH_FULL: f32 = 204.0;
 
@@ -54,7 +60,7 @@ pub fn side_strip_right(vw: f32, vh: f32) -> f32 {
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let (gx, gy) = grid_origin(ctx.vw, ctx.vh);
 
-    p.text_centered(TITLE, ctx.vw / 2.0, TITLE_Y, 0xFFFFFF, true);
+    p.text_centered(tr::title(), ctx.vw / 2.0, TITLE_Y, 0xFFFFFF, true);
 
     let mut button = |row: usize, column: usize, width: f32, label: &'static str| {
         Button::new(
@@ -67,25 +73,25 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         .draw(p, ctx)
     };
 
-    if button(0, 0, BUTTON_WIDTH_FULL, RETURN_TO_GAME) {
+    if button(0, 0, BUTTON_WIDTH_FULL, tr::return_to_game()) {
         state.nav = Some(Screen::None);
     }
-    if button(1, 0, BUTTON_WIDTH_HALF, ADVANCEMENTS) {
+    if button(1, 0, BUTTON_WIDTH_HALF, tr::advancements()) {
         state.advancements.parent = Screen::Pause;
         state.nav = Some(Screen::Advancements);
     }
-    if button(1, 1, BUTTON_WIDTH_HALF, STATISTICS) {
+    if button(1, 1, BUTTON_WIDTH_HALF, tr::statistics()) {
         state.nav = Some(Screen::Statistics);
     }
-    if button(2, 0, BUTTON_WIDTH_HALF, OPTIONS) {
+    if button(2, 0, BUTTON_WIDTH_HALF, tr::options()) {
         state.options_parent = Screen::Pause;
         state.nav = Some(Screen::Options);
     }
-    if button(2, 1, BUTTON_WIDTH_HALF, REPORT_BUGS) {
+    if button(2, 1, BUTTON_WIDTH_HALF, tr::report_bugs()) {
         state.credits_parent = Screen::Pause;
         state.nav = Some(Screen::Credits);
     }
-    if button(3, 0, BUTTON_WIDTH_FULL, DISCONNECT) {
+    if button(3, 0, BUTTON_WIDTH_FULL, tr::disconnect()) {
         state.disconnect = true;
         state.nav = Some(Screen::Title);
     }

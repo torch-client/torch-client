@@ -209,8 +209,10 @@ impl LightEngine {
             }
             if from_level == target {
                 match self.storage.layer() {
-                    Layer::Block => self.propagate_increase_block(world, node, data, from_level),
-                    Layer::Sky => self.propagate_increase_sky(world, node, data, from_level),
+                    Layer::Block => {
+                        self.propagate_increase::<false, _>(world, node, data, from_level)
+                    }
+                    Layer::Sky => self.propagate_increase::<true, _>(world, node, data, from_level),
                 }
             }
         }
@@ -251,7 +253,7 @@ impl LightEngine {
         }
     }
 
-    fn propagate_increase_block<W: LightWorld>(
+    fn propagate_increase<const SKY: bool, W: LightWorld>(
         &mut self,
         world: &W,
         from: Node,
@@ -259,6 +261,11 @@ impl LightEngine {
         from_level: u8,
     ) {
         let mut from_props: Option<&LightProps> = None;
+        let empty_below = if SKY {
+            self.count_empty_sections_below_if_at_border(from)
+        } else {
+            0
+        };
         for dir in Direction::ALL {
             if !qe::should_propagate(data, dir) {
                 continue;
@@ -287,6 +294,9 @@ impl LightEngine {
                         dir.opposite(),
                     ),
                 );
+            }
+            if SKY {
+                self.propagate_from_empty_sections(to, dir, new_level, true, empty_below);
             }
         }
     }
@@ -519,48 +529,6 @@ impl LightEngine {
                 }
             }
             sec.y += 1;
-        }
-    }
-
-    fn propagate_increase_sky<W: LightWorld>(
-        &mut self,
-        world: &W,
-        from: Node,
-        data: u32,
-        from_level: u8,
-    ) {
-        let mut from_props: Option<&LightProps> = None;
-        let empty_below = self.count_empty_sections_below_if_at_border(from);
-        for dir in Direction::ALL {
-            if !qe::should_propagate(data, dir) {
-                continue;
-            }
-            let Some((to, to_props, new_level)) = self.step_increase(world, from, from_level, dir)
-            else {
-                continue;
-            };
-            let fp = *from_props.get_or_insert_with(|| {
-                if qe::is_from_empty_shape(data) {
-                    props::air()
-                } else {
-                    state_props(world, from.0, from.1, from.2)
-                }
-            });
-            if props::shape_occludes(fp, to_props, dir) {
-                continue;
-            }
-            self.storage.set_stored_level(to.0, to.1, to.2, new_level);
-            if new_level > 1 {
-                self.enqueue_increase(
-                    to,
-                    qe::increase_skip_one_direction(
-                        new_level,
-                        to_props.empty_shape,
-                        dir.opposite(),
-                    ),
-                );
-            }
-            self.propagate_from_empty_sections(to, dir, new_level, true, empty_below);
         }
     }
 

@@ -101,7 +101,8 @@ mod tests {
         for spec in indices.into_iter().map(|i| &registry.specs[i]) {
             let geom = match &spec.geom {
                 Geom::Model(geom) => geom,
-                Geom::Item(_) | Geom::Block(_) | Geom::Built(_) => {
+                Geom::Item(_) => continue,
+                Geom::Block(_) | Geom::Built(_) => {
                     panic!("{} is not a Geom::Model spec", spec.name)
                 }
             };

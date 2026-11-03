@@ -1008,13 +1008,8 @@ fn top_half(face: Direction, location: Vec3, pos: BlockPos) -> bool {
 }
 
 fn look_vector(yaw: f32, pitch: f32) -> Vec3 {
-    let yaw = (yaw as f64).to_radians();
-    let pitch = (pitch as f64).to_radians();
-    Vec3 {
-        x: -yaw.sin() * pitch.cos(),
-        y: -pitch.sin(),
-        z: yaw.cos() * pitch.cos(),
-    }
+    let [x, y, z] = crate::modules::sent::view_vector(crate::modules::sent::Look { yaw, pitch });
+    Vec3::new(x, y, z)
 }
 
 fn player_facing(yaw: f32) -> Direction {

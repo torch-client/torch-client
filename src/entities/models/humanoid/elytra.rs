@@ -56,11 +56,11 @@ fn mesh() -> MeshDef {
 
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part_grow(
         "left_wing",
-        CubeList::new()
-            .tex_offs(22, 0)
-            .add_box_grow(-10.0, 0.0, 0.0, 10.0, 20.0, 2.0, WIND),
+        (22, 0),
+        [-10.0, 0.0, 0.0, 10.0, 20.0, 2.0],
+        WIND,
         PartPose::offset_rotation(5.0, 0.0, 0.0, DEFAULT_X_ROT, 0.0, DEFAULT_Z_ROT),
     );
     root.child(

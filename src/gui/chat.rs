@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::gui::ScreenCtx;
 use crate::gui::clickevent::{self, Followup};
 use crate::gui::confirmlink;
-use crate::gui::painter::Painter;
+use crate::gui::painter::{Painter, argb};
 use crate::gui::render::{GuiInput, clipboard_set};
 use crate::gui::suggestions::{self, GHOST_COLOR};
 use crate::gui::widgets::{TextBox, blink_on, byte_at, char_slice, draw_caret};
@@ -113,6 +113,7 @@ pub struct ChatState {
     wrapped_fonts: u32,
     next_id: u64,
     just_opened: bool,
+    offered: Option<(Caret, Caret)>,
     warning: Option<(String, u32)>,
     tag_tooltip: Option<(u64, Vec<Vec<Span>>)>,
     link_prompt: Option<String>,
@@ -145,6 +146,7 @@ impl Default for ChatState {
             wrapped_fonts: 0,
             next_id: 0,
             just_opened: false,
+            offered: None,
             warning: None,
             tag_tooltip: None,
             link_prompt: None,
@@ -181,6 +183,12 @@ impl ChatState {
             history,
             ..Default::default()
         };
+    }
+
+    pub fn withdraw_copy_offer(&mut self) {
+        if self.offered.take().is_some() {
+            crate::platform::clipboard::offer(None);
+        }
     }
 
     pub fn open(&mut self, prefix: &str) {
@@ -515,11 +523,6 @@ fn line_alpha(added: u32, now: u32, focused: bool) -> f32 {
     let d = now.saturating_sub(added) as f32;
     let t = (10.0 * (1.0 - d / 200.0)).clamp(0.0, 1.0);
     t * t
-}
-
-pub(in crate::gui) fn argb(alpha: f32, rgb: u32) -> u32 {
-    let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
-    (a << 24) | (rgb & 0x00FF_FFFF)
 }
 
 #[cfg(feature = "mobile_ui")]
@@ -909,6 +912,11 @@ fn handle_input(p: &mut Painter, chat: &mut ChatState, ctx: &ScreenCtx, shared: 
     if input.copy && chat.has_selection() {
         clipboard_set(&chat.selected_text());
     }
+    let selection = chat.ordered_selection().filter(|(a, b)| a != b);
+    if selection != chat.offered {
+        chat.offered = selection;
+        crate::platform::clipboard::offer(selection.map(|_| chat.selected_text()));
+    }
 
     let font = &p.atlas.font;
     chat.field
@@ -1180,7 +1188,7 @@ fn draw_input_line(p: &mut Painter, chat: &mut ChatState, ctx: &ScreenCtx, tick:
         && !ghost.is_empty()
         && scroll + shown >= count
     {
-        p.text_str(ghost, x + width, text_y, GHOST_COLOR, true);
+        p.text_plain(ghost, x + width, text_y, GHOST_COLOR, true);
     }
 
     let (sa, sb) = (
@@ -1664,253 +1672,24 @@ pub(crate) mod tests {
         assert!(!chat.has_selection());
         assert_eq!(chat.selected_text(), "");
     }
-}
-
-#[cfg(test)]
-mod visual {
-    use std::sync::{Arc, Mutex};
-
-    use super::*;
-    use crate::gui::atlas::build_gui_atlas;
-    use crate::gui::preview::save_upscaled;
-    use crate::gui::render::GuiInput;
-    use crate::gui::{GuiState, Screen};
-    use bevy::prelude::Vec2;
-
-    fn entry(text: &str, color: u32, tag: ChatTag) -> ChatEntry {
-        ChatEntry {
-            spans: vec![Span::colored(text, color)],
-            events: None,
-            tag,
-            original: None,
-        }
-    }
-
-    fn sample() -> Vec<ChatEntry> {
-        vec![
-            entry(
-                "Server started. Type /help for commands.",
-                0xFFFF55,
-                ChatTag::System,
-            ),
-            entry("<Alex> hey, anyone near spawn?", 0xFFFFFF, ChatTag::Secure),
-            entry("<Steve> yeah give me a sec", 0xFFFFFF, ChatTag::Secure),
-            entry(
-                "[Rank] <Bot> this line was rewritten by a chat plugin",
-                0xFFFFFF,
-                ChatTag::Modified,
-            ),
-            entry(
-                "<Console> unsigned relay message",
-                0xFFFFFF,
-                ChatTag::NotSecure,
-            ),
-            entry(
-                "<Alex> a much longer line that has to wrap because it does not fit \
-                 inside the 320 unit chat width vanilla uses at scale one",
-                0xFFFFFF,
-                ChatTag::Secure,
-            ),
-        ]
-    }
-
-    fn frame(
-        atlas: &crate::gui::atlas::GuiAtlas,
-        state: &mut GuiState,
-        shared: &Arc<SharedMutex>,
-        input: &GuiInput,
-        tick: u32,
-        name: &str,
-        vw: f32,
-        vh: f32,
-    ) {
-        let mut p = Painter::new(atlas, tick);
-        crate::gui::screens::draw(
-            &mut p,
-            state,
-            input,
-            shared,
-            #[cfg(feature = "skins")]
-            &mut Default::default(),
-        );
-        save_upscaled(&p, vw as u32, vh as u32, name);
-    }
 
     #[test]
-    fn preview_chat_states() {
-        let atlas = build_gui_atlas(&crate::assets_root());
-        let (vw, vh) = (427.0_f32, 240.0_f32);
-        let shared: Arc<SharedMutex> = Arc::new(SharedMutex::default());
-        let mk = |mouse: Option<Vec2>| GuiInput {
-            size: Vec2::new(vw, vh),
-            scale: 3.0,
-            mouse,
-            ..Default::default()
+    fn popup_opens_for_a_partial_command() {
+        let shared: std::sync::Arc<SharedMutex> = std::sync::Arc::new(SharedMutex::default());
+        shared.lock().unwrap().session.command_tree = Some(std::sync::Arc::new(preview_tree()));
+        let (font, _) = crate::text::Font::load(&crate::assets_root());
+        let input = idle_input();
+        let ctx = ScreenCtx {
+            input: &input,
+            vw: 427.0,
+            vh: 240.0,
         };
-
-        shared.lock().unwrap().session.chat_incoming = sample();
-        let mut state = GuiState::default();
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &mk(None),
-            0,
-            "chat_hud.png",
-            vw,
-            vh,
-        );
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &mk(None),
-            190,
-            "chat_hud_fading.png",
-            vw,
-            vh,
-        );
-
-        let mut state = GuiState::default();
-        shared.lock().unwrap().session.chat_incoming = sample();
-        state.screen = Screen::Chat;
-        state.chat.open("");
-        state.chat.field.input.set_text("hello world");
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &mk(None),
-            300,
-            "chat_focused.png",
-            vw,
-            vh,
-        );
-
-        let ids: Vec<u64> = state.chat.lines.iter().map(|l| l.id).collect();
-        state.chat.selection = Some((
-            Caret {
-                line: ids[4],
-                ch: 6,
-            },
-            Caret {
-                line: ids[1],
-                ch: 12,
-            },
-        ));
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &mk(None),
-            300,
-            "chat_selection.png",
-            vw,
-            vh,
-        );
-        assert!(!state.chat.selected_text().is_empty());
-
-        state.chat.field.input.anchor = 2;
-        state.chat.field.input.cursor = 8;
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &mk(None),
-            300,
-            "chat_input_selection.png",
-            vw,
-            vh,
-        );
-        state.chat.field.input.anchor = state.chat.field.input.cursor;
-
-        let mut state = GuiState::default();
-        state.screen = Screen::Chat;
-        state.chat.open("/");
-        {
-            let mut s = shared.lock().unwrap();
-            s.session.command_tree = Some(std::sync::Arc::new(super::tests::preview_tree()));
-            s.session.player_names = vec!["Alex".to_string(), "Steve".to_string()];
-        }
-        state.chat.field.suggest.allow = true;
-        state.chat.field.input.set_text("/g");
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &mk(None),
-            300,
-            "chat_suggestions.png",
-            vw,
-            vh,
-        );
-        assert!(
-            state.chat.field.suggest.list.is_some(),
-            "the popup should be up"
-        );
-
-        for _ in 0..11 {
-            state.chat.field.cycle(1, SUGGEST);
-        }
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &mk(None),
-            300,
-            "chat_suggestions_scrolled.png",
-            vw,
-            vh,
-        );
-
-        let mut state = GuiState::default();
-        state.screen = Screen::Chat;
-        state.chat.open("/");
-        state.chat.field.suggest.allow = true;
-        state.chat.field.input.set_text("/gamemode creative Steve");
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &mk(None),
-            300,
-            "chat_command_colored.png",
-            vw,
-            vh,
-        );
-
-        let mut state = GuiState::default();
-        state.screen = Screen::Chat;
-        state.chat.open("/");
-        state.chat.field.suggest.allow = true;
-        state.chat.field.input.set_text("/nosuchcommand");
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &mk(None),
-            300,
-            "chat_command_error.png",
-            vw,
-            vh,
-        );
-
-        let mut state = GuiState::default();
-        shared.lock().unwrap().session.chat_incoming = sample();
-        state.screen = Screen::Chat;
-        state.chat.open("");
-        shared.lock().unwrap().session.chat_send_error = Some(
-            "Chat disabled due to missing profile public key. Please try reconnecting.".into(),
-        );
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &mk(None),
-            320,
-            "chat_warning.png",
-            vw,
-            vh,
-        );
+        let mut chat = ChatState::default();
+        chat.open("/");
+        chat.field.suggest.allow = true;
+        chat.field.input.set_text("/g");
+        chat.field
+            .refresh(&font, &shared, SUGGEST, suggest_anchor(&ctx));
+        assert!(chat.field.suggest.list.is_some(), "the popup should be up");
     }
 }

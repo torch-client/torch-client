@@ -14,6 +14,7 @@ use crate::blockentities::render::skull;
 use crate::entities::geom;
 use crate::items::potions;
 
+use super::dispatch::ModelTree;
 use super::json::Json;
 use super::model::{
     Assets, DIR_SHADE, Resolved, Tex, Transform, corner_uv, default_face_uv, face_positions,
@@ -36,10 +37,11 @@ pub fn model_tier(target_px: f32) -> u32 {
 pub struct ItemIcons {
     pub image: RgbaImage,
     pub map: HashMap<String, Vec<(u32, [u32; 4])>>,
+    pub trees: HashMap<String, ModelTree>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Dispatch {
+pub(super) enum Dispatch {
     Model,
     Select,
     Condition,
@@ -51,7 +53,7 @@ enum Dispatch {
 }
 
 impl Dispatch {
-    fn of(node: &Json) -> Dispatch {
+    pub(super) fn of(node: &Json) -> Dispatch {
         match node.get("type").and_then(Json::as_str).map(strip_namespace) {
             Some("model") => Dispatch::Model,
             Some("select") => Dispatch::Select,
@@ -82,7 +84,7 @@ impl Dispatch {
 pub(super) enum Synthetic {
     Chest(String),
     Bed(String, bool, Mat4),
-    Skull(String, Mat4),
+    Skull(String, f32, Mat4),
     Banner(u8, Mat4),
     Shield(Mat4),
     Rigid(fn() -> geom::LayerDef, String, Mat4),
@@ -96,7 +98,7 @@ pub(super) struct Part {
     pub(super) synthetic: Option<Synthetic>,
 }
 
-fn parse_transformation(special: &Json) -> Mat4 {
+pub(super) fn parse_transformation(special: &Json) -> Mat4 {
     let Some(t) = special.get("transformation") else {
         return Mat4::IDENTITY;
     };
@@ -116,116 +118,29 @@ fn parse_transformation(special: &Json) -> Mat4 {
         * Mat4::from_quat(quat("right_rotation"))
 }
 
-pub(super) fn depends_on_display_context(node: &Json, depth: u32) -> bool {
-    if depth > 8 {
-        return false;
-    }
-    let branches = |keys: &[&str]| {
-        keys.iter()
-            .filter_map(|k| node.get(k))
-            .any(|child| depends_on_display_context(child, depth + 1))
-    };
-    match Dispatch::of(node) {
-        Dispatch::Select => {
-            is_display_context(node)
-                || branches(&["fallback"])
-                || node
-                    .get("cases")
-                    .map(Json::arr)
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|case| case.get("model"))
-                    .any(|child| depends_on_display_context(child, depth + 1))
-        }
-        Dispatch::Condition => branches(&["on_false", "on_true"]),
-        Dispatch::RangeDispatch => {
-            branches(&["fallback"])
-                || node
-                    .get("entries")
-                    .map(Json::arr)
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|entry| entry.get("model"))
-                    .any(|child| depends_on_display_context(child, depth + 1))
-        }
-        Dispatch::Composite => node
-            .get("models")
-            .map(Json::arr)
-            .unwrap_or_default()
-            .iter()
-            .any(|child| depends_on_display_context(child, depth + 1)),
-        _ => false,
-    }
-}
+pub use super::dispatch::{ChargeType, ItemUse, ItemWorld};
 
-fn is_display_context(node: &Json) -> bool {
-    node.get("property")
-        .and_then(Json::as_str)
-        .map(strip_namespace)
-        == Some("display_context")
-}
-
-fn is_using_item(node: &Json) -> bool {
-    node.get("property")
-        .and_then(Json::as_str)
-        .map(strip_namespace)
-        == Some("using_item")
-}
-
-pub(super) fn depends_on_using_item(node: &Json, depth: u32) -> bool {
-    if depth > 8 {
-        return false;
-    }
-    let branches = |keys: &[&str]| {
-        keys.iter()
-            .filter_map(|k| node.get(k))
-            .any(|child| depends_on_using_item(child, depth + 1))
-    };
-    match Dispatch::of(node) {
-        Dispatch::Select => {
-            branches(&["fallback"])
-                || node
-                    .get("cases")
-                    .map(Json::arr)
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|case| case.get("model"))
-                    .any(|child| depends_on_using_item(child, depth + 1))
+pub(super) fn parts_of(
+    assets: &Assets,
+    root: &Json,
+    ctx: &str,
+    use_: &ItemUse,
+    world: &ItemWorld,
+) -> Vec<Part> {
+    let mut parts = Vec::new();
+    match ModelTree::compile(root) {
+        Some(tree) => {
+            let leaf = tree.leaf(tree.eval(ctx, use_, world));
+            collect_parts(assets, &leaf.json, leaf.transform, &mut parts, 0);
         }
-        Dispatch::Condition => is_using_item(node) || branches(&["on_false", "on_true"]),
-        Dispatch::RangeDispatch => {
-            branches(&["fallback"])
-                || node
-                    .get("entries")
-                    .map(Json::arr)
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|entry| entry.get("model"))
-                    .any(|child| depends_on_using_item(child, depth + 1))
-        }
-        Dispatch::Composite => node
-            .get("models")
-            .map(Json::arr)
-            .unwrap_or_default()
-            .iter()
-            .any(|child| depends_on_using_item(child, depth + 1)),
-        _ => false,
+        None => collect_parts(assets, root, Mat4::IDENTITY, &mut parts, 0),
     }
-}
-
-fn case_matches(case: &Json, ctx: &str) -> bool {
-    match case.get("when") {
-        Some(Json::Arr(values)) => values.iter().any(|v| v.as_str() == Some(ctx)),
-        Some(value) => value.as_str() == Some(ctx),
-        None => false,
-    }
+    parts
 }
 
 pub(super) fn collect_parts(
     assets: &Assets,
     node: &Json,
-    ctx: &str,
-    using: bool,
     parent: Mat4,
     out: &mut Vec<Part>,
     depth: u32,
@@ -292,9 +207,13 @@ pub(super) fn collect_parts(
                         .and_then(Json::as_str)
                         .map(strip_namespace)
                         .unwrap_or("skeleton");
-                    Synthetic::Skull(kind.to_string(), local)
+                    let animation = inner
+                        .and_then(|m| m.get("animation"))
+                        .and_then(Json::as_f32)
+                        .unwrap_or(0.0);
+                    Synthetic::Skull(kind.to_string(), animation, local)
                 }
-                "player_head" => Synthetic::Skull("player".to_string(), local),
+                "player_head" => Synthetic::Skull("player".to_string(), 0.0, local),
                 "shield" => Synthetic::Shield(local),
                 "trident" => Synthetic::Rigid(
                     crate::entities::models::objects::projectile::trident_layer,
@@ -328,49 +247,23 @@ pub(super) fn collect_parts(
         }
         Dispatch::Composite => {
             for child in node.get("models").map(Json::arr).unwrap_or_default() {
-                collect_parts(assets, child, ctx, using, local, out, depth + 1);
+                collect_parts(assets, child, local, out, depth + 1);
             }
         }
-        Dispatch::Select => {
-            let matched = is_display_context(node)
-                .then(|| {
-                    node.get("cases")
-                        .map(Json::arr)
-                        .unwrap_or_default()
-                        .iter()
-                        .find(|case| case_matches(case, ctx))
-                        .and_then(|case| case.get("model"))
-                })
-                .flatten();
-            let branch = matched.or_else(|| {
-                node.get("fallback").or_else(|| {
-                    node.get("cases")
-                        .and_then(|c| c.idx(0))
-                        .and_then(|c| c.get("model"))
-                })
-            });
-            if let Some(branch) = branch {
-                collect_parts(assets, branch, ctx, using, local, out, depth + 1);
-            }
-        }
-        Dispatch::Condition => {
-            let branch = if is_using_item(node) {
-                node.get(if using { "on_true" } else { "on_false" })
-            } else {
-                node.get("on_false").or_else(|| node.get("on_true"))
-            };
-            if let Some(branch) = branch {
-                collect_parts(assets, branch, ctx, using, local, out, depth + 1);
-            }
-        }
-        Dispatch::RangeDispatch => {
-            let branch = node.get("fallback").or_else(|| {
-                node.get("entries")
-                    .and_then(|e| e.idx(0))
+        Dispatch::Select | Dispatch::Condition | Dispatch::RangeDispatch => {
+            let first = |list: &str| {
+                node.get(list)
+                    .and_then(|l| l.idx(0))
                     .and_then(|e| e.get("model"))
-            });
+            };
+            let branch = node
+                .get("fallback")
+                .or_else(|| node.get("on_false"))
+                .or_else(|| first("cases"))
+                .or_else(|| first("entries"))
+                .or_else(|| node.get("on_true"));
             if let Some(branch) = branch {
-                collect_parts(assets, branch, ctx, using, local, out, depth + 1);
+                collect_parts(assets, branch, local, out, depth + 1);
             }
         }
         Dispatch::Bundle | Dispatch::Unknown => {}
@@ -538,10 +431,32 @@ pub(super) fn baked_quads(
     tex: &Arc<Tex>,
     out: &mut Vec<Quad>,
 ) {
-    let rest = model.rest_pose();
+    posed_quads(model, &model.rest_pose(), root, tex, out);
+}
+
+pub(super) fn skull_quads(
+    kind: &str,
+    animation: f32,
+    root: Mat4,
+    tex: &Arc<Tex>,
+    out: &mut Vec<Quad>,
+) {
+    let baked = geom::bake(&skull::layer_for_type(kind));
+    let mut states = baked.rest_pose();
+    skull::pose_for_type(kind, &baked, &mut states, animation);
+    posed_quads(&baked, &states, root, tex, out);
+}
+
+fn posed_quads(
+    model: &geom::BakedModel,
+    states: &[geom::PartState],
+    root: Mat4,
+    tex: &Arc<Tex>,
+    out: &mut Vec<Quad>,
+) {
     let mut world = vec![Mat4::IDENTITY; model.parts.len()];
     for (id, part) in model.parts.iter().enumerate() {
-        let local = rest[id].transform().to_matrix();
+        let local = states[id].transform().to_matrix();
         world[id] = match part.parent {
             Some(parent) => world[parent] * local,
             None => root * local,
@@ -824,6 +739,45 @@ fn bake_potion_variants(
     out
 }
 
+fn bake_leaf_variants(
+    assets: &Assets,
+    ids: &[String],
+) -> (
+    Vec<(String, (Vec<(u32, RgbaImage)>, Dispatch, Source))>,
+    HashMap<String, ModelTree>,
+) {
+    let mut out = Vec::new();
+    let mut trees = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        let Some(tree) = assets
+            .json(&format!("items/{id}.json"))
+            .and_then(|doc| doc.get("model").and_then(ModelTree::compile))
+        else {
+            continue;
+        };
+        for leaf in tree.leaves() {
+            let Some(path) = leaf.icon.as_deref() else {
+                continue;
+            };
+            if !seen.insert(path.to_string()) {
+                continue;
+            }
+            let model = assets.model(path);
+            if !model.generated {
+                continue;
+            }
+            let mut image = RgbaImage::new(FLAT_ICON, FLAT_ICON);
+            if flat_icon(assets, &model, &parse_tints(assets, &leaf.json), &mut image) {
+                let entry = (vec![(FLAT_ICON, image)], Dispatch::Model, Source::Rendered);
+                out.push((path.to_string(), entry));
+            }
+        }
+        trees.insert(id.clone(), tree);
+    }
+    (out, trees)
+}
+
 fn bake_one(
     assets: &Assets,
     id: &str,
@@ -837,10 +791,9 @@ fn bake_one(
         .map(|n| Dispatch::of(n))
         .unwrap_or(Dispatch::Unknown);
 
-    let mut parts = Vec::new();
-    if let Some(node) = &root {
-        collect_parts(assets, node, "gui", false, Mat4::IDENTITY, &mut parts, 0);
-    }
+    let parts = root.as_ref().map_or_else(Vec::new, |node| {
+        parts_of(assets, node, "gui", &ItemUse::NONE, &ItemWorld::default())
+    });
 
     let mut quads: Vec<Quad> = Vec::new();
     let mut transform: Option<Transform> = None;
@@ -857,20 +810,15 @@ fn bake_one(
             }
             Some(Synthetic::Bed(texture, is_head, local)) => {
                 if let Some(tex) = assets.texture(texture) {
-                    let layer = if *is_head {
-                        models::bed_head()
-                    } else {
-                        models::bed_foot()
-                    };
+                    let layer = models::bed_half(*is_head);
                     let baked = geom::bake(&layer);
                     baked_quads(&baked, *local, &tex, &mut quads);
                     transform.get_or_insert(model.gui.unwrap_or(block_gui));
                 }
             }
-            Some(Synthetic::Skull(kind, local)) => {
+            Some(Synthetic::Skull(kind, animation, local)) => {
                 if let Some(tex) = assets.texture(skull::texture_for_type(kind)) {
-                    let baked = geom::bake(&skull::layer_for_type(kind));
-                    baked_quads(&baked, *local, &tex, &mut quads);
+                    skull_quads(kind, *animation, *local, &tex, &mut quads);
                     transform.get_or_insert(model.gui.unwrap_or(block_gui));
                 }
             }
@@ -1029,7 +977,10 @@ pub fn bake_item_icons(assets: &Path) -> ItemIcons {
         ));
     }
 
-    let variants = bake_potion_variants(&cache);
+    let (leaves, trees) = bake_leaf_variants(&cache, &ids);
+    let mut variants = bake_potion_variants(&cache);
+    let leaf_count = leaves.len();
+    variants.extend(leaves);
     let variant_count = variants.len();
     ids.reserve(variants.len());
     results.reserve(variants.len());
@@ -1099,8 +1050,9 @@ pub fn bake_item_icons(assets: &Path) -> ItemIcons {
     source_report.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     crate::log_info!(
         "items",
-        "item icons: {} items (+{variant_count} potion variants), {}x{} atlas, {:.2?} on {} threads",
+        "item icons: {} items (+{} potion variants, +{leaf_count} model leaves), {}x{} atlas, {:.2?} on {} threads",
         ids.len() - variant_count,
+        variant_count - leaf_count,
         image.width(),
         image.height(),
         start.elapsed(),
@@ -1112,7 +1064,7 @@ pub fn bake_item_icons(assets: &Path) -> ItemIcons {
         crate::log_debug!("items", "item icons: no model geometry for {:?}", fell_back);
     }
 
-    ItemIcons { image, map }
+    ItemIcons { image, map, trees }
 }
 
 #[cfg(test)]
@@ -1157,8 +1109,7 @@ mod tests {
             .json("items/shield.json")
             .and_then(|doc| doc.get("model").cloned())
             .expect("items/shield.json");
-        let mut parts = Vec::new();
-        collect_parts(&cache, &root, "gui", false, Mat4::IDENTITY, &mut parts, 0);
+        let parts = parts_of(&cache, &root, "gui", &ItemUse::NONE, &ItemWorld::default());
         let Some(Synthetic::Shield(local)) = parts.first().and_then(|p| p.synthetic.as_ref())
         else {
             panic!("shield resolved to {:?}", parts.first());
@@ -1187,8 +1138,7 @@ mod tests {
                 .json(&format!("items/{name}_banner.json"))
                 .and_then(|doc| doc.get("model").cloned())
                 .unwrap_or_else(|| panic!("no items/{name}_banner.json"));
-            let mut parts = Vec::new();
-            collect_parts(&cache, &root, "gui", false, Mat4::IDENTITY, &mut parts, 0);
+            let parts = parts_of(&cache, &root, "gui", &ItemUse::NONE, &ItemWorld::default());
             let synthetic = parts.first().and_then(|p| p.synthetic.as_ref());
             assert!(
                 matches!(synthetic, Some(Synthetic::Banner(dye, _)) if *dye == index as u8),
@@ -1229,7 +1179,10 @@ mod tests {
         let icons = bake_item_icons(assets);
         assert!(icons.map.len() > 1400, "only {} icons", icons.map.len());
 
-        let out = crate::gui::preview::output_dir();
+        let out = match std::env::var_os("MC_GUI_PREVIEW_DIR") {
+            Some(d) => std::path::PathBuf::from(d),
+            None => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/scratch"),
+        };
         std::fs::create_dir_all(&out).unwrap();
         icons.image.save(out.join("item_icons.png")).unwrap();
 

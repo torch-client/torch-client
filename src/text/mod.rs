@@ -160,6 +160,7 @@ pub fn parse_formatted(s: &str) -> Vec<Span> {
 
 pub fn parse_formatted_from(s: &str, style: Style) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
+    let root = style;
     let mut style = style;
     let mut buf = String::new();
     let mut it = s.chars().peekable();
@@ -184,12 +185,7 @@ pub fn parse_formatted_from(s: &str, style: Style) -> Vec<Span> {
             'm' => next.strikethrough = true,
             'n' => next.underline = true,
             'o' => next.italic = true,
-            'r' => {
-                next = Style {
-                    event: style.event,
-                    ..Style::default()
-                }
-            }
+            'r' => next = root,
             _ => continue,
         }
         if next != style {
@@ -227,7 +223,7 @@ enum Provider {
         ascent: i32,
         chars: Vec<Vec<char>>,
     },
-    Unihex(PathBuf),
+    Unihex(PathBuf, Vec<(u32, u32, u32, u32)>),
 }
 
 fn font_json_path(assets: &Path, id: &str) -> PathBuf {
@@ -255,30 +251,41 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn resolve(assets: &Path, id: &str, out: &mut Vec<Provider>) {
+fn resolve(assets: &Path, id: &str, out: &mut Vec<Provider>, visiting: &mut Vec<String>) {
+    if visiting.iter().any(|v| v == id) {
+        crate::log_warn!("font", "font {id} is part of a reference cycle, skipped");
+        return;
+    }
     let path = font_json_path(assets, id);
     let mut parsed = false;
+    visiting.push(id.to_owned());
     for text in crate::platform::assets::read_stack(&path) {
         match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(json) => {
                 parsed = true;
-                resolve_file(assets, &json, out);
+                resolve_file(assets, &json, out, visiting);
             }
             Err(e) => crate::log_warn!("font", "font definition {}: {e}", path.display()),
         }
     }
+    visiting.pop();
     if !parsed {
-        panic!("font definition {} is missing", path.display());
+        crate::log_warn!("font", "font definition {} is missing", path.display());
     }
 }
 
-fn resolve_file(assets: &Path, json: &serde_json::Value, out: &mut Vec<Provider>) {
+fn resolve_file(
+    assets: &Path,
+    json: &serde_json::Value,
+    out: &mut Vec<Provider>,
+    visiting: &mut Vec<String>,
+) {
     let providers = json["providers"].as_array().cloned().unwrap_or_default();
     for p in providers.iter().rev() {
         match p["type"].as_str().unwrap_or("") {
             "reference" => {
                 if let Some(id) = p["id"].as_str() {
-                    resolve(assets, id, out);
+                    resolve(assets, id, out, visiting);
                 }
             }
             "space" => {
@@ -296,20 +303,49 @@ fn resolve_file(assets: &Path, json: &serde_json::Value, out: &mut Vec<Provider>
                 let (Some(rows), Some(file)) = (p["chars"].as_array(), p["file"].as_str()) else {
                     continue;
                 };
-                let chars = rows
+                let chars: Vec<Vec<char>> = rows
                     .iter()
                     .map(|row| row.as_str().unwrap_or("").chars().collect::<Vec<char>>())
                     .collect();
+                let height = p["height"].as_i64().unwrap_or(8) as i32;
+                let Some(ascent) = p["ascent"].as_i64().map(|a| a as i32) else {
+                    crate::log_warn!("font", "bitmap provider {file}: no ascent, skipped");
+                    continue;
+                };
+                let width = chars.first().map_or(0, Vec::len);
+                if width == 0 || chars.iter().any(|row| row.len() != width) || ascent > height {
+                    crate::log_warn!(
+                        "font",
+                        "bitmap provider {file}: bad codepoint grid or ascent, skipped"
+                    );
+                    continue;
+                }
                 out.push(Provider::Bitmap {
                     file: texture_path(assets, file),
-                    height: p["height"].as_i64().unwrap_or(8) as i32,
-                    ascent: p["ascent"].as_i64().unwrap_or(7) as i32,
+                    height,
+                    ascent,
                     chars,
                 });
             }
             "unihex" if cfg!(feature = "full_font") => {
                 if let Some(id) = p["hex_file"].as_str() {
-                    out.push(Provider::Unihex(hex_zip_path(assets, id)));
+                    let codepoint =
+                        |v: &serde_json::Value| v.as_str()?.chars().next().map(u32::from);
+                    let overrides = p["size_overrides"]
+                        .as_array()
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(|o| {
+                                    let (from, to) = (codepoint(&o["from"])?, codepoint(&o["to"])?);
+                                    let left = o["left"].as_u64()? as u32;
+                                    let right = o["right"].as_u64()? as u32;
+                                    (from < to && left <= right && right < 32)
+                                        .then_some((from, to, left, right))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    out.push(Provider::Unihex(hex_zip_path(assets, id), overrides));
                 }
             }
             _ => {}
@@ -320,7 +356,7 @@ fn resolve_file(assets: &Path, json: &serde_json::Value, out: &mut Vec<Provider>
 impl Font {
     pub fn load(assets: &Path) -> (Font, FontPixels) {
         let mut providers = Vec::new();
-        resolve(assets, "minecraft:default", &mut providers);
+        resolve(assets, "minecraft:default", &mut providers, &mut Vec::new());
         providers.reverse();
 
         let mut pages: Vec<(PathBuf, RgbaImage)> = Vec::new();
@@ -345,17 +381,17 @@ impl Font {
         }
         providers
             .retain(|p| !matches!(p, Provider::Bitmap { file, .. } if unreadable.contains(file)));
-        let mut unihex_paths: Vec<PathBuf> = Vec::new();
+        let mut unihex_paths: Vec<(PathBuf, &[(u32, u32, u32, u32)])> = Vec::new();
         for p in &providers {
-            if let Provider::Unihex(path) = p {
-                if !unihex_paths.contains(path) {
-                    unihex_paths.push(path.clone());
+            if let Provider::Unihex(path, overrides) = p {
+                if !unihex_paths.iter().any(|(seen, _)| seen == path) {
+                    unihex_paths.push((path.clone(), overrides));
                 }
             }
         }
-        let mut unihex_glyphs: Vec<(char, u32, Vec<u8>)> = Vec::new();
+        let mut unihex_glyphs: Vec<(char, u32, Vec<u8>, Option<(u32, u32)>)> = Vec::new();
         let mut unihex_seen: std::collections::HashSet<char> = std::collections::HashSet::new();
-        for path in &unihex_paths {
+        for (path, overrides) in &unihex_paths {
             let Some(zip_bytes) = crate::platform::assets::read(path) else {
                 continue;
             };
@@ -385,7 +421,11 @@ impl Font {
                     if raw.len() != 16 && raw.len() != 32 {
                         continue;
                     }
-                    unihex_glyphs.push((c, if raw.len() == 16 { 8 } else { 16 }, raw));
+                    let size = overrides
+                        .iter()
+                        .find(|(from, to, _, _)| (*from..=*to).contains(&cp))
+                        .map(|&(_, _, left, right)| (left, right));
+                    unihex_glyphs.push((c, if raw.len() == 16 { 8 } else { 16 }, raw, size));
                 }
             }
         }
@@ -429,23 +469,34 @@ impl Font {
             (UNIHEX_COLS * 16, rows * 16)
         };
         let mut unihex_image = vec![0u8; unihex_w as usize * unihex_h as usize];
-        let mut unihex_rects: HashMap<char, [u32; 4]> = HashMap::new();
-        for (i, (c, width, raw)) in unihex_glyphs.iter().enumerate() {
+        let mut unihex_rects: HashMap<char, ([u32; 4], f32)> = HashMap::new();
+        for (i, (c, width, raw, size)) in unihex_glyphs.iter().enumerate() {
             let cx = (i as u32 % UNIHEX_COLS) * 16;
             let cy = (i as u32 / UNIHEX_COLS) * 16;
+            let mut mask = 0u32;
             for ry in 0..16u32 {
                 let row_bits: u32 = if *width == 8 {
                     (raw[ry as usize] as u32) << 8
                 } else {
                     ((raw[ry as usize * 2] as u32) << 8) | raw[ry as usize * 2 + 1] as u32
                 };
+                mask |= row_bits;
                 for rx in 0..*width {
                     if row_bits & (0x8000 >> rx) != 0 {
                         unihex_image[((cy + ry) * unihex_w + (cx + rx)) as usize] = 255;
                     }
                 }
             }
-            unihex_rects.insert(*c, [cx, cy, *width, 16]);
+            let (left, right) = size.unwrap_or(if mask == 0 {
+                (0, *width)
+            } else {
+                (mask.leading_zeros() - 16, 15 - mask.trailing_zeros())
+            });
+            let glyph_w = right - left + 1;
+            let advance = (glyph_w / 2 + 1) as f32;
+            let x0 = cx + left.min(16);
+            let drawn_w = glyph_w.min(16 - left.min(16));
+            unihex_rects.insert(*c, ([x0, cy, drawn_w, 16], advance));
         }
 
         let mut glyphs: HashMap<char, Glyph> = HashMap::new();
@@ -474,6 +525,14 @@ impl Font {
                     let rows = chars.len() as u32;
                     let cell_w = page.width() / cols;
                     let cell_h = page.height() / rows;
+                    if cell_w == 0 || cell_h == 0 {
+                        crate::log_warn!(
+                            "font",
+                            "font page {} is smaller than its grid",
+                            file.display()
+                        );
+                        continue;
+                    }
                     let scale = *height as f32 / cell_h as f32;
                     for (ry, row) in chars.iter().enumerate() {
                         for (cx, c) in row.iter().enumerate() {
@@ -500,24 +559,22 @@ impl Font {
                         }
                     }
                 }
-                Provider::Unihex(_) => {}
+                Provider::Unihex(..) => {}
             }
         }
 
         let mut unihex_glyphs_out: HashMap<char, Glyph> = HashMap::new();
-        for (c, rect) in &unihex_rects {
+        for (c, (rect, advance)) in &unihex_rects {
             let [x0, y0, w, h] = *rect;
             let scale = 0.5;
-            let trimmed = trimmed_width_packed(&unihex_image, unihex_w, x0, y0, w, h);
-            let advance = (0.5 + trimmed as f64 * scale) as i32 + 1;
             unihex_glyphs_out.insert(
                 *c,
                 Glyph {
                     rect: [x0, y0, w, h],
-                    draw_w: w as f32 * scale as f32,
-                    draw_h: h as f32 * scale as f32,
+                    draw_w: w as f32 * scale,
+                    draw_h: h as f32 * scale,
                     y_off: 0.0,
-                    advance: advance as f32,
+                    advance: *advance,
                 },
             );
         }
@@ -768,24 +825,6 @@ fn trimmed_width(page: &RgbaImage, x0: u32, y0: u32, cell_w: u32, cell_h: u32) -
     0
 }
 
-fn trimmed_width_packed(
-    buf: &[u8],
-    stride: u32,
-    x0: u32,
-    y0: u32,
-    cell_w: u32,
-    cell_h: u32,
-) -> u32 {
-    for col in (0..cell_w).rev() {
-        for y in 0..cell_h {
-            if buf[((y0 + y) * stride + x0 + col) as usize] != 0 {
-                return col + 1;
-            }
-        }
-    }
-    0
-}
-
 const BUILTIN: [(char, [u8; 8]); 66] = [
     (' ', [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
     ('%', [0x00, 0xC6, 0xCC, 0x18, 0x30, 0x66, 0xC6, 0x00]),
@@ -962,6 +1001,13 @@ mod tests {
         assert!(spans.iter().all(|s| s.style.event == 3));
         assert_eq!(spans[1].style.color, 0xFF5555);
         assert_eq!(spans[2].style.color, Style::default().color);
+    }
+
+    #[test]
+    fn a_reset_returns_to_the_root_style() {
+        let spans = parse_formatted_from("a\u{a7}cb\u{a7}rc", Style::colored(0x808080));
+        assert_eq!(spans[0].style.color, 0x808080);
+        assert_eq!(spans[2].style.color, 0x808080);
     }
 
     fn assets() -> PathBuf {

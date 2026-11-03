@@ -8,46 +8,40 @@ use crate::util::mth::DEG_TO_RAD;
 pub fn layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    let head = root.child(
+    let head = root.part(
         "head",
-        CubeList::new()
-            .tex_offs(1, 5)
-            .add_box(-3.0, -2.0, -5.0, 8.0, 6.0, 6.0),
+        (1, 5),
+        [-3.0, -2.0, -5.0, 8.0, 6.0, 6.0],
         PartPose::offset(-1.0, 16.5, -3.0),
     );
-    head.child(
+    head.part(
         "right_ear",
-        CubeList::new()
-            .tex_offs(8, 1)
-            .add_box(-3.0, -4.0, -4.0, 2.0, 2.0, 1.0),
+        (8, 1),
+        [-3.0, -4.0, -4.0, 2.0, 2.0, 1.0],
         PartPose::ZERO,
     );
-    head.child(
+    head.part(
         "left_ear",
-        CubeList::new()
-            .tex_offs(15, 1)
-            .add_box(3.0, -4.0, -4.0, 2.0, 2.0, 1.0),
+        (15, 1),
+        [3.0, -4.0, -4.0, 2.0, 2.0, 1.0],
         PartPose::ZERO,
     );
-    head.child(
+    head.part(
         "nose",
-        CubeList::new()
-            .tex_offs(6, 18)
-            .add_box(-1.0, 2.01, -8.0, 4.0, 2.0, 3.0),
+        (6, 18),
+        [-1.0, 2.01, -8.0, 4.0, 2.0, 3.0],
         PartPose::ZERO,
     );
-    let body = root.child(
+    let body = root.part(
         "body",
-        CubeList::new()
-            .tex_offs(24, 15)
-            .add_box(-3.0, 3.999, -3.5, 6.0, 11.0, 6.0),
+        (24, 15),
+        [-3.0, 3.999, -3.5, 6.0, 11.0, 6.0],
         PartPose::offset_rotation(0.0, 16.0, -6.0, std::f32::consts::FRAC_PI_2, 0.0, 0.0),
     );
-    body.child(
+    body.part(
         "tail",
-        CubeList::new()
-            .tex_offs(30, 0)
-            .add_box(2.0, 0.0, -1.0, 4.0, 9.0, 5.0),
+        (30, 0),
+        [2.0, 0.0, -1.0, 4.0, 9.0, 5.0],
         PartPose::offset_rotation(-4.0, 15.0, -1.0, -0.05235988, 0.0, 0.0),
     );
     let fudge = Grow::all(0.001);
@@ -96,46 +90,40 @@ pub fn baby_layer() -> LayerDef {
             .add_box(1.0, -4.125, -4.125, 2.0, 2.0, 1.0),
         PartPose::offset(0.0, 18.125, 0.125),
     );
-    root.child(
+    root.part(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(22, 4)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 2.0, 2.0),
+        (22, 4),
+        [-1.0, 0.0, -1.0, 2.0, 2.0, 2.0],
         PartPose::offset(-1.5, 22.0, 4.0),
     );
-    root.child(
+    root.part(
         "left_hind_leg",
-        CubeList::new()
-            .tex_offs(22, 0)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 2.0, 2.0),
+        (22, 0),
+        [-1.0, 0.0, -1.0, 2.0, 2.0, 2.0],
         PartPose::offset(1.5, 22.0, 4.0),
     );
-    root.child(
+    root.part(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(22, 4)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 2.0, 2.0),
+        (22, 4),
+        [-1.0, 0.0, -1.0, 2.0, 2.0, 2.0],
         PartPose::offset(-1.5, 22.0, 0.0),
     );
-    root.child(
+    root.part(
         "left_front_leg",
-        CubeList::new()
-            .tex_offs(22, 0)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 2.0, 2.0),
+        (22, 0),
+        [-1.0, 0.0, -1.0, 2.0, 2.0, 2.0],
         PartPose::offset(1.5, 22.0, 0.0),
     );
-    let body = root.child(
+    let body = root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 10)
-            .add_box(-2.5, -2.0, -3.0, 5.0, 4.0, 6.0),
+        (0, 10),
+        [-2.5, -2.0, -3.0, 5.0, 4.0, 6.0],
         PartPose::offset(0.0, 20.0, 2.0),
     );
-    body.child(
+    body.part(
         "tail",
-        CubeList::new()
-            .tex_offs(0, 20)
-            .add_box(-1.5, -1.48, -1.0, 3.0, 3.0, 6.0),
+        (0, 20),
+        [-1.5, -1.48, -1.0, 3.0, 3.0, 6.0],
         PartPose::offset(0.0, -0.5, 3.0),
     );
     LayerDef::create(mesh, 32, 32)

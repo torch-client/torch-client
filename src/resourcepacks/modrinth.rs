@@ -267,7 +267,7 @@ pub(crate) async fn download(project_id: &str, versions: &[String]) -> Result<St
 
     let bytes = get(&str_of(file, "url")).await?;
     let expected = file["hashes"]["sha1"].as_str().unwrap_or_default();
-    if !super::sha1_hex(&bytes).eq_ignore_ascii_case(expected) {
+    if !crate::util::hash::sha1_hex(&bytes).eq_ignore_ascii_case(expected) {
         return Err("download does not match its hash".into());
     }
     super::install(&name, &bytes)?;
@@ -319,7 +319,7 @@ pub(crate) async fn installed_projects() -> Vec<String> {
         let Ok(bytes) = packfs::shared(&dir.join(&pack.name)) else {
             continue;
         };
-        let hash = super::sha1_hex(&bytes);
+        let hash = crate::util::hash::sha1_hex(&bytes);
         let Ok(version) = get_json(&format!("{API}/version_file/{hash}?algorithm=sha1")).await
         else {
             continue;

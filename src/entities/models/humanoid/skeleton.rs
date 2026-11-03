@@ -9,11 +9,10 @@ use crate::renderer::anim::ArmPose;
 use super::humanoid::{self, ArmPoses, Limbs};
 
 fn default_skeleton_mesh(root: &mut PartDef) {
-    root.child(
+    root.part(
         "right_arm",
-        CubeList::new()
-            .tex_offs(40, 16)
-            .add_box(-1.0, -2.0, -1.0, 2.0, 12.0, 2.0),
+        (40, 16),
+        [-1.0, -2.0, -1.0, 2.0, 12.0, 2.0],
         PartPose::offset(-5.0, 2.0, 0.0),
     );
     root.child(
@@ -24,11 +23,10 @@ fn default_skeleton_mesh(root: &mut PartDef) {
             .add_box(-1.0, -2.0, -1.0, 2.0, 12.0, 2.0),
         PartPose::offset(5.0, 2.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(0, 16)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 12.0, 2.0),
+        (0, 16),
+        [-1.0, 0.0, -1.0, 2.0, 12.0, 2.0],
         PartPose::offset(-2.0, 12.0, 0.0),
     );
     root.child(
@@ -130,46 +128,40 @@ pub fn bogged_layer() -> LayerDef {
     }
     let head = mesh.root().get("head");
     let mushrooms = head.child("mushrooms", CubeList::new(), PartPose::ZERO);
-    mushrooms.child(
+    mushrooms.part(
         "red_mushroom_1",
-        CubeList::new()
-            .tex_offs(50, 16)
-            .add_box(-3.0, -3.0, 0.0, 6.0, 4.0, 0.0),
+        (50, 16),
+        [-3.0, -3.0, 0.0, 6.0, 4.0, 0.0],
         PartPose::offset_rotation(3.0, -8.0, 3.0, 0.0, FRAC_PI_4, 0.0),
     );
-    mushrooms.child(
+    mushrooms.part(
         "red_mushroom_2",
-        CubeList::new()
-            .tex_offs(50, 16)
-            .add_box(-3.0, -3.0, 0.0, 6.0, 4.0, 0.0),
+        (50, 16),
+        [-3.0, -3.0, 0.0, 6.0, 4.0, 0.0],
         PartPose::offset_rotation(3.0, -8.0, 3.0, 0.0, 2.356_194_5, 0.0),
     );
-    mushrooms.child(
+    mushrooms.part(
         "brown_mushroom_1",
-        CubeList::new()
-            .tex_offs(50, 22)
-            .add_box(-3.0, -3.0, 0.0, 6.0, 4.0, 0.0),
+        (50, 22),
+        [-3.0, -3.0, 0.0, 6.0, 4.0, 0.0],
         PartPose::offset_rotation(-3.0, -8.0, -3.0, 0.0, FRAC_PI_4, 0.0),
     );
-    mushrooms.child(
+    mushrooms.part(
         "brown_mushroom_2",
-        CubeList::new()
-            .tex_offs(50, 22)
-            .add_box(-3.0, -3.0, 0.0, 6.0, 4.0, 0.0),
+        (50, 22),
+        [-3.0, -3.0, 0.0, 6.0, 4.0, 0.0],
         PartPose::offset_rotation(-3.0, -8.0, -3.0, 0.0, 2.356_194_5, 0.0),
     );
-    mushrooms.child(
+    mushrooms.part(
         "brown_mushroom_3",
-        CubeList::new()
-            .tex_offs(50, 28)
-            .add_box(-3.0, -4.0, 0.0, 6.0, 4.0, 0.0),
+        (50, 28),
+        [-3.0, -4.0, 0.0, 6.0, 4.0, 0.0],
         PartPose::offset_rotation(-2.0, -1.0, 4.0, -FRAC_PI_2, 0.0, FRAC_PI_4),
     );
-    mushrooms.child(
+    mushrooms.part(
         "brown_mushroom_4",
-        CubeList::new()
-            .tex_offs(50, 28)
-            .add_box(-3.0, -4.0, 0.0, 6.0, 4.0, 0.0),
+        (50, 28),
+        [-3.0, -4.0, 0.0, 6.0, 4.0, 0.0],
         PartPose::offset_rotation(-2.0, -1.0, 4.0, -FRAC_PI_2, 0.0, 2.356_194_5),
     );
     LayerDef::create(mesh, 64, 32)

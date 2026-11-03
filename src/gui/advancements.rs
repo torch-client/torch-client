@@ -604,7 +604,7 @@ fn draw_hover(
     };
     lines(p, &w.title, title_x, title_top + 9);
     if let Some(text) = &progress {
-        p.text_str(
+        p.text_plain(
             text,
             progress_x as f32,
             (title_top + 9) as f32,
@@ -777,7 +777,7 @@ pub fn draw(
             p.text(title, (xo + 8) as f32, (yo + 6) as f32, false);
         }
         None => {
-            p.text_str(
+            p.text_plain(
                 label!("gui.advancements"),
                 (xo + 8) as f32,
                 (yo + 6) as f32,

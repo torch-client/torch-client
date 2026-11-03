@@ -8,6 +8,7 @@ use crate::entities::state::EntityState;
 use crate::entities::{RenderSpec, RootPose, rotate_around, setup_rotations};
 
 use super::armor;
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 
 pub fn register(registry: &mut Registry) {
     register_zombie(registry);
@@ -16,34 +17,22 @@ pub fn register(registry: &mut Registry) {
     register_giant(registry);
 }
 
-pub fn is_adult(st: &EntityState) -> bool {
-    !st.extras.is_baby
-}
-
-pub fn is_baby(st: &EntityState) -> bool {
-    st.extras.is_baby
-}
-
 fn register_zombie(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Zombie,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Zombie],
         RenderSpec::new(
             "zombie",
             zombie::zombie_layer,
             zombie_texture,
             zombie::setup_anim,
-        )
-        .with_visible(is_adult),
-    );
-    registry.add(
-        EntityKind::Zombie,
+        ),
         RenderSpec::new(
             "zombie_baby",
             zombie::baby_zombie_layer,
             zombie_texture,
             zombie::setup_anim,
-        )
-        .with_visible(is_baby),
+        ),
     );
     armor::register_set(
         registry,
@@ -61,28 +50,20 @@ fn register_zombie(registry: &mut Registry) {
 }
 
 fn zombie_texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/zombie/zombie_baby".into()
-    } else {
-        "entity/zombie/zombie".into()
-    }
+    aged_texture(st, "entity/zombie/zombie", "entity/zombie/zombie_baby")
 }
 
 fn register_husk(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Husk,
-        RenderSpec::new("husk", zombie::husk_layer, husk_texture, zombie::setup_anim)
-            .with_visible(is_adult),
-    );
-    registry.add(
-        EntityKind::Husk,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Husk],
+        RenderSpec::new("husk", zombie::husk_layer, husk_texture, zombie::setup_anim),
         RenderSpec::new(
             "husk_baby",
             zombie::baby_zombie_layer,
             husk_texture,
             zombie::setup_anim,
-        )
-        .with_visible(is_baby),
+        ),
     );
     armor::register_set(
         registry,
@@ -100,56 +81,44 @@ fn register_husk(registry: &mut Registry) {
 }
 
 fn husk_texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/zombie/husk_baby".into()
-    } else {
-        "entity/zombie/husk".into()
-    }
+    aged_texture(st, "entity/zombie/husk", "entity/zombie/husk_baby")
 }
 
 fn register_drowned(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Drowned,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Drowned],
         RenderSpec::new(
             "drowned",
             zombie::drowned_layer,
             drowned_texture,
             zombie::drowned_setup_anim,
         )
-        .with_visible(is_adult)
         .with_root(drowned_root),
-    );
-    registry.add(
-        EntityKind::Drowned,
         RenderSpec::new(
             "drowned_baby",
             zombie::baby_drowned_layer,
             drowned_texture,
             zombie::drowned_setup_anim,
         )
-        .with_visible(is_baby)
         .with_root(drowned_root),
     );
-    registry.add(
-        EntityKind::Drowned,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Drowned],
         RenderSpec::new(
             "drowned_outer",
             zombie::drowned_outer_layer,
             drowned_outer_texture,
             zombie::drowned_setup_anim,
         )
-        .with_visible(is_adult)
         .with_root(drowned_root),
-    );
-    registry.add(
-        EntityKind::Drowned,
         RenderSpec::new(
             "drowned_baby_outer",
             zombie::baby_drowned_outer_layer,
             drowned_outer_texture,
             zombie::drowned_setup_anim,
         )
-        .with_visible(is_baby)
         .with_root(drowned_root),
     );
     armor::register_set(
@@ -168,19 +137,15 @@ fn register_drowned(registry: &mut Registry) {
 }
 
 fn drowned_texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/zombie/drowned_baby".into()
-    } else {
-        "entity/zombie/drowned".into()
-    }
+    aged_texture(st, "entity/zombie/drowned", "entity/zombie/drowned_baby")
 }
 
 fn drowned_outer_texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/zombie/drowned_outer_layer_baby".into()
-    } else {
-        "entity/zombie/drowned_outer_layer".into()
-    }
+    aged_texture(
+        st,
+        "entity/zombie/drowned_outer_layer",
+        "entity/zombie/drowned_outer_layer_baby",
+    )
 }
 
 fn drowned_root(st: &EntityState) -> RootPose {

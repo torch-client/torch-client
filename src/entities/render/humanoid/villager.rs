@@ -7,28 +7,24 @@ use crate::entities::state::EntityState;
 use crate::entities::{RenderSpec, TexturePath};
 
 use super::armor;
-use super::zombie::{is_adult, is_baby};
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Villager,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Villager],
         RenderSpec::new(
             "villager",
             villager::villager_layer,
             villager_texture,
             villager::setup_anim,
-        )
-        .with_visible(is_adult),
-    );
-    registry.add(
-        EntityKind::Villager,
+        ),
         RenderSpec::new(
             "villager_baby",
             villager::baby_villager_layer,
             villager_texture,
             villager::setup_anim,
-        )
-        .with_visible(is_baby),
+        ),
     );
     register_profession_layers(
         registry,
@@ -84,25 +80,21 @@ pub fn register(registry: &mut Registry) {
         ),
     );
 
-    registry.add(
-        EntityKind::ZombieVillager,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::ZombieVillager],
         RenderSpec::new(
             "zombie_villager",
             zombie::zombie_villager_layer,
             zombie_villager_texture,
             zombie::setup_anim,
-        )
-        .with_visible(is_adult),
-    );
-    registry.add(
-        EntityKind::ZombieVillager,
+        ),
         RenderSpec::new(
             "zombie_villager_baby",
             zombie::baby_zombie_villager_layer,
             zombie_villager_texture,
             zombie::setup_anim,
-        )
-        .with_visible(is_baby),
+        ),
     );
     armor::register_set(
         registry,
@@ -153,11 +145,11 @@ pub fn register(registry: &mut Registry) {
 }
 
 fn villager_texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/villager/villager_baby".into()
-    } else {
-        "entity/villager/villager".into()
-    }
+    aged_texture(
+        st,
+        "entity/villager/villager",
+        "entity/villager/villager_baby",
+    )
 }
 
 fn wandering_trader_texture(_st: &EntityState) -> TexturePath {
@@ -169,11 +161,11 @@ fn witch_texture(_st: &EntityState) -> TexturePath {
 }
 
 fn zombie_villager_texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/zombie_villager/zombie_villager_baby".into()
-    } else {
-        "entity/zombie_villager/zombie_villager".into()
-    }
+    aged_texture(
+        st,
+        "entity/zombie_villager/zombie_villager",
+        "entity/zombie_villager/zombie_villager_baby",
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

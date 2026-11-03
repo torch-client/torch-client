@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use serde_json::Value;
 
@@ -300,6 +300,44 @@ pub fn current() -> Dimension {
 
 pub fn set_current(dim: Dimension) {
     CURRENT.store(id_of(dim), Ordering::Relaxed);
+}
+
+static LEVEL: AtomicU64 = AtomicU64::new(0);
+static LEVEL_NAME: AtomicU8 = AtomicU8::new(0);
+
+const VANILLA_LEVELS: [&str; 3] = ["overworld", "the_nether", "the_end"];
+
+fn level_hash(id: &azalea::Identifier) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in id
+        .namespace()
+        .bytes()
+        .chain(std::iter::once(b':'))
+        .chain(id.path().bytes())
+    {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+pub fn set_level(id: &azalea::Identifier) {
+    LEVEL.store(level_hash(id), Ordering::Relaxed);
+    let vanilla = id.namespace() == "minecraft";
+    let index = VANILLA_LEVELS
+        .iter()
+        .position(|name| vanilla && *name == id.path());
+    LEVEL_NAME.store(index.map_or(0, |i| i as u8 + 1), Ordering::Relaxed);
+}
+
+pub fn is_current_level(id: &azalea::Identifier) -> bool {
+    LEVEL.load(Ordering::Relaxed) == level_hash(id)
+}
+
+pub fn level_name() -> &'static str {
+    match LEVEL_NAME.load(Ordering::Relaxed) {
+        0 => "",
+        n => VANILLA_LEVELS[n as usize - 1],
+    }
 }
 
 static SEA_LEVEL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);

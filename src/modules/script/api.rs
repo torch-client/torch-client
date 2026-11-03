@@ -562,12 +562,21 @@ impl Ctx {
     }
 
     pub fn bot(&self, what: &str) -> mlua::Result<azalea::Client> {
-        (self.game.lock().unwrap_or_else(PoisonError::into_inner).bot.clone()).ok_or_else(|| {
-            Error::runtime(format!(
-                "{what} can't read the world here: it works in handlers the game calls during play, \
-                 not in an ondisable run by Reload, Reset data or leaving a world"
-            ))
-        })
+        (self
+            .game
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bot
+            .clone())
+        .ok_or_else(|| no_world_here(what))
+    }
+
+    pub fn world(&self, what: &str) -> mlua::Result<Option<super::game::WorldLock>> {
+        let game = self.game.lock().unwrap_or_else(PoisonError::into_inner);
+        if game.bot.is_none() {
+            return Err(no_world_here(what));
+        }
+        Ok(game.world.clone())
     }
 
     pub fn arm(&self) {
@@ -647,6 +656,13 @@ impl Ctx {
     }
 }
 
+fn no_world_here(what: &str) -> Error {
+    Error::runtime(format!(
+        "{what} can't read the world here: it works in handlers the game calls during play, \
+         not in an ondisable run by Reload, Reset data or leaving a world"
+    ))
+}
+
 fn too_early(what: &str) -> Error {
     Error::runtime(format!(
         "{what} can't be used while the mod loads: a file's top level may only call \
@@ -669,6 +685,14 @@ pub(super) struct Api {
     pub xpcall: Function,
     pub msgh: Function,
     prevent: Function,
+    classes: Vec<Table>,
+    packet_debug: Table,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Class {
+    Plain,
+    PacketDebug,
 }
 
 impl Api {
@@ -761,17 +785,15 @@ impl Api {
         let prevent = {
             let ctx = ctx.clone();
             lua.create_function(move |_, e: Table| {
-                let backing = e
-                    .metatable()
-                    .and_then(|mt| mt.raw_get::<Option<Table>>("__index").ok().flatten())
+                let mt = (e.metatable())
                     .ok_or_else(|| Error::runtime("preventDefault is called on an event: e:preventDefault()"))?;
-                if backing.raw_get::<bool>("cancelable")? {
-                    backing.raw_set("defaultPrevented", true)?;
+                if e.get::<bool>("cancelable")? {
+                    mt.raw_get::<Table>("__index")?.raw_set("defaultPrevented", true)?;
                     return Ok(());
                 }
                 let k = ctx.current.load(Relaxed);
                 if ctx.warned.lock().unwrap_or_else(PoisonError::into_inner).insert(k) {
-                    let ty: String = backing.raw_get::<Option<String>>("type")?.unwrap_or_default();
+                    let ty: String = e.get::<Option<String>>("type")?.unwrap_or_default();
                     crate::log_warn!(
                         "mods",
                         "{} e:preventDefault() on a `{ty}` event, which cannot be cancelled; ignored",
@@ -816,10 +838,30 @@ impl Api {
         let (blocks, items) = super::blocks::tables(&lua, &ctx)?;
         torch.raw_set("blocks", blocks)?;
         torch.raw_set("items", items)?;
-        torch.raw_set("biomes", super::blocks::biomes_table(&lua, &ctx)?)?;
         torch.raw_set("image", super::image::table(&lua, &ctx)?)?;
         torch.raw_set("time", super::game::time_table(&lua)?)?;
         torch.set_readonly(true);
+
+        let class = |index: Value| -> mlua::Result<Table> {
+            let mt = lua.create_table_with_capacity(0, 2)?;
+            mt.raw_set("__index", index)?;
+            mt.raw_set("__metatable", LOCKED)?;
+            Ok(mt)
+        };
+        let mut classes = Vec::with_capacity(EVENTS.len());
+        for ty in EVENTS {
+            let index = lua.create_table_with_capacity(0, 4)?;
+            index.raw_set("type", ty)?;
+            index.raw_set("cancelable", false)?;
+            index.raw_set("defaultPrevented", false)?;
+            index.raw_set("preventDefault", &prevent)?;
+            classes.push(class(Value::Table(index))?);
+        }
+        let packet_base: Table = classes[PACKET].raw_get("__index")?;
+        let packet_debug = class(Value::Function(super::packets::debug_index(
+            &lua,
+            packet_base,
+        )?))?;
 
         Ok(Api {
             lua,
@@ -836,6 +878,8 @@ impl Api {
             xpcall,
             msgh,
             prevent,
+            classes,
+            packet_debug,
         })
     }
 
@@ -846,17 +890,33 @@ impl Api {
         Ok(())
     }
 
-    pub fn event(&self, ty: &str, cancelable: bool) -> mlua::Result<(Table, Table)> {
+    pub fn cancelable_event(&self, ty: &str, prevented: bool) -> mlua::Result<(Table, Table)> {
         let backing = self.lua.create_table()?;
         backing.raw_set("type", ty)?;
-        backing.raw_set("cancelable", cancelable)?;
-        backing.raw_set("defaultPrevented", false)?;
+        backing.raw_set("cancelable", true)?;
+        backing.raw_set("defaultPrevented", prevented)?;
         backing.raw_set("preventDefault", &self.prevent)?;
         let e = proxy(&self.lua, &backing)?;
         e.set_readonly(true);
         Ok((e, backing))
     }
+
+    pub fn event_table(&self) -> mlua::Result<Table> {
+        self.lua.create_table_with_capacity(0, EVENT_FIELDS)
+    }
+
+    pub fn seal(&self, e: &Table, ev: usize, class: Class) -> mlua::Result<()> {
+        let mt = match class {
+            Class::Plain => &self.classes[ev],
+            Class::PacketDebug => &self.packet_debug,
+        };
+        e.set_metatable(Some(mt.clone()))?;
+        e.set_readonly(true);
+        Ok(())
+    }
 }
+
+const EVENT_FIELDS: usize = 4;
 
 pub(super) fn describe(err: &Value) -> String {
     fn root(e: &Error) -> &Error {
@@ -1789,5 +1849,35 @@ mod tests {
             "a field of the mod's own, not a typo"
         );
         assert_eq!(suggest("zzzzzz", &MODULE_FIELDS), "");
+    }
+
+    #[test]
+    fn events_keep_their_shape() {
+        let api = Api::new(Arc::new(Ctx::new())).unwrap();
+        let (e, backing) = api.cancelable_event(EVENTS[CHAT], false).unwrap();
+        backing.raw_set("text", "hi").unwrap();
+        let plain = api.event_table().unwrap();
+        plain.raw_set("cx", 3).unwrap();
+        api.seal(&plain, CHUNK, Class::Plain).unwrap();
+        let check: Function = (api.lua)
+            .load(
+                r#"
+                local e, plain = ...
+                assert(e.cancelable and not e.defaultPrevented and e.text == "hi" and e.type == "chat")
+                e:preventDefault()
+                assert(e.defaultPrevented)
+                assert(not pcall(rawset, e, "text", "no"), "rawset reached an event")
+                assert(plain.type == "chunk" and plain.cx == 3 and not plain.cancelable)
+                local n = 0
+                for k in pairs(plain) do n += 1 end
+                assert(n == 1, "pairs lists the fields only")
+                assert(not pcall(rawset, plain, "cx", 4), "rawset reached an event")
+                return true
+                "#,
+            )
+            .into_function()
+            .unwrap();
+        assert!(check.call::<bool>((&e, &plain)).unwrap());
+        assert!(backing.raw_get::<bool>("defaultPrevented").unwrap());
     }
 }

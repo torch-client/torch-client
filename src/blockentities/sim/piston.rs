@@ -437,7 +437,7 @@ impl<F: Fn([i32; 3]) -> BlockState> Resolver<'_, F> {
 }
 
 fn reaction(state: BlockState) -> PushReaction {
-    push_reaction(Box::<dyn BlockTrait>::from(state).id())
+    push_reaction(crate::blocks::block_name(state))
 }
 
 fn is_air(kind: BlockKind) -> bool {

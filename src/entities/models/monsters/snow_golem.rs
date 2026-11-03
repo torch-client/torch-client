@@ -8,11 +8,11 @@ pub fn layer() -> LayerDef {
     let deformation = Grow::all(-0.5);
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part_grow(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box_grow(-4.0, -8.0, -4.0, 8.0, 8.0, 8.0, deformation),
+        (0, 0),
+        [-4.0, -8.0, -4.0, 8.0, 8.0, 8.0],
+        deformation,
         PartPose::offset(0.0, 4.0, 0.0),
     );
     let arm =
@@ -29,30 +29,18 @@ pub fn layer() -> LayerDef {
         arm,
         PartPose::offset_rotation(-5.0, 6.0, -1.0, 0.0, 3.1415927, -1.0),
     );
-    root.child(
+    root.part_grow(
         "upper_body",
-        CubeList::new().tex_offs(0, 16).add_box_grow(
-            -5.0,
-            -10.0,
-            -5.0,
-            10.0,
-            10.0,
-            10.0,
-            deformation,
-        ),
+        (0, 16),
+        [-5.0, -10.0, -5.0, 10.0, 10.0, 10.0],
+        deformation,
         PartPose::offset(0.0, 13.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "lower_body",
-        CubeList::new().tex_offs(0, 36).add_box_grow(
-            -6.0,
-            -12.0,
-            -6.0,
-            12.0,
-            12.0,
-            12.0,
-            deformation,
-        ),
+        (0, 36),
+        [-6.0, -12.0, -6.0, 12.0, 12.0, 12.0],
+        deformation,
         PartPose::offset(0.0, 24.0, 0.0),
     );
     LayerDef::create(mesh, 64, 64)

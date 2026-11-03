@@ -40,8 +40,74 @@ impl State {
             block_light_tint: rgb(BLOCK_LIGHT_TINT),
             sky_light_color: rgb(dim.sky_light_color().unwrap_or(sky.sky_light_color)),
             ambient_color: rgb(dim.ambient_light_color()),
-            night_vision_color: [0.0; 3],
+            night_vision_color: rgb(NIGHT_VISION_COLOR),
         }
+    }
+
+    pub fn apply_effects(&mut self, fx: &Effects) {
+        let modifier = fx.darkness * DARKNESS_EFFECT_SCALE;
+        self.brightness_factor = (self.brightness_factor - modifier).max(0.0);
+        self.darkness_scale = darkness_scale(fx.darkness_age, modifier) * DARKNESS_EFFECT_SCALE;
+        self.night_vision_factor = match fx.night_vision {
+            Some(scale) => scale,
+            None if fx.water_vision > 0.0 && fx.conduit_power => fx.water_vision,
+            None => 0.0,
+        };
+        self.boss_overlay_darkening = fx.boss_darkening;
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Effects {
+    pub night_vision: Option<f32>,
+    pub water_vision: f32,
+    pub conduit_power: bool,
+    pub darkness: f32,
+    pub darkness_age: f32,
+    pub boss_darkening: f32,
+}
+
+const NIGHT_VISION_COLOR: Argb = Argb(0xFF99_9999);
+
+const DARKNESS_EFFECT_SCALE: f32 = 1.0;
+
+fn darkness_scale(age: f32, darkness_gamma: f32) -> f32 {
+    let darkness = 0.45 * darkness_gamma;
+    ((age * std::f32::consts::PI * 0.025).cos() * darkness).max(0.0)
+}
+
+pub fn water_vision(time: i32, eye_in_water: bool) -> f32 {
+    if !eye_in_water {
+        return 0.0;
+    }
+    let time = time as f32;
+    if time >= 600.0 {
+        return 1.0;
+    }
+    let a = (time / 100.0).clamp(0.0, 1.0);
+    let b = if time < 100.0 {
+        0.0
+    } else {
+        ((time - 100.0) / 500.0).clamp(0.0, 1.0)
+    };
+    a * 0.6 + b * 0.39999998
+}
+
+pub fn tick_water_vision(time: i32, eye_in_water: bool, spectator: bool) -> i32 {
+    if eye_in_water {
+        (time + if spectator { 10 } else { 1 }).clamp(0, 600)
+    } else {
+        (time - 10).clamp(0, 600)
+    }
+}
+
+pub fn tick_boss_darkening(value: f32, darken: bool) -> f32 {
+    if darken {
+        (value + 0.05).min(1.0)
+    } else if value > 0.0 {
+        value - 0.0125
+    } else {
+        value
     }
 }
 
@@ -182,7 +248,7 @@ pub fn tick_flicker(flicker: f32, noise: [f32; 3]) -> f32 {
     (flicker + step) * 0.9
 }
 
-fn get_brightness(level: f32) -> f32 {
+pub(crate) fn get_brightness(level: f32) -> f32 {
     level / (4.0 - 3.0 * level)
 }
 

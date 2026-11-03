@@ -4,7 +4,7 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::sheep;
 use crate::entities::registry::Registry;
-use crate::entities::render::add_adult_and_baby;
+use crate::entities::render::{add_adult_and_baby, aged_texture};
 use crate::entities::state::EntityState;
 
 use super::dye;
@@ -69,11 +69,11 @@ fn undercoat_texture(_st: &EntityState) -> TexturePath {
 }
 
 fn wool_texture(st: &EntityState) -> TexturePath {
-    if st.extras.is_baby {
-        "entity/sheep/sheep_wool_baby".into()
-    } else {
-        "entity/sheep/sheep_wool".into()
-    }
+    aged_texture(
+        st,
+        "entity/sheep/sheep_wool",
+        "entity/sheep/sheep_wool_baby",
+    )
 }
 
 fn undercoat_visible(st: &EntityState) -> bool {

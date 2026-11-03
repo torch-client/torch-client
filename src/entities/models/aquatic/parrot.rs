@@ -28,67 +28,58 @@ impl ParrotPose {
 pub fn layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(2, 8)
-            .add_box(-1.5, 0.0, -1.5, 3.0, 6.0, 3.0),
+        (2, 8),
+        [-1.5, 0.0, -1.5, 3.0, 6.0, 3.0],
         PartPose::offset_rotation(0.0, 16.5, -3.0, 0.4937, 0.0, 0.0),
     );
-    root.child(
+    root.part(
         "tail",
-        CubeList::new()
-            .tex_offs(22, 1)
-            .add_box(-1.5, -1.0, -1.0, 3.0, 4.0, 1.0),
+        (22, 1),
+        [-1.5, -1.0, -1.0, 3.0, 4.0, 1.0],
         PartPose::offset_rotation(0.0, 21.07, 1.16, 1.015, 0.0, 0.0),
     );
-    root.child(
+    root.part(
         "left_wing",
-        CubeList::new()
-            .tex_offs(19, 8)
-            .add_box(-0.5, 0.0, -1.5, 1.0, 5.0, 3.0),
+        (19, 8),
+        [-0.5, 0.0, -1.5, 1.0, 5.0, 3.0],
         PartPose::offset_rotation(1.5, 16.94, -2.76, -0.6981, -std::f32::consts::PI, 0.0),
     );
-    root.child(
+    root.part(
         "right_wing",
-        CubeList::new()
-            .tex_offs(19, 8)
-            .add_box(-0.5, 0.0, -1.5, 1.0, 5.0, 3.0),
+        (19, 8),
+        [-0.5, 0.0, -1.5, 1.0, 5.0, 3.0],
         PartPose::offset_rotation(-1.5, 16.94, -2.76, -0.6981, -std::f32::consts::PI, 0.0),
     );
-    let head = root.child(
+    let head = root.part(
         "head",
-        CubeList::new()
-            .tex_offs(2, 2)
-            .add_box(-1.0, -1.5, -1.0, 2.0, 3.0, 2.0),
+        (2, 2),
+        [-1.0, -1.5, -1.0, 2.0, 3.0, 2.0],
         PartPose::offset(0.0, 15.69, -2.76),
     );
-    head.child(
+    head.part(
         "head2",
-        CubeList::new()
-            .tex_offs(10, 0)
-            .add_box(-1.0, -0.5, -2.0, 2.0, 1.0, 4.0),
+        (10, 0),
+        [-1.0, -0.5, -2.0, 2.0, 1.0, 4.0],
         PartPose::offset(0.0, -2.0, -1.0),
     );
-    head.child(
+    head.part(
         "beak1",
-        CubeList::new()
-            .tex_offs(11, 7)
-            .add_box(-0.5, -1.0, -0.5, 1.0, 2.0, 1.0),
+        (11, 7),
+        [-0.5, -1.0, -0.5, 1.0, 2.0, 1.0],
         PartPose::offset(0.0, -0.5, -1.5),
     );
-    head.child(
+    head.part(
         "beak2",
-        CubeList::new()
-            .tex_offs(16, 7)
-            .add_box(-0.5, 0.0, -0.5, 1.0, 2.0, 1.0),
+        (16, 7),
+        [-0.5, 0.0, -0.5, 1.0, 2.0, 1.0],
         PartPose::offset(0.0, -1.75, -2.45),
     );
-    head.child(
+    head.part(
         "feather",
-        CubeList::new()
-            .tex_offs(2, 18)
-            .add_box(0.0, -4.0, -2.0, 0.0, 5.0, 4.0),
+        (2, 18),
+        [0.0, -4.0, -2.0, 0.0, 5.0, 4.0],
         PartPose::offset_rotation(0.0, -2.15, 0.15, -0.2214, 0.0, 0.0),
     );
     let leg = CubeList::new()

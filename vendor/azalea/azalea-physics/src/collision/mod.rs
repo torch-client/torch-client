@@ -21,7 +21,7 @@ use azalea_entity::{
     Position, metadata::Sprinting,
 };
 use azalea_registry::builtin::BlockKind;
-use azalea_world::{ChunkStorage, World};
+use azalea_world::{ChunkStorage, World, WorldBorder};
 use bevy_ecs::{entity::Entity, world::Mut};
 pub use blocks::BlockWithShape;
 pub use discrete_voxel_shape::*;
@@ -40,6 +40,44 @@ use crate::{
     travel::no_collision,
 };
 
+#[derive(Clone, Copy, Debug)]
+pub struct BorderSource<'a> {
+    pub border: &'a WorldBorder,
+    pub x: f64,
+    pub z: f64,
+}
+
+impl<'a> BorderSource<'a> {
+    pub fn at(border: Option<&'a WorldBorder>, x: f64, z: f64) -> Option<Self> {
+        Some(Self { border: border?, x, z })
+    }
+
+    pub fn collision(self, aabb: &Aabb) -> Option<VoxelShape> {
+        self.border
+            .is_inside_close_to_border(self.x, self.z, aabb)
+            .then(|| world_border_shape(self.border))
+    }
+}
+
+fn world_border_shape(border: &WorldBorder) -> VoxelShape {
+    let [min_x, max_x, min_z, max_z] = border.collision_bounds();
+    let mut cells = BitSetDiscreteVoxelShape::new(3, 1, 3);
+    for x in 0..3 {
+        for z in 0..3 {
+            if (x, z) != (1, 1) {
+                cells.fill(x, 0, z);
+            }
+        }
+    }
+    let (lo, hi) = (f64::NEG_INFINITY, f64::INFINITY);
+    VoxelShape::Array(ArrayVoxelShape::new(
+        DiscreteVoxelShape::BitSet(cells),
+        [lo, min_x, max_x, hi].into(),
+        [lo, hi].into(),
+        [lo, min_z, max_z, hi].into(),
+    ))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MoverType {
     Own,
@@ -57,12 +95,18 @@ impl MoveCtx<'_, '_, '_, '_> {
             entity_bottom: self.position.y,
             fall_distance: self.physics.fall_distance,
             stands_on_lava: self.stands_on_lava,
+            has_entity: true,
         }
+    }
+
+    pub(crate) fn border_source(&self) -> Option<BorderSource<'_>> {
+        BorderSource::at(self.border, self.position.x, self.position.z)
     }
 }
 
 fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
     let powder_snow = ctx.powder_snow();
+    let border = ctx.border_source();
     let entity_bounding_box = ctx.physics.bounding_box;
     let swept = entity_bounding_box.expand_towards(movement);
     let entity_collisions = match &ctx.vehicle_collisions {
@@ -91,6 +135,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
             world,
             &entity_collisions,
             powder_snow,
+            border,
         )
     };
 
@@ -108,6 +153,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
             world,
             &entity_collisions,
             powder_snow,
+            border,
         );
         let directly_up_delta = collide_bounding_box(
             Vec3::ZERO.with_y(max_up_step),
@@ -115,6 +161,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
             world,
             &entity_collisions,
             powder_snow,
+            border,
         );
         if directly_up_delta.y < max_up_step {
             let target_movement = collide_bounding_box(
@@ -123,6 +170,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
                 world,
                 &entity_collisions,
                 powder_snow,
+                border,
             )
             .add(directly_up_delta);
             if target_movement.horizontal_distance_squared()
@@ -141,6 +189,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
                 world,
                 &entity_collisions,
                 powder_snow,
+                border,
             ));
         }
     }
@@ -164,6 +213,7 @@ pub struct MoveCtx<'world, 'state, 'a, 'b> {
     pub powder_snow_walkable: bool,
     pub stands_on_lava: bool,
     pub fall_flying: bool,
+    pub border: Option<&'a WorldBorder>,
 
     pub direction: LookDirection,
     pub sprinting: Sprinting,
@@ -366,6 +416,7 @@ fn maybe_back_off_from_edge(move_ctx: &mut MoveCtx, mut movement: Vec3) -> Vec3 
         aabb_query: move_ctx.aabb_query,
         collidable_entity_query: move_ctx.collidable_entity_query,
         powder_snow: move_ctx.powder_snow(),
+        border: move_ctx.border_source(),
     };
 
     let Some(abilities) = move_ctx.abilities else {
@@ -437,6 +488,7 @@ pub struct CanFallAtLeastCtx<'world, 'state, 'a, 'b> {
     aabb_query: &'a AabbQuery<'world, 'state, 'b>,
     collidable_entity_query: &'a CollidableEntityQuery<'world, 'state>,
     powder_snow: PowderSnowCollision,
+    border: Option<BorderSource<'a>>,
 }
 
 fn can_fall_at_least(
@@ -463,7 +515,7 @@ fn can_fall_at_least(
         Some(ctx.source_entity),
         ctx.aabb_query,
         ctx.collidable_entity_query,
-        ctx.physics,
+        ctx.border,
         &aabb,
         false,
         ctx.powder_snow,
@@ -476,6 +528,7 @@ fn collide_bounding_box(
     world: &World,
     entity_collisions: &[VoxelShape],
     powder_snow: PowderSnowCollision,
+    border: Option<BorderSource>,
 ) -> Vec3 {
     let mut collision_boxes: Vec<VoxelShape> = Vec::with_capacity(entity_collisions.len() + 1);
 
@@ -483,11 +536,12 @@ fn collide_bounding_box(
         collision_boxes.extend_from_slice(entity_collisions);
     }
 
-    let block_collisions = get_block_collisions_for(
-        world,
-        &entity_bounding_box.expand_towards(movement),
-        powder_snow,
-    );
+    let swept = entity_bounding_box.expand_towards(movement);
+    if let Some(shape) = border.and_then(|b| b.collision(&swept)) {
+        collision_boxes.push(shape);
+    }
+
+    let block_collisions = get_block_collisions_for(world, &swept, powder_snow);
     collision_boxes.extend(block_collisions);
     collide_with_shapes(movement, *entity_bounding_box, &collision_boxes)
 }

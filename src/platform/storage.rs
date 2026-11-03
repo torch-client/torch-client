@@ -18,6 +18,8 @@ slots! {
     OPTIONS = "options.json";
     KEYBINDS = "keybinds.json";
     MODULES = "modules.json";
+    #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+    PROXY = "proxy.txt";
     PROFILE = "profile.json";
     ACCOUNTS = "accounts.json";
     COMMAND_HISTORY = "command_history.txt";

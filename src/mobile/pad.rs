@@ -119,6 +119,16 @@ impl Stick {
         };
         Some((sign(unit.x), sign(unit.y)))
     }
+
+    pub fn vector(&self, at: Vec2) -> Option<Vec2> {
+        let offset = (at - self.center) / self.travel;
+        let len = offset.length();
+        if len < STICK_DEADZONE {
+            return None;
+        }
+        let throttle = ((len - STICK_DEADZONE) / (1.0 - STICK_DEADZONE)).min(1.0);
+        Some(offset / len * throttle)
+    }
 }
 
 pub fn top_controls_bottom(vw: f32, vh: f32) -> f32 {

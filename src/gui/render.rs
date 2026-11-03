@@ -107,6 +107,60 @@ pub struct GuiInput {
     pub hold_progress: Option<f32>,
 }
 
+pub fn edit_key(input: &mut GuiInput, key: &Key) -> bool {
+    match key {
+        Key::Backspace => {
+            input.backspace = true;
+            input.edits.push(EditKey::Backspace);
+        }
+        Key::Delete => {
+            input.delete = true;
+            input.edits.push(EditKey::Delete);
+        }
+        Key::ArrowLeft => {
+            input.left_arrow = true;
+            input.edits.push(EditKey::Left);
+        }
+        Key::ArrowRight => {
+            input.right_arrow = true;
+            input.edits.push(EditKey::Right);
+        }
+        Key::ArrowUp => {
+            input.up_arrow = true;
+            input.edits.push(EditKey::Up);
+        }
+        Key::ArrowDown => {
+            input.down_arrow = true;
+            input.edits.push(EditKey::Down);
+        }
+        Key::Home => {
+            input.home = true;
+            input.edits.push(EditKey::Home);
+        }
+        Key::End => {
+            input.end = true;
+            input.edits.push(EditKey::End);
+        }
+        Key::PageUp => input.page_up = true,
+        Key::PageDown => input.page_down = true,
+        Key::Tab => input.tab = true,
+        Key::Character(s) => {
+            for c in s.chars() {
+                if !c.is_control() {
+                    input.typed.push(c);
+                    input.edits.push(EditKey::Char(c));
+                }
+            }
+        }
+        Key::Space => {
+            input.typed.push(' ');
+            input.edits.push(EditKey::Char(' '));
+        }
+        _ => return false,
+    }
+    true
+}
+
 #[derive(Resource)]
 pub struct GuiShared(pub Arc<SharedMutex>);
 
@@ -208,6 +262,8 @@ impl Plugin for GuiPlugin {
 
     fn finish(&self, app: &mut App) {
         crate::gui::draw::finish(app);
+        #[cfg(lua_mods)]
+        crate::renderer::mod_capture::finish(app);
     }
 }
 
@@ -607,8 +663,14 @@ pub(crate) fn collect_input(
             && !(anvil_typing && !matches!(binds.bound(action), keybinds::Bound::Mouse(_)))
             && binds.just(action, &keys, &buttons)
     };
-    input.drop_key = slot_key(keybinds::Action::Drop);
-    input.swap_key = slot_key(keybinds::Action::SwapOffhand);
+    let creative_search_focused =
+        state.screen == Screen::Creative && state.creative.search_focused();
+    let search_eats = |action: keybinds::Action| {
+        creative_search_focused && !matches!(binds.bound(action), keybinds::Bound::Mouse(_))
+    };
+    input.drop_key = slot_key(keybinds::Action::Drop) && !search_eats(keybinds::Action::Drop);
+    input.swap_key =
+        slot_key(keybinds::Action::SwapOffhand) && !search_eats(keybinds::Action::SwapOffhand);
     input.pressed_key = if elsewhere {
         None
     } else {
@@ -651,6 +713,13 @@ pub(crate) fn collect_input(
         if !ev.state.is_pressed() || elsewhere {
             continue;
         }
+        if ev.repeat
+            && !anvil_typing
+            && !creative_search_focused
+            && binds.bound(keybinds::Action::Drop) == keybinds::Bound::Key(ev.key_code)
+        {
+            input.drop_key = true;
+        }
         match ev.key_code {
             KeyCode::Enter | KeyCode::NumpadEnter => {
                 input.enter = true;
@@ -665,57 +734,13 @@ pub(crate) fn collect_input(
             _ => {}
         }
         match &ev.logical_key {
-            Key::Backspace => {
-                input.backspace = true;
-                input.edits.push(EditKey::Backspace);
-            }
-            Key::Delete => {
-                input.delete = true;
-                input.edits.push(EditKey::Delete);
-            }
-            Key::ArrowLeft => {
-                input.left_arrow = true;
-                input.edits.push(EditKey::Left);
-            }
-            Key::ArrowRight => {
-                input.right_arrow = true;
-                input.edits.push(EditKey::Right);
-            }
-            Key::ArrowUp => {
-                input.up_arrow = true;
-                input.edits.push(EditKey::Up);
-            }
-            Key::ArrowDown => {
-                input.down_arrow = true;
-                input.edits.push(EditKey::Down);
-            }
-            Key::Home => {
-                input.home = true;
-                input.edits.push(EditKey::Home);
-            }
-            Key::End => {
-                input.end = true;
-                input.edits.push(EditKey::End);
-            }
-            Key::PageUp => input.page_up = true,
-            Key::PageDown => input.page_down = true,
             Key::Enter => {
                 input.enter = true;
                 input.select = true;
                 input.edits.push(EditKey::Enter);
             }
-            Key::Tab => input.tab = true,
-            Key::Character(s) => {
-                for c in s.chars() {
-                    if !c.is_control() {
-                        input.typed.push(c);
-                        input.edits.push(EditKey::Char(c));
-                    }
-                }
-            }
             Key::Space => {
-                input.typed.push(' ');
-                input.edits.push(EditKey::Char(' '));
+                edit_key(&mut input, &ev.logical_key);
                 input.select = true;
             }
             #[cfg(target_os = "android")]
@@ -736,7 +761,9 @@ pub(crate) fn collect_input(
                     input.escape = true;
                 }
             }
-            _ => {}
+            key => {
+                edit_key(&mut input, key);
+            }
         }
     }
 
@@ -764,6 +791,7 @@ pub(crate) fn collect_input(
     }
 
     crate::platform::keyboard::resolve_taps();
+    crate::platform::keyboard::settle();
 
     #[cfg(target_os = "android")]
     if input.enter && state.screen_is_menu() && crate::platform::keyboard::has_focus() {
@@ -789,8 +817,6 @@ pub(crate) fn collect_input(
     input.page_up |= nav.page_up;
     input.page_down |= nav.page_down;
 
-    let creative_search_focused =
-        state.screen == Screen::Creative && state.creative.search_focused();
     if binds.just(keybinds::Action::Inventory, &keys, &buttons)
         && matches!(
             state.screen,
@@ -821,6 +847,7 @@ pub(crate) fn draw_gui(
     #[cfg(feature = "skins")] mut faces: ResMut<crate::gui::player_faces::PlayerFaces>,
     view: Option<Res<crate::renderer::FrameView>>,
     camera_view: Option<Res<crate::renderer::input::CameraView>>,
+    item_assets: Option<Res<crate::renderer::item_assets::ItemAssets>>,
 ) {
     #[cfg(feature = "budget")]
     let _t = crate::diag::budget::timed(crate::diag::budget::Slot::Gui);
@@ -835,6 +862,10 @@ pub(crate) fn draw_gui(
 
     let bufs = std::mem::take(&mut *scratch);
 
+    let item_use = view
+        .as_ref()
+        .filter(|view| view.local.using_item)
+        .map(|view| (view.local.using_offhand, view.local.ticks_using_item));
     state.screen_effects = match view {
         Some(view) => {
             let detached = camera_view.is_some_and(|c| c.detached());
@@ -849,6 +880,11 @@ pub(crate) fn draw_gui(
 
     let mut painter = Painter::with_buffers(&assets.atlas, frame, bufs);
     painter.scale = input.device_scale;
+    if let Some(items) = &item_assets {
+        painter.item_world = items.world();
+        painter.item_owner = items.local_owner();
+    }
+    painter.item_use = item_use;
     screens::draw(
         &mut painter,
         &mut state,

@@ -14,6 +14,8 @@ use crate::util::mth::{DEG_TO_RAD, progress};
 
 pub const HIT_FEEDBACK_TICKS: u32 = 10;
 
+pub const CROSSBOW_CHARGE_TICKS: f32 = 25.0;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Kinetic {
     pub delay_ticks: i32,

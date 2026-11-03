@@ -7,38 +7,32 @@ use crate::util::mth::DEG_TO_RAD;
 fn humanoid_mesh(g: Grow, y_offset: f32) -> MeshDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    let head = root.child(
+    let head = root.part_grow(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box_grow(-4.0, -8.0, -4.0, 8.0, 8.0, 8.0, g),
+        (0, 0),
+        [-4.0, -8.0, -4.0, 8.0, 8.0, 8.0],
+        g,
         PartPose::offset(0.0, y_offset, 0.0),
     );
-    head.child(
+    head.part_grow(
         "hat",
-        CubeList::new().tex_offs(32, 0).add_box_grow(
-            -4.0,
-            -8.0,
-            -4.0,
-            8.0,
-            8.0,
-            8.0,
-            g.extend(0.5),
-        ),
+        (32, 0),
+        [-4.0, -8.0, -4.0, 8.0, 8.0, 8.0],
+        g.extend(0.5),
         PartPose::ZERO,
     );
-    root.child(
+    root.part_grow(
         "body",
-        CubeList::new()
-            .tex_offs(16, 16)
-            .add_box_grow(-4.0, 0.0, -2.0, 8.0, 12.0, 4.0, g),
+        (16, 16),
+        [-4.0, 0.0, -2.0, 8.0, 12.0, 4.0],
+        g,
         PartPose::offset(0.0, y_offset, 0.0),
     );
-    root.child(
+    root.part_grow(
         "right_arm",
-        CubeList::new()
-            .tex_offs(40, 16)
-            .add_box_grow(-3.0, -2.0, -2.0, 4.0, 12.0, 4.0, g),
+        (40, 16),
+        [-3.0, -2.0, -2.0, 4.0, 12.0, 4.0],
+        g,
         PartPose::offset(-5.0, 2.0 + y_offset, 0.0),
     );
     root.child(
@@ -49,11 +43,11 @@ fn humanoid_mesh(g: Grow, y_offset: f32) -> MeshDef {
             .add_box_grow(-1.0, -2.0, -2.0, 4.0, 12.0, 4.0, g),
         PartPose::offset(5.0, 2.0 + y_offset, 0.0),
     );
-    root.child(
+    root.part_grow(
         "right_leg",
-        CubeList::new()
-            .tex_offs(0, 16)
-            .add_box_grow(-2.0, 0.0, -2.0, 4.0, 12.0, 4.0, g),
+        (0, 16),
+        [-2.0, 0.0, -2.0, 4.0, 12.0, 4.0],
+        g,
         PartPose::offset(-1.9, 12.0 + y_offset, 0.0),
     );
     root.child(
@@ -70,38 +64,29 @@ fn humanoid_mesh(g: Grow, y_offset: f32) -> MeshDef {
 pub fn layer() -> LayerDef {
     let mut mesh = humanoid_mesh(Grow::NONE, -14.0);
     let root = mesh.root();
-    let head = root.child(
+    let head = root.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-4.0, -8.0, -4.0, 8.0, 8.0, 8.0),
+        (0, 0),
+        [-4.0, -8.0, -4.0, 8.0, 8.0, 8.0],
         PartPose::offset(0.0, -13.0, 0.0),
     );
-    head.child(
+    head.part_grow(
         "hat",
-        CubeList::new().tex_offs(0, 16).add_box_grow(
-            -4.0,
-            -8.0,
-            -4.0,
-            8.0,
-            8.0,
-            8.0,
-            Grow::all(-0.5),
-        ),
+        (0, 16),
+        [-4.0, -8.0, -4.0, 8.0, 8.0, 8.0],
+        Grow::all(-0.5),
         PartPose::ZERO,
     );
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(32, 16)
-            .add_box(-4.0, 0.0, -2.0, 8.0, 12.0, 4.0),
+        (32, 16),
+        [-4.0, 0.0, -2.0, 8.0, 12.0, 4.0],
         PartPose::offset(0.0, -14.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_arm",
-        CubeList::new()
-            .tex_offs(56, 0)
-            .add_box(-1.0, -2.0, -1.0, 2.0, 30.0, 2.0),
+        (56, 0),
+        [-1.0, -2.0, -1.0, 2.0, 30.0, 2.0],
         PartPose::offset(-5.0, -12.0, 0.0),
     );
     root.child(
@@ -112,11 +97,10 @@ pub fn layer() -> LayerDef {
             .add_box(-1.0, -2.0, -1.0, 2.0, 30.0, 2.0),
         PartPose::offset(5.0, -12.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(56, 0)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 30.0, 2.0),
+        (56, 0),
+        [-1.0, 0.0, -1.0, 2.0, 30.0, 2.0],
         PartPose::offset(-2.0, -5.0, 0.0),
     );
     root.child(

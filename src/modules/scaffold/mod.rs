@@ -127,6 +127,7 @@ struct Plan {
     me: Me,
     target_y: i32,
     reach: f64,
+    cell: Option<BlockPos>,
 }
 
 enum LookAct {
@@ -294,7 +295,10 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
         };
         aim::click(&c, &plan.me, eye, look, plan.target_y, plan.reach)
     };
-    let Some(hit) = hit else {
+    let Some(hit) = hit.filter(|h| {
+        plan.cell
+            .is_none_or(|cell| target::step(h.block_pos, h.direction) == cell)
+    }) else {
         return;
     };
     if crate::play::interaction::module_place(
@@ -559,6 +563,14 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn prepare(&self, run: &mut Run, target: BlockPos, airborne: bool, y: f64) -> LookAct {
+        self.plan(run, target, airborne, y, false)
+    }
+
+    fn prepare_pinned(&self, run: &mut Run, target: BlockPos, airborne: bool, y: f64) -> LookAct {
+        self.plan(run, target, airborne, y, true)
+    }
+
+    fn plan(&self, run: &mut Run, target: BlockPos, airborne: bool, y: f64, pin: bool) -> LookAct {
         let me = &self.snap.me;
         let (target, look) = run.aim.prepare(
             self.c,
@@ -576,6 +588,7 @@ impl Ctx<'_> {
             me: *me,
             target_y: target.y,
             reach: self.reach,
+            cell: pin.then_some(target),
         });
         LookAct::Turn(look)
     }
@@ -751,36 +764,52 @@ fn telly_bridge(ctx: &Ctx, run: &mut Run, use_held: bool) -> Out {
         run.aim.idle();
         return Out::idle();
     }
-    let start_y = run.start_y;
-    let cell =
-        || target::place_position(c, me, true, start_y, ctx.expand).filter(|&t| c.replaceable(t));
-    if !me.on_ground {
-        if me.pos[1] > start_y + run.y_threshold.max(1.5) {
-            run.aim.idle();
-            return Out::idle();
-        }
-        let look = match cell() {
-            Some(t) => ctx.prepare(run, t, true, start_y),
-            None => LookAct::Hold,
-        };
+    if me.on_ground {
+        run.start_y = me.pos[1];
+        run.y_threshold = roll_y_threshold(s.num(setting::Y_INCREASE) as f64);
+        run.aim.idle();
+        let edge = me.moving() && target::telly_position(c, me, me.pos[1]).is_some();
         return Out {
-            look,
+            jump: edge.then_some(true),
             ..Out::idle()
         };
     }
 
-    run.y_threshold = roll_y_threshold(s.num(setting::Y_INCREASE) as f64);
-    match cell() {
-        Some(t) => Out {
-            look: ctx.prepare(run, t, true, start_y),
-            jump: Some(true),
-            ..Out::idle()
-        },
-        None => Out {
-            look: LookAct::Hold,
-            ..Out::idle()
-        },
+    let start_y = run.start_y;
+    if me.pos[1] > start_y + run.y_threshold.max(1.5) {
+        run.aim.idle();
+        return Out::idle();
     }
+    let look = match target::telly_position(c, me, start_y).filter(|&t| c.replaceable(t)) {
+        Some(t) => ctx.prepare_pinned(run, t, true, start_y),
+        None if turn_back_due(ctx, start_y) => {
+            run.aim.idle();
+            LookAct::Idle
+        }
+        None => LookAct::Hold,
+    };
+    Out {
+        look,
+        ..Out::idle()
+    }
+}
+
+fn turn_back_due(ctx: &Ctx, start_y: f64) -> bool {
+    let me = &ctx.snap.me;
+    let Some(sent) = ctx.snap.sent else {
+        return true;
+    };
+    let camera = ctx.snap.camera();
+    let angle = wrap_degrees(camera.yaw - sent.yaw).abs() + (camera.pitch - sent.pitch).abs();
+    let turn_ticks = (angle / ctx.turn.0.max(1.0)).ceil() as u32;
+    let (mut y, mut vy) = (me.pos[1], me.vel[1]);
+    let mut ticks = 0;
+    while y > start_y && ticks < 40 {
+        y += vy;
+        vy = (vy - 0.08) * 0.98;
+        ticks += 1;
+    }
+    ticks <= turn_ticks + 1
 }
 
 fn roll_y_threshold(y: f64) -> f64 {

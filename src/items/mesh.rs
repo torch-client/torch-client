@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bevy::math::Mat4;
 use image::RgbaImage;
 
 use crate::blockentities::render::skull;
@@ -9,8 +8,8 @@ use crate::entities::geom;
 use crate::entities::quads::QUAD_INDICES;
 
 use super::icons::{
-    LAYERS, Part, Synthetic, baked_quads, banner_quads, chest_quads, collect_parts, cube_quads,
-    model_quads, rgb_of, rigid_quads, shield_quads, tint_at,
+    LAYERS, Part, Synthetic, baked_quads, banner_quads, chest_quads, cube_quads, model_quads,
+    parts_of, rgb_of, rigid_quads, shield_quads, skull_quads, tint_at,
 };
 use super::model::{
     Assets, DIR_SHADE, DOWN, DisplayTransforms, EAST, NORTH, Resolved, SOUTH, Tex, UP, WEST,
@@ -18,6 +17,7 @@ use super::model::{
 };
 use super::raster::{self, Quad};
 
+pub use super::dispatch::{ChargeType, ItemUse, ItemWorld, ModelTree, Owner};
 pub use super::model::Transform;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,17 +46,6 @@ impl ItemMeshes {
         ItemMeshes { assets }
     }
 
-    pub fn context_sensitive(&self, id: &str) -> bool {
-        let id = match crate::items::potions::parse_tint_key(id) {
-            Some((item, _)) => item,
-            None => crate::blockentities::banner::key_item(id),
-        };
-        self.assets
-            .json(&format!("items/{}.json", id))
-            .and_then(|doc| doc.get("model").cloned())
-            .is_some_and(|root| super::icons::depends_on_display_context(&root, 0))
-    }
-
     pub fn swap_animation_scale(&self, id: &str) -> f32 {
         self.assets
             .json(&format!("items/{}.json", id))
@@ -64,15 +53,14 @@ impl ItemMeshes {
             .unwrap_or(1.0)
     }
 
-    pub fn depends_on_using_item(&self, id: &str) -> bool {
+    pub fn tree(&self, id: &str) -> Option<ModelTree> {
         let id = match crate::items::potions::parse_tint_key(id) {
             Some((item, _)) => item,
             None => crate::blockentities::banner::key_item(id),
         };
         self.assets
             .json(&format!("items/{}.json", id))
-            .and_then(|doc| doc.get("model").cloned())
-            .is_some_and(|root| super::icons::depends_on_using_item(&root, 0))
+            .and_then(|doc| doc.get("model").and_then(ModelTree::compile))
     }
 
     pub fn bake_pattern_icon(&self, key: &str, edge: u32) -> Option<image::RgbaImage> {
@@ -83,15 +71,12 @@ impl ItemMeshes {
             .get("model")
             .cloned()?;
 
-        let mut parts = Vec::new();
-        collect_parts(
+        let parts = parts_of(
             &self.assets,
             &root,
             "gui",
-            false,
-            Mat4::IDENTITY,
-            &mut parts,
-            0,
+            &ItemUse::NONE,
+            &ItemWorld::default(),
         );
         let mut quads = Vec::new();
         let model = parts.iter().find_map(|part| match &part.synthetic {
@@ -117,7 +102,13 @@ impl ItemMeshes {
         Some(raster::render(&quads, &transform, edge))
     }
 
-    pub fn build(&self, id: &str, ctx: &str, using: bool) -> Option<ItemMesh> {
+    pub fn build(
+        &self,
+        id: &str,
+        ctx: &str,
+        use_: &ItemUse,
+        world: &ItemWorld,
+    ) -> Option<ItemMesh> {
         let assets = &*self.assets;
         let (id, banner_layers) = match crate::blockentities::banner::parse_model_key(id) {
             Some((item, layers)) => (item, layers),
@@ -131,8 +122,7 @@ impl ItemMeshes {
             .json(&format!("items/{}.json", id))?
             .get("model")
             .cloned()?;
-        let mut parts: Vec<Part> = Vec::new();
-        collect_parts(assets, &root, ctx, using, Mat4::IDENTITY, &mut parts, 0);
+        let mut parts: Vec<Part> = parts_of(assets, &root, ctx, use_, world);
         if let Some(tint) = tint_override {
             for part in &mut parts {
                 if let Some(first) = part.tints.first_mut() {
@@ -155,19 +145,14 @@ impl ItemMeshes {
                         chest_quads(&tex, &mut quads);
                     }
                 }
-                Some(Synthetic::Skull(kind, local)) => {
+                Some(Synthetic::Skull(kind, animation, local)) => {
                     if let Some(tex) = assets.texture(skull::texture_for_type(kind)) {
-                        let baked = geom::bake(&skull::layer_for_type(kind));
-                        baked_quads(&baked, *local, &tex, &mut quads);
+                        skull_quads(kind, *animation, *local, &tex, &mut quads);
                     }
                 }
                 Some(Synthetic::Bed(texture, is_head, local)) => {
                     if let Some(tex) = assets.texture(texture) {
-                        let layer = if *is_head {
-                            crate::blockentities::models::bed_head()
-                        } else {
-                            crate::blockentities::models::bed_foot()
-                        };
+                        let layer = crate::blockentities::models::bed_half(*is_head);
                         let baked = geom::bake(&layer);
                         baked_quads(&baked, *local, &tex, &mut quads);
                     }
@@ -475,7 +460,12 @@ mod tests {
     fn sprite_item_is_extruded() {
         let Some(meshes) = meshes() else { return };
         let mesh = meshes
-            .build("diamond_sword", "thirdperson_righthand", false)
+            .build(
+                "diamond_sword",
+                "thirdperson_righthand",
+                &ItemUse::NONE,
+                &ItemWorld::default(),
+            )
             .expect("diamond_sword");
         assert!(mesh.generated);
         assert_eq!(mesh.indices.len(), mesh.vertices.len() / 4 * 6);
@@ -512,7 +502,12 @@ mod tests {
     fn block_item_is_a_cube() {
         let Some(meshes) = meshes() else { return };
         let mesh = meshes
-            .build("stone", "thirdperson_righthand", false)
+            .build(
+                "stone",
+                "thirdperson_righthand",
+                &ItemUse::NONE,
+                &ItemWorld::default(),
+            )
             .expect("stone");
         assert!(!mesh.generated);
         assert_eq!(mesh.vertices.len(), 6 * 4);
@@ -552,7 +547,12 @@ mod tests {
     fn chest_gets_synthetic_geometry() {
         let Some(meshes) = meshes() else { return };
         let mesh = meshes
-            .build("chest", "thirdperson_righthand", false)
+            .build(
+                "chest",
+                "thirdperson_righthand",
+                &ItemUse::NONE,
+                &ItemWorld::default(),
+            )
             .expect("chest");
         assert_eq!(mesh.vertices.len(), 3 * 6 * 4);
         assert!(
@@ -566,7 +566,12 @@ mod tests {
     fn skull_gets_synthetic_geometry() {
         let Some(meshes) = meshes() else { return };
         let mesh = meshes
-            .build("skeleton_skull", "thirdperson_righthand", false)
+            .build(
+                "skeleton_skull",
+                "thirdperson_righthand",
+                &ItemUse::NONE,
+                &ItemWorld::default(),
+            )
             .expect("skeleton_skull");
         assert_eq!(mesh.vertices.len(), 6 * 4);
     }
@@ -575,7 +580,12 @@ mod tests {
     fn transform_matches_hand_computed_point() {
         let Some(meshes) = meshes() else { return };
         let mesh = meshes
-            .build("diamond_sword", "thirdperson_righthand", false)
+            .build(
+                "diamond_sword",
+                "thirdperson_righthand",
+                &ItemUse::NONE,
+                &ItemWorld::default(),
+            )
             .expect("diamond_sword");
         let t = mesh
             .display
@@ -609,23 +619,50 @@ mod tests {
     #[test]
     fn unknown_id_is_none() {
         let Some(meshes) = meshes() else { return };
-        assert!(meshes.build("not_a_real_item", "gui", false).is_none());
-        assert!(meshes.build("", "gui", false).is_none());
-        assert!(meshes.build("../../etc/passwd", "gui", false).is_none());
+        assert!(
+            meshes
+                .build(
+                    "not_a_real_item",
+                    "gui",
+                    &ItemUse::NONE,
+                    &ItemWorld::default()
+                )
+                .is_none()
+        );
+        assert!(
+            meshes
+                .build("", "gui", &ItemUse::NONE, &ItemWorld::default())
+                .is_none()
+        );
+        assert!(
+            meshes
+                .build(
+                    "../../etc/passwd",
+                    "gui",
+                    &ItemUse::NONE,
+                    &ItemWorld::default()
+                )
+                .is_none()
+        );
     }
 
     #[test]
     fn display_context_picks_the_selected_case() {
         let Some(meshes) = meshes() else { return };
-        assert!(meshes.context_sensitive("trident"));
-        assert!(!meshes.context_sensitive("stone"));
+        assert!(meshes.tree("trident").is_some());
+        assert!(meshes.tree("stone").is_none());
 
         let framed = meshes
-            .build("trident", "fixed", false)
+            .build("trident", "fixed", &ItemUse::NONE, &ItemWorld::default())
             .expect("framed trident");
         assert!(framed.generated, "the fixed case is the flat sprite model");
         let held = meshes
-            .build("trident", "thirdperson_righthand", false)
+            .build(
+                "trident",
+                "thirdperson_righthand",
+                &ItemUse::NONE,
+                &ItemWorld::default(),
+            )
             .expect("held trident");
         assert!(!held.generated);
         assert_ne!(framed.vertices.len(), held.vertices.len());

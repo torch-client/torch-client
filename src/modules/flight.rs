@@ -5,6 +5,8 @@ use super::{Edge, Phase, store};
 
 pub const SINK_STEP: f64 = 0.031_30;
 
+const SINK_TICKS: u32 = 3;
+
 static EDGE: Edge = Edge::new(Id::Flight);
 
 static PHASE: AtomicU32 = AtomicU32::new(0);
@@ -16,6 +18,7 @@ pub enum State {
     Idle,
     On(f32),
     Release,
+    Drop,
 }
 
 options! {
@@ -46,12 +49,15 @@ pub fn poll() -> State {
     }
 
     let every = s.num(setting::EVERY).max(1.0) as u32;
-    let hold = s.num(setting::FOR).max(1.0) as u32;
+    let mut hold = s.num(setting::FOR).max(1.0) as u32;
+    if mode == AntiKick::Packet {
+        hold = hold.max(SINK_TICKS);
+    }
     let window = PHASE.fetch_add(1, Relaxed) % (every + hold) >= every;
 
     SINK.store(window && mode == AntiKick::Packet, Relaxed);
     if window && mode == AntiKick::Drop {
-        State::Release
+        State::Drop
     } else {
         State::On(speed)
     }

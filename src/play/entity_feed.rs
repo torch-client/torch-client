@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use bevy::platform::collections::{HashMap, HashSet};
 
 use azalea::ecs::entity::Entity as AzEntity;
 use azalea::prelude::*;
@@ -19,6 +19,7 @@ pub(crate) mod entity_event {
     pub const KINETIC_HIT: u8 = 2;
     pub const START_ATTACKING: u8 = 4;
     pub const SHAKE_WETNESS: u8 = 8;
+    pub const USE_ITEM_COMPLETE: u8 = 9;
     pub const EAT_GRASS: u8 = 10;
     pub const OFFER_FLOWER: u8 = 11;
     pub const SQUID_ANIM_SYNCH: u8 = 19;
@@ -40,7 +41,23 @@ pub(crate) const TICKS_REQUIRED_TO_FREEZE: i32 = 140;
 
 pub(crate) const METADATA_INDEX_18: u8 = 18;
 
-const ENTITY_RANGE: f64 = 64.0;
+fn within_render_range(
+    kind: azalea_registry::builtin::EntityKind,
+    distance_sq: f64,
+    view_scale: f64,
+) -> bool {
+    let dims = azalea::entity::dimensions::EntityDimensions::from(kind);
+    let size = f64::from(dims.width + dims.height + dims.width) / 3.0;
+    let range = size * 64.0 * view_scale;
+    distance_sq < range * range
+}
+
+fn entity_view_scale(bot: &Client) -> f64 {
+    let render_distance = bot
+        .component::<azalea::ClientInformation>()
+        .map_or(12, |info| info.view_distance);
+    (f64::from(render_distance) / 8.0).clamp(1.0, 2.5)
+}
 
 fn is_living(kind: azalea_registry::builtin::EntityKind) -> bool {
     use azalea_registry::builtin::EntityKind;
@@ -142,6 +159,16 @@ where
     eref.get_component::<C>().map(|c| (**c).clone())
 }
 
+fn panda_variant(main: u8, hidden: u8) -> i32 {
+    let by_id = |id: u8| if id <= 6 { i32::from(id) } else { 0 };
+    let (main, hidden) = (by_id(main), by_id(hidden));
+    if matches!(main, 4 | 5) && main != hidden {
+        0
+    } else {
+        main
+    }
+}
+
 fn variant_key<C>(eref: &EntityView) -> Option<(&'static str, u32)>
 where
     C: azalea::ecs::component::Component + std::ops::Deref,
@@ -164,9 +191,7 @@ fn resolve_variant(
 }
 
 fn block_id(state: azalea::block::BlockState) -> Option<String> {
-    use azalea::block::BlockTrait;
-    let block: Box<dyn BlockTrait> = state.into();
-    let id = block.id();
+    let id = crate::blocks::block_name(state);
     (id != "air").then(|| id.to_string())
 }
 
@@ -207,10 +232,8 @@ struct MetaCache {
     sleeping_pos: Option<AzBlockPos>,
 }
 
-fn meta_cache() -> &'static std::sync::Mutex<HashMap<i32, MetaCache>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<i32, MetaCache>>> =
-        std::sync::OnceLock::new();
-    CACHE.get_or_init(Default::default)
+crate::util::global! {
+    fn meta_cache() -> std::sync::Mutex<HashMap<i32, MetaCache>>
 }
 
 struct EntityDeferred {
@@ -227,22 +250,198 @@ struct Pending {
     input: entities::feed::TickInput,
     deferred: EntityDeferred,
     fresh: bool,
+    animal: bool,
+    camel_pose: (bool, i64),
+    glow_uuid: Option<u128>,
+}
+
+#[derive(Clone, Copy)]
+struct Mount {
+    vehicle: i32,
+    index: usize,
+    of: usize,
+}
+
+fn seat_riders(
+    mounts: &HashMap<i32, Mount>,
+    pending: &[Pending],
+    at: &HashMap<i32, u32>,
+    anims: &mut HashMap<i32, entities::feed::EntityAnim>,
+    player_anims: &mut HashMap<i32, crate::renderer::HumanoidAnim>,
+    players: &mut [crate::session::OtherPlayerInfo],
+) -> Vec<(i32, [f64; 3])> {
+    use crate::play::riding::{Passenger, SeatPose, passenger_attachment, vehicle_attachment};
+    use crate::session::OtherPlayerInfo;
+    use azalea_registry::builtin::EntityKind;
+
+    const MAX_DEPTH: usize = 4;
+    let depth = |mut id: i32| {
+        let mut d = 0;
+        while let Some(m) = mounts.get(&id)
+            && d < MAX_DEPTH
+        {
+            id = m.vehicle;
+            d += 1;
+        }
+        d
+    };
+    let mut order: Vec<(usize, i32)> = mounts.keys().map(|&id| (depth(id), id)).collect();
+    order.sort_unstable();
+
+    let player_scale = |players: &[OtherPlayerInfo], id: i32| {
+        players
+            .iter()
+            .find(|p| p.id == id)
+            .map_or(1.0, |p| p.body.scale as f64)
+    };
+    let pending_of = |id: i32| at.get(&id).map(|&i| &pending[i as usize]);
+    let mut seated = Vec::with_capacity(order.len());
+    for (_, rider) in order {
+        let m = mounts[&rider];
+        let (vehicle_kind, vehicle) = match anims.get(&m.vehicle) {
+            Some(a) => (a.kind, a.seat_body()),
+            None => match player_anims.get(&m.vehicle) {
+                Some(a) => (
+                    EntityKind::Player,
+                    a.seat_body(player_scale(players, m.vehicle)),
+                ),
+                None => continue,
+            },
+        };
+        let (rider_kind, body) = match anims.get(&rider) {
+            Some(a) => (a.kind, a.seat_body()),
+            None => match player_anims.get(&rider) {
+                Some(a) => (
+                    EntityKind::Player,
+                    a.seat_body(player_scale(players, rider)),
+                ),
+                None => continue,
+            },
+        };
+        let (camel_sitting, camel_pose_time) =
+            pending_of(m.vehicle).map_or((false, i64::MAX), |p| p.camel_pose);
+        let pose = SeatPose {
+            stand: vehicle.stand,
+            camel_sitting,
+            camel_pose_time,
+        };
+        let passenger = Passenger {
+            kind: rider_kind,
+            animal: pending_of(rider).is_some_and(|p| p.animal),
+            index: m.index,
+            of: m.of,
+        };
+        let seat =
+            passenger_attachment(vehicle_kind, vehicle.y_rot, vehicle.scale, passenger, pose);
+        let drop = vehicle_attachment(rider_kind, body.scale, body.width, vehicle.width);
+        let pos = [
+            vehicle.pos[0] + seat.x,
+            vehicle.pos[1] + seat.y - drop,
+            vehicle.pos[2] + seat.z,
+        ];
+        if let Some(a) = anims.get_mut(&rider) {
+            a.set_seated_pos(pos);
+        } else if let Some(a) = player_anims.get_mut(&rider) {
+            a.set_seated_pos(pos);
+            if let Some(p) = players.iter_mut().find(|p| p.id == rider) {
+                p.anim.set_seated_pos(pos);
+            }
+        }
+        seated.push((rider, pos));
+    }
+    seated
+}
+
+fn write_back_seats(bot: &Client, seated: &[(i32, [f64; 3])]) {
+    use azalea::entity::Position;
+    use azalea::entity::indexing::EntityIdIndex;
+    use azalea_core::entity_id::MinecraftEntityId;
+
+    if seated.is_empty() {
+        return;
+    }
+    let mut ecs = bot.ecs.write();
+    let Some(index) = ecs.get::<EntityIdIndex>(bot.entity) else {
+        return;
+    };
+    let found: Vec<(AzEntity, [f64; 3])> = seated
+        .iter()
+        .filter_map(|&(id, pos)| Some((index.get_by_minecraft_entity(MinecraftEntityId(id))?, pos)))
+        .collect();
+    for (entity, [x, y, z]) in found {
+        if let Some(mut position) = ecs.get_mut::<Position>(entity) {
+            **position = AzVec3 { x, y, z };
+        }
+    }
+}
+
+fn glow_outline(glow_uuid: Option<u128>) -> u32 {
+    if glow_uuid.is_some() { 0xFFFF_FFFF } else { 0 }
+}
+
+fn team_outlines(pending: &mut [Pending]) {
+    if pending.iter().all(|p| p.glow_uuid.is_none()) {
+        return;
+    }
+    crate::client::tablist::with_lookup(|tab| {
+        let mut buf = [0u8; uuid::fmt::Hyphenated::LENGTH];
+        for p in pending.iter_mut() {
+            let Some(uuid) = p.glow_uuid else { continue };
+            let name = uuid::Uuid::from_u128(uuid)
+                .hyphenated()
+                .encode_lower(&mut buf);
+            if let Some(rgb) = tab.team_color(name) {
+                p.input.outline = 0xFF00_0000 | rgb;
+            }
+        }
+    });
+}
+
+fn seat_and_glow(
+    eref: &EntityView<'_>,
+    kind: azalea_registry::builtin::EntityKind,
+    rider: bool,
+) -> (bool, (bool, i64), Option<u128>) {
+    use azalea::entity::metadata;
+    use azalea_registry::builtin::EntityKind;
+
+    let animal = rider && instance_of::<metadata::AbstractAnimal>(eref);
+    let camel_pose = if matches!(kind, EntityKind::Camel | EntityKind::CamelHusk) {
+        crate::play::riding::camel_pose(eref.get_component::<metadata::LastPoseChangeTick>())
+    } else {
+        (false, i64::MAX)
+    };
+    let glow_uuid = flag::<metadata::CurrentlyGlowing>(eref)
+        .then(|| {
+            eref.get_component::<azalea::entity::EntityUuid>()
+                .map(|u| u.as_u128())
+        })
+        .flatten();
+    (animal, camel_pose, glow_uuid)
 }
 
 fn par_map<T: Sync, R: Send + 'static>(items: &[T], f: impl Fn(&T) -> R + Send + Sync) -> Vec<R> {
     let Some((pool, size)) = fan_out(items.len()) else {
         return items.iter().map(f).collect();
     };
+    let total = items.len();
     let parts: Vec<Vec<R>> = pool.scope(|scope| {
-        for chunk in items.chunks(size) {
+        for (n, chunk) in items.chunks(size).enumerate() {
             let f = &f;
             scope.spawn(async move {
                 let _churn = crate::diag::alloc::scope(crate::diag::alloc::Site::Entities);
-                chunk.iter().map(f).collect::<Vec<R>>()
+                let mut out = Vec::with_capacity(if n == 0 { total } else { chunk.len() });
+                out.extend(chunk.iter().map(f));
+                out
             });
         }
     });
-    parts.into_iter().flatten().collect()
+    let mut parts = parts.into_iter();
+    let mut out = parts.next().unwrap_or_default();
+    for part in parts {
+        out.extend(part);
+    }
+    out
 }
 
 fn par_width() -> usize {
@@ -373,6 +572,7 @@ fn is_bare_object(kind: azalea_registry::builtin::EntityKind) -> bool {
 pub(crate) fn collect_entities(
     bot: &Client,
     seen_players: &HashSet<i32>,
+    players: &mut [crate::session::OtherPlayerInfo],
 ) -> std::sync::Arc<Vec<entities::feed::EntityAnim>> {
     use azalea::entity::dimensions::EntityDimensions;
     use azalea::entity::{EntityKindComponent, metadata};
@@ -401,7 +601,7 @@ pub(crate) fn collect_entities(
     let add_entity_data_map = &*add_entity_data_guard;
     let velocity_map = &*velocity_guard;
     let attributes_map = &*attributes_guard;
-    let (riders, vehicles, mounts): (HashSet<i32>, HashSet<i32>, HashMap<i32, i32>) = {
+    let (riders, vehicles, mounts): (HashSet<i32>, HashSet<i32>, HashMap<i32, Mount>) = {
         let map = passengers().lock().unwrap();
         (
             map.values().flatten().copied().collect(),
@@ -410,13 +610,25 @@ pub(crate) fn collect_entities(
                 .map(|(id, _)| *id)
                 .collect(),
             map.iter()
-                .flat_map(|(vehicle, list)| list.iter().map(move |rider| (*rider, *vehicle)))
+                .flat_map(|(vehicle, list)| {
+                    list.iter().enumerate().map(move |(index, rider)| {
+                        let mount = Mount {
+                            vehicle: *vehicle,
+                            index,
+                            of: list.len(),
+                        };
+                        (*rider, mount)
+                    })
+                })
                 .collect(),
         )
     };
+    let leash_guard = crate::client::tracking::leashes().lock().unwrap();
+    let leash_map = (!leash_guard.is_empty()).then_some(&*leash_guard);
     let now = game_time();
 
     let feed_cap = max_fed_entities();
+    let view_scale = entity_view_scale(bot);
     let refs = {
         let _t = crate::diag::timed(crate::diag::Phase::Nearest);
         nearby_entities(bot, origin, feed_cap)
@@ -439,15 +651,15 @@ pub(crate) fn collect_entities(
         if taken.contains(&id) {
             continue;
         }
-        if pos.distance_squared_to(origin) > ENTITY_RANGE * ENTITY_RANGE {
-            continue;
-        }
         if seen.len() >= feed_cap {
             continue;
         }
         let Some(kind) = view.get_component::<EntityKindComponent>().map(|k| **k) else {
             continue;
         };
+        if !within_render_range(kind, pos.distance_squared_to(origin), view_scale) {
+            continue;
+        }
         seen.insert(id);
         accepted.push((entity_ref, id, kind, pos));
     }
@@ -482,6 +694,9 @@ pub(crate) fn collect_entities(
             input.walk_halted = matches!(kind, EntityKind::Camel | EntityKind::CamelHusk)
                 && (input.pose != Pose::Standing || input.shared.dash);
             input.head_targets = [None; 2];
+            input.leash_holder = leash_map.and_then(|m| m.get(&id).copied());
+            let (animal, camel_pose, glow_uuid) = seat_and_glow(eref, kind, input.is_passenger);
+            input.outline = glow_outline(glow_uuid);
             let deferred = EntityDeferred {
                 variant: c.variant,
                 head_target_ids: c.head_target_ids,
@@ -495,6 +710,9 @@ pub(crate) fn collect_entities(
                 input,
                 deferred,
                 fresh: false,
+                animal,
+                camel_pose,
+                glow_uuid,
             };
         }
         let living = is_living(kind);
@@ -553,6 +771,13 @@ pub(crate) fn collect_entities(
                 .or_else(|| meta::<metadata::SalmonKind>(eref))
                 .or_else(|| meta::<metadata::ParrotVariant>(eref))
                 .unwrap_or(0);
+            if kind == EntityKind::Panda {
+                let main = meta::<metadata::MainGene>(eref).unwrap_or(0);
+                let hidden = meta::<metadata::HiddenGene>(eref).unwrap_or(0);
+                shared.variant_id = panda_variant(main, hidden);
+                shared.scared =
+                    shared.variant_id == 2 && crate::renderer::environment::thunder_level() > 0.9;
+            }
 
             shared.attach_face = meta::<metadata::AttachFace>(eref)
                 .map(entities::Direction::from)
@@ -797,7 +1022,7 @@ pub(crate) fn collect_entities(
 
         shared.main_hand = worn.main_hand;
         shared.off_hand = worn.off_hand;
-        shared.helmet = worn.helmet;
+        shared.head = worn.head;
         shared.chestplate = worn.chestplate;
         shared.leggings = worn.leggings;
         shared.boots = worn.boots;
@@ -810,7 +1035,7 @@ pub(crate) fn collect_entities(
         let custom_name = meta::<metadata::CustomName>(eref).flatten();
         shared.name_spans = custom_name
             .as_ref()
-            .map(|text| crate::client::chat_text::to_spans(text))
+            .map(|text| crate::client::chat_text::to_spans(text).into())
             .unwrap_or_default();
         shared.name = custom_name.map(|text| text.to_string());
         shared.name_visible = flag::<metadata::CustomNameVisible>(eref);
@@ -830,7 +1055,7 @@ pub(crate) fn collect_entities(
                 let damaged = (40.0 - health.min(40.0)) / 40.0;
                 (0.55 - damaged * 0.4) * std::f32::consts::PI
             } else {
-                std::f32::consts::FRAC_PI_2
+                0.628_318_55
             };
         }
 
@@ -915,6 +1140,12 @@ pub(crate) fn collect_entities(
                 display.opacity = meta::<metadata::TextOpacity>(eref).unwrap_or(display.opacity);
                 display.flags = meta::<metadata::StyleFlags>(eref).unwrap_or(display.flags);
             }
+            if instance_of::<metadata::ItemDisplay>(eref) {
+                use crate::items::model::DisplayContext;
+                display.item_context = meta::<metadata::ItemDisplayItemDisplay>(eref)
+                    .and_then(|id| DisplayContext::ALL.get(usize::from(id).checked_sub(1)?))
+                    .map_or("none", |ctx| ctx.name());
+            }
             shared.display = Some(Box::new(display));
         }
         if living {
@@ -943,6 +1174,7 @@ pub(crate) fn collect_entities(
         let ignited = living && flag::<metadata::IsIgnited>(eref);
         let playing_dead = living && flag::<metadata::PlayingDead>(eref);
 
+        let (animal, camel_pose, glow_uuid) = seat_and_glow(eref, kind, riders.contains(&id));
         let input = TickInput {
             simulate: true,
             pos: now_pos,
@@ -982,6 +1214,8 @@ pub(crate) fn collect_entities(
             shared: std::sync::Arc::new(shared),
             eating,
             driven: false,
+            leash_holder: leash_map.and_then(|m| m.get(&id).copied()),
+            outline: glow_outline(glow_uuid),
         };
 
         let deferred = EntityDeferred {
@@ -1012,6 +1246,9 @@ pub(crate) fn collect_entities(
             input,
             deferred,
             fresh: true,
+            animal,
+            camel_pose,
+            glow_uuid,
         }
     });
     drop(ecs);
@@ -1023,6 +1260,8 @@ pub(crate) fn collect_entities(
     drop(add_entity_data_guard);
     drop(velocity_guard);
     drop(attributes_guard);
+    drop(leash_guard);
+    team_outlines(&mut pending);
 
     let cap = max_simulated_entities();
     if pending.len() > cap {
@@ -1163,6 +1402,7 @@ pub(crate) fn collect_entities(
         input,
         deferred: extra,
         fresh,
+        ..
     } in &pending
     {
         if *fresh {
@@ -1244,13 +1484,23 @@ pub(crate) fn collect_entities(
 
     drop(_tick_timer);
     let _snap_timer = crate::diag::timed(crate::diag::Phase::Snapshot);
+    let mut seated = Vec::new();
     let pairs: HashMap<i32, (f32, f32)> = if mounts.is_empty() {
         HashMap::new()
     } else {
-        let player_anims = anim_states().lock().unwrap();
+        let mut player_anims = anim_states().lock().unwrap();
+        seated = seat_riders(
+            &mounts,
+            &pending,
+            &at,
+            &mut anims,
+            &mut player_anims,
+            players,
+        );
         mounts
             .iter()
-            .filter_map(|(rider, vehicle)| {
+            .filter_map(|(rider, &Mount { vehicle, .. })| {
+                let vehicle = &vehicle;
                 let pair = anims
                     .get(vehicle)
                     .filter(|anim| anim.is_living())
@@ -1269,52 +1519,40 @@ pub(crate) fn collect_entities(
     let out = std::sync::Arc::new(par_map(&live, |anim| (*anim).clone()));
 
     drop(_snap_timer);
+    drop(_anim_timer);
+    let _evict_timer = crate::diag::timed(crate::diag::Phase::Evict);
     anims.retain(|id, _| seen.contains(id));
     drop(anims);
-    meta_index_18()
-        .lock()
-        .unwrap()
-        .retain(|id, _| live_ids.contains(id));
-    add_entity_data()
-        .lock()
-        .unwrap()
-        .retain(|id, _| live_ids.contains(id));
-    meta_cache()
-        .lock()
-        .unwrap()
-        .retain(|id, _| live_ids.contains(id));
-    crate::client::tracking::meta_dirty()
-        .lock()
-        .unwrap()
-        .retain(|id, _| live_ids.contains(id));
-    velocities()
-        .lock()
-        .unwrap()
-        .retain(|id, _| live_ids.contains(id));
+    drop(chunk_level);
+    drop(guard);
+    drop(world);
+    write_back_seats(bot, &seated);
+    let only_live = |id: &i32| live_ids.contains(id);
+    let live = |id: &i32| live_ids.contains(id) || seen_players.contains(id);
+    evict(meta_index_18(), only_live);
+    evict(add_entity_data(), only_live);
+    meta_cache().lock().unwrap().retain(|id, _| only_live(id));
+    evict(crate::client::tracking::meta_dirty(), only_live);
+    evict(velocities(), only_live);
     crate::play::item_pickup::taken()
         .lock()
         .unwrap()
-        .retain(|id| live_ids.contains(id));
-    passengers()
-        .lock()
-        .unwrap()
-        .retain(|id, _| live_ids.contains(id));
-    {
-        let local = crate::client::tracking::local_entity_id();
-        crate::client::tracking::attributes()
-            .lock()
-            .unwrap()
-            .retain(|id, _| live_ids.contains(id) || seen_players.contains(id) || *id == local);
-    }
-    on_grounds()
-        .lock()
-        .unwrap()
-        .retain(|id, _| live_ids.contains(id) || seen_players.contains(id));
-    let live = |id: &i32| live_ids.contains(id) || seen_players.contains(id);
-    head_yaws().lock().unwrap().retain(|id, _| live(id));
-    equipment().lock().unwrap().retain(|id, _| live(id));
+        .retain(only_live);
+    evict(passengers(), only_live);
+    evict(crate::client::tracking::leashes(), only_live);
+    let local = crate::client::tracking::local_entity_id();
+    evict(crate::client::tracking::attributes(), |id| {
+        live(id) || *id == local
+    });
+    evict(on_grounds(), live);
+    evict(head_yaws(), live);
+    evict(equipment(), live);
 
     out
+}
+
+fn evict<V>(map: &crate::session::SideMutex<HashMap<i32, V>>, keep: impl Fn(&i32) -> bool) {
+    map.lock().unwrap().retain(|id, _| keep(id));
 }
 
 struct ChunkLevel<'a> {

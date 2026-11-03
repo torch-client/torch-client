@@ -1,4 +1,6 @@
-pub(crate) const WEBSOCKET: [(&str, u16); 2] = [("wss://", 443), ("ws://", 80)];
+pub(crate) const WEBSOCKET: [(&str, u16); 3] = [("wss://", 443), ("ws://", 80), (JAVA_TUNNEL, 443)];
+
+pub(crate) const JAVA_TUNNEL: &str = "java://";
 
 pub(crate) const EAGLER: bool = cfg!(any(feature = "eagler", target_arch = "wasm32"));
 
@@ -22,11 +24,15 @@ pub(crate) fn is_websocket(address: &str) -> bool {
     websocket(address).is_some()
 }
 
+pub(crate) fn is_java_tunnel(address: &str) -> bool {
+    websocket(address).is_some_and(|(scheme, _)| scheme == JAVA_TUNNEL)
+}
+
 pub(crate) fn check(address: &str) -> Result<(), String> {
     match websocket(address) {
         Some((scheme, _)) if !EAGLER => Err(format!(
-            "`{scheme}` addresses are Eaglercraft servers, and this build cannot connect to one. \
-             Rebuild with `cargo build --release --features eagler`."
+            "`{scheme}` addresses go over a WebSocket, and this build cannot open one. Rebuild \
+             with `cargo build --release --features eagler`."
         )),
         _ => Ok(()),
     }
@@ -34,12 +40,24 @@ pub(crate) fn check(address: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EAGLER, check, is_websocket, websocket};
+    use super::{EAGLER, check, is_java_tunnel, is_websocket, websocket};
 
     #[test]
     fn the_scheme_carries_the_web_default_port() {
         assert_eq!(websocket("wss://play.example"), Some(("wss://", 443)));
         assert_eq!(websocket("ws://play.example"), Some(("ws://", 80)));
+        assert_eq!(websocket("java://relay.example"), Some(("java://", 443)));
+    }
+
+    #[test]
+    fn only_the_java_scheme_is_a_tunnel() {
+        assert!(is_java_tunnel(" java://relay.example/t/tcp/mc.example "));
+        assert!(!is_java_tunnel("wss://relay.example/t/tcp/mc.example"));
+        assert!(!is_java_tunnel("mc.example:25565"));
+        assert_eq!(
+            super::normalize("java://relay.example"),
+            "java://relay.example"
+        );
     }
 
     #[test]

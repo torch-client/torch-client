@@ -7,7 +7,7 @@ pub(crate) mod hop;
 pub(crate) mod packets;
 pub(crate) mod remap;
 pub(crate) mod version;
-pub(crate) mod wire;
+pub(crate) use crate::util::wire;
 
 pub(crate) use version::joinable;
 
@@ -38,10 +38,8 @@ pub(crate) fn preselected() -> i32 {
         .unwrap_or(version::NATIVE.protocol)
 }
 
-static SEEN: OnceLock<Mutex<HashMap<String, i32>>> = OnceLock::new();
-
-fn seen() -> &'static Mutex<HashMap<String, i32>> {
-    SEEN.get_or_init(Default::default)
+crate::util::global! {
+fn seen() -> Mutex<HashMap<String, i32>>
 }
 
 fn key(address: &str) -> String {

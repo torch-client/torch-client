@@ -226,7 +226,7 @@ fn enchantment_line(id: &str, level: i32) -> Vec<Span> {
 }
 
 fn potion_name(stack: &SlotStack) -> Option<String> {
-    let contents = stack.potion.as_ref()?;
+    let contents = stack.extra.potion.as_ref()?;
     if !potions::is_potion_item(stack.item) {
         return None;
     }
@@ -318,7 +318,7 @@ fn format_modifier(value: f64) -> String {
 pub(crate) fn styled_hover_name(stack: &SlotStack) -> Vec<Span> {
     let def = item(stack.item);
     let rarity = def.map(|d| d.rarity.color()).unwrap_or(WHITE);
-    match &stack.custom_name {
+    match &stack.extra.custom_name {
         Some(spans) => inherit(spans, rarity, true),
         None => {
             let name = book_title(stack)
@@ -331,7 +331,7 @@ pub(crate) fn styled_hover_name(stack: &SlotStack) -> Vec<Span> {
 }
 
 fn book_title(stack: &SlotStack) -> Option<String> {
-    let book = stack.book.as_deref()?;
+    let book = stack.extra.book.as_deref()?;
     (book.signed && !book.title.trim().is_empty()).then(|| book.title.clone())
 }
 
@@ -340,23 +340,23 @@ fn build_lines(stack: &SlotStack, advanced: bool) -> Vec<Vec<Span>> {
 
     out.push(styled_hover_name(stack));
 
-    if let Some(b) = &stack.book
+    if let Some(b) = &stack.extra.book
         && b.signed
     {
         out.extend(book_lines(b));
     }
 
-    if let Some(contents) = &stack.potion
+    if let Some(contents) = &stack.extra.potion
         && potions::is_potion_item(stack.item)
     {
         out.extend(potion_lines(contents));
     }
 
-    for (id, level) in ordered_enchantments(&stack.enchantments) {
+    for (id, level) in ordered_enchantments(&stack.extra.enchantments) {
         out.push(enchantment_line(&id, level));
     }
 
-    for line in &stack.lore {
+    for line in &stack.extra.lore {
         out.push(inherit(line, DARK_PURPLE, true));
     }
 
@@ -551,6 +551,7 @@ fn place_lines(p: &mut Painter, lines: &[Vec<Span>], place: impl FnOnce(f32, f32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::StackExtra;
     use crate::text::Style;
 
     fn text_of(line: &[Span]) -> String {
@@ -585,24 +586,32 @@ mod tests {
         let mut stack = SlotStack {
             item: "written_book",
             count: 1,
-            book: Some(Box::new(crate::session::Book {
-                title: "Ars Goetia".into(),
-                author: "Steve".into(),
-                signed: true,
+            extra: StackExtra {
+                book: Some(Box::new(crate::session::Book {
+                    title: "Ars Goetia".into(),
+                    author: "Steve".into(),
+                    signed: true,
+                    ..Default::default()
+                })),
                 ..Default::default()
-            })),
+            }
+            .into(),
             ..Default::default()
         };
         assert_eq!(text_of(&styled_hover_name(&stack)), "Ars Goetia");
         assert!(!styled_hover_name(&stack)[0].style.italic);
 
-        stack.book.as_mut().unwrap().title = "   ".into();
+        stack.extra.make_mut().book.as_mut().unwrap().title = "   ".into();
         assert_eq!(text_of(&styled_hover_name(&stack)), "Written Book");
 
         let draft = SlotStack {
             item: "writable_book",
             count: 1,
-            book: Some(Box::new(crate::session::Book::default())),
+            extra: StackExtra {
+                book: Some(Box::new(crate::session::Book::default())),
+                ..Default::default()
+            }
+            .into(),
             ..Default::default()
         };
         assert_eq!(text_of(&styled_hover_name(&draft)), "Book and Quill");
@@ -692,7 +701,11 @@ mod tests {
         SlotStack {
             item,
             count: 1,
-            potion: Some(contents),
+            extra: StackExtra {
+                potion: Some(contents),
+                ..Default::default()
+            }
+            .into(),
             ..Default::default()
         }
     }
@@ -823,11 +836,15 @@ mod tests {
         let stack = SlotStack {
             item: "diamond_pickaxe",
             count: 1,
-            lore: vec![
-                crate::text::styled("first", Style::default()),
-                crate::text::styled("second", Style::default()),
-            ],
-            enchantments: vec![("silk_touch".into(), 1), ("efficiency".into(), 5)],
+            extra: StackExtra {
+                lore: vec![
+                    crate::text::styled("first", Style::default()),
+                    crate::text::styled("second", Style::default()),
+                ],
+                enchantments: vec![("silk_touch".into(), 1), ("efficiency".into(), 5)],
+                ..Default::default()
+            }
+            .into(),
             unbreakable: true,
             ..Default::default()
         };
@@ -862,7 +879,11 @@ mod tests {
         let stack = SlotStack {
             item: "golden_apple",
             count: 1,
-            custom_name: Some(crate::text::styled("Snack", Style::default())),
+            extra: StackExtra {
+                custom_name: Some(crate::text::styled("Snack", Style::default())),
+                ..Default::default()
+            }
+            .into(),
             ..Default::default()
         };
         let title = &build_lines(&stack, false)[0][0];
@@ -942,33 +963,5 @@ mod tests {
     #[test]
     fn positioner_taller_than_screen_pins_to_top() {
         assert_eq!(position(100.0, 100.0, 320.0, 240.0, 60.0, 400.0).1, 0.0);
-    }
-
-    #[test]
-    fn preview_tooltip() {
-        let atlas = crate::gui::atlas::build_gui_atlas(&crate::assets_root());
-        let stack = SlotStack {
-            item: "diamond_pickaxe",
-            count: 1,
-            damage: 900,
-            max_damage: 1561,
-            custom_name: Some(crate::text::parse_formatted("\u{a7}bDigger of Holes")),
-            lore: vec![crate::text::styled(
-                "Older than the mountain.",
-                Style::default(),
-            )],
-            enchantments: vec![("efficiency".into(), 5), ("mending".into(), 1)],
-            potion: None,
-            unbreakable: true,
-            component_count: 5,
-            nbt_bytes: 1434,
-            charged: false,
-            map_id: None,
-            ..Default::default()
-        };
-        let mut p = Painter::new(&atlas, 0);
-        draw(&mut p, &stack, 40.0, 60.0, 320.0, 240.0, true);
-        assert!(!p.positions.is_empty());
-        crate::gui::preview::save_upscaled(&p, 320, 240, "gui_tooltip.png");
     }
 }

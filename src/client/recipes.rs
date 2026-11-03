@@ -7,7 +7,7 @@ pub use craft::{BookMenu, CraftableStatus, Selection, StackedContents};
 pub use display::{ResolvedDisplay, Shape, Stacks, cycle, place_recipe};
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 use azalea::Client;
 use azalea::local_player::WorldHolder;
@@ -21,6 +21,7 @@ use azalea_registry::identifier::Identifier;
 
 use crate::gui::toast::ToastEvent;
 use crate::session::SharedMutex;
+use crate::util::global;
 use display::Ctx;
 
 const FLAG_NOTIFICATION: u8 = 1;
@@ -95,9 +96,8 @@ impl RecipeBookState {
     }
 }
 
-fn item_tags() -> &'static RwLock<HashMap<Identifier, Box<[ItemKind]>>> {
-    static TAGS: OnceLock<RwLock<HashMap<Identifier, Box<[ItemKind]>>>> = OnceLock::new();
-    TAGS.get_or_init(Default::default)
+global! {
+fn item_tags() -> RwLock<HashMap<Identifier, Box<[ItemKind]>>>
 }
 
 pub(crate) fn set_item_tags(tags: &TagMap) {
@@ -120,6 +120,12 @@ pub(crate) fn set_item_tags(tags: &TagMap) {
 
 pub(crate) fn clear_item_tags() {
     item_tags().write().unwrap().clear();
+}
+
+pub(crate) fn item_in_tag(tag: &str, kind: ItemKind) -> Option<bool> {
+    let tags = item_tags().read().unwrap();
+    tags.get(&Identifier::new(tag))
+        .map(|items| items.contains(&kind))
 }
 
 fn item_id(kind: ItemKind) -> &'static str {

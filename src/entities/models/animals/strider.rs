@@ -7,25 +7,22 @@ const SPEED: f32 = 1.5;
 pub fn layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(0, 32)
-            .add_box(-2.0, 0.0, -2.0, 4.0, 16.0, 4.0),
+        (0, 32),
+        [-2.0, 0.0, -2.0, 4.0, 16.0, 4.0],
         PartPose::offset(-4.0, 8.0, 0.0),
     );
-    root.child(
+    root.part(
         "left_leg",
-        CubeList::new()
-            .tex_offs(0, 55)
-            .add_box(-2.0, 0.0, -2.0, 4.0, 16.0, 4.0),
+        (0, 55),
+        [-2.0, 0.0, -2.0, 4.0, 16.0, 4.0],
         PartPose::offset(4.0, 8.0, 0.0),
     );
-    let body = root.child(
+    let body = root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-8.0, -6.0, -8.0, 16.0, 14.0, 16.0),
+        (0, 0),
+        [-8.0, -6.0, -8.0, 16.0, 14.0, 16.0],
         PartPose::offset(0.0, 1.0, 0.0),
     );
     body.child(
@@ -49,25 +46,22 @@ pub fn layer() -> LayerDef {
             .add_box_mirror(-12.0, 0.0, 0.0, 12.0, 0.0, 16.0, true),
         PartPose::offset_rotation(-8.0, -5.0, -8.0, 0.0, 0.0, -0.87266463),
     );
-    body.child(
+    body.part(
         "left_top_bristle",
-        CubeList::new()
-            .tex_offs(16, 33)
-            .add_box(0.0, 0.0, 0.0, 12.0, 0.0, 16.0),
+        (16, 33),
+        [0.0, 0.0, 0.0, 12.0, 0.0, 16.0],
         PartPose::offset_rotation(8.0, -6.0, -8.0, 0.0, 0.0, 0.87266463),
     );
-    body.child(
+    body.part(
         "left_middle_bristle",
-        CubeList::new()
-            .tex_offs(16, 49)
-            .add_box(0.0, 0.0, 0.0, 12.0, 0.0, 16.0),
+        (16, 49),
+        [0.0, 0.0, 0.0, 12.0, 0.0, 16.0],
         PartPose::offset_rotation(8.0, -2.0, -8.0, 0.0, 0.0, 1.134464),
     );
-    body.child(
+    body.part(
         "left_bottom_bristle",
-        CubeList::new()
-            .tex_offs(16, 65)
-            .add_box(0.0, 0.0, 0.0, 12.0, 0.0, 16.0),
+        (16, 65),
+        [0.0, 0.0, 0.0, 12.0, 0.0, 16.0],
         PartPose::offset_rotation(8.0, 3.0, -8.0, 0.0, 0.0, 1.2217305),
     );
     LayerDef::create(mesh, 64, 128)
@@ -76,47 +70,41 @@ pub fn layer() -> LayerDef {
 pub fn baby_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-3.5, -3.75, -4.0, 7.0, 7.0, 8.0),
+        (0, 0),
+        [-3.5, -3.75, -4.0, 7.0, 7.0, 8.0],
         PartPose::offset(0.0, 16.75, 0.0),
     );
-    root.child(
+    root.part(
         "right_leg",
-        CubeList::new()
-            .tex_offs(0, 24)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 4.0, 2.0),
+        (0, 24),
+        [-1.0, 0.0, -1.0, 2.0, 4.0, 2.0],
         PartPose::offset(-1.5, 20.0, 0.0),
     );
-    root.child(
+    root.part(
         "left_leg",
-        CubeList::new()
-            .tex_offs(8, 24)
-            .add_box(-1.0, 0.0, -1.0, 2.0, 4.0, 2.0),
+        (8, 24),
+        [-1.0, 0.0, -1.0, 2.0, 4.0, 2.0],
         PartPose::offset(1.5, 20.0, 0.0),
     );
     let body = root.get("body");
-    body.child(
+    body.part(
         "bristle0",
-        CubeList::new()
-            .tex_offs(0, 21)
-            .add_box(-3.5, -2.5, 0.0, 7.0, 3.0, 0.0),
+        (0, 21),
+        [-3.5, -2.5, 0.0, 7.0, 3.0, 0.0],
         PartPose::offset(0.0, -4.25, 2.0),
     );
-    body.child(
+    body.part(
         "bristle1",
-        CubeList::new()
-            .tex_offs(0, 18)
-            .add_box(-3.5, -2.5, 0.0, 7.0, 3.0, 0.0),
+        (0, 18),
+        [-3.5, -2.5, 0.0, 7.0, 3.0, 0.0],
         PartPose::offset(0.0, -4.25, 0.0),
     );
-    body.child(
+    body.part(
         "bristle2",
-        CubeList::new()
-            .tex_offs(0, 15)
-            .add_box(-3.5, -2.5, 0.0, 7.0, 3.0, 0.0),
+        (0, 15),
+        [-3.5, -2.5, 0.0, 7.0, 3.0, 0.0],
         PartPose::offset(0.0, -4.25, -2.0),
     );
     LayerDef::create(mesh, 32, 32)

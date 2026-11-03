@@ -1,8 +1,11 @@
 use crate::gui::accountlist::{self, Account, AccountKind, Accounts};
 use crate::gui::focus;
-use crate::gui::options::SCROLLBAR_GAP;
+use crate::gui::multiplayer::{
+    self, BUTTON_GAP, CONTENT_PAD, FOOTER_H, ICON_SIZE, LAYOUT, LOWER_ROW_BUTTON_W, ROW_H, ROW_W,
+    TEXT_INSET, row_left,
+};
 use crate::gui::painter::Painter;
-use crate::gui::widgets::{self, Button, HeaderFooter, TextBox, WIDGET_HEIGHT, WIDGET_WIDTH_BIG};
+use crate::gui::widgets::{self, Button, TextBox, WIDGET_HEIGHT, WIDGET_WIDTH_BIG};
 use crate::gui::{GuiState, Screen, ScreenCtx, menu};
 use crate::platform::cli::valid_username;
 
@@ -23,15 +26,6 @@ const DELETE_QUESTION: &str = "Are you sure you want to remove this account?";
 
 const USERNAME_MAX_LEN: usize = 16;
 
-const LAYOUT: HeaderFooter = HeaderFooter::new(HeaderFooter::DEFAULT_H, 60.0);
-const FOOTER_H: f32 = LAYOUT.footer_h;
-const ROW_W: f32 = 305.0;
-const ROW_H: f32 = 36.0;
-const CONTENT_PAD: f32 = 2.0;
-const ICON_SIZE: f32 = 32.0;
-const TEXT_INSET: f32 = ICON_SIZE + 3.0;
-const BUTTON_GAP: f32 = 4.0;
-const LOWER_ROW_BUTTON_W: f32 = 74.0;
 const BAR_W: f32 = 3.0 * LOWER_ROW_BUTTON_W + 2.0 * BUTTON_GAP;
 const TOP_ROW_BUTTON_W: f32 = (BAR_W - BUTTON_GAP) / 2.0;
 const GREY: u32 = 0x808080;
@@ -165,18 +159,6 @@ impl ProfileState {
         #[cfg(feature = "online_mode")]
         crate::client::ban::account_changed();
     }
-
-    fn content_height(&self) -> f32 {
-        self.accounts.entries.len() as f32 * ROW_H + 2.0 * CONTENT_PAD
-    }
-
-    fn max_scroll(&self, list_h: f32) -> f32 {
-        (self.content_height() - list_h).max(0.0)
-    }
-
-    fn clamp_scroll(&mut self, list_h: f32) {
-        self.scroll = self.scroll.clamp(0.0, self.max_scroll(list_h));
-    }
 }
 
 fn leave(state: &mut GuiState, back: Screen) {
@@ -225,18 +207,10 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 }
 
-fn row_left(vw: f32) -> f32 {
-    ((vw / 2.0).floor() - (ROW_W / 2.0).floor()).floor()
-}
-
-fn scrollbar_x(vw: f32) -> f32 {
-    row_left(vw) + ROW_W + SCROLLBAR_GAP
-}
-
 fn draw_rows(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locked: bool) {
     let (lx, ly, lw, lh) = LAYOUT.content_rect(ctx.vw, ctx.vh);
     let st = &mut state.profile;
-    st.clamp_scroll(lh);
+    multiplayer::clamp_list_scroll(&mut st.scroll, st.accounts.entries.len(), lh);
 
     let list_focused = focus::next(!locked && !st.accounts.entries.is_empty());
 
@@ -252,6 +226,7 @@ fn draw_rows(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locked: boo
     }
 
     let mut activate: Option<usize> = None;
+    let over_list = !locked && ctx.hovering(lx, ly, lw, lh);
 
     let guard = p.push_clip(lx, ly, lw, lh);
     for i in 0..st.accounts.entries.len() {
@@ -261,13 +236,7 @@ fn draw_rows(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locked: boo
             continue;
         }
         if st.selected == Some(i) {
-            let border = if list_focused {
-                0xFFFF_FFFF
-            } else {
-                0xFF80_8080
-            };
-            p.fill(rx, ry, ROW_W, ROW_H, border);
-            p.fill(rx + 1.0, ry + 1.0, ROW_W - 2.0, ROW_H - 2.0, 0xFF00_0000);
+            multiplayer::draw_selection_outline(p, rx, ry, list_focused);
         }
 
         let (cx, cy) = (rx + CONTENT_PAD, ry + CONTENT_PAD);
@@ -281,7 +250,7 @@ fn draw_rows(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locked: boo
             cw,
         );
 
-        if !locked && ctx.input.left_click && ctx.hovering(rx, ry, ROW_W, ROW_H) {
+        if over_list && ctx.input.left_click && ctx.hovering(rx, ry, ROW_W, ROW_H) {
             st.selected = Some(i);
             focus::claim();
             if ctx.input.double_click {
@@ -300,7 +269,7 @@ fn draw_row_content(p: &mut Painter, account: &Account, active: bool, cx: f32, c
     p.sprite("pack_icon", cx, cy, ICON_SIZE, ICON_SIZE);
 
     let text_x = cx + TEXT_INSET;
-    p.text_str(
+    p.text_plain(
         &account.name,
         text_x,
         cy + 6.0,
@@ -311,11 +280,11 @@ fn draw_row_content(p: &mut Painter, account: &Account, active: bool, cx: f32, c
         AccountKind::Microsoft => AQUA,
         AccountKind::Offline => GREY,
     };
-    p.text_str(account.kind.label(), text_x, cy + 18.0, color, true);
+    p.text_plain(account.kind.label(), text_x, cy + 18.0, color, true);
 
     if active {
         let w = p.atlas.font.width_str(IN_USE);
-        p.text_str(IN_USE, cx + cw - w, cy + 6.0, GREEN, true);
+        p.text_plain(IN_USE, cx + cw - w, cy + 6.0, GREEN, true);
     }
 }
 
@@ -327,8 +296,8 @@ fn draw_scrollbar(
     locked: bool,
 ) {
     let st = &mut state.profile;
-    let content_h = st.content_height();
-    crate::gui::multiplayer::list_scrollbar(
+    let content_h = multiplayer::list_content_height(st.accounts.entries.len());
+    multiplayer::list_scrollbar(
         p,
         ctx,
         &mut st.scroll,
@@ -433,15 +402,12 @@ fn handle_list_keys(state: &mut GuiState, ctx: &ScreenCtx) {
         return;
     }
     let count = state.profile.accounts.entries.len();
-    if count > 0 && (input.up_arrow || input.down_arrow) {
-        let delta = if input.up_arrow { -1i32 } else { 1 };
-        let next = match state.profile.selected {
-            Some(i) => (i as i32 + delta).clamp(0, count as i32 - 1) as usize,
-            None if delta > 0 => 0,
-            None => count - 1,
-        };
-        state.profile.selected = Some(next);
-    }
+    multiplayer::arrow_select(
+        &mut state.profile.selected,
+        count,
+        input.up_arrow,
+        input.down_arrow,
+    );
     if input.enter
         && let Some(i) = state.profile.selected.filter(|i| *i < count)
     {
@@ -637,7 +603,7 @@ pub fn draw_edit(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         );
         (x, buttons, bottom)
     };
-    p.text_str(USERNAME_LABEL, x + 1.0, 53.0, 0xA0A0A0, true);
+    p.text_plain(USERNAME_LABEL, x + 1.0, 53.0, 0xA0A0A0, true);
 
     let field = &mut state.profile.username;
     field.update(p, ctx, x, 66.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT);
@@ -709,12 +675,6 @@ pub fn draw_edit(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn row_and_scrollbar_geometry() {
-        assert_eq!(row_left(854.0), 275.0);
-        assert_eq!(scrollbar_x(854.0), 275.0 + 305.0 + 8.0);
-    }
 
     #[test]
     fn the_footer_rows_line_up() {

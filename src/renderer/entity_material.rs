@@ -18,6 +18,7 @@ pub enum LightMode {
     Flat = 1,
     Emissive = 2,
     Text = 3,
+    Outline = 4,
 }
 
 const DIFFUSE_LIGHT: [Vec3; 2] = [Vec3::new(0.2, 1.0, -0.7), Vec3::new(-0.2, 1.0, 0.7)];
@@ -86,6 +87,17 @@ impl Lit {
             dirs: diffuse_lights(Dimension::Overworld),
             overlay_alpha: 1.0,
             overlay_white: false,
+        }
+    }
+
+    pub fn vertex_lit() -> Lit {
+        Lit {
+            light: super::lightmap::CellLight {
+                floor: [1.0; 3],
+                sky: [0.0; 3],
+                ..super::lightmap::CellLight::full_bright()
+            },
+            ..Lit::full_bright()
         }
     }
 }
@@ -271,13 +283,7 @@ impl<K: Hash + Eq, const CAP: usize> SharedMaterials<K, CAP> {
 }
 
 impl Material for EntityMaterial {
-    fn vertex_shader() -> ShaderRef {
-        shader()
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        shader()
-    }
+    crate::renderer::material_shader_fns!();
 
     fn alpha_mode(&self) -> AlphaMode {
         self.alpha_mode

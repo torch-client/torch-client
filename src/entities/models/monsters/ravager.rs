@@ -11,11 +11,10 @@ fn triangle_wave(value: f32, period: f32) -> f32 {
 pub fn layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    let neck = root.child(
+    let neck = root.part(
         "neck",
-        CubeList::new()
-            .tex_offs(68, 73)
-            .add_box(-5.0, -1.0, -18.0, 10.0, 10.0, 18.0),
+        (68, 73),
+        [-5.0, -1.0, -18.0, 10.0, 10.0, 18.0],
         PartPose::offset(0.0, -7.0, 5.5),
     );
     let head = neck.child(
@@ -27,11 +26,10 @@ pub fn layer() -> LayerDef {
             .add_box(-2.0, -6.0, -18.0, 4.0, 8.0, 4.0),
         PartPose::offset(0.0, 16.0, -17.0),
     );
-    head.child(
+    head.part(
         "right_horn",
-        CubeList::new()
-            .tex_offs(74, 55)
-            .add_box(0.0, -14.0, -2.0, 2.0, 14.0, 4.0),
+        (74, 55),
+        [0.0, -14.0, -2.0, 2.0, 14.0, 4.0],
         PartPose::offset_rotation(-10.0, -14.0, -8.0, 1.0995574, 0.0, 0.0),
     );
     head.child(
@@ -42,11 +40,10 @@ pub fn layer() -> LayerDef {
             .add_box(0.0, -14.0, -2.0, 2.0, 14.0, 4.0),
         PartPose::offset_rotation(8.0, -14.0, -8.0, 1.0995574, 0.0, 0.0),
     );
-    head.child(
+    head.part(
         "mouth",
-        CubeList::new()
-            .tex_offs(0, 36)
-            .add_box(-8.0, 0.0, -16.0, 16.0, 3.0, 16.0),
+        (0, 36),
+        [-8.0, 0.0, -16.0, 16.0, 3.0, 16.0],
         PartPose::offset(0.0, -2.0, 2.0),
     );
     root.child(
@@ -58,11 +55,10 @@ pub fn layer() -> LayerDef {
             .add_box(-6.0, 6.0, -7.0, 12.0, 13.0, 18.0),
         PartPose::offset_rotation(0.0, 1.0, 2.0, 1.5707964, 0.0, 0.0),
     );
-    root.child(
+    root.part(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(96, 0)
-            .add_box(-4.0, 0.0, -4.0, 8.0, 37.0, 8.0),
+        (96, 0),
+        [-4.0, 0.0, -4.0, 8.0, 37.0, 8.0],
         PartPose::offset(-8.0, -13.0, 18.0),
     );
     root.child(
@@ -73,11 +69,10 @@ pub fn layer() -> LayerDef {
             .add_box(-4.0, 0.0, -4.0, 8.0, 37.0, 8.0),
         PartPose::offset(8.0, -13.0, 18.0),
     );
-    root.child(
+    root.part(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(64, 0)
-            .add_box(-4.0, 0.0, -4.0, 8.0, 37.0, 8.0),
+        (64, 0),
+        [-4.0, 0.0, -4.0, 8.0, 37.0, 8.0],
         PartPose::offset(-8.0, -13.0, -5.0),
     );
     root.child(

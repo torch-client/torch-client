@@ -167,6 +167,112 @@ mod web {
         }
     }
 
+    #[cfg(lua_mods)]
+    mod saved {
+        use std::path::Path;
+
+        use js_sys::{Function, Reflect, Uint8Array};
+        use wasm_bindgen::{JsCast, JsValue};
+
+        use super::{DIRS, FILES, dirs_under, under};
+
+        const MODS: &str = "mods";
+
+        pub(super) fn kept(path: &Path) -> bool {
+            path.starts_with(MODS)
+        }
+
+        fn call(method: &str, path: &Path, bytes: Option<&[u8]>) {
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            let Ok(store) = Reflect::get(&window, &JsValue::from_str("torchModFiles")) else {
+                return;
+            };
+            if store.is_undefined() {
+                return;
+            }
+            let Ok(f) = Reflect::get(&store, &JsValue::from_str(method)) else {
+                return;
+            };
+            let Some(f) = f.dyn_ref::<Function>() else {
+                return;
+            };
+            let key = JsValue::from_str(&path.to_string_lossy());
+            let result = match bytes {
+                Some(b) => f.call2(&store, &key, &Uint8Array::from(b)),
+                None => f.call1(&store, &key),
+            };
+            if let Err(e) = result {
+                crate::log_warn!("mods", "could not keep {}: {e:?}", path.display());
+            }
+        }
+
+        pub(super) fn put_tree(path: &Path) {
+            if !kept(path) {
+                return;
+            }
+            let (files, dirs): (Vec<_>, Vec<_>) = {
+                let all = FILES.lock();
+                let files = all
+                    .get(path)
+                    .map(|f| (path.to_path_buf(), f.1.clone()))
+                    .into_iter()
+                    .chain(under(&all, path).map(|(p, f)| (p.clone(), f.1.clone())))
+                    .collect();
+                let made = DIRS.lock();
+                let dirs = made
+                    .get(path)
+                    .cloned()
+                    .into_iter()
+                    .chain(dirs_under(&made, path).cloned())
+                    .collect();
+                (files, dirs)
+            };
+            for dir in dirs {
+                call("mkdir", &dir, None);
+            }
+            for (file, bytes) in files {
+                call("put", &file, Some(bytes.as_slice()));
+            }
+        }
+
+        pub(super) fn put(path: &Path, bytes: &[u8]) {
+            if kept(path) {
+                call("put", path, Some(bytes));
+            }
+        }
+
+        pub(super) fn mkdir(path: &Path) {
+            if kept(path) {
+                call("mkdir", path, None);
+            }
+        }
+
+        pub(super) fn remove(path: &Path) {
+            if kept(path) {
+                call("remove", path, None);
+            }
+        }
+    }
+
+    #[cfg(lua_mods)]
+    pub(crate) fn seed(path: &str, bytes: Option<Vec<u8>>) {
+        let path = PathBuf::from(path);
+        if !saved::kept(&path) {
+            return;
+        }
+        match bytes {
+            Some(bytes) => {
+                let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                FILES.lock().insert(path, (serial, Arc::new(bytes)));
+            }
+            None => {
+                DIRS.lock().insert(path);
+            }
+        }
+    }
+
     pub(crate) fn root() -> PathBuf {
         PathBuf::new()
     }
@@ -196,9 +302,10 @@ mod web {
             ));
         }
         let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        FILES
-            .lock()
-            .insert(path.to_path_buf(), (serial, Arc::new(bytes.into())));
+        let bytes = Arc::new(bytes.into());
+        #[cfg(lua_mods)]
+        saved::put(path, &bytes);
+        FILES.lock().insert(path.to_path_buf(), (serial, bytes));
         Ok(())
     }
 
@@ -206,6 +313,8 @@ mod web {
         let bytes = shared(from.as_ref())?;
         let len = bytes.len() as u64;
         let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(lua_mods)]
+        saved::put(to.as_ref(), &bytes);
         FILES
             .lock()
             .insert(to.as_ref().to_path_buf(), (serial, bytes));
@@ -214,6 +323,16 @@ mod web {
 
     pub(crate) fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
         let (from, to) = (from.as_ref(), to.as_ref());
+        move_in_memory(from, to)?;
+        #[cfg(lua_mods)]
+        {
+            saved::remove(from);
+            saved::put_tree(to);
+        }
+        Ok(())
+    }
+
+    fn move_in_memory(from: &Path, to: &Path) -> Result<()> {
         let mut files = FILES.lock();
         if let Some(file) = files.remove(from) {
             files.insert(to.to_path_buf(), file);
@@ -246,7 +365,10 @@ mod web {
             .lock()
             .remove(path)
             .map(drop)
-            .ok_or_else(|| not_found(path))
+            .ok_or_else(|| not_found(path))?;
+        #[cfg(lua_mods)]
+        saved::remove(path);
+        Ok(())
     }
 
     pub(crate) fn remove_dir(path: impl AsRef<Path>) -> Result<()> {
@@ -265,17 +387,21 @@ mod web {
                 format!("{} is not empty", path.display()),
             ));
         }
-        if dirs.remove(path) {
-            Ok(())
-        } else {
-            Err(not_found(path))
+        if !dirs.remove(path) {
+            return Err(not_found(path));
         }
+        drop((files, dirs));
+        #[cfg(lua_mods)]
+        saved::remove(path);
+        Ok(())
     }
 
     pub(crate) fn remove_dir_all(path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         FILES.lock().retain(|at, _| !at.starts_with(path));
         DIRS.lock().retain(|at| !at.starts_with(path));
+        #[cfg(lua_mods)]
+        saved::remove(path);
         Ok(())
     }
 
@@ -289,7 +415,10 @@ mod web {
         }
         let mut dirs = DIRS.lock();
         for at in path.ancestors().filter(|at| !at.as_os_str().is_empty()) {
-            dirs.insert(at.to_path_buf());
+            if dirs.insert(at.to_path_buf()) {
+                #[cfg(lua_mods)]
+                saved::mkdir(at);
+            }
         }
         Ok(())
     }
@@ -303,6 +432,8 @@ mod web {
             ));
         }
         DIRS.lock().insert(path.to_path_buf());
+        #[cfg(lua_mods)]
+        saved::mkdir(path);
         Ok(())
     }
 

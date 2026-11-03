@@ -182,6 +182,7 @@ impl ClickGuiState {
 
         let fy = y + HEADER_H + 3.0;
         self.sync_pointer(ui, active);
+        self.arm_search(ui, x + 5.0, fy, w - 10.0, FIELD_H);
         search_field(
             p,
             look,

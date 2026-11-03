@@ -422,7 +422,7 @@ fn loading(p: &mut Painter, ui: &StatsUi, ctx: &ScreenCtx, area_y: f32, area_h: 
     let top = area_y + ((area_h - widget_h - LOADING_PAD_BOTTOM) * 0.5).floor();
     let center_y = top + (widget_h / 2.0).floor();
     let w = p.atlas.font.width_str(message);
-    p.text_str(
+    p.text_plain(
         message,
         ((ctx.vw - w) / 2.0).floor(),
         center_y - LINE_HEIGHT,
@@ -432,7 +432,7 @@ fn loading(p: &mut Painter, ui: &StatsUi, ctx: &ScreenCtx, area_y: f32, area_h: 
     let ms = ui.opened.map_or(0, |t| t.elapsed().as_millis());
     let dots = DOTS[(ms / DOTS_INTERVAL_MS) as usize % DOTS.len()];
     let w = p.atlas.font.width_str(dots);
-    p.text_str(
+    p.text_plain(
         dots,
         ((ctx.vw - w) / 2.0).floor(),
         center_y + LINE_HEIGHT,
@@ -458,11 +458,11 @@ fn general_row(
 ) {
     let (cx, _, y) = content(left, top, GENERAL_ROW_H);
     let color = if index % 2 == 0 { EVEN } else { ODD };
-    p.text_str(name, cx + 2.0, y, color, true);
+    p.text_plain(name, cx + 2.0, y, color, true);
     let value = format_custom(*stat, stats.get(Stat::Custom(*stat)));
     let right = cx + ROW_W - 2.0 * PAD;
     let w = p.atlas.font.width_str(&value);
-    p.text_str(&value, right - w - 4.0, y, color, true);
+    p.text_plain(&value, right - w - 4.0, y, color, true);
 }
 
 fn mob_row(
@@ -473,7 +473,7 @@ fn mob_row(
     top: f32,
 ) {
     let (cx, cy, _) = content(left, top, MOB_ROW_H);
-    p.text_str(name, cx + 2.0, cy + 1.0, EVEN, true);
+    p.text_plain(name, cx + 2.0, cy + 1.0, EVEN, true);
 
     let kills = stats.get(Stat::Killed(*entity));
     let (text, color) = if kills == 0 {
@@ -493,7 +493,7 @@ fn mob_row(
             ODD,
         )
     };
-    p.text_str(&text, cx + 12.0, cy + 1.0 + LINE_HEIGHT, color, true);
+    p.text_plain(&text, cx + 12.0, cy + 1.0 + LINE_HEIGHT, color, true);
 
     let killed_by = stats.get(Stat::KilledBy(*entity));
     let (text, color) = if killed_by == 0 {
@@ -513,7 +513,7 @@ fn mob_row(
             ODD,
         )
     };
-    p.text_str(&text, cx + 12.0, cy + 1.0 + 2.0 * LINE_HEIGHT, color, true);
+    p.text_plain(&text, cx + 12.0, cy + 1.0 + 2.0 * LINE_HEIGHT, color, true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -584,7 +584,7 @@ fn items(
             let text = column.stat(item).map(|s| format_default(stats.get(s)));
             let text = text.as_deref().unwrap_or(none);
             let w = p.atlas.font.width_str(text);
-            p.text_str(text, cx + Column::x(c) - w, y, color, true);
+            p.text_plain(text, cx + Column::x(c) - w, y, color, true);
         }
     }
 }

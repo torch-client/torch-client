@@ -49,6 +49,14 @@ impl<'a> Reader<'a> {
         Some(u64::from_be_bytes(self.take(8)?.try_into().ok()?))
     }
 
+    pub(crate) fn i32(&mut self) -> Option<i32> {
+        Some(i32::from_be_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    pub(crate) fn uuid(&mut self) -> Option<u128> {
+        Some(u128::from_be_bytes(self.take(16)?.try_into().ok()?))
+    }
+
     pub(crate) fn varint(&mut self) -> Option<i32> {
         Some(self.var(MAX_VARINT_BYTES)? as u32 as i32)
     }

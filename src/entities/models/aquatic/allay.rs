@@ -9,11 +9,10 @@ pub fn layer() -> LayerDef {
     let root = mesh
         .root()
         .child("root", CubeList::new(), PartPose::offset(0.0, 23.5, 0.0));
-    root.child(
+    root.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-2.5, -5.0, -2.5, 5.0, 5.0, 5.0),
+        (0, 0),
+        [-2.5, -5.0, -2.5, 5.0, 5.0, 5.0],
         PartPose::offset(0.0, -3.99, 0.0),
     );
     let body = root.child(
@@ -25,44 +24,30 @@ pub fn layer() -> LayerDef {
             .add_box_grow(-1.5, 0.0, -1.0, 3.0, 5.0, 2.0, Grow::all(-0.2)),
         PartPose::offset(0.0, -4.0, 0.0),
     );
-    body.child(
+    body.part_grow(
         "right_arm",
-        CubeList::new().tex_offs(23, 0).add_box_grow(
-            -0.75,
-            -0.5,
-            -1.0,
-            1.0,
-            4.0,
-            2.0,
-            Grow::all(-0.01),
-        ),
+        (23, 0),
+        [-0.75, -0.5, -1.0, 1.0, 4.0, 2.0],
+        Grow::all(-0.01),
         PartPose::offset(-1.75, 0.5, 0.0),
     );
-    body.child(
+    body.part_grow(
         "left_arm",
-        CubeList::new().tex_offs(23, 6).add_box_grow(
-            -0.25,
-            -0.5,
-            -1.0,
-            1.0,
-            4.0,
-            2.0,
-            Grow::all(-0.01),
-        ),
+        (23, 6),
+        [-0.25, -0.5, -1.0, 1.0, 4.0, 2.0],
+        Grow::all(-0.01),
         PartPose::offset(1.75, 0.5, 0.0),
     );
-    body.child(
+    body.part(
         "right_wing",
-        CubeList::new()
-            .tex_offs(16, 14)
-            .add_box(0.0, 1.0, 0.0, 0.0, 5.0, 8.0),
+        (16, 14),
+        [0.0, 1.0, 0.0, 0.0, 5.0, 8.0],
         PartPose::offset(-0.5, 0.0, 0.6),
     );
-    body.child(
+    body.part(
         "left_wing",
-        CubeList::new()
-            .tex_offs(16, 14)
-            .add_box(0.0, 1.0, 0.0, 0.0, 5.0, 8.0),
+        (16, 14),
+        [0.0, 1.0, 0.0, 0.0, 5.0, 8.0],
         PartPose::offset(0.5, 0.0, 0.6),
     );
     LayerDef::create(mesh, 32, 32)

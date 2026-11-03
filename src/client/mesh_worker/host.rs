@@ -36,13 +36,10 @@ struct Handle {
 }
 
 fn worker_url() -> String {
-    let glue = js_sys::Reflect::get(&js_sys::global(), &"torchGlue".into())
+    js_sys::Reflect::get(&js_sys::global(), &"torchWorker".into())
         .ok()
-        .and_then(|v| v.as_string());
-    match glue {
-        Some(glue) => format!("./worker.js?{}", glue.trim_start_matches("./")),
-        None => "./worker.js".to_string(),
-    }
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| "./worker.js".to_string())
 }
 
 pub fn spawn(assets: &[u8]) -> bool {
@@ -208,8 +205,8 @@ fn apply(msg: FromWorker) {
 }
 
 fn supersede(
-    pending_chunks: &mut Vec<crate::renderer::PendingSection>,
-    pending_edits: &mut Vec<crate::renderer::PendingSection>,
+    pending_chunks: &mut std::collections::VecDeque<crate::renderer::PendingSection>,
+    pending_edits: &mut std::collections::VecDeque<crate::renderer::PendingSection>,
     chunks: &[crate::renderer::PendingSection],
     edits: &[crate::renderer::PendingSection],
 ) {

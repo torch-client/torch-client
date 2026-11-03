@@ -4,7 +4,7 @@ use crate::entities::RenderSpec;
 use crate::entities::TexturePath;
 use crate::entities::models::animals::equine;
 use crate::entities::registry::Registry;
-use crate::entities::render::{add_adult_and_baby, aged_texture};
+use crate::entities::render::{add_adult_and_baby, aged_texture, saddle_spec};
 use crate::entities::state::EntityState;
 
 pub fn register(registry: &mut Registry) {
@@ -26,14 +26,12 @@ pub fn register(registry: &mut Registry) {
     );
     registry.add(
         EntityKind::Donkey,
-        RenderSpec::new(
+        saddle_spec(
             "donkey_saddle",
             equine::donkey_saddle_layer,
             saddle_texture,
             equine::saddle_setup_anim,
-        )
-        .with_visible(|st| !st.extras.is_baby && st.extras.saddled)
-        .ignoring_invisibility(),
+        ),
     );
     add_adult_and_baby(
         registry,
@@ -53,14 +51,12 @@ pub fn register(registry: &mut Registry) {
     );
     registry.add(
         EntityKind::Mule,
-        RenderSpec::new(
+        saddle_spec(
             "mule_saddle",
             equine::mule_saddle_layer,
             saddle_texture,
             equine::saddle_setup_anim,
-        )
-        .with_visible(|st| !st.extras.is_baby && st.extras.saddled)
-        .ignoring_invisibility(),
+        ),
     );
 }
 

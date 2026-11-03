@@ -74,13 +74,7 @@ impl Material for SkyMaterial {
         BIAS_SKY_DOME
     }
 
-    fn enable_prepass() -> bool {
-        false
-    }
-
-    fn enable_shadows() -> bool {
-        false
-    }
+    crate::renderer::material_no_prepass_no_shadows!();
 
     fn specialize(
         _pipeline: &MaterialPipeline,
@@ -414,7 +408,7 @@ fn load_celestial(path: &std::path::Path) -> Image {
     image
 }
 
-fn add_celestial(
+pub(super) fn add_celestial(
     images: &mut Assets<Image>,
     path: std::path::PathBuf,
     tiled: bool,
@@ -827,14 +821,23 @@ fn update_sky(
                     Visibility::Hidden
                 });
             }
-            SkyPart::Sun => {
-                transform.set_if_neq(place(sky.sun_angle, SUN_HEIGHT, SUN_SIZE));
-            }
-            SkyPart::Moon => {
-                transform.set_if_neq(place(sky.moon_angle, MOON_HEIGHT, MOON_SIZE));
-                if sky.moon_phase != assets.moon_phase {
-                    assets.moon_phase = sky.moon_phase;
-                    material.0 = assets.moon_materials[sky.moon_phase].clone();
+            SkyPart::Sun | SkyPart::Moon => {
+                if *part == SkyPart::Sun {
+                    transform.set_if_neq(place(sky.sun_angle, SUN_HEIGHT, SUN_SIZE));
+                } else {
+                    transform.set_if_neq(place(sky.moon_angle, MOON_HEIGHT, MOON_SIZE));
+                    if sky.moon_phase != assets.moon_phase {
+                        assets.moon_phase = sky.moon_phase;
+                        material.0 = assets.moon_materials[sky.moon_phase].clone();
+                    }
+                }
+                let want = Color::srgba(1.0, 1.0, 1.0, 1.0 - env.rain);
+                if materials
+                    .get(&material.0)
+                    .is_some_and(|m| m.base.base_color != want)
+                    && let Some(m) = materials.get_mut(&material.0)
+                {
+                    m.base.base_color = want;
                 }
             }
             SkyPart::Stars => {

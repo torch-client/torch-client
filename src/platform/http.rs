@@ -144,7 +144,7 @@ mod imp {
             .map_err(|e| e.to_string())
     }
 
-    #[cfg(lua_mods)]
+    #[cfg(any(lua_mods, feature = "skins"))]
     pub(super) fn get_status_blocking(url: &str) -> Result<(u16, Vec<u8>), String> {
         let resp = client().get(url).send().map_err(|e| chain(&e))?;
         let status = resp.status().as_u16();
@@ -165,7 +165,11 @@ mod imp {
 
     async fn response(url: &str) -> Result<web_sys::Response, HttpError> {
         let window = web_sys::window().ok_or(HttpError::other("no window"))?;
-        let value = JsFuture::from(window.fetch_with_str(url))
+        settled(window.fetch_with_str(url)).await
+    }
+
+    async fn settled(fetch: js_sys::Promise) -> Result<web_sys::Response, HttpError> {
+        let value = JsFuture::from(fetch)
             .await
             .map_err(|e| HttpError::network(err("fetch failed", e)))?;
         let resp: web_sys::Response = value
@@ -178,7 +182,25 @@ mod imp {
     }
 
     pub(super) async fn get_string(url: &str) -> Result<String, HttpError> {
-        let resp = response(url).await?;
+        body_text(response(url).await?).await
+    }
+
+    pub(super) async fn get_string_accepting(url: &str, accept: &str) -> Result<String, HttpError> {
+        use web_sys::{Headers, Request, RequestInit};
+
+        let window = web_sys::window().ok_or(HttpError::other("no window"))?;
+        let headers = Headers::new().map_err(|e| HttpError::other(err("no headers", e)))?;
+        headers
+            .set("accept", accept)
+            .map_err(|e| HttpError::other(err("bad header", e)))?;
+        let init = RequestInit::new();
+        init.set_headers(&headers);
+        let request = Request::new_with_str_and_init(url, &init)
+            .map_err(|e| HttpError::other(err("bad request", e)))?;
+        body_text(settled(window.fetch_with_request(&request)).await?).await
+    }
+
+    async fn body_text(resp: web_sys::Response) -> Result<String, HttpError> {
         let text = JsFuture::from(
             resp.text()
                 .map_err(|e| HttpError::other(err("no body", e)))?,
@@ -258,6 +280,11 @@ pub(crate) async fn get_string(url: &str) -> Result<String, HttpError> {
     imp::get_string(url).await
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn get_string_accepting(url: &str, accept: &str) -> Result<String, HttpError> {
+    imp::get_string_accepting(url, accept).await
+}
+
 pub(crate) async fn get_bytes(
     url: &str,
     expected: u64,
@@ -276,7 +303,7 @@ pub(crate) fn get_as_blocking(url: &str, user_agent: &str) -> Result<Vec<u8>, St
     imp::get_as_blocking(url, user_agent)
 }
 
-#[cfg(all(lua_mods, not(target_arch = "wasm32")))]
+#[cfg(all(any(lua_mods, feature = "skins"), not(target_arch = "wasm32")))]
 pub(crate) fn get_status_blocking(url: &str) -> Result<(u16, Vec<u8>), String> {
     imp::get_status_blocking(url)
 }

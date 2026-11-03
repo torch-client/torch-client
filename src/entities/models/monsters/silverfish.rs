@@ -1,6 +1,6 @@
 #![allow(clippy::approx_constant)]
 
-use crate::entities::geom::{BakedModel, CubeList, LayerDef, MeshDef, PartPose, PartState};
+use crate::entities::geom::{BakedModel, LayerDef, MeshDef, PartPose, PartState};
 use crate::entities::state::EntityState;
 
 const SEGMENT_NAMES: [&str; 7] = [
@@ -26,16 +26,17 @@ fn segments(mesh: &mut MeshDef, sizes: &[[i32; 3]], texs: &[[i32; 2]]) -> Vec<f3
     let mut placement = -3.5;
     let mut z_placement = Vec::with_capacity(sizes.len());
     for i in 0..sizes.len() {
-        root.child(
+        root.part(
             &format!("segment{i}"),
-            CubeList::new().tex_offs(texs[i][0], texs[i][1]).add_box(
+            (texs[i][0], texs[i][1]),
+            [
                 sizes[i][0] as f32 * -0.5,
                 0.0,
                 sizes[i][2] as f32 * -0.5,
                 sizes[i][0] as f32,
                 sizes[i][1] as f32,
                 sizes[i][2] as f32,
-            ),
+            ],
             PartPose::offset(0.0, (24 - sizes[i][1]) as f32, placement),
         );
         z_placement.push(placement);
@@ -50,40 +51,43 @@ pub fn silverfish_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let z = segments(&mut mesh, &SILVERFISH_SIZES, &SILVERFISH_TEXS);
     let root = mesh.root();
-    root.child(
+    root.part(
         "layer0",
-        CubeList::new().tex_offs(20, 0).add_box(
+        (20, 0),
+        [
             -5.0,
             0.0,
             SILVERFISH_SIZES[2][2] as f32 * -0.5,
             10.0,
             8.0,
             SILVERFISH_SIZES[2][2] as f32,
-        ),
+        ],
         PartPose::offset(0.0, 16.0, z[2]),
     );
-    root.child(
+    root.part(
         "layer1",
-        CubeList::new().tex_offs(20, 11).add_box(
+        (20, 11),
+        [
             -3.0,
             0.0,
             SILVERFISH_SIZES[4][2] as f32 * -0.5,
             6.0,
             4.0,
             SILVERFISH_SIZES[4][2] as f32,
-        ),
+        ],
         PartPose::offset(0.0, 20.0, z[4]),
     );
-    root.child(
+    root.part(
         "layer2",
-        CubeList::new().tex_offs(20, 18).add_box(
+        (20, 18),
+        [
             -3.0,
             0.0,
             SILVERFISH_SIZES[4][2] as f32 * -0.5,
             6.0,
             5.0,
             SILVERFISH_SIZES[1][2] as f32,
-        ),
+        ],
         PartPose::offset(0.0, 19.0, z[1]),
     );
     LayerDef::create(mesh, 64, 32)

@@ -1,4 +1,4 @@
-use crate::gui::painter::Painter;
+use crate::gui::painter::{self, Painter};
 
 const FIRE_X_OFFSET: f32 = 0.24;
 const FIRE_Y_OFFSET: f32 = -0.3;
@@ -27,6 +27,20 @@ pub struct ScreenEffects {
     pub confusion: f32,
     pub portal: f32,
     pub portal_frame: u64,
+    pub vignette: u32,
+}
+
+fn vignette_color(border: &azalea::world::WorldBorder, x: f64, z: f64) -> u32 {
+    let dist = f64::from(border.distance_to_border(x, z) as f32);
+    let moving = (border.lerp_speed() * f64::from(border.warning_time))
+        .min((border.lerp_target() - border.size()).abs());
+    let warning = f64::from(border.warning_blocks).max(moving);
+    if dist >= warning {
+        return 0;
+    }
+    let strength = (1.0 - (dist / warning) as f32).clamp(0.0, 1.0);
+    let gb = (strength * 255.0) as u32;
+    0xFF00_0000 | gb << 8 | gb
 }
 
 impl ScreenEffects {
@@ -54,6 +68,7 @@ impl ScreenEffects {
             confusion,
             portal,
             portal_frame: view.game_time % PORTAL_FRAMES,
+            vignette: vignette_color(&view.border, view.player_pos[0], view.player_pos[2]),
         }
     }
 }
@@ -103,7 +118,7 @@ fn draw_fire(p: &mut Painter, vw: f32, vh: f32) {
         let ndc_y = y / (depth * tan_half);
         [(ndc_x + 1.0) * 0.5 * vw, (1.0 - ndc_y) * 0.5 * vh]
     };
-    let argb = ((FIRE_ALPHA * 255.0).round() as u32) << 24 | 0x00FF_FFFF;
+    let argb = painter::argb(FIRE_ALPHA, 0x00FF_FFFF);
     for i in 0..2 {
         let side = if i == 0 { 1.0 } else { -1.0 };
         let (sin, cos) = (-side * FIRE_TURN_DEGREES).to_radians().sin_cos();
@@ -144,7 +159,7 @@ pub fn draw_portal(p: &mut Painter, fx: &ScreenEffects, vw: f32, vh: f32) {
     if alpha < 1.0 {
         alpha = alpha.powi(4) * (1.0 - PORTAL_MIN_ALPHA) + PORTAL_MIN_ALPHA;
     }
-    let argb = ((alpha * 255.0).round() as u32) << 24 | 0x00FF_FFFF;
+    let argb = painter::argb(alpha, 0x00FF_FFFF);
     let v0 = fx.portal_frame as f32 / PORTAL_FRAMES as f32;
     let v1 = v0 + 1.0 / PORTAL_FRAMES as f32;
     p.sprite_quad(

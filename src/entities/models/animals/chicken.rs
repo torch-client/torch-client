@@ -5,32 +5,28 @@ use crate::util::mth::DEG_TO_RAD;
 fn base_mesh() -> MeshDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    let head = root.child(
+    let head = root.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-2.0, -6.0, -2.0, 4.0, 6.0, 3.0),
+        (0, 0),
+        [-2.0, -6.0, -2.0, 4.0, 6.0, 3.0],
         PartPose::offset(0.0, 15.0, -4.0),
     );
-    head.child(
+    head.part(
         "beak",
-        CubeList::new()
-            .tex_offs(14, 0)
-            .add_box(-2.0, -4.0, -4.0, 4.0, 2.0, 2.0),
+        (14, 0),
+        [-2.0, -4.0, -4.0, 4.0, 2.0, 2.0],
         PartPose::ZERO,
     );
-    head.child(
+    head.part(
         "red_thing",
-        CubeList::new()
-            .tex_offs(14, 4)
-            .add_box(-1.0, -2.0, -3.0, 2.0, 2.0, 2.0),
+        (14, 4),
+        [-1.0, -2.0, -3.0, 2.0, 2.0, 2.0],
         PartPose::ZERO,
     );
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 9)
-            .add_box(-3.0, -4.0, -3.0, 6.0, 8.0, 6.0),
+        (0, 9),
+        [-3.0, -4.0, -3.0, 6.0, 8.0, 6.0],
         PartPose::offset_rotation(0.0, 16.0, 0.0, std::f32::consts::FRAC_PI_2, 0.0, 0.0),
     );
     let leg = CubeList::new()
@@ -38,18 +34,16 @@ fn base_mesh() -> MeshDef {
         .add_box(-1.0, 0.0, -3.0, 3.0, 5.0, 3.0);
     root.child("right_leg", leg.clone(), PartPose::offset(-2.0, 19.0, 1.0));
     root.child("left_leg", leg, PartPose::offset(1.0, 19.0, 1.0));
-    root.child(
+    root.part(
         "right_wing",
-        CubeList::new()
-            .tex_offs(24, 13)
-            .add_box(0.0, 0.0, -3.0, 1.0, 4.0, 6.0),
+        (24, 13),
+        [0.0, 0.0, -3.0, 1.0, 4.0, 6.0],
         PartPose::offset(-4.0, 13.0, 0.0),
     );
-    root.child(
+    root.part(
         "left_wing",
-        CubeList::new()
-            .tex_offs(24, 13)
-            .add_box(-1.0, 0.0, -3.0, 1.0, 4.0, 6.0),
+        (24, 13),
+        [-1.0, 0.0, -3.0, 1.0, 4.0, 6.0],
         PartPose::offset(4.0, 13.0, 0.0),
     );
     mesh
@@ -112,18 +106,16 @@ pub fn baby_layer() -> LayerDef {
             .add_box(-0.5, 2.0, -1.0, 1.0, 0.0, 1.0),
         PartPose::offset(-1.0, 22.0, 0.5),
     );
-    root.child(
+    root.part(
         "right_wing",
-        CubeList::new()
-            .tex_offs(6, 8)
-            .add_box(0.0, 0.0, -1.0, 1.0, 0.0, 2.0),
+        (6, 8),
+        [0.0, 0.0, -1.0, 1.0, 0.0, 2.0],
         PartPose::offset(2.0, 20.0, 0.0),
     );
-    root.child(
+    root.part(
         "left_wing",
-        CubeList::new()
-            .tex_offs(4, 8)
-            .add_box(-1.0, 0.0, -1.0, 1.0, 0.0, 2.0),
+        (4, 8),
+        [-1.0, 0.0, -1.0, 1.0, 0.0, 2.0],
         PartPose::offset(-2.0, 20.0, 0.0),
     );
     LayerDef::create(mesh, 16, 16)

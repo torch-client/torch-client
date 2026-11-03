@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use azalea_protocol::packets::game::ClientboundGamePacket;
 use azalea_protocol::packets::game::c_boss_event::{
@@ -9,6 +9,7 @@ use crate::client::chat_text::to_spans;
 use crate::platform::time::Instant;
 use crate::session::SharedMutex;
 use crate::text::Span;
+use crate::util::global;
 
 #[derive(Clone)]
 pub struct BossBar {
@@ -18,10 +19,6 @@ pub struct BossBar {
     pub set_at: Instant,
     pub color: u8,
     pub overlay: u8,
-    #[allow(
-        dead_code,
-        reason = "published boss-bar state the renderer does not consume yet"
-    )]
     pub darken: bool,
     #[allow(
         dead_code,
@@ -42,11 +39,7 @@ struct Bar {
     bar: BossBar,
 }
 
-static STATE: OnceLock<Mutex<Vec<Bar>>> = OnceLock::new();
-
-fn state() -> &'static Mutex<Vec<Bar>> {
-    STATE.get_or_init(Default::default)
-}
+global!(fn state() -> Mutex<Vec<Bar>>);
 
 pub(crate) fn reset() {
     state().lock().unwrap().clear();

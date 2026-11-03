@@ -1,7 +1,7 @@
 use std::{
     cmp,
     hash::{Hash, Hasher},
-    mem::{self, transmute},
+    mem::transmute,
     ops::{Add, Mul},
 };
 
@@ -124,24 +124,18 @@ impl Hash for RelBlockPos {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(C)]
 pub struct SmallChunkSectionPos {
     pub y: i32,
-    pub x: i16,
-    pub z: i16,
-}
-impl SmallChunkSectionPos {
-    pub fn as_u64(self) -> u64 {
-        unsafe { mem::transmute::<_, u64>(self) }
-    }
+    pub x: i32,
+    pub z: i32,
 }
 impl From<BlockPos> for SmallChunkSectionPos {
     #[inline]
     fn from(pos: BlockPos) -> Self {
         Self {
-            x: (pos.x >> 4) as i16,
+            x: pos.x >> 4,
             y: pos.y >> 4,
-            z: (pos.z >> 4) as i16,
+            z: pos.z >> 4,
         }
     }
 }
@@ -152,6 +146,6 @@ impl PartialOrd for SmallChunkSectionPos {
 }
 impl Ord for SmallChunkSectionPos {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.as_u64().cmp(&other.as_u64())
+        (self.y, self.x, self.z).cmp(&(other.y, other.x, other.z))
     }
 }

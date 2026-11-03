@@ -176,9 +176,18 @@ if ! grep -q "$GLUE" "$DIST/worker.js"; then
   exit 1
 fi
 
+WORKER="worker.$(sha256sum "$DIST/worker.js" | cut -c1-12).js"
+mv "$DIST/worker.js" "$DIST/$WORKER"
+sed -i "s|\./worker\.js|./$WORKER|g" "$DIST/index.html"
+
+if grep -q '\./worker\.js' "$DIST/index.html" || ! grep -q "$WORKER" "$DIST/index.html"; then
+  echo "the page does not name $WORKER; the torchWorker line in web/index.html changed" >&2
+  exit 1
+fi
+
 if (( CHROMEBOOK )); then
   cp web/chromebook/manifest.webmanifest web/chromebook/icon-*.png "$DIST/"
-  cached=(index.html "$GLUE" "$MODULE" worker.js manifest.webmanifest icon-192.png icon-512.png icon-maskable-512.png)
+  cached=(index.html "$GLUE" "$MODULE" "$WORKER" manifest.webmanifest icon-192.png icon-512.png icon-maskable-512.png)
   if [[ -f "$DIST/assets.bin" ]]; then
     cached+=(assets.bin)
   fi
@@ -209,10 +218,10 @@ cat > "$DIST/_headers" <<HEADERS
 /$GLUE
   Cache-Control: public, max-age=31536000, immutable
 
-/index.html
-  Cache-Control: no-cache
+/$WORKER
+  Cache-Control: public, max-age=31536000, immutable
 
-/worker.js
+/index.html
   Cache-Control: no-cache
 
 /snippets/*

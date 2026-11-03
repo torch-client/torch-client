@@ -1,5 +1,6 @@
 use crate::session::SideMutex;
-use std::sync::{Arc, OnceLock, atomic::AtomicU64};
+use crate::util::global;
+use std::sync::{Arc, atomic::AtomicU64};
 
 use bevy::platform::collections::{HashMap, HashSet};
 
@@ -10,16 +11,12 @@ use crate::{
 use azalea::prelude::*;
 use azalea_registry::builtin::Attribute as Attr;
 
-static MESHED: OnceLock<SideMutex<HashSet<(i32, i32)>>> = OnceLock::new();
-
-pub(crate) fn meshed_chunks() -> &'static SideMutex<HashSet<(i32, i32)>> {
-    MESHED.get_or_init(Default::default)
+global! {
+pub(crate) fn meshed_chunks() -> SideMutex<HashSet<(i32, i32)>>
 }
 
-static RECEIVED: OnceLock<SideMutex<HashSet<(i32, i32)>>> = OnceLock::new();
-
-pub(crate) fn received_chunks() -> &'static SideMutex<HashSet<(i32, i32)>> {
-    RECEIVED.get_or_init(Default::default)
+global! {
+pub(crate) fn received_chunks() -> SideMutex<HashSet<(i32, i32)>>
 }
 
 pub(crate) fn reset_chunk_tracking() {
@@ -36,18 +33,14 @@ pub(crate) fn reset_chunk_tracking_best_effort() {
     }
 }
 
-static ANIM: OnceLock<SideMutex<HashMap<i32, HumanoidAnim>>> = OnceLock::new();
+global! {
+pub(crate) fn anim_states() -> SideMutex<HashMap<i32, HumanoidAnim>>
+}
 
 pub(crate) const LOCAL_ANIM_ID: i32 = -1;
 
-pub(crate) fn anim_states() -> &'static SideMutex<HashMap<i32, HumanoidAnim>> {
-    ANIM.get_or_init(Default::default)
-}
-
-static ENTITY_ANIM: OnceLock<SideMutex<HashMap<i32, entities::feed::EntityAnim>>> = OnceLock::new();
-
-pub(crate) fn entity_anims() -> &'static SideMutex<HashMap<i32, entities::feed::EntityAnim>> {
-    ENTITY_ANIM.get_or_init(Default::default)
+global! {
+pub(crate) fn entity_anims() -> SideMutex<HashMap<i32, entities::feed::EntityAnim>>
 }
 
 pub(crate) fn on_living_anim(
@@ -67,7 +60,8 @@ pub(crate) fn on_living_anim(
 pub struct Equipment {
     pub main_hand: renderer::HeldItem,
     pub off_hand: renderer::HeldItem,
-    pub helmet: Option<&'static str>,
+    pub consume: [Option<crate::items::consume::Consumption>; 2],
+    pub head: renderer::HeldItem,
     pub chestplate: Option<&'static str>,
     pub leggings: Option<&'static str>,
     pub boots: Option<&'static str>,
@@ -76,10 +70,14 @@ pub struct Equipment {
     pub saddle: Option<&'static str>,
 }
 
-static EQUIPMENT: OnceLock<SideMutex<HashMap<i32, Equipment>>> = OnceLock::new();
+impl Equipment {
+    pub fn helmet(&self) -> Option<&'static str> {
+        (!self.head.is_empty()).then_some(self.head.id)
+    }
+}
 
-pub(crate) fn equipment() -> &'static SideMutex<HashMap<i32, Equipment>> {
-    EQUIPMENT.get_or_init(Default::default)
+global! {
+pub(crate) fn equipment() -> SideMutex<HashMap<i32, Equipment>>
 }
 
 #[derive(Clone, Debug, Default)]
@@ -188,10 +186,8 @@ pub(crate) const fn ranged(attribute: Attr) -> RangedAttribute {
 
 pub(crate) const DEFAULT_CAMERA_DISTANCE: f64 = ranged(Attr::CameraDistance).default;
 
-static ATTRIBUTES: OnceLock<SideMutex<HashMap<i32, EntityAttributes>>> = OnceLock::new();
-
-pub(crate) fn attributes() -> &'static SideMutex<HashMap<i32, EntityAttributes>> {
-    ATTRIBUTES.get_or_init(Default::default)
+global! {
+pub(crate) fn attributes() -> SideMutex<HashMap<i32, EntityAttributes>>
 }
 
 pub(crate) fn update_attributes(
@@ -244,29 +240,23 @@ where
     entity.read(|c: &C| **c).unwrap_or(false)
 }
 
-static META_INDEX_18: OnceLock<SideMutex<HashMap<i32, u8>>> = OnceLock::new();
-
-pub(crate) fn meta_index_18() -> &'static SideMutex<HashMap<i32, u8>> {
-    META_INDEX_18.get_or_init(Default::default)
+global! {
+pub(crate) fn meta_index_18() -> SideMutex<HashMap<i32, u8>>
 }
 
-static META_DIRTY: OnceLock<SideMutex<HashMap<i32, u8>>> = OnceLock::new();
-
-pub(crate) fn meta_dirty() -> &'static SideMutex<HashMap<i32, u8>> {
-    META_DIRTY.get_or_init(Default::default)
+global! {
+pub(crate) fn meta_dirty() -> SideMutex<HashMap<i32, u8>>
 }
 
 pub(crate) fn mark_meta_dirty(id: i32) {
     meta_dirty().lock().unwrap().insert(id, 2);
 }
 
-static MAPS: OnceLock<SideMutex<HashMap<i32, Box<[u8; MAP_BYTES]>>>> = OnceLock::new();
-
 pub(crate) const MAP_EDGE: usize = 128;
 pub(crate) const MAP_BYTES: usize = MAP_EDGE * MAP_EDGE;
 
-fn maps() -> &'static SideMutex<HashMap<i32, Box<[u8; MAP_BYTES]>>> {
-    MAPS.get_or_init(Default::default)
+global! {
+fn maps() -> SideMutex<HashMap<i32, Box<[u8; MAP_BYTES]>>>
 }
 
 pub(crate) fn apply_map_patch(
@@ -301,18 +291,14 @@ pub(crate) fn reset_maps() {
     maps().lock().unwrap().clear();
 }
 
-static ON_GROUND: OnceLock<SideMutex<HashMap<i32, bool>>> = OnceLock::new();
-
-pub(crate) fn on_grounds() -> &'static SideMutex<HashMap<i32, bool>> {
-    ON_GROUND.get_or_init(Default::default)
+global! {
+pub(crate) fn on_grounds() -> SideMutex<HashMap<i32, bool>>
 }
 
-static VELOCITY: OnceLock<SideMutex<HashMap<i32, ([f64; 3], u64)>>> = OnceLock::new();
+global! {
+pub(crate) fn velocities() -> SideMutex<HashMap<i32, ([f64; 3], u64)>>
+}
 static VELOCITY_SEQ: AtomicU64 = AtomicU64::new(1);
-
-pub(crate) fn velocities() -> &'static SideMutex<HashMap<i32, ([f64; 3], u64)>> {
-    VELOCITY.get_or_init(Default::default)
-}
 
 pub(crate) fn record_velocity(id: i32, delta: azalea_core::position::Vec3) {
     let seq = VELOCITY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -322,16 +308,16 @@ pub(crate) fn record_velocity(id: i32, delta: azalea_core::position::Vec3) {
         .insert(id, ([delta.x, delta.y, delta.z], seq));
 }
 
-static ADD_ENTITY_DATA: OnceLock<SideMutex<HashMap<i32, i32>>> = OnceLock::new();
-
-pub(crate) fn add_entity_data() -> &'static SideMutex<HashMap<i32, i32>> {
-    ADD_ENTITY_DATA.get_or_init(Default::default)
+global! {
+pub(crate) fn add_entity_data() -> SideMutex<HashMap<i32, i32>>
 }
 
-static PASSENGERS: OnceLock<SideMutex<HashMap<i32, Vec<i32>>>> = OnceLock::new();
+global! {
+pub(crate) fn passengers() -> SideMutex<HashMap<i32, Vec<i32>>>
+}
 
-pub(crate) fn passengers() -> &'static SideMutex<HashMap<i32, Vec<i32>>> {
-    PASSENGERS.get_or_init(Default::default)
+global! {
+pub(crate) fn leashes() -> SideMutex<HashMap<i32, i32>>
 }
 
 pub(crate) static GAME_TIME: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
@@ -366,22 +352,17 @@ pub(crate) fn overworld_clock(
     })
 }
 
-static HEAD_YAW: OnceLock<SideMutex<HashMap<i32, f32>>> = OnceLock::new();
-
-pub(crate) fn head_yaws() -> &'static SideMutex<HashMap<i32, f32>> {
-    HEAD_YAW.get_or_init(Default::default)
+global! {
+pub(crate) fn head_yaws() -> SideMutex<HashMap<i32, f32>>
 }
 
 pub(crate) fn retain_loaded<T>(items: &mut Vec<T>, key: impl Fn(&T) -> (i32, i32)) {
     let loaded = meshed_chunks().lock().unwrap();
     items.retain(|item| loaded.contains(&key(item)));
 }
-static WORLD: OnceLock<SideMutex<Option<Arc<parking_lot::RwLock<azalea_world::World>>>>> =
-    OnceLock::new();
 
-pub(crate) fn current_world()
--> &'static SideMutex<Option<Arc<parking_lot::RwLock<azalea_world::World>>>> {
-    WORLD.get_or_init(Default::default)
+global! {
+pub(crate) fn current_world() -> SideMutex<Option<Arc<parking_lot::RwLock<azalea_world::World>>>>
 }
 
 pub(crate) fn set_current_world(world: &Arc<parking_lot::RwLock<azalea_world::World>>) {

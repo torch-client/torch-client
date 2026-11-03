@@ -29,11 +29,7 @@ fn key(st: &BeState) -> Option<u64> {
 }
 
 fn layer(st: &BeState) -> LayerDef {
-    if part(st) == "head" {
-        models::bed_head()
-    } else {
-        models::bed_foot()
-    }
+    models::bed_half(part(st) == "head")
 }
 
 fn texture(st: &BeState) -> String {

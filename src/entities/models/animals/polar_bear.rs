@@ -57,11 +57,10 @@ pub fn layer() -> LayerDef {
 pub fn baby_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 9)
-            .add_box(-4.0, -3.5, -6.0, 8.0, 7.0, 12.0),
+        (0, 9),
+        [-4.0, -3.5, -6.0, 8.0, 7.0, 12.0],
         PartPose::offset(0.0, 17.5, 0.0),
     );
     root.child(
@@ -77,32 +76,28 @@ pub fn baby_layer() -> LayerDef {
             .add_box(2.0, -3.625, -2.75, 2.0, 2.0, 1.0),
         PartPose::offset(0.0, 18.625, -5.75),
     );
-    root.child(
+    root.part(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(0, 34)
-            .add_box(-1.5, -0.5, -1.5, 3.0, 3.0, 3.0),
+        (0, 34),
+        [-1.5, -0.5, -1.5, 3.0, 3.0, 3.0],
         PartPose::offset(-2.5, 21.5, 4.5),
     );
-    root.child(
+    root.part(
         "left_hind_leg",
-        CubeList::new()
-            .tex_offs(12, 34)
-            .add_box(-1.5, -0.5, -1.5, 3.0, 3.0, 3.0),
+        (12, 34),
+        [-1.5, -0.5, -1.5, 3.0, 3.0, 3.0],
         PartPose::offset(2.5, 21.5, 4.5),
     );
-    root.child(
+    root.part(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(0, 28)
-            .add_box(-1.5, -0.5, -1.5, 3.0, 3.0, 3.0),
+        (0, 28),
+        [-1.5, -0.5, -1.5, 3.0, 3.0, 3.0],
         PartPose::offset(-2.5, 21.5, -4.5),
     );
-    root.child(
+    root.part(
         "left_front_leg",
-        CubeList::new()
-            .tex_offs(12, 28)
-            .add_box(-1.5, -0.5, -1.5, 3.0, 3.0, 3.0),
+        (12, 28),
+        [-1.5, -0.5, -1.5, 3.0, 3.0, 3.0],
         PartPose::offset(2.5, 21.5, -4.5),
     );
     LayerDef::create(mesh, 64, 64)

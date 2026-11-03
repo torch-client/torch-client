@@ -24,6 +24,10 @@ pub struct FrameView {
     pub camera_distance: f32,
     pub local_body: crate::session::PlayerBody,
     pub nausea: f32,
+    pub night_vision: Option<f32>,
+    pub conduit_power: bool,
+    pub darkness: f32,
+    pub boss_darken: bool,
     pub portal: f32,
     pub day_ticks: f64,
     pub day_rate: f32,
@@ -45,10 +49,12 @@ pub struct FrameView {
     pub main_hand_left: bool,
     pub entities: Arc<Vec<EntityAnim>>,
     pub item_pickups: Vec<crate::play::item_pickup::ItemPickup>,
-    pub block_entities:
-        Arc<std::collections::HashMap<[i32; 3], crate::blockentities::feed::BlockEntityInfo>>,
+    pub block_entities: Arc<crate::blockentities::feed::BlockEntityMap>,
     pub block_entities_version: u64,
     pub game_time: u64,
+    pub compass_spawn: Option<[i32; 3]>,
+    pub compass_death: Option<[i32; 3]>,
+    pub border: azalea::world::WorldBorder,
     pub op_level: u8,
     pub local: AnimSample,
     pub breaking: Vec<BreakingBlock>,
@@ -81,6 +87,16 @@ impl FrameView {
             "nausea",
             partial,
         );
+        self.night_vision = crate::play::mob_effects::find(&session.active_effects, "night_vision")
+            .map(|e| crate::play::mob_effects::night_vision_scale(e.duration, partial));
+        self.conduit_power =
+            crate::play::mob_effects::find(&session.active_effects, "conduit_power").is_some();
+        self.darkness = crate::play::mob_effects::effect_blend_factor(
+            &session.active_effects,
+            "darkness",
+            partial,
+        );
+        self.boss_darken = session.boss_bars.iter().any(|b| b.darken);
         self.portal = session.portal_effect.sample(partial);
         self.day_ticks = session.day_clock.at(partial);
         self.day_rate = session.day_clock.rate;
@@ -103,6 +119,14 @@ impl FrameView {
         self.entities = session.entities.clone();
         self.item_pickups.clone_from(&session.item_pickups);
         self.game_time = session.game_time;
+        let here = |at: &Option<azalea_core::position::GlobalPos>| {
+            at.as_ref()
+                .filter(|at| crate::renderer::dimension::is_current_level(&at.dimension))
+                .map(|at| [at.pos.x, at.pos.y, at.pos.z])
+        };
+        self.compass_spawn = here(&session.spawn_pos);
+        self.compass_death = here(&session.last_death);
+        self.border = session.border;
         self.op_level = session.op_level;
         #[cfg(feature = "skins")]
         {

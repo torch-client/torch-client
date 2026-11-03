@@ -40,13 +40,9 @@ struct Profiler {
     dropped: u64,
 }
 
-static PROF: OnceLock<Mutex<Profiler>> = OnceLock::new();
-
 static CAPTURE_UNTIL_NS: AtomicU64 = AtomicU64::new(0);
 
-fn prof() -> &'static Mutex<Profiler> {
-    PROF.get_or_init(Default::default)
-}
+crate::util::global!(fn prof() -> Mutex<Profiler>);
 
 fn max_records() -> usize {
     static MAX: OnceLock<usize> = OnceLock::new();

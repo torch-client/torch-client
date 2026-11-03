@@ -19,40 +19,77 @@ use tokio::{
 };
 
 use super::socket::{Frame, Rx, Socket, Tx};
+use super::wisp;
+use crate::util::wire::{Reader, write_varint};
 use crate::{log_error, log_info, log_warn};
 
 static PREPARED: Mutex<Option<transport::HandshakeConn>> = Mutex::new(None);
 
 pub(super) fn prepare(socket: Socket, profile: GameProfile, eagler_version: u16) {
+    let bridge = spawn_bridge(socket, Some(profile), None);
+    #[cfg(eagler_skins)]
+    super::skins::begin(eagler_version, bridge.to_server.clone());
+    #[cfg(not(eagler_skins))]
+    let _ = eagler_version;
+    park(Connection::wrap_stream(bridge));
+}
+
+pub(super) fn prepare_raw(socket: Socket, wisp: Option<wisp::Stream>) {
+    park(raw_connection(socket, wisp));
+}
+
+pub(super) fn raw_connection(
+    socket: Socket,
+    wisp: Option<wisp::Stream>,
+) -> transport::HandshakeConn {
+    Connection::wrap_stream(spawn_bridge(socket, None, wisp))
+}
+
+fn spawn_bridge(
+    socket: Socket,
+    profile: Option<GameProfile>,
+    wisp: Option<wisp::Stream>,
+) -> Bridge {
+    let raw = profile.is_none();
     let (to_server, outgoing) = unbounded_channel();
     let (from_server, incoming) = unbounded_channel();
     let (open_gate, gate) = oneshot::channel();
-    #[cfg(eagler_skins)]
-    super::skins::begin(eagler_version, to_server.clone());
-    #[cfg(not(eagler_skins))]
-    let _ = eagler_version;
+    let login = if raw {
+        let _ = open_gate.send(());
+        Login::Done
+    } else {
+        Login::Intention(open_gate)
+    };
 
     let (tx, rx) = socket.split();
     let pump_side = from_server.clone();
     crate::platform::executor::spawn_task(async move {
-        if let Err(e) = pump(tx, rx, outgoing, pump_side, gate).await {
-            log_error!("net", "eagler: the connection stopped: {e}");
-        }
+        let reason = match pump(tx, rx, outgoing, pump_side.clone(), gate, raw, wisp).await {
+            Ok(()) => None,
+            Err(e) => {
+                log_error!("net", "eagler: the connection stopped: {e}");
+                Some(e.to_string())
+            }
+        };
+        let _ = pump_side.send(FromServer::Ended(reason));
     });
 
-    let bridge = Bridge {
+    Bridge {
         to_server,
         incoming,
         inject: from_server,
         pending: Vec::new(),
         taken: 0,
         partial: Vec::new(),
-        login: Login::Intention(open_gate),
-        profile,
+        login,
+        profile: profile.unwrap_or_default(),
+        raw,
         closed: false,
-    };
+    }
+}
 
-    *PREPARED.lock().unwrap() = Some(Connection::wrap_stream(bridge));
+fn park(connection: transport::HandshakeConn) {
+    *PREPARED.lock().unwrap() = Some(connection);
 
     transport::set_opener(Box::new(|_address| {
         Box::pin(async move {
@@ -66,29 +103,57 @@ pub(super) fn prepare(socket: Socket, profile: GameProfile, eagler_version: u16)
     }));
 }
 
+enum FromServer {
+    Bytes(Vec<u8>),
+    Ended(Option<String>),
+}
+
 async fn pump(
     mut tx: Tx,
     mut rx: Rx,
     mut outgoing: UnboundedReceiver<Vec<u8>>,
-    incoming: UnboundedSender<Vec<u8>>,
+    incoming: UnboundedSender<FromServer>,
     gate: oneshot::Receiver<()>,
+    raw: bool,
+    mut wisp: Option<wisp::Stream>,
 ) -> eyre::Result<()> {
     if gate.await.is_err() {
         return Ok(());
     }
-    log_info!("net", "eagler: past the faked login, relaying packets");
+    if !raw {
+        log_info!("net", "eagler: past the faked login, relaying packets");
+    }
 
     loop {
         tokio::select! {
-            body = outgoing.recv() => {
+            body = outgoing.recv(), if wisp.as_ref().is_none_or(wisp::Stream::can_send) => {
                 let Some(body) = body else {
                     log_info!("net", "eagler: azalea closed the connection");
                     return Ok(());
                 };
+                let body = match wisp.as_mut() {
+                    Some(stream) => stream.data(&body),
+                    None => body,
+                };
                 tx.send_binary(body).await?;
             }
             message = rx.recv() => {
-                match message?.unwrap_or(Frame::Close(None)) {
+                let frame = message?.unwrap_or(Frame::Close(None));
+                let frame = match (frame, wisp.as_mut()) {
+                    (Frame::Binary(message), Some(stream)) => match stream.receive(&message) {
+                        wisp::Inbound::Data(bytes) => Frame::Binary(bytes),
+                        wisp::Inbound::Closed(reason) => eyre::bail!("{reason}"),
+                        wisp::Inbound::Nothing => Frame::Other,
+                    },
+                    (frame, _) => frame,
+                };
+                match frame {
+                    Frame::Binary(payload) if raw => {
+                        if incoming.send(FromServer::Bytes(payload)).is_err() {
+                            log_info!("net", "eagler: azalea dropped the connection");
+                            return Ok(());
+                        }
+                    }
                     Frame::Binary(payload) if is_injected(&payload) => {
                         note_injected(&payload);
                         #[cfg(eagler_skins)]
@@ -96,7 +161,7 @@ async fn pump(
                     }
                     Frame::Binary(payload) => {
                         for body in unprefixed(payload) {
-                            if incoming.send(body).is_err() {
+                            if incoming.send(FromServer::Bytes(body)).is_err() {
                                 log_info!("net", "eagler: azalea dropped the connection");
                                 return Ok(());
                             }
@@ -223,13 +288,14 @@ const ID_LOGIN_ACKNOWLEDGED: u32 = 0x03;
 
 pub(super) struct Bridge {
     to_server: UnboundedSender<Vec<u8>>,
-    incoming: UnboundedReceiver<Vec<u8>>,
-    inject: UnboundedSender<Vec<u8>>,
+    incoming: UnboundedReceiver<FromServer>,
+    inject: UnboundedSender<FromServer>,
     pending: Vec<u8>,
     taken: usize,
     partial: Vec<u8>,
     login: Login,
     profile: GameProfile,
+    raw: bool,
     closed: bool,
 }
 
@@ -245,9 +311,13 @@ impl AsyncRead for Bridge {
                 return Poll::Ready(Ok(()));
             }
             match me.incoming.poll_recv(cx) {
-                Poll::Ready(Some(body)) => {
-                    me.pending = framed(&body);
+                Poll::Ready(Some(FromServer::Bytes(body))) => {
+                    me.pending = if me.raw { body } else { framed(&body) };
                     me.taken = 0;
+                }
+                Poll::Ready(Some(FromServer::Ended(reason))) => {
+                    me.closed = true;
+                    return Poll::Ready(reason.map_or(Ok(()), |r| Err(io::Error::other(r))));
                 }
                 Poll::Ready(None) => {
                     me.closed = true;
@@ -270,6 +340,12 @@ impl AsyncWrite for Bridge {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let me = &mut *self;
+        if me.raw {
+            me.to_server.send(buf.to_vec()).map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "the tunnel connection is gone")
+            })?;
+            return Poll::Ready(Ok(buf.len()));
+        }
         me.partial.extend_from_slice(buf);
         while let Some((len, header)) = read_varint(&me.partial) {
             let len = len as usize;
@@ -331,9 +407,11 @@ impl Bridge {
             });
             let raw = azalea_protocol::write::serialize_packet(&packet)
                 .map_err(|e| io::Error::other(format!("eagler: {e}")))?;
-            self.inject.send(raw.into_vec()).map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "the eagler connection is gone")
-            })?;
+            self.inject
+                .send(FromServer::Bytes(raw.into_vec()))
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "the eagler connection is gone")
+                })?;
         }
 
         self.login = match std::mem::replace(&mut self.login, Login::Done) {
@@ -350,31 +428,14 @@ impl Bridge {
 }
 
 fn read_varint(buf: &[u8]) -> Option<(u32, usize)> {
-    let mut value = 0u32;
-    for (i, byte) in buf.iter().take(5).enumerate() {
-        value |= ((byte & 0x7F) as u32) << (i * 7);
-        if byte & 0x80 == 0 {
-            return Some((value, i + 1));
-        }
-    }
-    None
-}
-
-fn write_varint(out: &mut Vec<u8>, mut value: u32) {
-    loop {
-        let byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if value == 0 {
-            out.push(byte);
-            return;
-        }
-        out.push(byte | 0x80);
-    }
+    let mut r = Reader::new(buf);
+    let value = r.varint()? as u32;
+    Some((value, r.pos()))
 }
 
 fn framed(body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + 5);
-    write_varint(&mut out, body.len() as u32);
+    write_varint(&mut out, body.len() as i32);
     out.extend_from_slice(body);
     out
 }
@@ -426,7 +487,7 @@ mod tests {
     fn no_packet_id_can_look_like_an_eaglerx_message() {
         for id in 0..=255u32 {
             let mut out = Vec::new();
-            write_varint(&mut out, id);
+            write_varint(&mut out, id as i32);
             assert_ne!(out[0], super::INJECTED, "id {id} collides with the marker");
         }
     }
@@ -447,21 +508,6 @@ mod tests {
         super::write_varint(&mut frame, 0x8d);
         frame.extend(std::iter::repeat_n(0u8, 0x8d));
         assert_eq!(super::unprefixed(frame.clone()), vec![frame]);
-    }
-
-    #[test]
-    fn a_varint_round_trips() {
-        for value in [0u32, 1, 127, 128, 255, 2097151, u32::MAX] {
-            let mut out = Vec::new();
-            write_varint(&mut out, value);
-            assert_eq!(read_varint(&out), Some((value, out.len())));
-        }
-    }
-
-    #[test]
-    fn a_truncated_varint_is_not_a_value() {
-        assert_eq!(read_varint(&[]), None);
-        assert_eq!(read_varint(&[0x80]), None);
     }
 
     #[test]

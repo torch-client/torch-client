@@ -9,7 +9,7 @@ pub mod travel;
 
 use std::collections::HashSet;
 
-use azalea_block::{BlockState, BlockTrait};
+use azalea_block::BlockState;
 use azalea_core::{
     math,
     position::{BlockPos, Vec3},
@@ -397,7 +397,9 @@ fn handle_relative_friction_and_calculate_movement(ctx: &mut MoveCtx, block_fric
             .unwrap_or_default()
             .into();
 
-        if *ctx.on_climbable || block_at_feet == BlockKind::PowderSnow {
+        if *ctx.on_climbable
+            || (block_at_feet == BlockKind::PowderSnow && ctx.powder_snow_walkable)
+        {
             ctx.physics.velocity.y = 0.2;
         }
     }
@@ -452,24 +454,20 @@ fn get_friction_influenced_speed(
 }
 
 pub fn block_jump_factor(world: &World, position: Position) -> f32 {
-    let block_at_pos = world.chunks.get_block_state(position.into());
-    let block_below = world
-        .chunks
-        .get_block_state(get_block_pos_below_that_affects_movement(position));
-
-    let block_at_pos_jump_factor = if let Some(block) = block_at_pos {
-        Box::<dyn BlockTrait>::from(block).behavior().jump_factor
-    } else {
-        1.
+    let factor_of = |pos: BlockPos| {
+        block_jump_factor_of(BlockKind::from(world.chunks.get_block_state(pos).unwrap_or_default()))
     };
-    if block_at_pos_jump_factor != 1. {
-        return block_at_pos_jump_factor;
+    let here = factor_of(position.into());
+    if here != 1. {
+        return here;
     }
+    factor_of(get_block_pos_below_that_affects_movement(position))
+}
 
-    if let Some(block) = block_below {
-        Box::<dyn BlockTrait>::from(block).behavior().jump_factor
-    } else {
-        1.
+pub const fn block_jump_factor_of(block: BlockKind) -> f32 {
+    match block {
+        BlockKind::HoneyBlock => 0.5,
+        _ => 1.0,
     }
 }
 

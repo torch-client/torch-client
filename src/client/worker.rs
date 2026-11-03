@@ -868,6 +868,14 @@ fn fill_light(occ: &mut Occupancy, light: &crate::lighting::LightMap) {
                     (sy * 16).max(y_base),
                     (sy * 16 + 15).min(y_base + y_count - 1),
                 );
+                if let crate::lighting::level::SectionSample::Uniform { block, sky } = sample {
+                    for y in wy0..=wy1 {
+                        for x in wx0..=wx1 {
+                            occ.set_light_z_run(x, y, wz0, wz1, block, sky);
+                        }
+                    }
+                    continue;
+                }
                 for y in wy0..=wy1 {
                     for x in wx0..=wx1 {
                         for z in wz0..=wz1 {
@@ -939,6 +947,7 @@ fn fill_occupancy(
             let i = usize::try_from(sec_idx as i32 - lo).ok()?;
             states.get(i * SECTION_CELLS..(i + 1) * SECTION_CELLS)
         });
+        let mut biome_cells = [u16::MAX; 64];
         for ly in 0u8..16 {
             let y = sec_y + ly as i32;
             if !occ.covers_y(y) {
@@ -961,16 +970,20 @@ fn fill_occupancy(
                     let rb = cache.get(state);
                     let z = oz + lz as i32;
                     occ.set_cull_group(x, y, z, rb.cull_group);
-                    let biome = section.get_biome(ChunkSectionBiomePos {
-                        x: lx / 4,
-                        y: ly / 4,
-                        z: lz / 4,
-                    });
-                    let idx = biomes
-                        .get(biome.protocol_id() as usize)
-                        .copied()
-                        .unwrap_or(u8::MAX);
-                    occ.set_biome(x, y, z, idx);
+                    let cell = &mut biome_cells
+                        [(ly as usize / 4) * 16 + (lz as usize / 4) * 4 + lx as usize / 4];
+                    if *cell == u16::MAX {
+                        let biome = section.get_biome(ChunkSectionBiomePos {
+                            x: lx / 4,
+                            y: ly / 4,
+                            z: lz / 4,
+                        });
+                        *cell = biomes
+                            .get(biome.protocol_id() as usize)
+                            .copied()
+                            .unwrap_or(u8::MAX) as u16;
+                    }
+                    occ.set_biome(x, y, z, *cell as u8);
                     if rb.full_cube {
                         occ.set_full_cube(x, y, z);
                     }

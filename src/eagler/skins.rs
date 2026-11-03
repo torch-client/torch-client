@@ -5,6 +5,7 @@ use image::RgbaImage;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::client::skins::SkinRef;
+use crate::util::wire::{Reader, write_varint};
 use crate::{log_debug, log_info};
 
 pub(crate) const V4_CHANNEL: &str = "eagler:1-8";
@@ -76,7 +77,7 @@ pub(crate) fn request(uuid: u128) {
         s.next_id = s.next_id.wrapping_add(1) & i32::MAX;
         s.pending.insert(id, uuid);
         let mut frame = vec![INJECTED, V5_GET_OTHER_SKIN];
-        write_varint(&mut frame, id as u32);
+        write_varint(&mut frame, id);
         frame.extend(hi.to_be_bytes());
         frame.extend(lo.to_be_bytes());
         let _ = s.socket.send(frame);
@@ -115,11 +116,11 @@ fn unbatch(body: &[u8]) -> Vec<&[u8]> {
         return vec![body];
     };
     let mut out = Vec::new();
-    let mut r = Reader(rest);
+    let mut r = Reader::new(rest);
     let Some(count) = r.varint() else { return out };
-    for _ in 0..count {
+    for _ in 0..count as u32 {
         let Some(len) = r.varint() else { break };
-        let Some(message) = r.take(len as usize) else {
+        let Some(message) = r.take(len as u32 as usize) else {
             break;
         };
         out.push(message);
@@ -133,20 +134,17 @@ enum Texture<'a> {
 }
 
 fn receive(message: &[u8], version: u16) {
-    let mut r = Reader(message);
+    let mut r = Reader::new(message);
     let Some(id) = r.u8() else { return };
     let parsed = if version >= 5 {
         match id {
-            V5_SKIN_PRESET => r.varint().and_then(|req| {
-                Some((
-                    Who::Request(req as i32),
-                    Texture::Preset(r.varint()? as i32),
-                ))
-            }),
+            V5_SKIN_PRESET => r
+                .varint()
+                .and_then(|req| Some((Who::Request(req), Texture::Preset(r.varint()?)))),
             V5_SKIN_CUSTOM => r.varint().and_then(|req| {
                 let model = r.u8()?;
                 Some((
-                    Who::Request(req as i32),
+                    Who::Request(req),
                     Texture::Custom {
                         slim: model == 1,
                         pixels: r.take(CUSTOM_LEN)?,
@@ -255,55 +253,6 @@ fn decode(pixels: &[u8]) -> Option<RgbaImage> {
     RgbaImage::from_raw(64, 64, rgba)
 }
 
-fn write_varint(out: &mut Vec<u8>, mut value: u32) {
-    loop {
-        let byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if value == 0 {
-            out.push(byte);
-            return;
-        }
-        out.push(byte | 0x80);
-    }
-}
-
-struct Reader<'a>(&'a [u8]);
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        if self.0.len() < n {
-            return None;
-        }
-        let (head, tail) = self.0.split_at(n);
-        self.0 = tail;
-        Some(head)
-    }
-
-    fn u8(&mut self) -> Option<u8> {
-        Some(self.take(1)?[0])
-    }
-
-    fn i32(&mut self) -> Option<i32> {
-        Some(i32::from_be_bytes(self.take(4)?.try_into().ok()?))
-    }
-
-    fn uuid(&mut self) -> Option<u128> {
-        Some(u128::from_be_bytes(self.take(16)?.try_into().ok()?))
-    }
-
-    fn varint(&mut self) -> Option<u32> {
-        let mut value = 0u32;
-        for i in 0..5 {
-            let byte = self.u8()?;
-            value |= ((byte & 0x7F) as u32) << (i * 7);
-            if byte & 0x80 == 0 {
-                return Some(value);
-            }
-        }
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,12 +271,5 @@ mod tests {
         let image = decode(&pixels).unwrap();
         assert_eq!(image.get_pixel(0, 0).0, [0x10, 0x20, 0x30, 0xFF]);
         assert_eq!(image.get_pixel(1, 0).0[3], 0);
-    }
-
-    #[test]
-    fn a_varint_reads_back() {
-        let mut out = Vec::new();
-        write_varint(&mut out, 300);
-        assert_eq!(Reader(&out).varint(), Some(300));
     }
 }

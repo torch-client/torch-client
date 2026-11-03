@@ -1,4 +1,5 @@
 use crate::gui::painter::Painter;
+use crate::gui::tooltip::label;
 use crate::gui::widgets::{self, Button, HeaderFooter};
 use crate::gui::{GuiState, Screen, ScreenCtx};
 use crate::text::{LINE_HEIGHT, Span};
@@ -43,7 +44,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) -> Option<Sc
         LAYOUT.footer_y(ctx.vh),
         widgets::WIDGET_WIDTH_BIG,
         widgets::WIDGET_HEIGHT,
-        "Back to title screen",
+        label!("gui.toTitle"),
     )
     .draw(p, ctx)
     .then_some(Screen::Title)

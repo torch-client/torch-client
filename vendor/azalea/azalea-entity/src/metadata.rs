@@ -3218,6 +3218,8 @@ pub struct OnBack(pub bool);
 #[derive(Component, Deref, DerefMut, Clone, Copy, PartialEq)]
 pub struct PandaRolling(pub bool);
 #[derive(Component, Deref, DerefMut, Clone, PartialEq)]
+pub struct MainGene(pub u8);
+#[derive(Component, Deref, DerefMut, Clone, PartialEq)]
 pub struct HiddenGene(pub u8);
 #[derive(Component, Deref, DerefMut, Clone, PartialEq)]
 pub struct PandaFlags(pub u8);
@@ -3240,17 +3242,18 @@ impl Panda {
                 entity.insert(EatCounter(d.value.into_int()?));
             }
             21 => {
-                let bitfield = d.value.into_byte()?;
-                entity.insert(Sneezing(bitfield & 0x2 != 0));
-                entity.insert(PandaSitting(bitfield & 0x8 != 0));
-                entity.insert(OnBack(bitfield & 0x10 != 0));
-                entity.insert(PandaRolling(bitfield & 0x4 != 0));
+                entity.insert(MainGene(d.value.into_byte()?));
             }
             22 => {
                 entity.insert(HiddenGene(d.value.into_byte()?));
             }
             23 => {
-                entity.insert(PandaFlags(d.value.into_byte()?));
+                let bitfield = d.value.into_byte()?;
+                entity.insert(Sneezing(bitfield & 0x2 != 0));
+                entity.insert(PandaSitting(bitfield & 0x8 != 0));
+                entity.insert(OnBack(bitfield & 0x10 != 0));
+                entity.insert(PandaRolling(bitfield & 0x4 != 0));
+                entity.insert(PandaFlags(bitfield));
             }
             _ => {}
         }
@@ -3269,6 +3272,7 @@ pub struct PandaMetadataBundle {
     panda_sitting: PandaSitting,
     on_back: OnBack,
     panda_rolling: PandaRolling,
+    main_gene: MainGene,
     hidden_gene: HiddenGene,
     panda_flags: PandaFlags,
 }
@@ -3284,6 +3288,7 @@ impl Default for PandaMetadataBundle {
             panda_sitting: PandaSitting(false),
             on_back: OnBack(false),
             panda_rolling: PandaRolling(false),
+            main_gene: MainGene(0),
             hidden_gene: HiddenGene(0),
             panda_flags: PandaFlags(0),
         }

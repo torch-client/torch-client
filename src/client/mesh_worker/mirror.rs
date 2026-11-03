@@ -437,7 +437,7 @@ impl Mirror {
             &mut self.scratch,
             POST_SECTIONS,
         );
-        let (chunks, edits) = {
+        let (mut chunks, mut edits) = {
             let mut s = self.shared.lock().unwrap();
             (
                 std::mem::take(&mut s.session.pending_chunks),
@@ -449,7 +449,10 @@ impl Mirror {
         }
         let n = chunks.len() + edits.len();
         self.posted = self.posted.wrapping_add(n as u32);
-        post(msg::sections(&chunks, &edits));
+        post(msg::sections(
+            chunks.make_contiguous(),
+            edits.make_contiguous(),
+        ));
         n
     }
 }

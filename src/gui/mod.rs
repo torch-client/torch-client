@@ -52,8 +52,6 @@ pub mod ping;
 #[cfg(feature = "skins")]
 pub mod player_faces;
 pub mod pool;
-#[cfg(test)]
-pub mod preview;
 pub mod profile;
 pub mod puppet;
 pub mod recipe_book;
@@ -422,6 +420,7 @@ pub struct GuiOptions {
     pub shader_quality: crate::renderer::terrain::ShaderQuality,
     pub shaders_enabled: bool,
     pub player_shadows: bool,
+    pub entity_shadows: bool,
     pub touch_movement: TouchMovement,
     pub lod_distance: u32,
     pub lod_quality: LodQuality,
@@ -586,6 +585,9 @@ impl GuiOptions {
             player_shadows: value("playerShadows")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            entity_shadows: value("entityShadows")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             touch_movement: value("touchMovement")
                 .and_then(|v| v.as_str().and_then(TouchMovement::from_serialized_name))
                 .unwrap_or_default(),
@@ -697,7 +699,28 @@ pub fn save_options(options: &GuiOptions) {
     }
     let mut file = chosen.clone();
     file.insert(OPTIONS_FORMAT_KEY.to_owned(), OPTIONS_FORMAT.into());
-    crate::platform::storage::OPTIONS.store(&serde_json::Value::Object(file).to_string());
+    let text = serde_json::Value::Object(file).to_string();
+    if widgets::slider_dragging() {
+        *PENDING_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
+        return;
+    }
+    PENDING_OPTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    crate::platform::storage::OPTIONS.store(&text);
+}
+
+static PENDING_OPTIONS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub(in crate::gui) fn flush_pending_options() {
+    let pending = PENDING_OPTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(text) = pending {
+        crate::platform::storage::OPTIONS.store(&text);
+    }
 }
 
 fn options_json(options: &GuiOptions) -> serde_json::Value {
@@ -722,6 +745,7 @@ fn options_json(options: &GuiOptions) -> serde_json::Value {
         "shaders": options.shaders_enabled,
         "shaderQuality": options.shader_quality.serialized_name(),
         "playerShadows": options.player_shadows,
+        "entityShadows": options.entity_shadows,
         "touchMovement": options.touch_movement.serialized_name(),
         "lodDistance": options.lod_distance,
         "lodQuality": options.lod_quality.serialized_name(),
@@ -872,11 +896,12 @@ pub struct Snapshot {
     pub subtitle_text: Option<Vec<crate::text::Span>>,
     pub title_times: Option<(Option<u32>, Option<u32>, Option<u32>)>,
     pub titles_clear: Option<bool>,
-    pub menu_slots: Vec<SlotStack>,
+    pub menu_slots: std::sync::Arc<[SlotStack]>,
     pub attack_strength: f32,
     pub attack_delay: f32,
     pub targeted_entity: bool,
     pub hotbar: std::sync::Arc<[SlotStack]>,
+    pub armor: std::sync::Arc<[SlotStack]>,
     pub carried: SlotStack,
     pub selected: u8,
     pub gamemode: Gamemode,
@@ -965,7 +990,7 @@ mod tests {
         hotbar[9] = stack("shield");
 
         let snap = Snapshot {
-            menu_slots,
+            menu_slots: menu_slots.into(),
             hotbar: hotbar.into(),
             ..Default::default()
         };

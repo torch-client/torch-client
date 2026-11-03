@@ -38,11 +38,11 @@ pub fn squid_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
     let g = Grow::all(0.02);
-    root.child(
+    root.part_grow(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box_grow(-6.0, -8.0, -6.0, 12.0, 16.0, 12.0, g),
+        (0, 0),
+        [-6.0, -8.0, -6.0, 12.0, 16.0, 12.0],
+        g,
         PartPose::offset(0.0, 8.0, 0.0),
     );
     let tentacle = CubeList::new()
@@ -55,11 +55,10 @@ pub fn squid_layer() -> LayerDef {
 pub fn baby_squid_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-4.0, -5.0, -4.0, 8.0, 10.0, 8.0),
+        (0, 0),
+        [-4.0, -5.0, -4.0, 8.0, 10.0, 8.0],
         PartPose::offset(0.0, 13.0, 0.0),
     );
     let tentacle = CubeList::new()

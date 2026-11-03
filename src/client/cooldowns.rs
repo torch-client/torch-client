@@ -1,7 +1,9 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use azalea_protocol::packets::game::ClientboundGamePacket;
 use azalea_registry::identifier::Identifier;
+
+use crate::util::global;
 
 struct Cooldown {
     group: Identifier,
@@ -15,11 +17,7 @@ struct State {
     tick: u32,
 }
 
-static STATE: OnceLock<Mutex<State>> = OnceLock::new();
-
-fn state() -> &'static Mutex<State> {
-    STATE.get_or_init(Default::default)
-}
+global!(fn state() -> Mutex<State>);
 
 pub(crate) fn reset() {
     let mut s = state().lock().unwrap();
@@ -72,6 +70,17 @@ pub(crate) fn percent(group_override: Option<&Identifier>, item: &str) -> u8 {
     let duration = u64::from(c.end.saturating_sub(c.start)).max(1);
     let remaining = u64::from(c.end.saturating_sub(s.tick));
     (remaining * 255).div_ceil(duration).min(255) as u8
+}
+
+pub(crate) fn stack_percent(data: &azalea_inventory::ItemStackData) -> u8 {
+    if !any_active() {
+        return 0;
+    }
+    let use_cooldown = data.get_component::<azalea_inventory::components::UseCooldown>();
+    let group = use_cooldown
+        .as_ref()
+        .and_then(|c| c.cooldown_group.as_ref());
+    percent(group, data.kind.to_str().trim_start_matches("minecraft:"))
 }
 
 #[cfg(test)]

@@ -25,18 +25,16 @@ pub fn end_crystal_layer() -> LayerDef {
             PartPose::offset(0.0, 24.0, 0.0),
         );
         let inner = outer.child("inner_glass", glass_cube, PartPose::ZERO.with_scale(0.875));
-        inner.child(
+        inner.part(
             "cube",
-            CubeList::new()
-                .tex_offs(32, 0)
-                .add_box(-4.0, -4.0, -4.0, 8.0, 8.0, 8.0),
+            (32, 0),
+            [-4.0, -4.0, -4.0, 8.0, 8.0, 8.0],
             PartPose::ZERO.with_scale(0.765_625),
         );
-        root.child(
+        root.part(
             "base",
-            CubeList::new()
-                .tex_offs(0, 16)
-                .add_box(-6.0, 0.0, -6.0, 12.0, 4.0, 12.0),
+            (0, 16),
+            [-6.0, 0.0, -6.0, 12.0, 4.0, 12.0],
             PartPose::ZERO,
         );
     }
@@ -77,11 +75,10 @@ pub fn end_crystal_setup_anim(model: &BakedModel, parts: &mut [PartState], st: &
 pub fn evoker_fangs_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     {
-        let base = mesh.root().child(
+        let base = mesh.root().part(
             "base",
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box(0.0, 0.0, 0.0, 10.0, 12.0, 10.0),
+            (0, 0),
+            [0.0, 0.0, 0.0, 10.0, 12.0, 10.0],
             PartPose::offset(-5.0, 24.0, -5.0),
         );
         let jaw = CubeList::new()
@@ -132,18 +129,16 @@ pub fn shield_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     {
         let root = mesh.root();
-        root.child(
+        root.part(
             "plate",
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box(-6.0, -11.0, -2.0, 12.0, 22.0, 1.0),
+            (0, 0),
+            [-6.0, -11.0, -2.0, 12.0, 22.0, 1.0],
             PartPose::ZERO,
         );
-        root.child(
+        root.part(
             "handle",
-            CubeList::new()
-                .tex_offs(26, 0)
-                .add_box(-1.0, -3.0, -1.0, 2.0, 6.0, 6.0),
+            (26, 0),
+            [-1.0, -3.0, -1.0, 2.0, 6.0, 6.0],
             PartPose::ZERO,
         );
     }

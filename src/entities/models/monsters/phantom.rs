@@ -4,39 +4,34 @@ use crate::util::mth::DEG_TO_RAD;
 
 pub fn layer() -> LayerDef {
     let mut mesh = MeshDef::new();
-    let body = mesh.root().child(
+    let body = mesh.root().part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 8)
-            .add_box(-3.0, -2.0, -8.0, 5.0, 3.0, 9.0),
+        (0, 8),
+        [-3.0, -2.0, -8.0, 5.0, 3.0, 9.0],
         PartPose::rotation(-0.1, 0.0, 0.0),
     );
-    let tail_base = body.child(
+    let tail_base = body.part(
         "tail_base",
-        CubeList::new()
-            .tex_offs(3, 20)
-            .add_box(-2.0, 0.0, 0.0, 3.0, 2.0, 6.0),
+        (3, 20),
+        [-2.0, 0.0, 0.0, 3.0, 2.0, 6.0],
         PartPose::offset(0.0, -2.0, 1.0),
     );
-    tail_base.child(
+    tail_base.part(
         "tail_tip",
-        CubeList::new()
-            .tex_offs(4, 29)
-            .add_box(-1.0, 0.0, 0.0, 1.0, 1.0, 6.0),
+        (4, 29),
+        [-1.0, 0.0, 0.0, 1.0, 1.0, 6.0],
         PartPose::offset(0.0, 0.5, 6.0),
     );
-    let left_wing_base = body.child(
+    let left_wing_base = body.part(
         "left_wing_base",
-        CubeList::new()
-            .tex_offs(23, 12)
-            .add_box(0.0, 0.0, 0.0, 6.0, 2.0, 9.0),
+        (23, 12),
+        [0.0, 0.0, 0.0, 6.0, 2.0, 9.0],
         PartPose::offset_rotation(2.0, -2.0, -8.0, 0.0, 0.0, 0.1),
     );
-    left_wing_base.child(
+    left_wing_base.part(
         "left_wing_tip",
-        CubeList::new()
-            .tex_offs(16, 24)
-            .add_box(0.0, 0.0, 0.0, 13.0, 1.0, 9.0),
+        (16, 24),
+        [0.0, 0.0, 0.0, 13.0, 1.0, 9.0],
         PartPose::offset_rotation(6.0, 0.0, 0.0, 0.0, 0.0, 0.1),
     );
     let right_wing_base = body.child(
@@ -55,11 +50,10 @@ pub fn layer() -> LayerDef {
             .add_box(-13.0, 0.0, 0.0, 13.0, 1.0, 9.0),
         PartPose::offset_rotation(-6.0, 0.0, 0.0, 0.0, 0.0, -0.1),
     );
-    body.child(
+    body.part(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-4.0, -2.0, -5.0, 7.0, 3.0, 5.0),
+        (0, 0),
+        [-4.0, -2.0, -5.0, 7.0, 3.0, 5.0],
         PartPose::offset_rotation(0.0, 1.0, -7.0, 0.2, 0.0, 0.0),
     );
     LayerDef::create(mesh, 64, 64)

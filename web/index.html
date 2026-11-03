@@ -71,9 +71,9 @@
 <canvas id="canvas" hidden></canvas>
 
 <script type="module">
-  import init, { start_web, take_web_assets, asset_cache_key, ships_assets } from "./torch-client.js";
+  import init, { start_web, take_web_assets, asset_cache_key, ships_assets, seed_mod_file } from "./torch-client.js";
 
-  globalThis.torchGlue = "./torch-client.js";
+  globalThis.torchWorker = "./worker.js";
 
   const status = document.getElementById("status");
   const label = document.getElementById("label");
@@ -144,21 +144,23 @@
   const DB = "torch-client";
   const STORE = "assets";
 
-  let connection = null;
-  function openDb() {
-    connection ??= new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB, 1);
-      request.onupgradeneeded = () => request.result.createObjectStore(STORE);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-    return connection;
+  const connections = new Map();
+  function openDb(name, store) {
+    if (!connections.has(name)) {
+      connections.set(name, new Promise((resolve, reject) => {
+        const request = indexedDB.open(name, 1);
+        request.onupgradeneeded = () => request.result.createObjectStore(store);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      }));
+    }
+    return connections.get(name);
   }
 
-  async function idb(mode, run) {
-    const db = await openDb();
+  async function idb(mode, run, name = DB, store = STORE) {
+    const db = await openDb(name, store);
     return new Promise((resolve, reject) => {
-      const request = run(db.transaction(STORE, mode).objectStore(STORE));
+      const request = run(db.transaction(store, mode).objectStore(store));
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -191,6 +193,33 @@
     }
     location.reload();
   };
+
+  const MODS_DB = "torch-client-mods";
+  const MODS_STORE = "files";
+
+  function keepMod(run) {
+    idb("readwrite", run, MODS_DB, MODS_STORE).catch((e) => console.warn("could not keep a mod file:", e));
+  }
+
+  window.torchModFiles = {
+    put: (path, bytes) => keepMod((store) => store.put(bytes, path)),
+    mkdir: (path) => keepMod((store) => store.put(null, path)),
+    remove: (path) => keepMod((store) => {
+      store.delete(IDBKeyRange.bound(`${path}/`, `${path}/￿`));
+      return store.delete(path);
+    }),
+  };
+
+  async function restoreMods() {
+    try {
+      const keys = await idb("readonly", (store) => store.getAllKeys(), MODS_DB, MODS_STORE);
+      const values = await idb("readonly", (store) => store.getAll(), MODS_DB, MODS_STORE);
+      for (let i = 0; i < keys.length; i++) seed_mod_file(keys[i], values[i] ?? undefined);
+      if (keys.length) console.info(`restored ${keys.length} kept mod entries`);
+    } catch (e) {
+      console.warn("kept mods unreadable:", e);
+    }
+  }
 
   const RETRY_KEY = "assets-retried";
   function mayRetry() {
@@ -294,6 +323,8 @@
     } else {
       assets = new Uint8Array();
     }
+
+    await restoreMods();
 
     say("initializing client, this may take a moment…");
     await new Promise((resolve) => {

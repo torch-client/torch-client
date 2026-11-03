@@ -40,7 +40,7 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, parent: Screen) -> Option<Screen> 
     for &(line, color) in LINES {
         if !line.is_empty() {
             let w = p.atlas.font.width_str(line);
-            p.text_str(line, ((ctx.vw - w) * 0.5).floor(), y, color, true);
+            p.text_plain(line, ((ctx.vw - w) * 0.5).floor(), y, color, true);
         }
         y += LINE_HEIGHT;
     }

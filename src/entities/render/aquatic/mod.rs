@@ -35,10 +35,11 @@ mod tests {
     use crate::entities::registry::Registry;
     use crate::entities::state::EntityState;
 
-    fn model_geom(spec: &crate::entities::RenderSpec) -> &crate::entities::ModelGeom {
+    fn model_geom(spec: &crate::entities::RenderSpec) -> Option<&crate::entities::ModelGeom> {
         match &spec.geom {
-            Geom::Model(geom) => geom,
-            Geom::Item(_) | Geom::Block(_) | Geom::Built(_) => {
+            Geom::Model(geom) => Some(geom),
+            Geom::Item(_) => None,
+            Geom::Block(_) | Geom::Built(_) => {
                 panic!("{} is not a Geom::Model spec", spec.name)
             }
         }
@@ -50,7 +51,7 @@ mod tests {
         let expected = [
             (EntityKind::Squid, 2),
             (EntityKind::GlowSquid, 2),
-            (EntityKind::Dolphin, 2),
+            (EntityKind::Dolphin, 3),
             (EntityKind::Cod, 1),
             (EntityKind::Salmon, 3),
             (EntityKind::TropicalFish, 4),
@@ -63,7 +64,7 @@ mod tests {
             (EntityKind::Bat, 1),
             (EntityKind::Bee, 2),
             (EntityKind::Parrot, 1),
-            (EntityKind::Allay, 1),
+            (EntityKind::Allay, 3),
             (EntityKind::Ghast, 1),
             (EntityKind::HappyGhast, 6),
         ];
@@ -132,7 +133,10 @@ mod tests {
                     if !(spec.visible)(&st) {
                         continue;
                     }
-                    let path = (model_geom(spec).texture)(&st);
+                    let Some(geom) = model_geom(spec) else {
+                        continue;
+                    };
+                    let path = (geom.texture)(&st);
                     let file = crate::assets_root().join(format!("textures/{path}.png"));
                     assert!(file.exists(), "{path} missing for {base}/{index}");
                 }
@@ -145,7 +149,10 @@ mod tests {
         let registry = Registry::build();
         let check = |kind: EntityKind, st: &EntityState| {
             for &i in registry.specs_for(kind) {
-                let path = (model_geom(&registry.specs[i]).texture)(st);
+                let Some(geom) = model_geom(&registry.specs[i]) else {
+                    continue;
+                };
+                let path = (geom.texture)(st);
                 let file = crate::assets_root().join(format!("textures/{path}.png"));
                 assert!(file.exists(), "{path} missing");
             }
@@ -250,7 +257,9 @@ mod tests {
         for kind in kinds {
             for &i in registry.specs_for(kind) {
                 let spec = &registry.specs[i];
-                let geom = model_geom(spec);
+                let Some(geom) = model_geom(spec) else {
+                    continue;
+                };
                 let model = crate::entities::geom::bake(&(geom.layer)());
                 let mut parts = model.rest_pose();
                 for flag in [false, true] {

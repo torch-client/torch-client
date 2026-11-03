@@ -71,7 +71,10 @@ pub struct Body {
     pub velocity: [f64; 3],
     pub on_ground: bool,
     pub in_ground: bool,
+    pub acceleration_power: f64,
 }
+
+pub const INITIAL_ACCELERATION_POWER: f64 = 0.1;
 
 pub struct Shape {
     pub width: f64,
@@ -258,6 +261,14 @@ pub fn step(
                 (_, false) => 0.95,
             };
             body.velocity[1] -= motion.gravity();
+            if motion == Motion::Fireball {
+                let [x, y, z] = body.velocity;
+                let length = (x * x + y * y + z * z).sqrt();
+                if length >= 1.0e-5 {
+                    let scale = body.acceleration_power / length;
+                    body.velocity = [x + x * scale, y + y * scale, z + z * scale];
+                }
+            }
             for axis in &mut body.velocity {
                 *axis *= inertia;
             }

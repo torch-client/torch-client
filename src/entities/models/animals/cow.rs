@@ -82,18 +82,16 @@ pub fn cold_layer() -> LayerDef {
             .add_box(-3.0, 1.0, -7.0, 6.0, 3.0, 1.0),
         PartPose::offset(0.0, 4.0, -8.0),
     );
-    head.child(
+    head.part(
         "right_horn",
-        CubeList::new()
-            .tex_offs(0, 40)
-            .add_box(-1.5, -4.5, -0.5, 2.0, 6.0, 2.0),
+        (0, 40),
+        [-1.5, -4.5, -0.5, 2.0, 6.0, 2.0],
         PartPose::offset_rotation(-4.5, -2.5, -3.5, 1.5708, 0.0, 0.0),
     );
-    head.child(
+    head.part(
         "left_horn",
-        CubeList::new()
-            .tex_offs(0, 32)
-            .add_box(-1.5, -3.0, -0.5, 2.0, 6.0, 2.0),
+        (0, 32),
+        [-1.5, -3.0, -0.5, 2.0, 6.0, 2.0],
         PartPose::offset_rotation(5.5, -2.5, -5.0, 1.5708, 0.0, 0.0),
     );
     LayerDef::create(mesh, 64, 64)
@@ -143,39 +141,34 @@ pub fn baby_layer() -> LayerDef {
             .add_box(-2.0, -1.569, -5.8333, 4.0, 3.0, 1.0),
         PartPose::offset(0.0, 13.569, -5.1667),
     );
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-7.0, -7.0, -1.0, 8.0, 6.0, 12.0),
+        (0, 0),
+        [-7.0, -7.0, -1.0, 8.0, 6.0, 12.0],
         PartPose::offset(3.0, 19.0, -5.0),
     );
-    root.child(
+    root.part(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(22, 18)
-            .add_box(-1.5, 0.0, -1.5, 3.0, 6.0, 3.0),
+        (22, 18),
+        [-1.5, 0.0, -1.5, 3.0, 6.0, 3.0],
         PartPose::offset(-2.5, 18.0, -3.5),
     );
-    root.child(
+    root.part(
         "left_front_leg",
-        CubeList::new()
-            .tex_offs(34, 18)
-            .add_box(-1.5, 0.0, -1.5, 3.0, 6.0, 3.0),
+        (34, 18),
+        [-1.5, 0.0, -1.5, 3.0, 6.0, 3.0],
         PartPose::offset(2.5, 18.0, -3.5),
     );
-    root.child(
+    root.part(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(22, 27)
-            .add_box(-1.5, 0.0, -1.5, 3.0, 6.0, 3.0),
+        (22, 27),
+        [-1.5, 0.0, -1.5, 3.0, 6.0, 3.0],
         PartPose::offset(-2.5, 18.0, 3.5),
     );
-    root.child(
+    root.part(
         "left_hind_leg",
-        CubeList::new()
-            .tex_offs(34, 27)
-            .add_box(-1.5, 0.0, -1.5, 3.0, 6.0, 3.0),
+        (34, 27),
+        [-1.5, 0.0, -1.5, 3.0, 6.0, 3.0],
         PartPose::offset(2.5, 18.0, 3.5),
     );
     LayerDef::create(mesh, 64, 64)

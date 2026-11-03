@@ -1,5 +1,7 @@
 use crate::gui::atlas::{GuiAtlas, Region, Scaling};
 use crate::gui::draw::{GLINT_UV_BIAS, UNIHEX_UV_BIAS};
+use crate::items::dispatch::{ItemUse, ItemWorld, Owner};
+use crate::session::SlotStack;
 use crate::text::{Glyph, Span, Style};
 use crate::util::mth::srgb_to_linear;
 
@@ -89,6 +91,9 @@ pub struct Painter<'a> {
     rng: u32,
     clip: Option<[f32; 4]>,
     xform: (f32, f32, f32),
+    pub item_world: ItemWorld,
+    pub item_owner: Option<Owner>,
+    pub item_use: Option<(bool, f32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -104,6 +109,8 @@ pub struct PainterBuffers {
 }
 
 pub const ATLAS_TEXTURE: u64 = 0;
+
+pub const VIGNETTE_TEXTURE: u64 = u64::MAX;
 
 impl<'a> Painter<'a> {
     pub fn new(atlas: &'a GuiAtlas, frame: u32) -> Self {
@@ -130,6 +137,9 @@ impl<'a> Painter<'a> {
             rng: frame.wrapping_mul(0x9E37_79B9) | 1,
             clip: None,
             xform: (1.0, 0.0, 0.0),
+            item_world: ItemWorld::default(),
+            item_owner: None,
+            item_use: None,
         }
     }
 
@@ -331,6 +341,22 @@ impl<'a> Painter<'a> {
             corners,
             [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
             [color; 4],
+        );
+        self.use_texture(ATLAS_TEXTURE);
+    }
+
+    pub fn vignette(&mut self, w: f32, h: f32, argb: u32) {
+        let Some(sp) = self.atlas.sprite("vignette").copied() else {
+            return;
+        };
+        self.use_texture(VIGNETTE_TEXTURE);
+        let mut color = unpack(argb);
+        color[3] = 1.0;
+        self.region_quad(
+            sp.region,
+            [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]],
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            color,
         );
         self.use_texture(ATLAS_TEXTURE);
     }
@@ -680,10 +706,6 @@ impl<'a> Painter<'a> {
         s.chars().map(sga_advance).sum()
     }
 
-    pub fn text_str(&mut self, s: &str, x: f32, y: f32, argb_rgb: u32, shadow: bool) -> f32 {
-        self.text_plain(s, x, y, argb_rgb, shadow)
-    }
-
     pub fn text_centered(&mut self, s: &str, cx: f32, y: f32, argb_rgb: u32, shadow: bool) -> f32 {
         let x = self.centered_x(s, cx);
         self.text_plain(s, x, y, argb_rgb, shadow);
@@ -706,18 +728,7 @@ impl<'a> Painter<'a> {
             };
             let color = unpack((a << 24) | rgb);
             let start = pen;
-            for ch in span.text.chars() {
-                let ch = if st.obfuscated { self.shuffle(ch) } else { ch };
-                let Some(g) = self.atlas.font.glyph(ch).copied() else {
-                    pen += self.atlas.font.advance(ch, st.bold);
-                    continue;
-                };
-                self.glyph(ch, &g, pen, y, color, st.italic);
-                if st.bold {
-                    self.glyph(ch, &g, pen + 1.0, y, color, st.italic);
-                }
-                pen += g.advance + if st.bold { 1.0 } else { 0.0 };
-            }
+            pen = self.glyph_run(&span.text, pen, y, color, st.bold, st.italic, st.obfuscated);
             let x0 = if start == x { start - 1.0 } else { start };
             if st.strikethrough {
                 self.fill(x0, y + 3.5, pen - x0, 1.0, (a << 24) | rgb);
@@ -725,6 +736,33 @@ impl<'a> Painter<'a> {
             if st.underline {
                 self.fill(x0, y + 8.0, pen - x0, 1.0, (a << 24) | rgb);
             }
+        }
+        pen
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn glyph_run(
+        &mut self,
+        s: &str,
+        x: f32,
+        y: f32,
+        color: [f32; 4],
+        bold: bool,
+        italic: bool,
+        obfuscated: bool,
+    ) -> f32 {
+        let mut pen = x;
+        for ch in s.chars() {
+            let ch = if obfuscated { self.shuffle(ch) } else { ch };
+            let Some(g) = self.atlas.font.glyph(ch).copied() else {
+                continue;
+            };
+            self.glyph(ch, &g, pen, y, color, italic);
+            if bold {
+                self.glyph(ch, &g, pen + 1.0, y, color, italic);
+            }
+            pen += g.advance + if bold { 1.0 } else { 0.0 };
         }
         pen
     }
@@ -798,6 +836,46 @@ impl<'a> Painter<'a> {
         self.region_part(
             r, 0.0, 0.0, r.w as f32, r.h as f32, x, y, ITEM_SIZE, ITEM_SIZE, [1.0; 4],
         );
+    }
+
+    pub fn stack_icon(&mut self, stack: &SlotStack, x: f32, y: f32) {
+        let use_ = ItemUse {
+            owner: self.owner_at(x, y),
+            ..stack.item_use()
+        };
+        self.stack_icon_as(stack, x, y, use_);
+    }
+
+    pub fn owner_at(&self, x: f32, y: f32) -> Option<Owner> {
+        self.item_owner.map(|owner| Owner {
+            seed: x as i32 + y as i32 * 256,
+            ..owner
+        })
+    }
+
+    pub fn stack_icon_as(&mut self, stack: &SlotStack, x: f32, y: f32, use_: ItemUse) {
+        self.item_icon_for(&stack.model_key(), stack.item, use_, x, y, stack.glint);
+    }
+
+    pub fn item_icon_for(
+        &mut self,
+        key: &str,
+        item: &str,
+        use_: ItemUse,
+        x: f32,
+        y: f32,
+        glint: bool,
+    ) {
+        let atlas = self.atlas;
+        let leaf = atlas
+            .item_tree(item)
+            .and_then(|tree| {
+                tree.leaf(tree.eval("gui", &use_, &self.item_world))
+                    .icon
+                    .as_deref()
+            })
+            .filter(|path| atlas.item_for_size(path, 0.0).is_some());
+        self.item_icon_glint(leaf.unwrap_or(key), x, y, glint);
     }
 
     pub fn item_icon_glint(&mut self, id: &str, x: f32, y: f32, glint: bool) {
@@ -886,16 +964,20 @@ impl<'a> Painter<'a> {
         if max_damage > 0 && damage > 0 {
             let frac = 1.0 - (damage as f32 / max_damage as f32).clamp(0.0, 1.0);
             let bar = (frac * 13.0).round().max(0.0);
-            let hue = frac / 3.0;
-            let rgb = hsv_to_rgb(hue, 1.0, 1.0);
             self.fill(x + 2.0, y + 13.0, 13.0, 2.0, 0xFF00_0000);
-            self.fill(x + 2.0, y + 13.0, bar, 1.0, 0xFF00_0000 | rgb);
+            self.fill(
+                x + 2.0,
+                y + 13.0,
+                bar,
+                1.0,
+                0xFF00_0000 | bar_color(damage, max_damage),
+            );
         }
         if count > 1 {
             let digits = Digits::new(count as u32);
             let s = digits.as_str();
             let w = self.atlas.font.width_str(s);
-            self.text_str(s, x + 17.0 - w, y + 9.0, count_color, true);
+            self.text_plain(s, x + 17.0 - w, y + 9.0, count_color, true);
         }
     }
 
@@ -954,11 +1036,6 @@ impl<'a> Painter<'a> {
 
     pub fn region(&mut self, r: Region, x: f32, y: f32, w: f32, h: f32) {
         self.region_part(r, 0.0, 0.0, r.w as f32, r.h as f32, x, y, w, h, [1.0; 4]);
-    }
-
-    #[cfg(test)]
-    pub fn blit_region_debug(&mut self, r: Region, x: f32, y: f32, w: f32, h: f32) {
-        self.region(r, x, y, w, h);
     }
 
     pub fn slot_highlight_back(&mut self, x: f32, y: f32) {
@@ -1092,16 +1169,7 @@ impl<'a> Painter<'a> {
     }
 
     fn plain_run(&mut self, s: &str, x: f32, y: f32, rgb: u32) -> f32 {
-        let color = unpack(0xFF00_0000 | rgb);
-        let mut pen = x;
-        for ch in s.chars() {
-            let Some(g) = self.atlas.font.glyph(ch).copied() else {
-                continue;
-            };
-            self.glyph(ch, &g, pen, y, color, false);
-            pen += g.advance;
-        }
-        pen
+        self.glyph_run(s, x, y, unpack(0xFF00_0000 | rgb), false, false, false)
     }
 
     pub fn outline(&mut self, x: f32, y: f32, w: f32, h: f32, argb: u32) {
@@ -1112,6 +1180,11 @@ impl<'a> Painter<'a> {
     }
 }
 
+pub fn argb(alpha: f32, rgb: u32) -> u32 {
+    let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (a << 24) | (rgb & 0x00FF_FFFF)
+}
+
 pub fn unpack(argb: u32) -> [f32; 4] {
     [
         srgb_to_linear(((argb >> 16) & 0xFF) as f32 / 255.0),
@@ -1119,6 +1192,11 @@ pub fn unpack(argb: u32) -> [f32; 4] {
         srgb_to_linear((argb & 0xFF) as f32 / 255.0),
         ((argb >> 24) & 0xFF) as f32 / 255.0,
     ]
+}
+
+pub fn bar_color(damage: u16, max_damage: u16) -> u32 {
+    let frac = 1.0 - (damage as f32 / max_damage.max(1) as f32).clamp(0.0, 1.0);
+    hsv_to_rgb(frac / 3.0, 1.0, 1.0)
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> u32 {

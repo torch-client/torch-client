@@ -1,3 +1,29 @@
+macro_rules! material_shader_fns {
+    () => {
+        fn vertex_shader() -> bevy::shader::ShaderRef {
+            shader()
+        }
+
+        fn fragment_shader() -> bevy::shader::ShaderRef {
+            shader()
+        }
+    };
+}
+pub(crate) use material_shader_fns;
+
+macro_rules! material_no_prepass_no_shadows {
+    () => {
+        fn enable_prepass() -> bool {
+            false
+        }
+
+        fn enable_shadows() -> bool {
+            false
+        }
+    };
+}
+pub(crate) use material_no_prepass_no_shadows;
+
 pub mod anim;
 mod atlas;
 pub mod clouds;
@@ -20,9 +46,12 @@ pub mod lightmap;
 pub mod lod;
 pub mod maps;
 mod mesh;
+#[cfg(lua_mods)]
+pub mod mod_capture;
 pub mod occlusion;
 mod occupancy;
 pub mod origin;
+pub mod outline;
 pub mod overlays;
 #[cfg(feature = "shader_support")]
 pub mod packdraw;
@@ -39,11 +68,12 @@ pub mod ssaa;
 pub mod systems;
 pub mod terrain;
 pub mod terrain_pool;
-#[cfg(any(feature = "render_lod", lua_mods))]
+#[cfg(feature = "render_lod")]
 pub mod tile_colors;
 pub mod timeline;
 pub mod visgraph;
 pub mod weather;
+pub mod world_border;
 pub mod world_draw;
 pub mod world_text;
 
@@ -59,6 +89,9 @@ pub use mesh::{
 pub use occupancy::Occupancy;
 pub use origin::RenderOrigin;
 pub use systems::{Shared, run};
+
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CameraPinnedMeshes;
 
 pub const ATLAS_COLS: u32 = 16;
 pub const TILE_PX: u32 = 16;
@@ -122,6 +155,7 @@ pub enum TintKind {
     Foliage,
     DryFoliage,
     Redstone(u8),
+    Stem(u8),
     Water,
 }
 

@@ -80,16 +80,29 @@ pub fn stack(tag: &NbtCompound) -> HeldItem {
         .or_else(|| tag.byte("count").map(i32::from))
         .unwrap_or(1);
     let components = tag.compound("components");
+    let projectiles = components
+        .and_then(|c| c.list("minecraft:charged_projectiles"))
+        .and_then(|list| list.compounds());
     HeldItem {
         id: def.id,
         count: count.clamp(1, u8::MAX as i32) as u8,
         tint: potions::is_potion_item(def.id).then(|| potion_color(components)),
         map_id: components.and_then(|c| c.int("minecraft:map_id")),
-        charged: components
-            .and_then(|c| c.list("minecraft:charged_projectiles"))
-            .and_then(|list| list.compounds())
-            .is_some_and(|projectiles| !projectiles.is_empty()),
+        charged: projectiles.is_some_and(|p| !p.is_empty()),
+        rocket: projectiles.is_some_and(|p| {
+            p.iter().any(|s| {
+                s.string("id").is_some_and(|id| {
+                    id.to_str().trim_start_matches("minecraft:") == "firework_rocket"
+                })
+            })
+        }),
         glint: crate::items::glint::codec_foil(def.id, components),
+        trim: components
+            .and_then(|c| c.compound("minecraft:trim"))
+            .and_then(|trim| trim.string("material"))
+            .map_or(0, |m| {
+                crate::items::dispatch::trim_index(&bare(&m.to_str()))
+            }),
         ..HeldItem::default()
     }
 }

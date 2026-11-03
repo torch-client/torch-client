@@ -1,7 +1,6 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::transform::TransformSystems;
 
 use super::AppState;
 use super::mesh::QUAD_INDICES;
@@ -123,7 +122,7 @@ impl Plugin for CloudPlugin {
         .add_systems(
             PostUpdate,
             update_clouds
-                .before(TransformSystems::Propagate)
+                .in_set(super::CameraPinnedMeshes)
                 .run_if(in_state(AppState::InGame))
                 .run_if(resource_exists::<CloudAssets>),
         );

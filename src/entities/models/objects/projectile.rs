@@ -6,11 +6,10 @@ pub fn arrow_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     {
         let root = mesh.root();
-        root.child(
+        root.part(
             "back",
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box(0.0, -2.5, -2.5, 0.0, 5.0, 5.0),
+            (0, 0),
+            [0.0, -2.5, -2.5, 0.0, 5.0, 5.0],
             PartPose::offset_rotation(-11.0, 0.0, 0.0, 0.785_398_2, 0.0, 0.0).with_scale(0.8),
         );
         let cross = CubeList::new().tex_offs(0, 0).add_box_tex_scale(
@@ -45,32 +44,28 @@ pub fn arrow_setup_anim(_model: &BakedModel, parts: &mut [PartState], st: &Entit
 pub fn trident_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     {
-        let pole = mesh.root().child(
+        let pole = mesh.root().part(
             "pole",
-            CubeList::new()
-                .tex_offs(0, 6)
-                .add_box(-0.5, 2.0, -0.5, 1.0, 25.0, 1.0),
+            (0, 6),
+            [-0.5, 2.0, -0.5, 1.0, 25.0, 1.0],
             PartPose::ZERO,
         );
-        pole.child(
+        pole.part(
             "base",
-            CubeList::new()
-                .tex_offs(4, 0)
-                .add_box(-1.5, 0.0, -0.5, 3.0, 2.0, 1.0),
+            (4, 0),
+            [-1.5, 0.0, -0.5, 3.0, 2.0, 1.0],
             PartPose::ZERO,
         );
-        pole.child(
+        pole.part(
             "left_spike",
-            CubeList::new()
-                .tex_offs(4, 3)
-                .add_box(-2.5, -3.0, -0.5, 1.0, 4.0, 1.0),
+            (4, 3),
+            [-2.5, -3.0, -0.5, 1.0, 4.0, 1.0],
             PartPose::ZERO,
         );
-        pole.child(
+        pole.part(
             "middle_spike",
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box(-0.5, -4.0, -0.5, 1.0, 4.0, 1.0),
+            (0, 0),
+            [-0.5, -4.0, -0.5, 1.0, 4.0, 1.0],
             PartPose::ZERO,
         );
         pole.child(
@@ -124,17 +119,11 @@ pub fn wind_charge_layer() -> LayerDef {
                 .add_box_grow(-3.0, -2.0, -3.0, 6.0, 4.0, 6.0, Grow::all(0.0)),
             PartPose::offset_rotation(0.0, 0.0, 0.0, 0.0, -0.7854, 0.0),
         );
-        bone.child(
+        bone.part_grow(
             "wind_charge",
-            CubeList::new().tex_offs(0, 0).add_box_grow(
-                -2.0,
-                -2.0,
-                -2.0,
-                4.0,
-                4.0,
-                4.0,
-                Grow::all(0.0),
-            ),
+            (0, 0),
+            [-2.0, -2.0, -2.0, 4.0, 4.0, 4.0],
+            Grow::all(0.0),
             PartPose::offset(0.0, 0.0, 0.0),
         );
     }

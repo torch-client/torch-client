@@ -21,11 +21,10 @@ pub fn layer() -> LayerDef {
             .add_box(-8.5, -8.0, -1.0, 5.0, 4.0, 1.0),
         PartPose::offset(0.0, 11.5, -17.0),
     );
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 25)
-            .add_box(-9.5, -13.0, -6.5, 19.0, 26.0, 13.0),
+        (0, 25),
+        [-9.5, -13.0, -6.5, 19.0, 26.0, 13.0],
         PartPose::offset_rotation(0.0, 10.0, 0.0, std::f32::consts::FRAC_PI_2, 0.0, 0.0),
     );
     let leg = CubeList::new()
@@ -53,11 +52,10 @@ pub fn layer() -> LayerDef {
 pub fn baby_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 11)
-            .add_box(-4.5, -3.5, -5.5, 9.0, 7.0, 11.0),
+        (0, 11),
+        [-4.5, -3.5, -5.5, 9.0, 7.0, 11.0],
         PartPose::offset(0.0, 18.5, 2.5),
     );
     root.child(
@@ -73,32 +71,28 @@ pub fn baby_layer() -> LayerDef {
             .add_box(1.5, -4.0, -3.5, 3.0, 3.0, 1.0),
         PartPose::offset(0.0, 19.0, -3.0),
     );
-    root.child(
+    root.part(
         "right_hind_leg",
-        CubeList::new()
-            .tex_offs(0, 34)
-            .add_box(-1.5, 0.0, -1.5, 3.0, 2.0, 3.0),
+        (0, 34),
+        [-1.5, 0.0, -1.5, 3.0, 2.0, 3.0],
         PartPose::offset(-3.0, 22.0, 6.5),
     );
-    root.child(
+    root.part(
         "left_hind_leg",
-        CubeList::new()
-            .tex_offs(12, 34)
-            .add_box(-1.5, 0.0, -1.5, 3.0, 2.0, 3.0),
+        (12, 34),
+        [-1.5, 0.0, -1.5, 3.0, 2.0, 3.0],
         PartPose::offset(3.0, 22.0, 6.5),
     );
-    root.child(
+    root.part(
         "right_front_leg",
-        CubeList::new()
-            .tex_offs(0, 29)
-            .add_box(-1.5, 0.0, -1.5, 3.0, 2.0, 3.0),
+        (0, 29),
+        [-1.5, 0.0, -1.5, 3.0, 2.0, 3.0],
         PartPose::offset(-3.0, 22.0, -1.5),
     );
-    root.child(
+    root.part(
         "left_front_leg",
-        CubeList::new()
-            .tex_offs(12, 29)
-            .add_box(-1.5, 0.0, -1.5, 3.0, 2.0, 3.0),
+        (12, 29),
+        [-1.5, 0.0, -1.5, 3.0, 2.0, 3.0],
         PartPose::offset(3.0, 22.0, -1.5),
     );
     LayerDef::create(mesh, 64, 64)

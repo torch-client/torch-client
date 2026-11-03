@@ -234,6 +234,7 @@ pub fn handle_start_use_item_queued(
                     client: entity,
                     target: r.entity,
                     location: Some(r.location),
+                    hand: InteractionHand::MainHand,
                 });
             }
         }
@@ -246,6 +247,7 @@ pub struct EntityInteractEvent {
     pub client: Entity,
     pub target: Entity,
     pub location: Option<Vec3>,
+    pub hand: InteractionHand,
 }
 
 pub fn handle_entity_interact(
@@ -267,6 +269,10 @@ pub fn handle_entity_interact(
         return;
     };
 
+    let Ok(target_position) = target_query.get(trigger.target) else {
+        warn!("tried to interact with an entity without the entity having a position");
+        return;
+    };
     let location = if let Some(l) = trigger.location {
         l
     } else {
@@ -275,26 +281,17 @@ pub fn handle_entity_interact(
         {
             entity_hit_result.location
         } else {
-            let Ok(target_position) = target_query.get(trigger.target) else {
-                warn!("tried to look at an entity without the entity having a position");
-                return;
-            };
             **target_position
         }
     };
 
     let interact = ServerboundInteract {
         entity_id,
-        hand: InteractionHand::MainHand,
-        location: LpVec3::from(location),
+        hand: trigger.hand,
+        location: LpVec3::from(location - **target_position),
         using_secondary_action: physics_state.trying_to_crouch,
     };
-    commands.trigger(SendGamePacketEvent::new(trigger.client, interact.clone()));
-
-    let consumes_action = false;
-    if !consumes_action {
-        commands.trigger(SendGamePacketEvent::new(trigger.client, interact));
-    }
+    commands.trigger(SendGamePacketEvent::new(trigger.client, interact));
 }
 
 pub fn check_is_interaction_restricted(

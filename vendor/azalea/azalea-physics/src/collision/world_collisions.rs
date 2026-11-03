@@ -28,6 +28,40 @@ pub struct PowderSnowCollision {
     pub entity_bottom: f64,
     pub fall_distance: f64,
     pub stands_on_lava: bool,
+    pub has_entity: bool,
+}
+
+static SCAFFOLDING_STABLE_SHAPE: LazyLock<VoxelShape> = LazyLock::new(|| {
+    let s = box_shape(0.0, 0.875, 0.0, 1.0, 1.0, 1.0);
+    let s = Shapes::or(s, box_shape(0.0, 0.0, 0.0, 0.125, 1.0, 0.125));
+    let s = Shapes::or(s, box_shape(0.875, 0.0, 0.0, 1.0, 1.0, 0.125));
+    let s = Shapes::or(s, box_shape(0.0, 0.0, 0.875, 0.125, 1.0, 1.0));
+    Shapes::or(s, box_shape(0.875, 0.0, 0.875, 1.0, 1.0, 1.0))
+});
+
+static SCAFFOLDING_UNSTABLE_BOTTOM_SHAPE: LazyLock<VoxelShape> =
+    LazyLock::new(|| box_shape(0.0, 0.0, 0.0, 1.0, 0.125, 1.0));
+
+fn scaffolding_shape(
+    context: &PowderSnowCollision,
+    block_state: BlockState,
+    pos: BlockPos,
+) -> Option<&'static VoxelShape> {
+    use azalea_block::properties::{Bottom, ScaffoldingDistance};
+
+    if !context.has_entity {
+        return Some(&SCAFFOLDING_STABLE_SHAPE);
+    }
+    let is_above = |top: f64| context.entity_bottom > f64::from(pos.y) + top - 9.999999747378752e-6;
+    if is_above(1.0) && !context.descending {
+        return Some(&SCAFFOLDING_STABLE_SHAPE);
+    }
+    let distance = block_state.property::<ScaffoldingDistance>();
+    let bottom = block_state.property::<Bottom>().unwrap_or(false);
+    if distance.is_some_and(|d| d != ScaffoldingDistance::_0) && bottom && is_above(0.0) {
+        return Some(&SCAFFOLDING_UNSTABLE_BOTTOM_SHAPE);
+    }
+    None
 }
 
 static LAVA_STABLE_SHAPE: LazyLock<VoxelShape> =
@@ -147,6 +181,16 @@ impl<'a> BlockCollisionsState<'a> {
 
         if self.powder_snow.collides() && BlockKind::from(block_state) == BlockKind::PowderSnow {
             if let Some(shape) = self.powder_snow.shape(item.pos) {
+                let shape = shape.move_relative(item.pos.to_vec3_floored());
+                if Shapes::matches_anywhere(&shape, &self.entity_shape, |a, b| a && b) {
+                    block_collisions.push(shape);
+                }
+            }
+            return;
+        }
+
+        if BlockKind::from(block_state) == BlockKind::Scaffolding {
+            if let Some(shape) = scaffolding_shape(&self.powder_snow, block_state, item.pos) {
                 let shape = shape.move_relative(item.pos.to_vec3_floored());
                 if Shapes::matches_anywhere(&shape, &self.entity_shape, |a, b| a && b) {
                     block_collisions.push(shape);

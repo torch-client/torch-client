@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use bevy::platform::collections::HashMap;
 use std::path::Path;
 
 use image::RgbaImage;
 
+use crate::items::dispatch::ModelTree;
 use crate::items::icons::{ItemIcons, bake_item_icons};
 use crate::text::Font;
 
@@ -139,6 +140,7 @@ pub struct GuiAtlas {
     sprites: HashMap<String, Sprite>,
     sheets: HashMap<String, Region>,
     items: HashMap<String, Vec<(u32, Region)>>,
+    item_trees: std::collections::HashMap<String, ModelTree>,
     font_origin: (u32, u32),
     server_icons: ReservedGrid,
     banner_icons: ReservedGrid,
@@ -156,17 +158,6 @@ impl GuiAtlas {
         self.sheets.get(name).copied()
     }
 
-    #[allow(
-        dead_code,
-        reason = "untiered lookups, used by the preview and the tests"
-    )]
-    pub fn item(&self, id: &str) -> Option<Region> {
-        self.items
-            .get(id)
-            .and_then(|tiers| tiers.last())
-            .map(|(_, r)| *r)
-    }
-
     pub fn item_for_size(&self, id: &str, target_px: f32) -> Option<Region> {
         let tiers = self.items.get(id)?;
         tiers
@@ -176,12 +167,8 @@ impl GuiAtlas {
             .map(|(_, r)| *r)
     }
 
-    #[allow(
-        dead_code,
-        reason = "untiered lookups, used by the preview and the tests"
-    )]
-    pub fn has_item(&self, id: &str) -> bool {
-        self.items.contains_key(id)
+    pub fn item_tree(&self, id: &str) -> Option<&ModelTree> {
+        self.item_trees.get(id)
     }
 
     pub fn banner_icon(&self, slot: usize) -> Option<Region> {
@@ -247,6 +234,7 @@ impl GuiAtlas {
             sprites: HashMap::new(),
             sheets: HashMap::new(),
             items: HashMap::new(),
+            item_trees: std::collections::HashMap::new(),
             font_origin: (0, 0),
             server_icons: SERVER_ICON_GRID,
             banner_icons: BANNER_ICON_GRID,
@@ -559,6 +547,15 @@ const EXTRAS: &[Extra] = &[
         size: (256, 256),
         crop_h: None,
         nearest: true,
+        scaling: Scaling::Stretch,
+    },
+    Extra {
+        key: "vignette",
+        path: "misc/vignette.png",
+        alt_path: None,
+        size: (256, 256),
+        crop_h: None,
+        nearest: false,
         scaling: Scaling::Stretch,
     },
     Extra {
@@ -993,6 +990,7 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
 
     let icons: ItemIcons = bake_item_icons(assets);
     let icon_map = icons.map;
+    let item_trees = icons.trees;
     entries.push(Entry {
         kind: Kind::Items,
         key: String::new(),
@@ -1110,6 +1108,7 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
         sprites,
         sheets,
         items,
+        item_trees,
         font_origin,
         server_icons,
         banner_icons,

@@ -1,5 +1,5 @@
 use crate::platform::time::Instant;
-use std::collections::{HashMap, HashSet};
+use bevy::platform::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -18,9 +18,9 @@ use super::input::{
     CameraAngles, CameraView, VehicleTurnSpread, apply_gui_nav, apply_server_look,
     apply_vehicle_look, bot_movement_input, debug_spectate, flight_toggle_input, freecam_movement,
     fullscreen_key, handle_hotbar_keys, handle_hotbar_scroll, handle_keybinds, handle_mouse_input,
-    handle_spectator_action_key, handle_spectator_fly_speed_scroll, mouse_look, reload_all_chunks,
-    toggle_advanced_tooltips, toggle_chunk_borders, toggle_freecam, toggle_screen,
-    toggle_third_person, web_pointer_lock, window_focus_cursor,
+    handle_spectator_action_key, handle_spectator_fly_speed_scroll, mouse_look,
+    pause_on_lost_focus, reload_all_chunks, toggle_advanced_tooltips, toggle_chunk_borders,
+    toggle_freecam, toggle_screen, toggle_third_person, web_pointer_lock, window_focus_cursor,
 };
 use super::overlays::{
     BlockOutline, BlockOutlineMarker, BreakOverlay, BreakOverlayMarker, ChunkBorderMarker,
@@ -62,6 +62,8 @@ pub struct LightmapState {
     flicker: f32,
     flicker_tick: u64,
     flicker_rng: crate::util::javarandom::JavaRandom,
+    boss_darkening: [f32; 2],
+    water_vision_time: i32,
     pub current: super::lightmap::State,
 }
 
@@ -71,6 +73,8 @@ impl Default for LightmapState {
             flicker: 0.0,
             flicker_tick: 0,
             flicker_rng: crate::util::javarandom::JavaRandom::new(0),
+            boss_darkening: [0.0; 2],
+            water_vision_time: 0,
             current: Default::default(),
         }
     }
@@ -113,16 +117,36 @@ fn update_lightmap(
     crate::prof_span!("render:update_lightmap");
     let tick = view.game_time;
     let behind = tick.wrapping_sub(state.flicker_tick).min(20);
+    let eye_in_water = {
+        let [x, y, z] = view.tick_eye();
+        crate::util::block_model::eye_fluid_at(x, y, z)
+            == Some(crate::util::block_model::EyeFluid::Water)
+    };
+    let spectator = view.gamemode == crate::session::Gamemode::Spectator;
     for _ in 0..behind {
         let rng = &mut state.flicker_rng;
         let noise = [rng.next_f32(), rng.next_f32(), rng.next_f32()];
         state.flicker = super::lightmap::tick_flicker(state.flicker, noise);
+        state.boss_darkening[0] = state.boss_darkening[1];
+        state.boss_darkening[1] =
+            super::lightmap::tick_boss_darkening(state.boss_darkening[1], view.boss_darken);
+        state.water_vision_time =
+            super::lightmap::tick_water_vision(state.water_vision_time, eye_in_water, spectator);
     }
     state.flicker_tick = tick;
 
     let gamma = gui.options.gamma as f32 / 100.0;
-    let lm =
+    let mut lm =
         super::lightmap::State::sample(super::dimension::current(), &env.sky, state.flicker, gamma);
+    let [boss_prev, boss] = state.boss_darkening;
+    lm.apply_effects(&super::lightmap::Effects {
+        night_vision: view.night_vision,
+        water_vision: super::lightmap::water_vision(state.water_vision_time, eye_in_water),
+        conduit_power: view.conduit_power,
+        darkness: view.darkness,
+        darkness_age: (view.game_time % 80) as f32 - view.partial,
+        boss_darkening: boss_prev + (boss - boss_prev) * view.partial,
+    });
     state.current = lm;
     super::lightmap::write_image_data(&lm, &mut pixels.data);
 }
@@ -245,6 +269,11 @@ impl ChunkIndex {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    #[cfg(lua_mods)]
+    pub fn has_column(&self, cx: i32, cz: i32) -> bool {
+        self.columns.contains_key(&(cx, cz))
     }
 
     pub fn len(&self) -> usize {
@@ -520,7 +549,7 @@ fn setup(
 }
 
 fn take_budgeted(
-    queue: &mut Vec<PendingSection>,
+    queue: &mut std::collections::VecDeque<PendingSection>,
     verts: &mut usize,
     sections: &mut usize,
 ) -> Vec<PendingSection> {
@@ -982,8 +1011,8 @@ impl TagProjector {
 
     fn project(
         &self,
-        name: &[crate::text::Span],
-        below: &[crate::text::Span],
+        name: &std::sync::Arc<[crate::text::Span]>,
+        below: Option<&std::sync::Arc<[crate::text::Span]>>,
         at: Vec3,
         range: f32,
     ) -> Option<crate::gui::hud::NameTag> {
@@ -1012,11 +1041,10 @@ impl TagProjector {
             return None;
         }
         Some(crate::gui::hud::NameTag {
-            name: name.to_vec(),
-            below: if distance <= BELOW_NAME_RANGE {
-                below.to_vec()
-            } else {
-                Vec::new()
+            name: name.clone(),
+            below: match below {
+                Some(below) if distance <= BELOW_NAME_RANGE => below.clone(),
+                _ => std::sync::Arc::default(),
             },
             x: (ndc.x * 0.5 + 0.5) * view.x,
             y: (0.5 - ndc.y * 0.5) * view.y,
@@ -1067,7 +1095,8 @@ fn collect_player_tags(
             (false, false) => NAME_TAG_RANGE,
         };
         let at = projector.anchor(feet, height + 0.5);
-        let Some(mut tag) = projector.project(&info.name_tag, &info.below_name, at, range) else {
+        let Some(mut tag) = projector.project(&info.name_tag, Some(&info.below_name), at, range)
+        else {
             continue;
         };
         if on {
@@ -1106,7 +1135,7 @@ fn collect_nametags(
             continue;
         }
         let at = projector.anchor(anim.position(partial), anim.bounding_box_height() + 0.5);
-        tags.extend(projector.project(&extras.name_spans, &[], at, NAME_TAG_RANGE));
+        tags.extend(projector.project(&extras.name_spans, None, at, NAME_TAG_RANGE));
     }
 
     tags.sort_by(|a, b| b.distance.total_cmp(&a.distance));
@@ -1557,6 +1586,7 @@ pub(super) fn enter_screen(
     let was_open = state.screen.is_open();
     if next != state.screen {
         crate::platform::keyboard::hide();
+        state.chat.withdraw_copy_offer();
     }
     reset_menu_state(state, shared);
     if next != state.screen {
@@ -1565,6 +1595,10 @@ pub(super) fn enter_screen(
     #[cfg(feature = "click_gui")]
     if next == crate::gui::Screen::ClickGui && state.screen != next {
         state.clickgui.opened();
+    }
+    #[cfg(feature = "click_gui")]
+    if state.screen == crate::gui::Screen::ClickGui && next != state.screen {
+        crate::modules::flush_changed();
     }
     #[cfg(feature = "hud_editor")]
     if state.screen == crate::gui::Screen::HudEditor && next != state.screen {
@@ -1932,13 +1966,30 @@ fn apply_fov(
         };
 
         let base_fov = state.options.fov as f32 + (target_fov - state.options.fov as f32) * ease.0;
-        let fov = (base_fov * modifier).to_radians();
+        let fov = modify_fov_for_death_or_fluid(
+            base_fov * modifier,
+            &view,
+            state.options.fov_effects as f32 / 100.0,
+        )
+        .to_radians();
         if perspective.fov != fov
             && let Projection::Perspective(perspective) = &mut *projection
         {
             perspective.fov = fov;
         }
     }
+}
+
+fn modify_fov_for_death_or_fluid(mut fov: f32, view: &FrameView, effect_scale: f32) -> f32 {
+    if view.local.death_time > 0.0 {
+        let scale = view.local.death_time.min(20.0);
+        fov /= (1.0 - 500.0 / (scale + 500.0)) * 2.0 + 1.0;
+    }
+    let camera = view.camera_world;
+    if crate::util::block_model::eye_fluid_at(camera.x, camera.y, camera.z).is_some() {
+        fov *= 1.0 + (0.857_142_87 - 1.0) * effect_scale;
+    }
+    fov
 }
 
 fn trace_reextracted_meshes(
@@ -2388,6 +2439,7 @@ pub fn run(
     .add_plugins(crate::renderer::terrain_pool::TerrainPoolPlugin)
     .add_plugins(crate::renderer::entity_material::EntityMaterialPlugin)
     .add_plugins(crate::renderer::esp_material::EspMaterialPlugin)
+    .add_plugins(crate::renderer::outline::OutlinePlugin)
     .add_plugins((
         #[cfg(feature = "render_lod")]
         crate::renderer::lod::LodPlugin,
@@ -2396,6 +2448,13 @@ pub fn run(
     .add_plugins(crate::renderer::ssaa::SsaaPlugin)
     .add_plugins(crate::renderer::clouds::CloudPlugin)
     .add_plugins(crate::renderer::weather::WeatherPlugin)
+    .add_plugins(crate::renderer::world_border::WorldBorderPlugin)
+    .configure_sets(
+        PostUpdate,
+        super::CameraPinnedMeshes
+            .before(bevy::transform::TransformSystems::Propagate)
+            .before(bevy::asset::AssetEventSystems),
+    )
     .add_plugins(crate::renderer::post::PostPlugin)
     .add_plugins(crate::entities::EntityPlugin)
     .add_plugins(crate::util::particles::ParticlePlugin)
@@ -2408,9 +2467,14 @@ pub fn run(
     .init_resource::<CameraAngles>()
     .init_resource::<VehicleTurnSpread>()
     .init_resource::<CameraView>()
+    .init_resource::<super::input::FreecamTouch>()
     .init_resource::<ProfVisible>()
     .init_resource::<FrameGate>()
     .insert_resource(crate::renderer::item_assets::ItemAssets::new())
+    .add_systems(
+        Update,
+        crate::renderer::item_assets::step_item_world.after(FrameViewSystems),
+    )
     .init_state::<AppState>()
     .add_systems(Startup, setup.in_set(RendererSetup))
     .init_resource::<LightmapState>()
@@ -2511,6 +2575,12 @@ pub fn run(
                 .run_if(in_state(AppState::InGame)),
         )
         .add_systems(Update, window_focus_cursor)
+        .add_systems(
+            Update,
+            pause_on_lost_focus
+                .after(toggle_screen)
+                .run_if(in_state(AppState::InGame)),
+        )
         .add_systems(Update, crate::renderer::input::track_lifecycle)
         .add_systems(Update, log_window_geometry)
         .add_systems(Update, fullscreen_key)

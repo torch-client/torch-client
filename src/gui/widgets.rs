@@ -581,6 +581,9 @@ impl TextBox {
     }
 
     pub fn draw(&mut self, p: &mut Painter, x: f32, y: f32, w: f32, h: f32) {
+        if self.browser_keyboard {
+            crate::platform::keyboard::arm();
+        }
         if self.bordered {
             let frame_color = if self.focused {
                 0xFFFF_FFFF
@@ -868,7 +871,7 @@ impl MultiLineTextBox {
             let b1 = seek(range.end);
             let line = &text[b0..b1];
             let ly = y + (row - first) as f32 * LINE_HEIGHT;
-            p.text_str(line, x, ly, color, false);
+            p.text_plain(line, x, ly, color, false);
             let (a, b) = (
                 sa.clamp(range.start, range.end),
                 sb.clamp(range.start, range.end),
@@ -943,7 +946,7 @@ pub(crate) fn draw_caret(
 }
 
 pub(crate) fn draw_append_caret(p: &mut Painter, x: f32, y: f32, color: u32, shadow: bool) {
-    p.text_str("_", x, y, color, shadow);
+    p.text_plain("_", x, y, color, shadow);
 }
 
 pub(crate) fn draw_insert_caret(p: &mut Painter, x: f32, y: f32, line_height: f32, color: u32) {
@@ -960,7 +963,7 @@ pub(crate) fn draw_selection(
     bottom: f32,
 ) {
     p.fill(x0, top, (x1 - x0).max(1.0), bottom - top, 0xFFFF_FFFF);
-    p.text_str(text, x0, text_y, 0x000000, false);
+    p.text_plain(text, x0, text_y, 0x000000, false);
 }
 
 pub(crate) fn allowed_char(c: char) -> bool {
@@ -1135,7 +1138,7 @@ pub fn tab_bar_with(
         }
         let top = if selected { 0.0 } else { 3.0 };
         let y = ((top + TAB_BAR_H - LINE_HEIGHT) / 2.0).floor() + 1.0;
-        p.text_str(label, x + ((tab_w - text_w) / 2.0).floor(), y, color, true);
+        p.text_plain(label, x + ((tab_w - text_w) / 2.0).floor(), y, color, true);
         if !selected && enabled && hovered && ctx.input.left_click {
             picked = Some(i);
         }
@@ -1375,11 +1378,13 @@ pub(in crate::gui) fn slider_track_cursor(
 ) -> bool {
     if input.left_release && SLIDER_DRAG.load(Ordering::Relaxed) == id {
         SLIDER_DRAG.store(0, Ordering::Relaxed);
+        super::flush_pending_options();
     }
     if SLIDER_DRAG.load(Ordering::Relaxed) == id
         && SLIDER_DRAG_SCALE.load(Ordering::Relaxed) != scale.to_bits()
     {
         SLIDER_DRAG.store(0, Ordering::Relaxed);
+        super::flush_pending_options();
         return false;
     }
     #[cfg(not(feature = "mobile_ui"))]
@@ -1555,6 +1560,13 @@ impl<F: Fn(i32) -> String> Slider<F> {
             self.h,
         );
         value
+    }
+
+    pub fn draw_into(self, p: &mut Painter, ctx: &ScreenCtx, value: &mut u32) -> bool {
+        let new = self.draw(p, ctx).clamp(self.min, self.max) as u32;
+        let changed = new != *value;
+        *value = new;
+        changed
     }
 }
 

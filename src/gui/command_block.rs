@@ -2,6 +2,7 @@ use azalea_core::position::BlockPos;
 
 use crate::gui::painter::Painter;
 use crate::gui::suggestions;
+use crate::gui::tooltip::label;
 use crate::gui::widgets::{Button, TextBox, WIDGET_HEIGHT};
 use crate::gui::{Screen, ScreenCtx};
 use crate::session::{CommandBlockData, CommandBlockMode as Mode, CommandBlockUpdate, SharedMutex};
@@ -158,20 +159,26 @@ pub fn draw(
         .refresh(&p.atlas.font, shared, SUGGEST, anchor(ctx));
 
     p.text_centered(
-        "Set Console Command for Block",
+        label!("advMode.setCommand"),
         ctx.vw / 2.0,
         20.0,
         0xFFFFFF,
         true,
     );
-    p.text_str("Console Command", x + 1.0, 40.0, LABEL, true);
+    p.text_plain(label!("advMode.command"), x + 1.0, 40.0, LABEL, true);
     if state.field.input.suggestion != state.field.suggest.ghost {
         state.field.input.suggestion = state.field.suggest.ghost.clone();
     }
     state.field.input.draw(p, x, 50.0, BOX_W, WIDGET_HEIGHT);
 
     if !state.previous.text.is_empty() {
-        p.text_str("Previous Output", x + 1.0, PREVIOUS_Y - 10.0, LABEL, true);
+        p.text_plain(
+            label!("advMode.previousOutput"),
+            x + 1.0,
+            PREVIOUS_Y - 10.0,
+            LABEL,
+            true,
+        );
         state
             .previous
             .draw(p, x, PREVIOUS_Y, PREVIOUS_W, WIDGET_HEIGHT);
@@ -201,9 +208,9 @@ pub fn draw(
             MODE_W,
             WIDGET_HEIGHT,
             match state.mode {
-                Mode::Sequence => "Chain",
-                Mode::Auto => "Repeat",
-                Mode::Redstone => "Impulse",
+                Mode::Sequence => label!("advMode.mode.sequence"),
+                Mode::Auto => label!("advMode.mode.auto"),
+                Mode::Redstone => label!("advMode.mode.redstone"),
             },
         )
     };
@@ -222,9 +229,9 @@ pub fn draw(
             MODE_W,
             WIDGET_HEIGHT,
             if state.conditional {
-                "Conditional"
+                label!("advMode.mode.conditional")
             } else {
-                "Unconditional"
+                label!("advMode.mode.unconditional")
             },
         )
     };
@@ -239,9 +246,9 @@ pub fn draw(
             MODE_W,
             WIDGET_HEIGHT,
             if state.automatic {
-                "Always Active"
+                label!("advMode.mode.autoexec.bat")
             } else {
-                "Needs Redstone"
+                label!("advMode.mode.redstoneTriggered")
             },
         )
     };
@@ -257,7 +264,7 @@ pub fn draw(
             button_y,
             BUTTON_W,
             WIDGET_HEIGHT,
-            "Done",
+            label!("gui.done"),
         )
     };
     let cancel = Button::new(
@@ -265,7 +272,7 @@ pub fn draw(
         button_y,
         BUTTON_W,
         WIDGET_HEIGHT,
-        "Cancel",
+        label!("gui.cancel"),
     );
     let confirmed = ctx.input.enter && state.enabled;
     let done_pressed = (done.draw(p, ctx) && !consumed.click) || confirmed;
@@ -281,101 +288,29 @@ pub fn draw(
 }
 
 #[cfg(test)]
-mod visual {
-    use std::sync::Arc;
-
+mod tests {
     use super::*;
-    use crate::gui::atlas::build_gui_atlas;
-    use crate::gui::preview::save_upscaled;
     use crate::gui::render::GuiInput;
-    use crate::gui::{GuiState, Screen};
-    use crate::session::SharedMutex;
-    use bevy::prelude::Vec2;
-
-    fn frame(
-        atlas: &crate::gui::atlas::GuiAtlas,
-        state: &mut GuiState,
-        shared: &Arc<SharedMutex>,
-        input: &GuiInput,
-        name: &str,
-        vw: f32,
-        vh: f32,
-    ) {
-        let mut p = Painter::new(atlas, 0);
-        crate::gui::screens::draw(
-            &mut p,
-            state,
-            input,
-            shared,
-            #[cfg(feature = "skins")]
-            &mut Default::default(),
-        );
-        save_upscaled(&p, vw as u32, vh as u32, name);
-    }
 
     #[test]
-    fn preview_command_block_states() {
-        let atlas = build_gui_atlas(&crate::assets_root());
-        let (vw, vh) = (427.0_f32, 240.0_f32);
-        let shared: Arc<SharedMutex> = Arc::new(SharedMutex::default());
-        let input = GuiInput {
-            size: Vec2::new(vw, vh),
-            scale: 3.0,
-            ..Default::default()
+    fn slashless_line_completes() {
+        let shared = std::sync::Arc::new(SharedMutex::default());
+        shared.lock().unwrap().session.command_tree =
+            Some(std::sync::Arc::new(crate::gui::chat::tests::preview_tree()));
+        let (font, _) = crate::text::Font::load(&crate::assets_root());
+        let input = GuiInput::default();
+        let ctx = ScreenCtx {
+            input: &input,
+            vw: 427.0,
+            vh: 240.0,
         };
-        {
-            let mut s = shared.lock().unwrap();
-            s.session.command_tree =
-                Some(std::sync::Arc::new(crate::gui::chat::tests::preview_tree()));
-            s.session.command_block_pos = Some(BlockPos::new(0, 64, 0));
-        }
-
-        let mut state = GuiState::default();
-        state.screen = Screen::CommandBlock;
-        state
-            .command_block
-            .open(BlockPos::new(0, 64, 0), Mode::Redstone, false);
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &input,
-            "command_block_empty.png",
-            vw,
-            vh,
-        );
-
-        shared.lock().unwrap().session.command_block_data = Some(CommandBlockData {
-            command: "gamemode creative".to_string(),
-            track_output: true,
-            last_output: "Set own game mode to Creative Mode".to_string(),
-            automatic: true,
-        });
-        state.command_block.mode = Mode::Auto;
-        state.command_block.conditional = true;
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &input,
-            "command_block_filled.png",
-            vw,
-            vh,
-        );
-
-        state.command_block.field.input.set_text("g");
-        state.command_block.field.suggest.allow = true;
-        frame(
-            &atlas,
-            &mut state,
-            &shared,
-            &input,
-            "command_block_suggestions.png",
-            vw,
-            vh,
-        );
+        let mut state = CommandBlockState::default();
+        state.open(BlockPos::new(0, 64, 0), Mode::Redstone, false);
+        state.field.input.set_text("g");
+        state.field.suggest.allow = true;
+        state.field.refresh(&font, &shared, SUGGEST, anchor(&ctx));
         assert!(
-            state.command_block.field.suggest.list.is_some(),
+            state.field.suggest.list.is_some(),
             "a slashless line should still complete"
         );
     }

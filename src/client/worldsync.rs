@@ -1,3 +1,4 @@
+use crate::util::global;
 use crate::{log_debug, log_error};
 use azalea::Client;
 use azalea_core::position::BlockPos as AzBlockPos;
@@ -42,36 +43,6 @@ pub(crate) fn install_block_change_hook() {
                 send_light(lighting::LightJob::Block { world, pos });
             }
 
-            #[cfg(feature = "audio")]
-            {
-                let at = crate::util::block_centre([pos.x, pos.y, pos.z]).to_array();
-                if crate::audio::audible_at(at) {
-                    use azalea::block::BlockTrait;
-                    let name = |state| {
-                        let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
-                        crate::util::block_model::sound_group(block.id())
-                    };
-                    let is_fluid = |state| {
-                        let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
-                        matches!(block.id(), "water" | "lava" | "bubble_column")
-                    };
-                    let event = if old.is_air() && !new.is_air() && !is_fluid(new) {
-                        Some(name(new).place_event)
-                    } else {
-                        None
-                    };
-                    if let Some(event) = event {
-                        crate::audio::play_at(
-                            event,
-                            crate::audio::SoundCategory::Blocks,
-                            at,
-                            1.0,
-                            0.8,
-                        );
-                    }
-                }
-            }
-
             if !old.is_air()
                 && new.is_air()
                 && let Some(shared) = SHARED.get()
@@ -98,12 +69,10 @@ pub(crate) fn install_block_change_hook() {
     }
 }
 
-static LIGHT_MAP: OnceLock<Arc<parking_lot::RwLock<lighting::LightMap>>> = OnceLock::new();
-static LIGHT_THREAD: OnceLock<lighting::LightThread> = OnceLock::new();
-
-pub(crate) fn light_map() -> &'static Arc<parking_lot::RwLock<lighting::LightMap>> {
-    LIGHT_MAP.get_or_init(Default::default)
+global! {
+pub(crate) fn light_map() -> Arc<parking_lot::RwLock<lighting::LightMap>>
 }
+static LIGHT_THREAD: OnceLock<lighting::LightThread> = OnceLock::new();
 
 pub(crate) fn start_light_thread() {
     let _ = LIGHT_THREAD.get_or_init(|| {
@@ -277,10 +246,8 @@ pub(crate) fn note_chunk_received(bot: &Client, cx: i32, cz: i32) {
     });
 }
 
-static SERVER_LIGHT: OnceLock<Mutex<HashMap<(i32, i32), lighting::ServerLight>>> = OnceLock::new();
-
-fn server_light_stash() -> &'static Mutex<HashMap<(i32, i32), lighting::ServerLight>> {
-    SERVER_LIGHT.get_or_init(Default::default)
+global! {
+fn server_light_stash() -> Mutex<HashMap<(i32, i32), lighting::ServerLight>>
 }
 
 pub(crate) fn stash_server_light(cx: i32, cz: i32, light: lighting::ServerLight) {
@@ -407,10 +374,21 @@ pub(crate) fn reset_level(shared: &Arc<SharedMutex>) {
     s.session.unloaded_chunks.clear();
 }
 
-pub(crate) fn set_dimension(common: &azalea_protocol::packets::common::CommonPlayerSpawnInfo) {
+pub(crate) fn set_dimension(
+    world: &azalea::local_player::WorldHolder,
+    common: &azalea_protocol::packets::common::CommonPlayerSpawnInfo,
+) {
     use crate::renderer::dimension::Dimension;
 
-    crate::renderer::dimension::set_current(Dimension::from_path(common.dimension.path()));
+    let type_path = {
+        let shared = world.shared.read();
+        common
+            .dimension_type(&shared.registries)
+            .map(|(id, _)| id.path().to_owned())
+    };
+    let path = type_path.unwrap_or_else(|| common.dimension.path().to_owned());
+    crate::renderer::dimension::set_current(Dimension::from_path(&path));
+    crate::renderer::dimension::set_level(&common.dimension);
     crate::renderer::dimension::set_sea_level(common.sea_level);
 }
 

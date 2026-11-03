@@ -5,18 +5,18 @@ use crate::util::mth::DEG_TO_RAD;
 pub fn body_layer(g: Grow) -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part_grow(
         "head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box_grow(-4.0, -8.0, -4.0, 8.0, 8.0, 8.0, g),
+        (0, 0),
+        [-4.0, -8.0, -4.0, 8.0, 8.0, 8.0],
+        g,
         PartPose::offset(0.0, 6.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "body",
-        CubeList::new()
-            .tex_offs(16, 16)
-            .add_box_grow(-4.0, 0.0, -2.0, 8.0, 12.0, 4.0, g),
+        (16, 16),
+        [-4.0, 0.0, -2.0, 8.0, 12.0, 4.0],
+        g,
         PartPose::offset(0.0, 6.0, 0.0),
     );
     let leg = CubeList::new()

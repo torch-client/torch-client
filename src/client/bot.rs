@@ -389,10 +389,19 @@ pub(crate) fn start_bot(address: String) {
             {
                 Ok(bridged) => bridged,
                 Err(e) => {
-                    log_error!("net", "could not reach {address}: {e}");
+                    let (status, spans) = match e.downcast_ref::<crate::eagler::Refused>() {
+                        Some(refused) => {
+                            log_warn!("net", "{address} refused the login: {refused}");
+                            (format!("Refused: {refused}"), refused.reason.clone())
+                        }
+                        None => {
+                            log_error!("net", "could not reach {address}: {e}");
+                            let status = format!("Could not connect: {e}");
+                            let spans = crate::text::parse_formatted(&status);
+                            (status, spans)
+                        }
+                    };
                     if let Some(shared) = SHARED.get() {
-                        let status = format!("Could not connect: {e}");
-                        let spans = crate::text::parse_formatted(&status);
                         shared.lock().unwrap().end_session(status, Some(spans));
                     }
                     return;
@@ -597,8 +606,8 @@ fn reset_session_side_tables(blocking: bool) {
             }
         }
         use crate::client::tracking::{
-            add_entity_data, entity_anims, meta_dirty, meta_index_18, on_grounds, passengers,
-            velocities,
+            add_entity_data, entity_anims, leashes, meta_dirty, meta_index_18, on_grounds,
+            passengers, velocities,
         };
         clear(entity_anims());
         clear(meta_index_18());
@@ -607,7 +616,11 @@ fn reset_session_side_tables(blocking: bool) {
         clear(velocities());
         clear(add_entity_data());
         clear(passengers());
+        clear(leashes());
         crate::play::tracking_emitter::reset();
+        crate::play::item_use::reset();
+        #[cfg(feature = "audio")]
+        crate::play::riding::sound::reset();
     }
     crate::client::tracking::LOCAL_ENTITY_ID.store(i32::MIN, std::sync::atomic::Ordering::Relaxed);
     crate::play::riding::reset(blocking);

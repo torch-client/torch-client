@@ -10,7 +10,7 @@ use crate::gui::atlas::{PUPPET_ARMOR_SLOT, PUPPET_SKIN_SLOT, PUPPET_SLOTS, Regio
 use crate::gui::painter::Painter;
 use crate::renderer::anim::AnimSample;
 use crate::renderer::player_model::{
-    ARMOR_LAYERS, ARMOR_PARTS, AVATAR_SCALE, MODEL_Y_OFFSET, OVERLAY_BITS, PARTS, SLIM_ARMS,
+    ARMOR_LAYERS, ARMOR_PARTS, AVATAR_SCALE, MODEL_Y_OFFSET, OVERLAY_BITS, player_parts,
 };
 use crate::renderer::skin::SKIN_SHEET;
 
@@ -185,11 +185,8 @@ fn model(slim: bool) -> [Part; 6] {
         centre: Vec3::ZERO,
         shells: Vec::new(),
     });
-    for (i, def) in PARTS.iter().enumerate() {
-        let (origin, size) = SLIM_ARMS
-            .iter()
-            .find(|a| slim && a.0 == i)
-            .map_or((def.origin, def.size), |&(_, origin, size)| (origin, size));
+    for (i, def) in player_parts(slim).iter().enumerate() {
+        let (origin, size) = (def.origin, def.size);
         let cube = geom::CubeDef {
             tex: def.tex,
             origin,

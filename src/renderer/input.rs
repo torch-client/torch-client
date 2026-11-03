@@ -55,6 +55,14 @@ impl CameraView {
     }
 }
 
+#[derive(Resource, Default)]
+pub struct FreecamTouch {
+    pub dir: Vec2,
+    pub up: bool,
+    pub down: bool,
+    pub sprint: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Perspective {
     #[default]
@@ -254,7 +262,7 @@ pub(super) fn apply_gui_nav(
                 s.session
                     .hotbar
                     .get(hand.hotbar_index(selected))
-                    .and_then(|slot| slot.book.as_deref())
+                    .and_then(|slot| slot.extra.book.as_deref())
                     .cloned()
             };
             (
@@ -614,6 +622,31 @@ pub(super) fn window_focus_cursor(
     }
 }
 
+pub(super) fn pause_on_lost_focus(
+    time: Res<Time>,
+    view: Res<super::FrameView>,
+    shared: Res<Shared>,
+    mut state: ResMut<crate::gui::GuiState>,
+    mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
+    mut last_active: Local<f32>,
+) {
+    if cfg!(feature = "mobile_ui") {
+        return;
+    }
+    let now = time.elapsed_secs();
+    let focused = windows.single().map_or(true, |(window, _)| {
+        crate::platform::keyboard::window_active(window.focused)
+    });
+    if focused || !view.in_world {
+        *last_active = now;
+        return;
+    }
+    if now - *last_active > 0.5 && !state.screen.is_open() {
+        crate::log_info!("input", "pausing: window lost focus");
+        enter_screen(crate::gui::Screen::Pause, &mut state, &shared, &mut windows);
+    }
+}
+
 pub(super) fn track_lifecycle(
     mut lifecycle: bevy::ecs::message::MessageReader<bevy::window::AppLifecycle>,
 ) {
@@ -635,10 +668,20 @@ pub(super) fn web_pointer_lock(
         With<PrimaryWindow>,
     >,
     mut held_frames: Local<u32>,
+    time: Res<Time>,
+    mut screen_seen: Local<f32>,
 ) {
     #[cfg(feature = "mobile_ui")]
     {
-        let _ = (buttons, shared, state, windows, held_frames);
+        let _ = (
+            buttons,
+            shared,
+            state,
+            windows,
+            held_frames,
+            time,
+            screen_seen,
+        );
         return;
     }
     #[cfg(not(feature = "mobile_ui"))]
@@ -647,7 +690,12 @@ pub(super) fn web_pointer_lock(
             return;
         }
         let claimed = crate::platform::pointer::take_claimed();
+        let now = time.elapsed_secs();
         if state.screen.is_open() {
+            *screen_seen = now;
+            if crate::platform::pointer::is_locked() {
+                crate::platform::pointer::unlock();
+            }
             *held_frames = 0;
             return;
         }
@@ -661,7 +709,9 @@ pub(super) fn web_pointer_lock(
             return;
         }
         const SETTLED: u32 = 3;
-        if std::mem::take(&mut *held_frames) >= SETTLED {
+        const CLOSE_GRACE: f32 = 0.6;
+        if std::mem::take(&mut *held_frames) >= SETTLED && now - *screen_seen > CLOSE_GRACE {
+            crate::log_info!("input", "pausing: pointer lock lost");
             enter_screen(crate::gui::Screen::Pause, &mut state, &shared, &mut windows);
             return;
         }
@@ -807,20 +857,22 @@ pub(super) fn toggle_freecam(
     }
 }
 
-pub(super) fn freecam_movement(
+pub(crate) fn freecam_movement(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut view: ResMut<CameraView>,
     angles: Res<CameraAngles>,
     time: Res<Time>,
     state: Res<crate::gui::GuiState>,
+    mut touch: ResMut<FreecamTouch>,
 ) {
+    let touch = std::mem::take(&mut *touch);
     if !view.free || state.screen.is_open() {
         return;
     }
     let binds = &state.keybinds;
     let down = |action| binds.down(action, &keys, &buttons);
-    let speed = crate::modules::freecam::speed(down(Action::Sprint));
+    let speed = crate::modules::freecam::speed(down(Action::Sprint) || touch.sprint);
     let dt = time.delta_secs();
     let eye = &mut view.free_eye;
     let step = |dir: Vec3| (dir * speed * dt).as_dvec3();
@@ -841,11 +893,14 @@ pub(super) fn freecam_movement(
     if down(Action::Left) {
         *eye -= step(right);
     }
-    if down(Action::Jump) {
+    if down(Action::Jump) || touch.up {
         *eye += step(Vec3::Y);
     }
-    if down(Action::Sneak) {
+    if down(Action::Sneak) || touch.down {
         *eye -= step(Vec3::Y);
+    }
+    if touch.dir != Vec2::ZERO {
+        *eye += step(forward * touch.dir.y + right * touch.dir.x);
     }
 }
 
@@ -1172,6 +1227,11 @@ pub(super) fn toggle_screen(
         && !creative_search_focused
         && !state.anvil_typing();
     let close_key = keys.just_pressed(KeyCode::Escape) || field_escape;
+    #[cfg(lua_mods)]
+    let close_key = close_key
+        || (state.screen == Screen::LuaList
+            && keys.just_pressed(KeyCode::ShiftRight)
+            && state.lua_list.windowed());
     #[cfg(target_arch = "wasm32")]
     let pause_key = state.keybinds.just(Action::Pause, &keys, &buttons);
     #[cfg(not(target_arch = "wasm32"))]
@@ -1185,6 +1245,11 @@ pub(super) fn toggle_screen(
     if state.screen_is_menu() {
         return;
     }
+
+    #[cfg(lua_mods)]
+    let lua_escape = close_key && state.screen == Screen::LuaList && state.lua_list.escape();
+    #[cfg(not(lua_mods))]
+    let lua_escape = false;
 
     let next = if state.screen == Screen::Pause || state.screen.is_options() {
         if close_key || (pause_key && state.screen == Screen::Pause) {
@@ -1304,7 +1369,9 @@ pub(super) fn toggle_screen(
             None
         }
     } else if state.screen.is_open() {
-        if (toggle_key || close_key)
+        if lua_escape {
+            None
+        } else if (toggle_key || close_key)
             && crate::gui::recipe_book_ghost::key_before_close(
                 &state,
                 &shared.0,
@@ -1507,10 +1574,20 @@ pub(super) fn reload_all_chunks(
 pub(super) fn handle_keybinds(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
+    mut key_events: MessageReader<bevy::input::keyboard::KeyboardInput>,
     mut state: ResMut<crate::gui::GuiState>,
     shared: Res<Shared>,
     mut commands: Commands,
 ) {
+    let drop_clicks = state
+        .keybinds
+        .clicks(Action::Drop, key_events.read(), &buttons);
+    let drop_clicks = if crate::gui::keyboard_elsewhere() {
+        0
+    } else {
+        drop_clicks
+    };
+
     let held = state.keybinds.down(Action::PlayerList, &keys, &buttons) && !state.screen.is_open();
     if state.tab_list_held != held {
         state.tab_list_held = held;
@@ -1532,13 +1609,17 @@ pub(super) fn handle_keybinds(
         shared.0.lock().unwrap().session.swap_hands = true;
     }
 
-    if state.keybinds.just(Action::Drop, &keys, &buttons) {
+    if drop_clicks > 0 {
         let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-        shared.0.lock().unwrap().session.pending_drop = Some(if ctrl {
+        let drop = if ctrl {
             DropRequest::HeldStack
         } else {
             DropRequest::HeldItem
-        });
+        };
+        let mut s = shared.0.lock().unwrap();
+        s.session
+            .pending_drops
+            .extend(std::iter::repeat_n(drop, drop_clicks as usize));
     }
 }
 

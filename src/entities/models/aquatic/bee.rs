@@ -10,40 +10,36 @@ pub fn adult_layer() -> LayerDef {
     let bone = mesh
         .root()
         .child("bone", CubeList::new(), PartPose::offset(0.0, 19.0, 0.0));
-    let body = bone.child(
+    let body = bone.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-3.5, -4.0, -5.0, 7.0, 7.0, 10.0),
+        (0, 0),
+        [-3.5, -4.0, -5.0, 7.0, 7.0, 10.0],
         PartPose::ZERO,
     );
-    body.child(
+    body.part(
         "stinger",
-        CubeList::new()
-            .tex_offs(26, 7)
-            .add_box(0.0, -1.0, 5.0, 0.0, 1.0, 2.0),
+        (26, 7),
+        [0.0, -1.0, 5.0, 0.0, 1.0, 2.0],
         PartPose::ZERO,
     );
-    body.child(
+    body.part(
         "left_antenna",
-        CubeList::new()
-            .tex_offs(2, 0)
-            .add_box(1.5, -2.0, -3.0, 1.0, 2.0, 3.0),
+        (2, 0),
+        [1.5, -2.0, -3.0, 1.0, 2.0, 3.0],
         PartPose::offset(0.0, -2.0, -5.0),
     );
-    body.child(
+    body.part(
         "right_antenna",
-        CubeList::new()
-            .tex_offs(2, 3)
-            .add_box(-2.5, -2.0, -3.0, 1.0, 2.0, 3.0),
+        (2, 3),
+        [-2.5, -2.0, -3.0, 1.0, 2.0, 3.0],
         PartPose::offset(0.0, -2.0, -5.0),
     );
     let wing = Grow::all(0.001);
-    bone.child(
+    bone.part_grow(
         "right_wing",
-        CubeList::new()
-            .tex_offs(0, 18)
-            .add_box_grow(-9.0, 0.0, 0.0, 9.0, 0.0, 6.0, wing),
+        (0, 18),
+        [-9.0, 0.0, 0.0, 9.0, 0.0, 6.0],
+        wing,
         PartPose::offset_rotation(-1.5, -4.0, -3.0, 0.0, -0.2618, 0.0),
     );
     bone.child(
@@ -83,25 +79,22 @@ pub fn baby_layer() -> LayerDef {
             .add_box(-2.0, -1.6667, -2.1933, 1.0, 2.0, 2.0),
         PartPose::offset(0.0, 19.6667, -1.8567),
     );
-    bone.child(
+    bone.part(
         "body",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box(-2.0, -2.0, -2.5, 4.0, 4.0, 5.0),
+        (0, 0),
+        [-2.0, -2.0, -2.5, 4.0, 4.0, 5.0],
         PartPose::offset(0.0, 1.3333, 2.3567),
     )
-    .child(
+    .part(
         "stinger",
-        CubeList::new()
-            .tex_offs(13, 2)
-            .add_box(0.0, -0.5, 0.0, 0.0, 1.0, 1.0),
+        (13, 2),
+        [0.0, -0.5, 0.0, 0.0, 1.0, 1.0],
         PartPose::offset(0.0, 0.5, 2.5),
     );
-    bone.child(
+    bone.part(
         "right_wing",
-        CubeList::new()
-            .tex_offs(3, 9)
-            .add_box(-3.0, 0.0, 0.0, 3.0, 0.0, 3.0),
+        (3, 9),
+        [-3.0, 0.0, 0.0, 3.0, 0.0, 3.0],
         PartPose::offset_rotation(-1.0, -0.6667, 0.8567, 0.2182, 0.3491, 0.0),
     );
     bone.child(
@@ -113,25 +106,22 @@ pub fn baby_layer() -> LayerDef {
             .mirror_if(false),
         PartPose::offset_rotation(1.0, -0.6667, 0.8567, 0.2182, -0.3491, 0.0),
     );
-    bone.child(
+    bone.part(
         "front_legs",
-        CubeList::new()
-            .tex_offs(13, 0)
-            .add_box(-1.5, 0.0, 0.0, 3.0, 1.0, 0.0),
+        (13, 0),
+        [-1.5, 0.0, 0.0, 3.0, 1.0, 0.0],
         PartPose::offset(0.0, 3.3333, 1.8567),
     );
-    bone.child(
+    bone.part(
         "middle_legs",
-        CubeList::new()
-            .tex_offs(13, 1)
-            .add_box(-1.5, 0.0, 0.0, 3.0, 1.0, 0.0),
+        (13, 1),
+        [-1.5, 0.0, 0.0, 3.0, 1.0, 0.0],
         PartPose::offset(0.0, 3.3333, 2.8567),
     );
-    bone.child(
+    bone.part(
         "back_legs",
-        CubeList::new()
-            .tex_offs(13, 2)
-            .add_box(-1.5, 0.0, 0.0, 3.0, 1.0, 0.0),
+        (13, 2),
+        [-1.5, 0.0, 0.0, 3.0, 1.0, 0.0],
         PartPose::offset(0.0, 3.3333, 3.8567),
     );
     LayerDef::create(mesh, 32, 32)

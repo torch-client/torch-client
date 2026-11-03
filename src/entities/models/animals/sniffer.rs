@@ -32,32 +32,28 @@ pub fn layer() -> LayerDef {
             .add_box(-6.5, 7.5, -11.5, 13.0, 0.0, 11.0),
         PartPose::offset(0.0, 6.5, -19.48),
     );
-    head.child(
+    head.part(
         "left_ear",
-        CubeList::new()
-            .tex_offs(2, 0)
-            .add_box(0.0, 0.0, -3.0, 1.0, 19.0, 7.0),
+        (2, 0),
+        [0.0, 0.0, -3.0, 1.0, 19.0, 7.0],
         PartPose::offset(6.51, -7.5, -4.51),
     );
-    head.child(
+    head.part(
         "right_ear",
-        CubeList::new()
-            .tex_offs(48, 0)
-            .add_box(-1.0, 0.0, -3.0, 1.0, 19.0, 7.0),
+        (48, 0),
+        [-1.0, 0.0, -3.0, 1.0, 19.0, 7.0],
         PartPose::offset(-6.51, -7.5, -4.51),
     );
-    head.child(
+    head.part(
         "nose",
-        CubeList::new()
-            .tex_offs(10, 45)
-            .add_box(-6.5, -2.0, -9.0, 13.0, 2.0, 9.0),
+        (10, 45),
+        [-6.5, -2.0, -9.0, 13.0, 2.0, 9.0],
         PartPose::offset(0.0, -4.5, -11.5),
     );
-    head.child(
+    head.part(
         "lower_beak",
-        CubeList::new()
-            .tex_offs(10, 57)
-            .add_box(-6.5, -7.0, -8.0, 13.0, 12.0, 9.0),
+        (10, 57),
+        [-6.5, -7.0, -8.0, 13.0, 12.0, 9.0],
         PartPose::offset(0.0, 2.5, -12.5),
     );
     let bone = mesh.root().get("bone");
@@ -66,11 +62,10 @@ pub fn layer() -> LayerDef {
         ("right_mid_leg", 32, 105, 0.0),
         ("right_hind_leg", 32, 123, 15.0),
     ] {
-        bone.child(
+        bone.part(
             name,
-            CubeList::new()
-                .tex_offs(u, v)
-                .add_box(-3.5, -1.0, -4.0, 7.0, 10.0, 8.0),
+            (u, v),
+            [-3.5, -1.0, -4.0, 7.0, 10.0, 8.0],
             PartPose::offset(-7.5, 10.0, z),
         );
     }
@@ -79,11 +74,10 @@ pub fn layer() -> LayerDef {
         ("left_mid_leg", 0, 105, 0.0),
         ("left_hind_leg", 0, 123, 15.0),
     ] {
-        bone.child(
+        bone.part(
             name,
-            CubeList::new()
-                .tex_offs(u, v)
-                .add_box(-3.5, -1.0, -4.0, 7.0, 10.0, 8.0),
+            (u, v),
+            [-3.5, -1.0, -4.0, 7.0, 10.0, 8.0],
             PartPose::offset(7.5, 10.0, z),
         );
     }
@@ -114,32 +108,28 @@ pub fn baby_layer() -> LayerDef {
             .add_box(-5.0, 3.75, -7.5, 10.0, 0.0, 9.0),
         PartPose::offset(-6.0, -4.75, 0.0),
     );
-    head.child(
+    head.part(
         "left_ear",
-        CubeList::new()
-            .tex_offs(104, 38)
-            .add_box(0.0, 0.0, -2.0, 1.0, 11.0, 3.0),
+        (104, 38),
+        [0.0, 0.0, -2.0, 1.0, 11.0, 3.0],
         PartPose::offset(5.0, -4.25, -1.5),
     );
-    head.child(
+    head.part(
         "right_ear",
-        CubeList::new()
-            .tex_offs(96, 38)
-            .add_box(-1.0, 0.0, -2.0, 1.0, 11.0, 3.0),
+        (96, 38),
+        [-1.0, 0.0, -2.0, 1.0, 11.0, 3.0],
         PartPose::offset(-5.0, -4.25, -1.5),
     );
-    head.child(
+    head.part(
         "nose",
-        CubeList::new()
-            .tex_offs(68, 47)
-            .add_box(-5.0, -3.0, -2.0, 10.0, 3.0, 4.0),
+        (68, 47),
+        [-5.0, -3.0, -2.0, 10.0, 3.0, 4.0],
         PartPose::offset(0.0, -1.25, -9.5),
     );
-    head.child(
+    head.part(
         "lower_beak",
-        CubeList::new()
-            .tex_offs(68, 38)
-            .add_box(-5.0, -2.5, -2.0, 10.0, 5.0, 4.0),
+        (68, 38),
+        [-5.0, -2.5, -2.0, 10.0, 5.0, 4.0],
         PartPose::offset(0.0, 1.25, -9.5),
     );
     let bone = mesh.root().get("bone");
@@ -151,11 +141,10 @@ pub fn baby_layer() -> LayerDef {
         ("left_mid_leg", 16, 78, 4.0, 0.0),
         ("left_hind_leg", 16, 87, 4.0, 7.0),
     ] {
-        bone.child(
+        bone.part(
             name,
-            CubeList::new()
-                .tex_offs(u, v)
-                .add_box(-2.0, -1.0, -2.0, 4.0, 5.0, 4.0),
+            (u, v),
+            [-2.0, -1.0, -2.0, 4.0, 5.0, 4.0],
             PartPose::offset(x, -4.0, z),
         );
     }

@@ -4,62 +4,47 @@ use bevy::prelude::*;
 use crate::entities::TexturePath;
 use crate::entities::models::aquatic::squid;
 use crate::entities::registry::Registry;
+use crate::entities::render::add_adult_and_baby;
 use crate::entities::state::EntityState;
 use crate::entities::{RenderSpec, RootPose};
 
 pub fn register(registry: &mut Registry) {
-    registry.add(
-        EntityKind::Squid,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::Squid],
         RenderSpec::new(
             "squid",
             squid::squid_layer,
             squid_texture,
             squid::setup_anim,
         )
-        .with_root(root)
-        .with_visible(is_adult),
-    );
-    registry.add(
-        EntityKind::Squid,
+        .with_root(root),
         RenderSpec::new(
             "squid_baby",
             squid::baby_squid_layer,
             squid_baby_texture,
             squid::setup_anim,
         )
-        .with_root(root)
-        .with_visible(is_baby),
+        .with_root(root),
     );
-    registry.add(
-        EntityKind::GlowSquid,
+    add_adult_and_baby(
+        registry,
+        &[EntityKind::GlowSquid],
         RenderSpec::new(
             "glow_squid",
             squid::squid_layer,
             glow_squid_texture,
             squid::setup_anim,
         )
-        .with_root(root)
-        .with_visible(is_adult),
-    );
-    registry.add(
-        EntityKind::GlowSquid,
+        .with_root(root),
         RenderSpec::new(
             "glow_squid_baby",
             squid::baby_squid_layer,
             glow_squid_baby_texture,
             squid::setup_anim,
         )
-        .with_root(root)
-        .with_visible(is_baby),
+        .with_root(root),
     );
-}
-
-fn is_adult(st: &EntityState) -> bool {
-    !st.extras.is_baby
-}
-
-fn is_baby(st: &EntityState) -> bool {
-    st.extras.is_baby
 }
 
 fn squid_texture(_st: &EntityState) -> TexturePath {

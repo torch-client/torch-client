@@ -11,11 +11,11 @@ const RIBCAGE_X_ROT: f32 = 0.20420352;
 pub fn body_layer(g: Grow) -> LayerDef {
     let mut mesh = MeshDef::new();
     let root = mesh.root();
-    root.child(
+    root.part_grow(
         "shoulders",
-        CubeList::new()
-            .tex_offs(0, 16)
-            .add_box_grow(-10.0, 3.9, -0.5, 20.0, 3.0, 3.0, g),
+        (0, 16),
+        [-10.0, 3.9, -0.5, 20.0, 3.0, 3.0],
+        g,
         PartPose::ZERO,
     );
     root.child(
@@ -31,11 +31,11 @@ pub fn body_layer(g: Grow) -> LayerDef {
             .add_box_grow(-4.0, 6.5, 0.5, 11.0, 2.0, 2.0, g),
         PartPose::offset_rotation(-2.0, 6.9, -0.5, RIBCAGE_X_ROT, 0.0, 0.0),
     );
-    root.child(
+    root.part_grow(
         "tail",
-        CubeList::new()
-            .tex_offs(12, 22)
-            .add_box_grow(0.0, 0.0, 0.0, 3.0, 6.0, 3.0, g),
+        (12, 22),
+        [0.0, 0.0, 0.0, 3.0, 6.0, 3.0],
+        g,
         PartPose::offset_rotation(
             -2.0,
             6.9 + RIBCAGE_X_ROT.cos() * 10.0,
@@ -45,11 +45,11 @@ pub fn body_layer(g: Grow) -> LayerDef {
             0.0,
         ),
     );
-    root.child(
+    root.part_grow(
         "center_head",
-        CubeList::new()
-            .tex_offs(0, 0)
-            .add_box_grow(-4.0, -4.0, -4.0, 8.0, 8.0, 8.0, g),
+        (0, 0),
+        [-4.0, -4.0, -4.0, 8.0, 8.0, 8.0],
+        g,
         PartPose::ZERO,
     );
     let side_head = CubeList::new()

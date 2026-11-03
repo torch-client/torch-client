@@ -21,7 +21,10 @@ use crate::items::model::DisplayContext;
 use crate::renderer::anim::{
     AnimSample, HeldItem, UseAnimation, rot_lerp, use_animation, wrap_degrees,
 };
-use crate::renderer::item_assets::{ItemAssets, ItemGpu};
+use crate::renderer::item_assets::{ItemAssets, ItemGpu, ItemUse};
+use crate::renderer::player_model::{
+    PART_LEFT_ARM, PART_LEFT_SLEEVE, PART_RIGHT_ARM, PART_RIGHT_SLEEVE, player_parts,
+};
 use crate::session::Gamemode;
 
 pub const HAND_LAYER: usize = 2;
@@ -167,7 +170,7 @@ const EQUIP_STEP: f32 = 0.4;
 
 const EQUIP_SWAP_THRESHOLD: f32 = 0.1;
 
-const CROSSBOW_CHARGE_TICKS: f32 = 25.0;
+use crate::items::kinetic::CROSSBOW_CHARGE_TICKS;
 
 const BRUSH_USE_DURATION_TICKS: f32 = 200.0;
 
@@ -683,11 +686,8 @@ fn apply_player_arm(
 
 fn apply_arm_part(c: &mut Chain, hand: Hand, main_arm_left: bool) {
     let arm = arm_def(hand, main_arm_left);
-    c.translate(
-        arm.pivot[0] / 16.0,
-        arm.pivot[1] / 16.0,
-        arm.pivot[2] / 16.0,
-    );
+    let pivot = arm.pivot();
+    c.translate(pivot[0] / 16.0, pivot[1] / 16.0, pivot[2] / 16.0);
     c.rot_z(arm.z_rot.to_degrees());
 }
 
@@ -819,16 +819,16 @@ impl ViewBob {
 }
 
 struct ArmDef {
-    tex: [f32; 2],
-    sleeve_tex: [f32; 2],
-    origin: [f32; 3],
-    pivot: [f32; 3],
+    arm: usize,
+    sleeve: usize,
     z_rot: f32,
 }
 
-const OVERLAY_SCALE: f32 = 0.25;
-
-const ARM_SIZE: [f32; 3] = [4.0, 12.0, 4.0];
+impl ArmDef {
+    fn pivot(&self) -> [f32; 3] {
+        player_parts(false)[self.arm].pivot
+    }
+}
 
 fn arm_def(hand: Hand, main_arm_left: bool) -> ArmDef {
     if hand.is_left(main_arm_left) {
@@ -839,18 +839,14 @@ fn arm_def(hand: Hand, main_arm_left: bool) -> ArmDef {
 }
 
 const RIGHT_ARM: ArmDef = ArmDef {
-    tex: [40.0, 16.0],
-    sleeve_tex: [40.0, 32.0],
-    origin: [-3.0, -2.0, -2.0],
-    pivot: [-5.0, 2.0, 0.0],
+    arm: PART_RIGHT_ARM,
+    sleeve: PART_RIGHT_SLEEVE,
     z_rot: 0.1,
 };
 
 const LEFT_ARM: ArmDef = ArmDef {
-    tex: [32.0, 48.0],
-    sleeve_tex: [48.0, 48.0],
-    origin: [-1.0, -2.0, -2.0],
-    pivot: [5.0, 2.0, 0.0],
+    arm: PART_LEFT_ARM,
+    sleeve: PART_LEFT_SLEEVE,
     z_rot: -0.1,
 };
 
@@ -860,28 +856,17 @@ const ARM_COLOR: Option<[f32; 4]> = if cfg!(feature = "shader_support") {
     None
 };
 
-fn arm_box_mesh(tex: [f32; 2], origin: [f32; 3], size: [f32; 3], grow: f32) -> Mesh {
+fn arm_box_mesh(slim: bool, part: usize) -> Mesh {
+    let def = &player_parts(slim)[part];
     super::skin::box_mesh(
         super::skin::SKIN_SHEET,
-        tex,
-        origin,
-        size,
-        grow,
+        def.tex,
+        def.origin,
+        def.size,
+        def.grow,
         super::skin::MODEL_TO_BLOCKS,
         ARM_COLOR,
     )
-}
-
-#[cfg(feature = "skins")]
-const SLIM_ARM_SIZE: [f32; 3] = [3.0, 12.0, 4.0];
-
-#[cfg(feature = "skins")]
-fn slim_origin(left: bool, wide: [f32; 3]) -> [f32; 3] {
-    if left {
-        wide
-    } else {
-        [wide[0] + 1.0, wide[1], wide[2]]
-    }
 }
 
 fn map_quad(min: f32, max: f32, z: f32) -> Mesh {
@@ -967,7 +952,7 @@ struct HandEntities {
 
 struct UploadedItem {
     item: HeldItem,
-    using: bool,
+    branch: u32,
     main_arm_left: bool,
     transform: Option<ItemTransform>,
 }
@@ -1175,34 +1160,12 @@ fn setup_hand(
     };
 
     let assets = HandAssets {
-        arm: [RIGHT_ARM, LEFT_ARM]
-            .map(|def| meshes.add(arm_box_mesh(def.tex, def.origin, ARM_SIZE, 0.0))),
-        sleeve: [RIGHT_ARM, LEFT_ARM].map(|def| {
-            meshes.add(arm_box_mesh(
-                def.sleeve_tex,
-                def.origin,
-                ARM_SIZE,
-                OVERLAY_SCALE,
-            ))
-        }),
+        arm: [RIGHT_ARM, LEFT_ARM].map(|def| meshes.add(arm_box_mesh(false, def.arm))),
+        sleeve: [RIGHT_ARM, LEFT_ARM].map(|def| meshes.add(arm_box_mesh(false, def.sleeve))),
         #[cfg(feature = "skins")]
-        slim_arm: [(false, RIGHT_ARM), (true, LEFT_ARM)].map(|(left, def)| {
-            meshes.add(arm_box_mesh(
-                def.tex,
-                slim_origin(left, def.origin),
-                SLIM_ARM_SIZE,
-                0.0,
-            ))
-        }),
+        slim_arm: [RIGHT_ARM, LEFT_ARM].map(|def| meshes.add(arm_box_mesh(true, def.arm))),
         #[cfg(feature = "skins")]
-        slim_sleeve: [(false, RIGHT_ARM), (true, LEFT_ARM)].map(|(left, def)| {
-            meshes.add(arm_box_mesh(
-                def.sleeve_tex,
-                slim_origin(left, def.origin),
-                SLIM_ARM_SIZE,
-                OVERLAY_SCALE,
-            ))
-        }),
+        slim_sleeve: [RIGHT_ARM, LEFT_ARM].map(|def| meshes.add(arm_box_mesh(true, def.sleeve))),
         map_background: cutout(paper(&mut images, "map_background")),
         map_checkerboard: cutout(paper(&mut images, "map_background_checkerboard")),
         map_picture: std::array::from_fn(|_| cutout(None)),
@@ -1518,7 +1481,7 @@ fn sync_hands(
             hand,
             main_arm_left: sample.main_arm_left,
             item: rig.hands[index].shown.clone(),
-            attack: if (hand == Hand::Off) == sample.attack_left {
+            attack: if ((hand == Hand::Off) != sample.main_arm_left) == sample.attack_left {
                 sample.attack_time
             } else {
                 0.0
@@ -1594,11 +1557,17 @@ fn sync_hands(
         set_visible(&mut nodes, state.nodes.map, false);
         set_visible(&mut nodes, state.nodes.item, true);
 
+        let use_ = ItemUse {
+            owner: item_assets.local_owner(),
+            ..ItemUse::of(&frame.item, frame.using, frame.ticks_using + 1.0)
+        };
+        let ctx = hand.display_context(frame.main_arm_left).name();
+        let branch = item_assets.branch(frame.item.id, ctx, use_);
         let cached = state
             .uploaded
             .as_ref()
             .filter(|up| {
-                up.using == frame.using
+                up.branch == branch
                     && up.main_arm_left == frame.main_arm_left
                     && up.item.same_model(&frame.item)
             })
@@ -1607,13 +1576,7 @@ fn sync_hands(
             Some(display) => display,
             None => {
                 let key = frame.item.model_key();
-                let gpu = item_assets.get(
-                    &key,
-                    hand.display_context(frame.main_arm_left).name(),
-                    frame.using,
-                    &mut meshes,
-                    &mut images,
-                );
+                let gpu = item_assets.get(&key, ctx, use_, &mut meshes, &mut images);
                 let display = gpu.map(|gpu| display_transform(gpu, hand, frame.main_arm_left));
                 if let Some(gpu) = gpu
                     && let Ok(mut mesh) = item_nodes.get_mut(state.nodes.item)
@@ -1631,7 +1594,7 @@ fn sync_hands(
                 }
                 state.uploaded = Some(UploadedItem {
                     item: frame.item.clone(),
-                    using: frame.using,
+                    branch,
                     main_arm_left: frame.main_arm_left,
                     transform: display,
                 });
@@ -1944,10 +1907,10 @@ mod tests {
 
     #[test]
     fn arm_def_follows_the_main_arm() {
-        assert_eq!(arm_def(Hand::Main, false).tex, RIGHT_ARM.tex);
-        assert_eq!(arm_def(Hand::Off, false).tex, LEFT_ARM.tex);
-        assert_eq!(arm_def(Hand::Main, true).tex, LEFT_ARM.tex);
-        assert_eq!(arm_def(Hand::Off, true).tex, RIGHT_ARM.tex);
+        assert_eq!(arm_def(Hand::Main, false).arm, RIGHT_ARM.arm);
+        assert_eq!(arm_def(Hand::Off, false).arm, LEFT_ARM.arm);
+        assert_eq!(arm_def(Hand::Main, true).arm, LEFT_ARM.arm);
+        assert_eq!(arm_def(Hand::Off, true).arm, RIGHT_ARM.arm);
     }
 
     #[test]
@@ -2266,11 +2229,12 @@ mod tests {
             });
             let sample = anim.sample(1.0);
             assert!(!sample.attack_left, "the main hand is the right arm");
-            let attack = if (Hand::Main == Hand::Off) == sample.attack_left {
-                sample.attack_time
-            } else {
-                0.0
-            };
+            let attack =
+                if ((Hand::Main == Hand::Off) != sample.main_arm_left) == sample.attack_left {
+                    sample.attack_time
+                } else {
+                    0.0
+                };
             let swung = item_origin(&arm_with_item(&frame(Hand::Main, "stone", attack)));
             moved |= (swung - rest).length() > 0.05;
         }

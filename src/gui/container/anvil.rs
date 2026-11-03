@@ -139,7 +139,7 @@ fn on_name_changed(
     if input.is_empty() {
         return;
     }
-    let Some(name) = rename_value(text, hover, input.custom_name.is_some()) else {
+    let Some(name) = rename_value(text, hover, input.extra.custom_name.is_some()) else {
         return;
     };
     if sent.as_deref() != Some(&*name) {

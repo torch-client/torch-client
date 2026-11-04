@@ -309,7 +309,7 @@
   try {
     say("loading the client…");
     const wasmBytes = await fetchModule(progress);
-    await init(wasmBytes);
+    await init({ module_or_path: wasmBytes });
 
     say("downloading assets…");
     progress(0, 1);

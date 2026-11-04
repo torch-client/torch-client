@@ -121,7 +121,9 @@ mod web {
     pub(super) fn unlock() {
         WANT.store(false, Ordering::Relaxed);
         CLAIMED.store(false, Ordering::Relaxed);
-        if let Some(doc) = document() {
+        if is_locked()
+            && let Some(doc) = document()
+        {
             doc.exit_pointer_lock();
         }
     }

@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use azalea::Client;
@@ -16,7 +15,7 @@ static NEXT: AtomicU32 = AtomicU32::new(0);
 
 static EDGE: Edge = Edge::new(Id::AutoSell);
 
-pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
+pub fn tick(bot: &Client, shared: &SharedMutex) {
     let s = store();
     match EDGE.poll(s) {
         Phase::Off => return,

@@ -502,8 +502,18 @@ impl KeyBinds {
     }
 
     pub fn reset(&mut self, i: usize) {
-        if let Some(def) = BINDS.get(i) {
-            self.set(i, def.default);
+        if i < BINDS.len() {
+            self.reclaim_default(i);
+            self.save();
+        }
+    }
+
+    fn reclaim_default(&mut self, i: usize) {
+        let default = BINDS[i].default;
+        for (j, (slot, def)) in self.bound.iter_mut().zip(BINDS.iter()).enumerate() {
+            if j == i || (default != Bound::Unbound && *slot == default) {
+                *slot = def.default;
+            }
         }
     }
 
@@ -667,6 +677,61 @@ mod tests {
             binds.collisions(Action::Jump as usize),
             vec!["Strafe Left", "Reload Chunks"]
         );
+    }
+
+    #[test]
+    fn reset_takes_the_default_key_back() {
+        let fresh = || KeyBinds {
+            bound: BINDS.iter().map(|d| d.default).collect(),
+            capturing: None,
+            escape_guard: false,
+        };
+        let forward = Action::Forward as usize;
+        let jump = Action::Jump as usize;
+        let w = Bound::Key(KeyCode::KeyW);
+
+        let mut binds = fresh();
+        binds.bound[jump] = w;
+        assert!(!binds.collisions(forward).is_empty());
+        binds.reclaim_default(forward);
+        assert!(binds.is_default(jump));
+        assert!(binds.collisions(forward).is_empty());
+
+        let mut binds = fresh();
+        binds.bound[jump] = w;
+        binds.bound[forward] = Bound::Key(KeyCode::KeyI);
+        binds.reclaim_default(forward);
+        assert_eq!(binds.row(forward), w);
+        assert!(binds.is_default(jump));
+        assert!(binds.collisions(forward).is_empty());
+
+        let mut binds = fresh();
+        binds.bound[jump] = w;
+        let drop = Action::Drop as usize;
+        binds.bound[drop] = Bound::Key(KeyCode::KeyI);
+        binds.reclaim_default(jump);
+        assert_eq!(binds.row(drop), Bound::Key(KeyCode::KeyI));
+
+        let mut binds = fresh();
+        let left = Action::Left as usize;
+        let reload = Action::ReloadChunks as usize;
+        binds.bound[left] = Bound::Key(KeyCode::KeyI);
+        binds.reclaim_default(left);
+        assert_eq!(binds.row(reload), binds.row(left));
+    }
+
+    #[cfg(feature = "hud_editor")]
+    #[test]
+    fn unbound_default_claims_nothing() {
+        let mut binds = KeyBinds {
+            bound: BINDS.iter().map(|d| d.default).collect(),
+            capturing: None,
+            escape_guard: false,
+        };
+        let jump = Action::Jump as usize;
+        binds.bound[jump] = Bound::Unbound;
+        binds.reclaim_default(Action::HudEditor as usize);
+        assert_eq!(binds.row(jump), Bound::Unbound);
     }
 
     #[test]

@@ -98,17 +98,7 @@ impl Actions {
     };
 }
 
-pub(super) fn intern(s: String) -> &'static str {
-    static SEEN: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
-    let mut seen = SEEN.lock().unwrap_or_else(PoisonError::into_inner);
-    let seen = seen.get_or_insert_with(HashSet::new);
-    if let Some(&s) = seen.get(s.as_str()) {
-        return s;
-    }
-    let s: &'static str = Box::leak(s.into_boxed_str());
-    seen.insert(s);
-    s
-}
+pub(super) use crate::util::intern;
 
 pub(super) fn shown(x: f32, decimals: u8) -> f64 {
     let scale = 10f64.powi(decimals as i32);

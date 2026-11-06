@@ -1,4 +1,4 @@
-use crate::client::language::{self, ENGLISH, Fetch, Language};
+use crate::client::language::{self, ENGLISH, Fetch, Language, ListFetch};
 use crate::gui::focus;
 use crate::gui::menu;
 use crate::gui::options::{draw_scrollbar, row_visible, scroll_masked};
@@ -30,7 +30,8 @@ const PROGRESS: u32 = 0xAA_AAAA;
 
 const APPLY: &str = "Apply";
 const DOWNLOADING: &str = "Downloading...";
-const NO_LIST: &str = "Reinstall the assets to list other languages";
+const LIST_LOADING: &str = "Downloading the language list...";
+const LIST_FAILED: &str = "No language list";
 
 pub struct State {
     search: TextBox,
@@ -55,6 +56,7 @@ impl Default for State {
 impl State {
     pub fn open(&mut self) {
         language::retry();
+        language::request_list();
         let mut search = TextBox::bordered(SEARCH_MAX_LEN, &translate("gui.language.search", &[]));
         search.focus();
         *self = State {
@@ -87,8 +89,8 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         SEARCH_H,
     );
 
-    let list = language::list();
-    let languages = list.clone().unwrap_or_else(language::english_only);
+    let list_fetch = language::list_fetch();
+    let languages = language::list().unwrap_or_else(language::english_only);
     let needle = st.search.text.to_lowercase();
     let shown: Vec<&Language> = languages
         .iter()
@@ -104,7 +106,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let content_h = shown.len() as f32 * ROW_H + 2.0 * LIST_PAD;
     let max_scroll = (content_h - lh).max(0.0);
     if st.center_pending {
-        st.center_pending = false;
+        st.center_pending = list_fetch == ListFetch::Fetching;
         if let Some(i) = shown.iter().position(|l| l.code == st.selected) {
             st.scroll = (i as f32 * ROW_H + ROW_H / 2.0 - lh / 2.0).clamp(0.0, max_scroll);
         }
@@ -173,11 +175,14 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         Fetch::Failed(code, why) if *code == st.selected => {
             (format!("{}: {why}", name_of(code)), ERROR)
         }
-        _ if list.is_none() => (NO_LIST.to_owned(), WARNING),
-        _ => (
-            label!("options.languageAccuracyWarning").to_owned(),
-            WARNING,
-        ),
+        _ => match list_fetch {
+            ListFetch::Fetching => (LIST_LOADING.to_owned(), PROGRESS),
+            ListFetch::Failed(why) => (format!("{LIST_FAILED}: {why}"), ERROR),
+            ListFetch::Idle => (
+                label!("options.languageAccuracyWarning").to_owned(),
+                WARNING,
+            ),
+        },
     };
     p.text_centered(&line, ctx.vw / 2.0, footer_top, color, true);
 

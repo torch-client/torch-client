@@ -28,6 +28,7 @@ pub struct ContainerUi {
 pub struct BeaconPick {
     pub primary: Option<i16>,
     pub secondary: Option<i16>,
+    pub seen: Option<[i16; 3]>,
 }
 
 #[derive(Debug)]

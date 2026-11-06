@@ -101,6 +101,7 @@ pub(crate) struct Inputs {
     pub(crate) blindness: f32,
     pub(crate) night_vision: f32,
     pub(crate) darkness: f32,
+    pub(crate) darkness_light: f32,
     pub(crate) biome: Option<u8>,
     pub(crate) atlas_size: IVec2,
     pub(crate) relative_eye: Vec3,
@@ -133,8 +134,6 @@ fn fading(duration: i32) -> f32 {
     }
 }
 
-use crate::play::mob_effects::night_vision_scale;
-
 fn held_block_light(item: &str) -> i32 {
     use std::str::FromStr;
     azalea_registry::builtin::BlockKind::from_str(item).map_or(0, |kind| {
@@ -164,6 +163,7 @@ pub(crate) fn gather_inputs(
     compiled: Option<Res<super::install::CompiledPack>>,
     camera_view: Res<crate::renderer::input::CameraView>,
     origin: Res<RenderOrigin>,
+    lightmap: Res<crate::renderer::systems::LightmapState>,
     mut inputs: ResMut<Inputs>,
 ) {
     let item_ids = compiled.as_deref().map(|c| &c.installed.item_ids);
@@ -176,12 +176,9 @@ pub(crate) fn gather_inputs(
     let pos = DVec3::from_array(view.player_lerp);
     let eye = DVec3::from_array(view.lerp_eye());
     let body_vector = view_vector(-view.camera_pitch, -view.camera_yaw - 180.0);
-    let (effects, held_items, held_light, vitals, elytra_flying, swimming) = {
+    let (held_items, held_light, vitals, elytra_flying, swimming) = {
         let Ok(state) = shared.0.lock();
         let session = &state.session;
-        let effect = |name: &str| {
-            crate::play::mob_effects::find(&session.active_effects, name).map(|e| e.duration)
-        };
         let held = |slot: usize| {
             let item = session.hotbar.get(slot).map_or("", |s| s.item);
             item_ids
@@ -197,11 +194,6 @@ pub(crate) fn gather_inputs(
         };
         let (main, off) = (light(usize::from(session.hotbar_selected)), light(9));
         (
-            (
-                effect("blindness"),
-                effect("night_vision"),
-                effect("darkness"),
-            ),
             [held(usize::from(session.hotbar_selected)), held(9)],
             [if old_hand_light { main.max(off) } else { main }, off],
             Vitals::of(
@@ -324,9 +316,10 @@ pub(crate) fn gather_inputs(
         thunder: environment.thunder,
         eye_in,
         eye_light: IVec2::new(i32::from(block), i32::from(sky)),
-        blindness: effects.0.map_or(0.0, fading),
-        night_vision: effects.1.map_or(0.0, |d| night_vision_scale(d, partial)),
-        darkness: effects.2.map_or(0.0, fading),
+        blindness: view.blindness.map_or(0.0, fading),
+        night_vision: lightmap.current.night_vision_factor,
+        darkness: view.darkness,
+        darkness_light: lightmap.current.darkness_scale,
         biome: row,
         atlas_size,
         relative_eye: (camera_at - eye).as_vec3(),
@@ -396,11 +389,9 @@ mod tests {
     }
 
     #[test]
-    fn effects_fade_in_their_last_second() {
+    fn blindness_fades_in_its_last_second() {
         assert_eq!(fading(-1), 1.0);
         assert_eq!(fading(400), 1.0);
         assert_eq!(fading(10), 0.5);
-        assert_eq!(night_vision_scale(400, 0.0), 1.0);
-        assert!(night_vision_scale(100, 0.0) <= 1.0);
     }
 }

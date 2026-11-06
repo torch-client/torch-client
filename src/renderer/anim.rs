@@ -289,6 +289,8 @@ pub struct AnimSample {
     pub swim_amount: f32,
     pub age_ticks: f32,
     pub death_time: f32,
+    pub hurt_time: f32,
+    pub hurt_dir: f32,
     pub has_red_overlay: bool,
     pub crouching: bool,
     #[allow(
@@ -352,6 +354,7 @@ pub struct AnimInput {
 pub struct HumanoidAnim {
     core: LivingCore,
     swim: SwimAmount,
+    hurt_dir: f32,
     ticks: u32,
     use_ticks: u32,
     kinetic_hit_at: Option<u32>,
@@ -504,6 +507,10 @@ impl HumanoidAnim {
         self.core.swing(left_arm);
     }
 
+    pub fn set_swing_effect(&mut self, ticks: i32) {
+        self.core.set_swing_effect(ticks);
+    }
+
     pub fn swing_hand(&mut self, off_hand: bool) {
         self.core.swing(off_hand != self.flags.main_arm_left);
     }
@@ -528,6 +535,16 @@ impl HumanoidAnim {
 
     pub fn hurt(&mut self) {
         self.core.hurt();
+    }
+
+    pub fn hurt_from(&mut self, yaw: f32) {
+        self.hurt_dir = yaw;
+        self.core.hurt();
+    }
+
+    pub fn reset_hurt(&mut self) {
+        self.hurt_dir = 0.0;
+        self.core.clear_hurt();
     }
 
     pub fn damage(&mut self) {
@@ -663,6 +680,8 @@ impl HumanoidAnim {
             swim_amount: self.swim.get(t),
             age_ticks: self.ticks as f32 + t,
             death_time: c.death_time(t),
+            hurt_time: c.hurt_time(t),
+            hurt_dir: self.hurt_dir,
             has_red_overlay: c.has_red_overlay(),
             #[cfg(feature = "skins")]
             cape: self.cape(t),
@@ -707,7 +726,20 @@ impl HumanoidAnim {
 
 pub use crate::util::mth::{rot_lerp, wrap_degrees};
 
-use crate::entities::living::{LivingCore, SwimAmount};
+use crate::entities::living::{HURT_DURATION, LivingCore, SwimAmount};
+
+pub fn hurt_tilt(hurt: f32, dir: f32, death: f32, strength: f32) -> bevy::math::Quat {
+    use bevy::math::Quat;
+
+    let roll = Quat::from_rotation_z((40.0 - 8000.0 / (death.min(20.0) + 200.0)).to_radians());
+    if hurt < 0.0 {
+        return roll;
+    }
+    let h = hurt / HURT_DURATION as f32;
+    let tilt = -(h * h * h * h * std::f32::consts::PI).sin() * 14.0 * strength;
+    let turn = Quat::from_rotation_y((-dir).to_radians());
+    roll * turn * Quat::from_rotation_z(tilt.to_radians()) * turn.inverse()
+}
 
 #[cfg(feature = "skins")]
 use crate::util::mth::DEG_TO_RAD;
@@ -738,6 +770,54 @@ mod tests {
             a.tick(input(0.0, 0.0));
         }
         assert!(!a.sample(0.0).has_red_overlay);
+    }
+
+    fn roll_degrees(q: bevy::math::Quat) -> f32 {
+        let (axis, angle) = q.to_axis_angle();
+        angle.to_degrees() * axis.z.signum()
+    }
+
+    #[test]
+    fn hurt_tilt_peaks_at_fourteen_degrees() {
+        let peak = 10.0 * 0.5f32.powf(0.25);
+        assert!((roll_degrees(hurt_tilt(peak, 0.0, 0.0, 1.0)) + 14.0).abs() < 1e-3);
+        assert!((roll_degrees(hurt_tilt(peak, 0.0, 0.0, 0.5)) + 7.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hurt_tilt_at_no_strength_is_the_identity() {
+        let peak = 10.0 * 0.5f32.powf(0.25);
+        assert!(hurt_tilt(peak, 90.0, 0.0, 0.0).angle_between(bevy::math::Quat::IDENTITY) < 1e-3);
+        assert!(hurt_tilt(-0.5, 90.0, 0.0, 1.0).angle_between(bevy::math::Quat::IDENTITY) < 1e-3);
+    }
+
+    #[test]
+    fn hurt_tilt_conjugates_by_the_direction() {
+        use bevy::math::Quat;
+        let dir = 37.0f32;
+        let turn = Quat::from_rotation_y((-dir).to_radians());
+        let want = turn * hurt_tilt(8.0, 0.0, 0.0, 1.0) * turn.inverse();
+        assert!(hurt_tilt(8.0, dir, 0.0, 1.0).angle_between(want) < 1e-3);
+    }
+
+    #[test]
+    fn the_death_roll_settles_at_twenty_ticks() {
+        assert!((roll_degrees(hurt_tilt(-1.0, 0.0, 20.0, 1.0)) - 3.636).abs() < 1e-3);
+        assert!((roll_degrees(hurt_tilt(-1.0, 0.0, 35.0, 1.0)) - 3.636).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hurt_direction_comes_from_the_animation_alone() {
+        let mut a = HumanoidAnim::default();
+        a.hurt_from(42.0);
+        assert_eq!(a.sample(0.0).hurt_dir, 42.0);
+        assert_eq!(a.sample(0.5).hurt_time, 9.5);
+        a.damage();
+        a.hurt();
+        assert_eq!(a.sample(0.0).hurt_dir, 42.0);
+        a.reset_hurt();
+        assert_eq!(a.sample(0.0).hurt_dir, 0.0);
+        assert_eq!(a.sample(0.0).hurt_time, 0.0);
     }
 
     #[test]

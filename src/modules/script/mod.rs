@@ -25,6 +25,7 @@ mod json;
 mod kinds;
 mod load;
 mod nbt;
+pub mod online;
 mod packets;
 mod perm;
 mod profile;
@@ -227,6 +228,10 @@ pub fn init() {
     #[cfg(target_arch = "wasm32")]
     bevy::reflect::TypeRegistry::empty().register_derived_types();
     load(false, true);
+}
+
+pub fn init_after_install() {
+    on_worker(|| load(false, true));
 }
 
 fn in_world() -> bool {
@@ -468,7 +473,7 @@ fn runtime_briefly() -> Option<std::sync::MutexGuard<'static, Option<run::Runtim
     None
 }
 
-pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) -> Option<(f32, f32)> {
+pub fn tick(bot: &Client, shared: &SharedMutex) -> Option<(f32, f32)> {
     if WANTS.load(Relaxed) & TICK_SITE == 0 {
         return None;
     }
@@ -552,7 +557,7 @@ pub fn command_typed(name: String, raw: String) {
     WANTS.fetch_or(COMMAND, Relaxed);
 }
 
-pub fn chat(bot: &Client, shared: &Arc<SharedMutex>, spans: &[Span]) -> bool {
+pub fn chat(bot: &Client, shared: &SharedMutex, spans: &[Span]) -> bool {
     if WANTS.load(Relaxed) & CHAT == 0 || LEAVE_PENDING.load(Relaxed) {
         return false;
     }
@@ -578,7 +583,7 @@ pub fn typed(line: String) {
     game::TYPED_ANY.store(true, Relaxed);
 }
 
-pub fn chatsend(bot: &Client, shared: &Arc<SharedMutex>, rest: Vec<String>) -> Vec<String> {
+pub fn chatsend(bot: &Client, shared: &SharedMutex, rest: Vec<String>) -> Vec<String> {
     if !game::TYPED_ANY.swap(false, Relaxed) {
         return rest;
     }
@@ -600,11 +605,7 @@ pub fn chatsend(bot: &Client, shared: &Arc<SharedMutex>, rest: Vec<String>) -> V
     lines
 }
 
-pub fn attack(
-    bot: &Client,
-    shared: &Arc<SharedMutex>,
-    entity: azalea::ecs::entity::Entity,
-) -> bool {
+pub fn attack(bot: &Client, shared: &SharedMutex, entity: azalea::ecs::entity::Entity) -> bool {
     if !game::listens(api::ATTACK)
         || LEAVE_PENDING.load(Relaxed)
         || !shared.lock().unwrap().in_world
@@ -627,7 +628,7 @@ pub fn attack(
     }
 }
 
-pub fn use_item(bot: &Client, shared: &Arc<SharedMutex>) -> bool {
+pub fn use_item(bot: &Client, shared: &SharedMutex) -> bool {
     if !game::listens(api::USE) || LEAVE_PENDING.load(Relaxed) || !shared.lock().unwrap().in_world {
         return false;
     }
@@ -905,7 +906,7 @@ pub fn note_input(moves: u8, attack: bool, use_item: bool) {
     game::INPUT.store(u16::from(moves) | attack | use_item, Relaxed);
 }
 
-fn flush(bot: &Client, shared: &Arc<SharedMutex>) -> Option<(f32, f32)> {
+fn flush(bot: &Client, shared: &SharedMutex) -> Option<(f32, f32)> {
     if WANTS.load(Relaxed) & OUTBOX == 0 {
         return None;
     }

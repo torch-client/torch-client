@@ -26,7 +26,7 @@ impl<S: PalletedContainerKind> Palette<S> {
             Palette::SingleValue(v) => *v,
             Palette::Linear(v) => v.get(id).copied().unwrap_or_default(),
             Palette::Hashmap(v) => v.get(id).copied().unwrap_or_default(),
-            Palette::Global => S::try_from(id as u32).unwrap_or_default(),
+            Palette::Global => S::from_network(id as u32),
         }
     }
 }
@@ -62,18 +62,18 @@ impl PaletteKind {
     ) -> Result<Palette<S>, BufReadError> {
         Ok(match self {
             PaletteKind::SingleValue => {
-                Palette::SingleValue(S::try_from(u32::azalea_read_var(buf)?).unwrap_or_default())
+                Palette::SingleValue(S::from_network(u32::azalea_read_var(buf)?))
             }
             PaletteKind::Linear => Palette::Linear(
                 Vec::<u32>::azalea_read_var(buf)?
                     .into_iter()
-                    .map(|v| S::try_from(v).unwrap_or_default())
+                    .map(S::from_network)
                     .collect(),
             ),
             PaletteKind::Hashmap => Palette::Hashmap(
                 Vec::<u32>::azalea_read_var(buf)?
                     .into_iter()
-                    .map(|v| S::try_from(v).unwrap_or_default())
+                    .map(S::from_network)
                     .collect(),
             ),
             PaletteKind::Global => Palette::Global,

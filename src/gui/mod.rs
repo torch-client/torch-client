@@ -43,6 +43,9 @@ pub mod menu;
 #[cfg(lua_mods)]
 pub mod mod_images;
 pub mod multiplayer;
+#[cfg(feature = "audio")]
+pub mod now_playing;
+pub mod op_blocks;
 pub mod options;
 #[cfg(any(resource_packs, feature = "shader_support"))]
 pub mod packdrop;
@@ -61,6 +64,8 @@ pub mod render;
 pub mod resourcepacks;
 pub mod screen_effects;
 pub mod screens;
+#[cfg(self_update)]
+pub mod selfupdate;
 pub mod serverlist;
 pub mod serverpack;
 #[cfg(feature = "shader_support")]
@@ -73,6 +78,8 @@ pub mod sleep;
 pub mod slots;
 pub mod spectator_menu;
 pub mod stats;
+#[cfg(feature = "audio")]
+pub mod subtitles;
 pub mod suggestions;
 pub mod tablist;
 pub mod title;
@@ -100,6 +107,8 @@ pub enum Screen {
     Title,
     #[cfg(feature = "asset_download")]
     AssetDownload,
+    #[cfg(self_update)]
+    SelfUpdate,
     Accounts,
     EditProfile,
     Credits,
@@ -141,6 +150,10 @@ pub enum Screen {
     Container(ContainerKind),
 
     CommandBlock,
+    StructureBlock,
+    JigsawBlock,
+    TestBlock,
+    TestInstanceBlock,
     SignEdit,
     BookView,
     BookEdit,
@@ -194,6 +207,10 @@ impl Screen {
         }
         #[cfg(feature = "asset_download")]
         if matches!(self, Screen::AssetDownload | Screen::Language) {
+            return true;
+        }
+        #[cfg(self_update)]
+        if self == Screen::SelfUpdate {
             return true;
         }
         #[cfg(feature = "online_mode")]
@@ -265,12 +282,26 @@ impl Screen {
         matches!(self, Screen::Chat | Screen::Sleep)
     }
 
+    pub fn is_op_block_editor(self) -> bool {
+        matches!(
+            self,
+            Screen::StructureBlock
+                | Screen::JigsawBlock
+                | Screen::TestBlock
+                | Screen::TestInstanceBlock
+        )
+    }
+
     pub fn tab_navigates(self) -> bool {
         if self.is_options() {
             return true;
         }
         #[cfg(feature = "asset_download")]
         if matches!(self, Screen::AssetDownload | Screen::Language) {
+            return true;
+        }
+        #[cfg(self_update)]
+        if self == Screen::SelfUpdate {
             return true;
         }
         #[cfg(feature = "online_mode")]
@@ -300,6 +331,10 @@ impl Screen {
                 | Screen::Statistics
                 | Screen::CodeOfConduct
                 | Screen::Reconfiguring
+                | Screen::StructureBlock
+                | Screen::JigsawBlock
+                | Screen::TestBlock
+                | Screen::TestInstanceBlock
         )
     }
 }
@@ -402,6 +437,7 @@ pub struct GuiOptions {
     pub fov: u32,
     pub fov_effects: u32,
     pub screen_effects: u32,
+    pub damage_tilt: u32,
     pub clouds: crate::renderer::clouds::CloudStatus,
     pub particles: crate::util::particles::ParticleStatus,
     pub render_distance: u32,
@@ -411,6 +447,7 @@ pub struct GuiOptions {
     pub lighting_enabled: bool,
     pub max_fps: u32,
     pub vsync: bool,
+    pub inactivity_fps_limit: InactivityFpsLimit,
     pub auto_jump: bool,
     pub toggle_sprint: bool,
     pub main_hand_left: bool,
@@ -431,6 +468,14 @@ pub struct GuiOptions {
     pub toast_time: u32,
     #[cfg(feature = "audio")]
     pub volumes: [u32; crate::audio::category::SoundCategory::COUNT],
+    #[cfg(feature = "audio")]
+    pub show_subtitles: bool,
+    #[cfg(feature = "audio")]
+    pub music_frequency: crate::audio::MusicFrequency,
+    #[cfg(feature = "audio")]
+    pub music_toast: now_playing::MusicToast,
+    #[cfg(feature = "audio")]
+    pub sound_device: Option<&'static str>,
 }
 
 #[cfg(feature = "audio")]
@@ -451,6 +496,28 @@ pub const MAX_FPS_MIN: u32 = 10;
 pub const MAX_FPS_UNLIMITED: u32 = 260;
 pub const MAX_FPS_DEFAULT: u32 = if cfg!(feature = "mobile_ui") { 30 } else { 60 };
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InactivityFpsLimit {
+    #[default]
+    Minimized,
+    Afk,
+}
+
+impl InactivityFpsLimit {
+    fn name(self) -> &'static str {
+        match self {
+            InactivityFpsLimit::Minimized => "minimized",
+            InactivityFpsLimit::Afk => "afk",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        [InactivityFpsLimit::Minimized, InactivityFpsLimit::Afk]
+            .into_iter()
+            .find(|limit| limit.name() == name)
+    }
+}
+
 pub const VSYNC_DEFAULT: bool = !cfg!(target_os = "android");
 
 pub const RENDER_DISTANCE_DEFAULT: u32 = if cfg!(feature = "mobile_ui") { 2 } else { 8 };
@@ -466,6 +533,8 @@ pub const GAMMA_MAX: u32 = 150;
 pub const FOV_EFFECTS_DEFAULT: u32 = 100;
 
 pub const SCREEN_EFFECTS_DEFAULT: u32 = 100;
+
+pub const DAMAGE_TILT_DEFAULT: u32 = 100;
 
 #[cfg(feature = "skins")]
 pub const MODEL_PART_KEYS: [(&str, u8); 7] = [
@@ -511,6 +580,7 @@ impl GuiOptions {
                 .unwrap_or(crate::renderer::systems::VANILLA_FOV_DEGREES as u32),
             fov_effects: effect_scale("fovEffectScale", FOV_EFFECTS_DEFAULT),
             screen_effects: effect_scale("screenEffectScale", SCREEN_EFFECTS_DEFAULT),
+            damage_tilt: effect_scale("damageTiltStrength", DAMAGE_TILT_DEFAULT),
             clouds: value("renderClouds")
                 .and_then(|v| v.as_str().and_then(CloudStatus::from_serialized_name))
                 .unwrap_or(if cfg!(feature = "mobile_ui") {
@@ -554,6 +624,9 @@ impl GuiOptions {
             vsync: value("vsync")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(VSYNC_DEFAULT),
+            inactivity_fps_limit: value("inactivityFpsLimit")
+                .and_then(|v| v.as_str().and_then(InactivityFpsLimit::from_name))
+                .unwrap_or_default(),
             auto_jump: value("autoJump")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(AUTO_JUMP_DEFAULT),
@@ -627,6 +700,27 @@ impl GuiOptions {
                 }
                 volumes
             },
+            #[cfg(feature = "audio")]
+            show_subtitles: value("showSubtitles")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            #[cfg(feature = "audio")]
+            music_frequency: value("musicFrequency")
+                .and_then(|v| {
+                    v.as_str()
+                        .and_then(crate::audio::MusicFrequency::from_serialized_name)
+                })
+                .unwrap_or_default(),
+            #[cfg(feature = "audio")]
+            music_toast: value("musicToast")
+                .and_then(|v| v.as_str().and_then(now_playing::MusicToast::from_name))
+                .unwrap_or_default(),
+            #[cfg(feature = "audio")]
+            sound_device: value("soundDevice").and_then(|v| {
+                v.as_str()
+                    .filter(|name| !name.is_empty())
+                    .map(|name| crate::util::intern(name.to_owned()))
+            }),
         }
     }
 }
@@ -729,6 +823,7 @@ fn options_json(options: &GuiOptions) -> serde_json::Value {
         "fov": options.fov,
         "fovEffectScale": options.fov_effects,
         "screenEffectScale": options.screen_effects,
+        "damageTiltStrength": options.damage_tilt,
         "renderClouds": options.clouds.serialized_name(),
         "particles": options.particles.serialized_name(),
         "renderDistance": options.render_distance,
@@ -738,6 +833,7 @@ fn options_json(options: &GuiOptions) -> serde_json::Value {
         "lightingEnabled": options.lighting_enabled,
         "maxFps": options.max_fps,
         "vsync": options.vsync,
+        "inactivityFpsLimit": options.inactivity_fps_limit.name(),
         "autoJump": options.auto_jump,
         "toggleSprint": options.toggle_sprint,
         "mainHand": if options.main_hand_left { "left" } else { "right" },
@@ -774,6 +870,22 @@ fn options_json(options: &GuiOptions) -> serde_json::Value {
                 serde_json::json!(options.volumes[category.index()]),
             );
         }
+        map.insert(
+            "showSubtitles".to_owned(),
+            serde_json::json!(options.show_subtitles),
+        );
+        map.insert(
+            "musicFrequency".to_owned(),
+            serde_json::json!(options.music_frequency.serialized_name()),
+        );
+        map.insert(
+            "musicToast".to_owned(),
+            serde_json::json!(options.music_toast.serialized_name()),
+        );
+        map.insert(
+            "soundDevice".to_owned(),
+            serde_json::json!(options.sound_device.unwrap_or("")),
+        );
     }
     json
 }
@@ -786,6 +898,7 @@ pub struct GuiState {
     pub chat: chat::ChatState,
     pub sign_edit: sign_edit::SignEditState,
     pub command_block: command_block::CommandBlockState,
+    pub op_blocks: op_blocks::OpBlocksState,
     pub book: book::BookState,
     pub dialog: dialog::DialogState,
     pub advanced_tooltips: bool,
@@ -851,6 +964,8 @@ pub struct GuiState {
     pub hud_overlays: hud::HudOverlays,
     pub toasts: toast::Toasts,
     pub spectator_menu: spectator_menu::SpectatorMenuState,
+    #[cfg(feature = "audio")]
+    pub subtitles: subtitles::Subtitles,
     #[cfg(feature = "mobile_ui")]
     pub mobile: crate::mobile::MobileUi,
 }
@@ -891,7 +1006,7 @@ impl GuiState {
 
 #[derive(Default)]
 pub struct Snapshot {
-    pub action_bar: Option<Vec<crate::text::Span>>,
+    pub action_bar: Option<(Vec<crate::text::Span>, bool)>,
     pub title_text: Option<Vec<crate::text::Span>>,
     pub subtitle_text: Option<Vec<crate::text::Span>>,
     pub title_times: Option<(Option<u32>, Option<u32>, Option<u32>)>,
@@ -903,6 +1018,7 @@ pub struct Snapshot {
     pub hotbar: std::sync::Arc<[SlotStack]>,
     pub armor: std::sync::Arc<[SlotStack]>,
     pub carried: SlotStack,
+    pub creative_cursor: Option<crate::session::CreativeAnswer>,
     pub selected: u8,
     pub gamemode: Gamemode,
     pub health: f32,
@@ -927,6 +1043,7 @@ pub struct Snapshot {
     pub stonecutter_recipes: std::sync::Arc<[crate::session::StonecutterRecipe]>,
     pub advancements: Option<std::sync::Arc<crate::client::advancements::AdvancementTree>>,
     pub advancement_tab: Option<u32>,
+    pub tick_rate: crate::session::TickRate,
     pub active_effects: Vec<crate::play::mob_effects::MobEffectInstance>,
     pub xp_progress: f32,
     pub xp_level: u32,

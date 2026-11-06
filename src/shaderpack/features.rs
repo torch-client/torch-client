@@ -1,37 +1,23 @@
 use super::preprocess::Defines;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Feature {
-    SeparateHardwareSamplers,
-    HigherShadowcolor,
-    CustomImages,
-    PerBufferBlending,
-    ComputeShaders,
-    TessellationShaders,
-    EntityTranslucent,
-    ReversedCulling,
-    BlockEmissionAttribute,
-    CanDisableWeather,
-    Ssbo,
-    FadeVariable,
-    TextureFiltering,
+crate::util::indexed_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Feature {
+        SeparateHardwareSamplers,
+        HigherShadowcolor,
+        CustomImages,
+        PerBufferBlending,
+        ComputeShaders,
+        TessellationShaders,
+        EntityTranslucent,
+        ReversedCulling,
+        BlockEmissionAttribute,
+        CanDisableWeather,
+        Ssbo,
+        FadeVariable,
+        TextureFiltering,
+    }
 }
-
-pub(crate) const ALL: [Feature; 13] = [
-    Feature::SeparateHardwareSamplers,
-    Feature::HigherShadowcolor,
-    Feature::CustomImages,
-    Feature::PerBufferBlending,
-    Feature::ComputeShaders,
-    Feature::TessellationShaders,
-    Feature::EntityTranslucent,
-    Feature::ReversedCulling,
-    Feature::BlockEmissionAttribute,
-    Feature::CanDisableWeather,
-    Feature::Ssbo,
-    Feature::FadeVariable,
-    Feature::TextureFiltering,
-];
 
 impl Feature {
     pub(crate) fn name(self) -> &'static str {
@@ -56,7 +42,8 @@ impl Feature {
         if name.eq_ignore_ascii_case("TESSELATION_SHADERS") {
             return Some(Feature::TessellationShaders);
         }
-        ALL.into_iter()
+        Feature::ALL
+            .into_iter()
             .find(|f| f.name().eq_ignore_ascii_case(name))
     }
 
@@ -203,7 +190,7 @@ pub(crate) fn render_stage(name: &str) -> i32 {
 
 pub(crate) fn properties_defines() -> Defines {
     let mut defines = base_defines();
-    for feature in ALL.into_iter().filter(|f| supported(*f)) {
+    for feature in Feature::ALL.into_iter().filter(|f| supported(*f)) {
         defines.define(format!("IRIS_FEATURE_{}", feature.name()), "");
     }
     defines
@@ -243,7 +230,7 @@ mod tests {
 
     #[test]
     fn every_flag_round_trips_through_its_name() {
-        for feature in ALL {
+        for feature in Feature::ALL {
             assert_eq!(Feature::parse(feature.name()), Some(feature));
         }
         assert_eq!(Feature::parse("NOT_A_FLAG"), None);
@@ -266,7 +253,7 @@ mod tests {
         );
         let properties = properties_defines();
         let program = program_defines(["CUSTOM_IMAGES", "ssbo"].into_iter());
-        for feature in ALL {
+        for feature in Feature::ALL {
             let name = format!("IRIS_FEATURE_{}", feature.name());
             assert!(!defines.is_defined(&name), "{name}");
             assert_eq!(properties.is_defined(&name), supported(feature), "{name}");

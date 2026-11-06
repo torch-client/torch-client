@@ -706,6 +706,7 @@ pub struct RenderSpec {
     pub depth_bias: i32,
     pub tint: fn(&EntityState) -> [f32; 4],
     pub respects_invisibility: bool,
+    pub outlined_while_invisible: bool,
     pub light: Option<LightMode>,
     pub levels: fn(&EntityState, (u8, u8)) -> (u8, u8),
     pub armor_glint: fn(&EntityState) -> bool,
@@ -814,6 +815,7 @@ impl RenderSpec {
             depth_bias: 0,
             tint: no_tint,
             respects_invisibility: true,
+            outlined_while_invisible: false,
             light: None,
             levels: own_levels,
             armor_glint: no_glint,
@@ -890,6 +892,11 @@ impl RenderSpec {
 
     pub fn ignoring_invisibility(mut self) -> RenderSpec {
         self.respects_invisibility = false;
+        self
+    }
+
+    pub fn outlined_while_invisible(mut self) -> RenderSpec {
+        self.outlined_while_invisible = true;
         self
     }
 
@@ -1559,6 +1566,7 @@ struct LayerRig {
     glint: Vec4,
     states: Vec<PartState>,
     glow: u32,
+    outline_only: bool,
 }
 
 struct EntityRig {
@@ -1787,6 +1795,7 @@ fn sync_entities(
             layers: spec_ids.iter().map(|_| None).collect(),
         });
         let mut held: Option<(RootPose, Anchors)> = None;
+        let mut body_seen = false;
 
         for (slot, &idx) in rig.layers.iter_mut().zip(spec_ids) {
             let spec = &registry.specs[idx];
@@ -1801,13 +1810,35 @@ fn sync_entities(
                 ),
             };
             let hidden = crate::session::invisible_to(st.is_invisible, view.gamemode);
-            let show = in_range
-                && (!hidden || !spec.respects_invisibility)
+            let glow = match glowing.get(&st.id) {
+                Some(&argb)
+                    if !matches!(spec.geom, Geom::Built(_)) && display_leftover(st).is_none() =>
+                {
+                    argb
+                }
+                _ => 0,
+            };
+            let is_body = !body_seen
+                && spec.respects_invisibility
+                && matches!(spec.geom, Geom::Model(_))
+                && (spec.visible)(st);
+            body_seen |= is_body;
+            let outline_only = hidden
+                && in_range
+                && glow != 0
+                && spec.respects_invisibility
+                && (is_body || spec.outlined_while_invisible)
                 && (spec.visible)(st)
-                && match &spec.geom {
-                    Geom::Item(geom) => geom.holds(st),
-                    _ => true,
-                };
+                && !matches!(spec.light_mode(), LightMode::Emissive | LightMode::Text)
+                && !crate::renderer::terrain::pack_drawing();
+            let show = outline_only
+                || in_range
+                    && (!hidden || !spec.respects_invisibility)
+                    && (spec.visible)(st)
+                    && match &spec.geom {
+                        Geom::Item(geom) => geom.holds(st),
+                        _ => true,
+                    };
             if !show
                 && hidden
                 && in_range
@@ -1847,19 +1878,17 @@ fn sync_entities(
             if let Ok((_, mut visibility)) = nodes.get_mut(layer.pose_root) {
                 set_visibility(&mut visibility, shown(show));
             }
-            let glow = match glowing.get(&st.id) {
-                Some(&argb)
-                    if !matches!(spec.geom, Geom::Built(_)) && display_leftover(st).is_none() =>
-                {
-                    argb
-                }
-                _ => 0,
-            };
             crate::renderer::outline::set_glowing(
                 &mut commands,
                 layer.pose_root,
                 &mut layer.glow,
                 glow,
+            );
+            crate::renderer::outline::set_outline_only(
+                &mut commands,
+                layer.pose_root,
+                &mut layer.outline_only,
+                outline_only,
             );
             if !show {
                 continue;
@@ -2406,6 +2435,7 @@ fn spawn_model_rig(
         glint: Vec4::ZERO,
         states,
         glow: 0,
+        outline_only: false,
     }
 }
 
@@ -2449,6 +2479,7 @@ fn spawn_single_rig(
             glint: Vec4::ZERO,
             states: Vec::new(),
             glow: 0,
+            outline_only: false,
         };
     }
 
@@ -2499,6 +2530,7 @@ fn spawn_single_rig(
         glint: Vec4::ZERO,
         states: Vec::new(),
         glow: 0,
+        outline_only: false,
     }
 }
 

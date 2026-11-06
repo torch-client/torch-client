@@ -64,7 +64,7 @@ fn can_glide_using(stack: &ItemStack, slot: EquipmentSlot) -> bool {
     equippable.slot == slot && !next_damage_will_break(stack)
 }
 
-fn next_damage_will_break(stack: &ItemStack) -> bool {
+pub(crate) fn next_damage_will_break(stack: &ItemStack) -> bool {
     let (Some(max), Some(damage)) = (
         stack.get_component::<MaxDamage>(),
         stack.get_component::<Damage>(),
@@ -111,7 +111,7 @@ fn start_fall_flying(
             continue;
         }
 
-        let levitating = effects.is_some_and(|e| e.get_level(MobEffect::Levitation).is_some());
+        let levitating = effects.is_some_and(|e| e.has(MobEffect::Levitation));
         if **fall_flying
             || abilities.flying
             || physics.is_in_water()

@@ -110,11 +110,20 @@ pub fn read_packets(ecs: &mut World) {
                         state,
                         &mut queued_packet_events,
                     ) {
-                        let head = &raw_packet[..raw_packet.len().min(16)];
-                        error!(
-                            "Error reading packet: {e} ({state:?}, {} bytes, starts {head:02x?})",
-                            raw_packet.len()
-                        );
+                        let first = azalea_registry::unknown::note_packet(match &*e {
+                            ReadPacketError::Parse { packet_name, .. }
+                            | ReadPacketError::LeftoverData { packet_name, .. } => {
+                                packet_name.as_str()
+                            }
+                            _ => "unnamed",
+                        });
+                        if first {
+                            let head = &raw_packet[..raw_packet.len().min(16)];
+                            error!(
+                                "Error reading packet: {e} ({state:?}, {} bytes, starts {head:02x?})",
+                                raw_packet.len()
+                            );
+                        }
                     }
                 }
                 Ok(None) => {

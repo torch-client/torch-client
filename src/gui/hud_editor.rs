@@ -5,8 +5,8 @@ use bevy::math::Vec2;
 #[cfg(feature = "mobile_ui")]
 use crate::gui::hud_layout::Area;
 use crate::gui::hud_layout::{
-    Anchor, COUNT, ElementId, Frames, GRIDS, Home, HudLayout, Layer, MAX_SCALE, MIN_SCALE, Panel,
-    Place, Rect, StackId, Visibility, snap_scale,
+    Anchor, COUNT, DEFAULT_GRID, ElementId, Frames, GRIDS, Home, HudLayout, Layer, MAX_SCALE,
+    MIN_SCALE, Panel, Place, Rect, StackId, Visibility, snap_scale,
 };
 use crate::gui::painter::Painter;
 #[cfg(not(feature = "mobile_ui"))]
@@ -51,7 +51,7 @@ const PANEL_HOT: u32 = 0xFF30_3030;
 const LABEL_BG: u32 = 0xC000_0000;
 const HINT: u32 = 0xAAAAAA;
 
-const TOOLBAR_W: f32 = 300.0;
+const TOOLBAR_W: f32 = 384.0;
 const TOOLBAR_H: f32 = if TOUCH { 20.0 } else { 14.0 };
 const BUTTON_MIN: f32 = if TOUCH { 46.0 } else { 40.0 };
 const GRIP_H: f32 = if TOUCH { 14.0 } else { 8.0 };
@@ -138,7 +138,9 @@ enum Act {
 enum Tool {
     Done,
     Undo,
+    Redo,
     Grid,
+    Hint,
     #[cfg(feature = "mobile_ui")]
     Snap,
     #[cfg(not(feature = "mobile_ui"))]
@@ -170,6 +172,11 @@ struct Guide {
     at: f32,
 }
 
+struct Snapshot {
+    layout: HudLayout,
+    gui_scale: u32,
+}
+
 #[derive(Default)]
 pub struct EditorState {
     pub layout: HudLayout,
@@ -179,7 +186,9 @@ pub struct EditorState {
     drag: Option<Drag>,
     selected: Option<Grab>,
     menu: Option<Menu>,
-    undo: VecDeque<HudLayout>,
+    undo: VecDeque<Snapshot>,
+    redo: Vec<Snapshot>,
+    gui_scale: u32,
     scroll_run: Option<Grab>,
     guides: [Option<Guide>; 2],
     drop: Option<Landing>,
@@ -207,6 +216,7 @@ impl EditorState {
         self.clear_hand();
         self.selected = None;
         self.undo.clear();
+        self.redo.clear();
         self.scroll_run = None;
         self.guides = [None; 2];
         self.adding = false;
@@ -257,15 +267,36 @@ impl EditorState {
         if self.undo.len() == UNDO_DEPTH {
             self.undo.pop_front();
         }
-        self.undo.push_back(self.layout.clone());
+        self.undo.push_back(self.snapshot());
+        self.redo.clear();
+        self.scroll_run = None;
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            layout: self.layout.clone(),
+            gui_scale: self.gui_scale,
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: Snapshot) {
+        self.layout = snapshot.layout;
+        self.gui_scale = snapshot.gui_scale;
+        self.clear_hand();
         self.scroll_run = None;
     }
 
     fn undo(&mut self) {
         if let Some(prev) = self.undo.pop_back() {
-            self.layout = prev;
-            self.clear_hand();
-            self.scroll_run = None;
+            self.redo.push(self.snapshot());
+            self.restore_snapshot(prev);
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(next) = self.redo.pop() {
+            self.undo.push_back(self.snapshot());
+            self.restore_snapshot(next);
         }
     }
 
@@ -747,11 +778,13 @@ fn hints(layer: Layer) -> &'static [&'static str] {
         Layer::Extras => &[
             "Drag: move. Drop on a stack or line: stack. Shift: free.",
             "Scroll/corner: scale. Right-click: options. Bar: move stack.",
-            "H: hide. Del: remove/delete (Add restores). R: reset. Ctrl+Z: undo.",
+            "H: hide. Del: remove/delete (Add restores). R: reset.",
+            "Ctrl+Z: undo. Ctrl+Y: redo.",
         ],
         _ => &[
             "Drag: move. Shift: free. Scroll/corner: scale. Right-click: options.",
-            "H: hide. Del: remove (Add restores). R: reset. Ctrl+Z: undo.",
+            "H: hide. Del: remove (Add restores). R: reset.",
+            "Ctrl+Z: undo. Ctrl+Y: redo.",
         ],
     }
 }
@@ -767,13 +800,21 @@ struct Toolbar {
 }
 
 impl Toolbar {
-    fn new(p: &Painter, vw: f32, vh: f32, layer: Layer, panel: Option<Panel>) -> Toolbar {
-        let mut tools = vec![Tool::Done, Tool::Undo];
+    fn new(
+        p: &Painter,
+        vw: f32,
+        vh: f32,
+        layer: Layer,
+        panel: Option<Panel>,
+        show_hints: bool,
+    ) -> Toolbar {
+        let mut tools = vec![Tool::Done, Tool::Undo, Tool::Redo];
         #[cfg(feature = "mobile_ui")]
         tools.push(Tool::Snap);
         #[cfg(not(feature = "mobile_ui"))]
         tools.push(Tool::Gui);
         tools.push(Tool::Grid);
+        tools.push(Tool::Hint);
         match layer {
             #[cfg(feature = "mobile_ui")]
             Layer::Areas => tools.push(Tool::NewArea),
@@ -788,7 +829,11 @@ impl Toolbar {
             .floor();
         let cols = (((w + 2.0) / (BUTTON_MIN + 2.0)).floor() as usize).max(1);
         let rows = |n: usize| n.div_ceil(cols.min(n).max(1));
-        let hints = crate::gui::widgets::wrap(p, hints(layer), w);
+        let hints = if show_hints {
+            crate::gui::widgets::wrap(p, hints(layer), w)
+        } else {
+            Vec::new()
+        };
         let button_rows = rows(Layer::ALL.len()) + rows(tools.len());
         let h = button_rows as f32 * (TOOLBAR_H + 2.0) + hints.len() as f32 * 10.0 + GRIP_H;
         let (x, y) = match panel {
@@ -949,6 +994,9 @@ fn keys(st: &mut EditorState, ctx: &ScreenCtx) {
     let input = ctx.input;
     if input.undo {
         st.undo();
+    }
+    if input.redo {
+        st.redo();
     }
     let target = st
         .drag
@@ -1511,6 +1559,7 @@ pub fn draw(
     let mouse = ctx.mouse();
     let grid = GRIDS[st.layout.grid.min(GRIDS.len() - 1)];
     let free = input.shift || st.free;
+    st.gui_scale = options.gui_scale;
 
     keys(st, ctx);
 
@@ -1552,7 +1601,7 @@ pub fn draw(
     }
 
     let layer = st.layer();
-    let bar = Toolbar::new(p, vw, vh, layer, st.layout.panel);
+    let bar = Toolbar::new(p, vw, vh, layer, st.layout.panel, st.layout.hints);
     st.bar_rect = bar.rect;
     let menu_box = st.menu.map(|m| menu_rect(m, vw, vh));
     let removed: Vec<Restore> = ElementId::ALL
@@ -1686,6 +1735,11 @@ pub fn draw(
                     st.undo();
                 }
             }
+            Tool::Redo => {
+                if button(p, ctx, r, "Redo") {
+                    st.redo();
+                }
+            }
             Tool::Grid => {
                 let label = if grid > 0.0 {
                     format!("Grid: {grid:.0}")
@@ -1693,7 +1747,14 @@ pub fn draw(
                     "Grid: off".to_owned()
                 };
                 if button(p, ctx, r, &label) {
+                    st.push_undo();
                     st.layout.grid = (st.layout.grid + 1) % GRIDS.len();
+                }
+            }
+            Tool::Hint => {
+                if button_on(p, ctx, r, "Hint", st.layout.hints) {
+                    st.push_undo();
+                    st.layout.hints = !st.layout.hints;
                 }
             }
             #[cfg(feature = "mobile_ui")]
@@ -1704,17 +1765,15 @@ pub fn draw(
             }
             #[cfg(not(feature = "mobile_ui"))]
             Tool::Gui => {
-                let label = match options.gui_scale {
+                let label = match st.gui_scale {
                     0 => "GUI: Auto".to_owned(),
                     n => format!("GUI: {n}"),
                 };
                 let right = inside(Some(r)) && input.right_click;
                 let left = button(p, ctx, r, &label);
                 if left || right {
-                    options.gui_scale = step_gui_scale(options.gui_scale, left, ctx);
-                    crate::gui::save_options(options);
-                    st.drag = None;
-                    st.drop = None;
+                    st.push_undo();
+                    st.gui_scale = step_gui_scale(st.gui_scale, left, ctx);
                 }
             }
             Tool::Add => {
@@ -1744,13 +1803,25 @@ pub fn draw(
                     st.push_undo();
                     st.layout.reset_layer(layer);
                     st.layout.panel = None;
+                    st.layout.grid = DEFAULT_GRID;
+                    st.layout.hints = true;
                     st.selected = None;
+                    #[cfg(not(feature = "mobile_ui"))]
+                    {
+                        crate::gui::reset_options(options, |key| key == "guiScale");
+                        crate::gui::save_options(options);
+                        st.gui_scale = options.gui_scale;
+                        st.clear_hand();
+                    }
                 }
             }
         }
     }
-    #[cfg(feature = "mobile_ui")]
-    let _ = options;
+    if st.gui_scale != options.gui_scale {
+        options.gui_scale = st.gui_scale;
+        crate::gui::save_options(options);
+        st.clear_hand();
+    }
     let g = bar.grip;
     let lit = st.panel_drag.is_some() || st.panel_pinch.is_some();
     if lit {

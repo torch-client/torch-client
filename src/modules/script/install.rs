@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::{folder, load, perm};
 use crate::platform::packfs;
@@ -20,6 +20,7 @@ pub struct Candidate {
     pub verdict: Verdict,
     pub id: String,
     pub perms: Vec<&'static str>,
+    bytes: Option<Arc<Vec<u8>>>,
 }
 
 impl Candidate {
@@ -98,9 +99,35 @@ pub fn check(paths: Vec<PathBuf>, already: &[Candidate]) -> Vec<Candidate> {
             verdict,
             id,
             perms,
+            bytes: None,
         });
     }
     out
+}
+
+pub(super) fn from_memory(
+    id: &str,
+    title: &str,
+    version: &str,
+    perms: &[&'static str],
+    bytes: Arc<Vec<u8>>,
+) -> Candidate {
+    let file = format!("{id}.zip");
+    let same = same_id(&folder(), id);
+    Candidate {
+        path: PathBuf::from(&file),
+        file,
+        title: title.to_string(),
+        version: Some(version.to_string()),
+        verdict: if same.is_empty() {
+            Verdict::New
+        } else {
+            Verdict::Replaces(same)
+        },
+        id: id.to_string(),
+        perms: perms.to_vec(),
+        bytes: Some(bytes),
+    }
 }
 
 fn id_of(c: &Candidate) -> Option<&str> {
@@ -207,5 +234,8 @@ fn install_one(dir: &Path, c: &Candidate) -> std::io::Result<()> {
             }
         }
     }
-    crate::util::pack::copy_tree(&c.path, &dir.join(&c.file))
+    match &c.bytes {
+        Some(bytes) => packfs::write(dir.join(&c.file), bytes.to_vec()),
+        None => crate::util::pack::copy_tree(&c.path, &dir.join(&c.file)),
+    }
 }

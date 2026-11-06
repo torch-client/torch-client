@@ -51,6 +51,10 @@ impl JavaRandom {
         }
     }
 
+    pub fn next_bool(&mut self) -> bool {
+        self.next(1) != 0
+    }
+
     pub fn next_f32(&mut self) -> f32 {
         self.next(24) as f32 * FLOAT_MULTIPLIER
     }
@@ -88,6 +92,14 @@ mod tests {
         let mut r = JavaRandom::new(0);
         assert!((r.next_f32() - 0.730_967_8).abs() < 1e-6);
         assert!((r.next_f32() - 0.831_441_0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_boolean_is_a_bound_of_two() {
+        let (mut a, mut b) = (JavaRandom::new(42), JavaRandom::new(42));
+        for _ in 0..64 {
+            assert_eq!(a.next_bool(), b.next_int(2) != 0);
+        }
     }
 
     #[test]

@@ -6,9 +6,10 @@ use std::{
     fmt::Debug,
     io,
     io::{Cursor, Write},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
-use azalea_block::block_state::{BlockState, BlockStateIntegerRepr};
+use azalea_block::block_state::BlockState;
 use azalea_buf::{AzBuf, BufReadError};
 use azalea_core::{
     heightmap_kind::HeightmapKind,
@@ -25,6 +26,13 @@ const SECTION_HEIGHT: u32 = 16;
 pub struct Chunk {
     pub sections: Box<[Section]>,
     pub heightmaps: HashMap<HeightmapKind, Heightmap>,
+    version: u64,
+}
+
+static NEXT_VERSION: AtomicU64 = AtomicU64::new(1);
+
+fn next_version() -> u64 {
+    NEXT_VERSION.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -44,6 +52,7 @@ impl Default for Chunk {
         Chunk {
             sections: vec![Section::default(); (384 / 16) as usize].into(),
             heightmaps: HashMap::new(),
+            version: next_version(),
         }
     }
 }
@@ -73,7 +82,12 @@ impl Chunk {
         Ok(Chunk {
             sections,
             heightmaps,
+            version: next_version(),
         })
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     pub fn get_block_state(&self, pos: &ChunkBlockPos, min_y: i32) -> Option<BlockState> {
@@ -96,6 +110,7 @@ impl Chunk {
         };
         let chunk_section_pos = ChunkSectionBlockPos::from(pos);
         let previous_state = section.get_and_set_block_state(chunk_section_pos, state);
+        self.version = next_version();
 
         for heightmap in self.heightmaps.values_mut() {
             heightmap.update(pos, state, &self.sections);
@@ -114,6 +129,7 @@ impl Chunk {
         };
         let chunk_section_pos = ChunkSectionBlockPos::from(pos);
         section.get_and_set_block_state(chunk_section_pos, state);
+        self.version = next_version();
 
         for heightmap in self.heightmaps.values_mut() {
             heightmap.update(pos, state, &self.sections);
@@ -159,16 +175,6 @@ impl AzBuf for Section {
         let fluid_count = u16::azalea_read(buf)?;
 
         let states = PalettedContainer::<BlockState>::read(buf)?;
-
-        for i in 0..states.storage.size() {
-            if !BlockState::is_valid_state(states.storage.get(i) as BlockStateIntegerRepr) {
-                return Err(BufReadError::Custom(format!(
-                    "Invalid block state {} (index {i}) found in section.",
-                    states.storage.get(i)
-                )));
-            }
-        }
-
         let biomes = PalettedContainer::<Biome>::read(buf)?;
         Ok(Section {
             block_count,
@@ -232,7 +238,10 @@ pub fn section_index(y: i32, min_y: i32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::palette::SectionPos;
+    use crate::{
+        BitStorage,
+        palette::{PalletedContainerKind, SectionPos},
+    };
 
     #[test]
     fn test_section_index() {
@@ -274,5 +283,94 @@ mod tests {
         assert_eq!(cur.position(), buf.len() as u64);
 
         assert_eq!(section, deserialized_section);
+    }
+
+    fn global_section(bits: u8, first: u32) -> Vec<u8> {
+        let mut storage = BitStorage::new(bits as usize, 4096, None).unwrap();
+        for i in 0..4096 {
+            storage.set(i, 1);
+        }
+        storage.set(0, first as u64);
+
+        let mut bytes = Vec::new();
+        4096_u16.azalea_write(&mut bytes).unwrap();
+        0_u16.azalea_write(&mut bytes).unwrap();
+        bits.azalea_write(&mut bytes).unwrap();
+        for word in &storage.data {
+            word.azalea_write(&mut bytes).unwrap();
+        }
+        bytes.extend([0, 0]);
+        bytes
+    }
+
+    fn assert_next_section_aligned(mut bytes: Vec<u8>) -> Section {
+        let expected_next = BlockState::try_from(2_u32).unwrap();
+        bytes.extend([16, 0, 0, 0, 0, 2, 0, 0]);
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let section = Section::azalea_read(&mut cur).unwrap();
+        let next = Section::azalea_read(&mut cur).unwrap();
+
+        assert_eq!(cur.position(), bytes.len() as u64);
+        assert_eq!(next.states.get_at_index(0), expected_next);
+        section
+    }
+
+    #[test]
+    fn global_section_with_unknown_id_survives() {
+        let unknown = u32::from(BlockState::MAX_STATE) + 1;
+        let native = BlockState::storage_bits(9);
+
+        let section = assert_next_section_aligned(global_section(native, unknown));
+
+        assert_eq!(section.states.get_at_index(0), BlockState::stand_in());
+        assert_eq!(
+            section.states.get_at_index(1),
+            BlockState::try_from(1_u32).unwrap()
+        );
+
+        let mut unpacked = vec![BlockState::AIR; 4096];
+        section.states.unpack_into(&mut unpacked);
+        assert_eq!(unpacked[0], BlockState::stand_in());
+        assert_eq!(unpacked[1], BlockState::try_from(1_u32).unwrap());
+    }
+
+    #[test]
+    fn wide_global_sections_decode_aligned() {
+        for (bits, id) in [(16, 65_535), (17, 131_071), (32, u32::MAX)] {
+            let section = assert_next_section_aligned(global_section(bits, id));
+
+            assert_eq!(section.states.bits_per_entry, bits);
+            assert_eq!(section.states.get_at_index(0), BlockState::stand_in());
+            assert_eq!(
+                section.states.get_at_index(4095),
+                BlockState::try_from(1_u32).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn wide_global_section_round_trips_its_raw_ids() {
+        let bytes = global_section(17, 131_071);
+        let section = Section::azalea_read(&mut Cursor::new(bytes.as_slice())).unwrap();
+
+        let mut written = Vec::new();
+        section.azalea_write(&mut written).unwrap();
+
+        assert_eq!(written, bytes);
+    }
+
+    #[test]
+    fn block_section_wider_than_a_u32_fails() {
+        let bytes = [0, 0, 0, 0, 33];
+        assert!(Section::azalea_read(&mut Cursor::new(&bytes[..])).is_err());
+    }
+
+    #[test]
+    fn narrow_global_byte_is_stored_at_the_native_width() {
+        let native = BlockState::storage_bits(9);
+        assert_eq!(BlockState::storage_bits(native - 1), native);
+        assert_eq!(BlockState::storage_bits(native), native);
+        assert_eq!(BlockState::storage_bits(native + 1), native + 1);
     }
 }

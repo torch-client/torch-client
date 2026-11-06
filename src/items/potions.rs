@@ -1,3 +1,9 @@
+use std::str::FromStr;
+
+use azalea_inventory::components::{MobEffectDetails, PotionDurationScale};
+use azalea_inventory::default_components::get_default_component;
+use azalea_registry::builtin::ItemKind;
+
 use crate::play::mob_effects;
 
 pub struct PotionEffect {
@@ -152,13 +158,33 @@ pub struct PotionContents {
     pub custom_color: Option<u32>,
     pub custom_effects: Vec<PotionEffectInstance>,
     pub custom_name: Option<String>,
+    pub duration_scale: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PotionEffectInstance {
     pub effect: String,
-    pub duration: i32,
-    pub amplifier: i32,
+    pub details: MobEffectDetails,
+}
+
+impl PotionEffectInstance {
+    pub fn new(effect: impl Into<String>, duration: i32, amplifier: i32) -> Self {
+        Self {
+            effect: effect.into(),
+            details: MobEffectDetails {
+                duration,
+                amplifier,
+                ..MobEffectDetails::new()
+            },
+        }
+    }
+}
+
+pub fn default_duration_scale(item: &str) -> f32 {
+    ItemKind::from_str(item)
+        .ok()
+        .and_then(get_default_component::<PotionDurationScale>)
+        .map_or(1.0, |c| c.value)
 }
 
 pub fn potion(id: &str) -> Option<&'static Potion> {
@@ -178,11 +204,7 @@ impl PotionContents {
             .map(|p| {
                 p.effects
                     .iter()
-                    .map(|e| PotionEffectInstance {
-                        effect: e.effect.to_string(),
-                        duration: e.duration,
-                        amplifier: e.amplifier,
-                    })
+                    .map(|e| PotionEffectInstance::new(e.effect, e.duration, e.amplifier))
                     .collect()
             })
             .unwrap_or_default();
@@ -196,8 +218,11 @@ impl PotionContents {
         }
         let (mut r, mut g, mut b, mut weight) = (0u32, 0u32, 0u32, 0u32);
         for effect in self.all_effects() {
+            if !effect.details.show_particles {
+                continue;
+            }
             let color = mob_effects::color(&effect.effect);
-            let amplifier = (effect.amplifier + 1).max(0) as u32;
+            let amplifier = (effect.details.amplifier + 1).max(0) as u32;
             r += amplifier * ((color >> 16) & 0xFF);
             g += amplifier * ((color >> 8) & 0xFF);
             b += amplifier * (color & 0xFF);
@@ -329,11 +354,7 @@ mod tests {
         assert_eq!(custom.color(), 0x123456);
         let mixed = PotionContents {
             potion: Some("swiftness".into()),
-            custom_effects: vec![PotionEffectInstance {
-                effect: "poison".into(),
-                duration: 200,
-                amplifier: 0,
-            }],
+            custom_effects: vec![PotionEffectInstance::new("poison", 200, 0)],
             ..Default::default()
         };
         let effects = mixed.all_effects();
@@ -348,6 +369,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(only_custom.color(), poison);
+        let mut hidden = PotionEffectInstance::new("poison", 200, 0);
+        hidden.details.show_particles = false;
+        let invisible = PotionContents {
+            potion: Some("swiftness".into()),
+            custom_effects: vec![hidden],
+            ..Default::default()
+        };
+        assert_eq!(invisible.color(), speed);
+    }
+
+    #[test]
+    fn duration_scale_defaults_follow_the_item() {
+        assert_eq!(default_duration_scale("potion"), 1.0);
+        assert_eq!(default_duration_scale("lingering_potion"), 0.25);
+        assert_eq!(default_duration_scale("tipped_arrow"), 0.125);
     }
 
     #[test]

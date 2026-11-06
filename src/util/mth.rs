@@ -151,6 +151,10 @@ pub mod ease {
     }
 }
 
+pub fn as_8bit_channel(value: f32) -> u32 {
+    (value * 255.0).floor() as u32
+}
+
 pub fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.040_45 {
         c / 12.92

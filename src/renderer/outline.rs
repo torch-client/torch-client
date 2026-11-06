@@ -8,8 +8,8 @@ use bevy::mesh::{MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, ColorWrites,
-    CompareFunction, RenderPipelineDescriptor, SpecializedMeshPipelineError, TextureFormat,
+    AsBindGroup, BlendFactor as F, ColorWrites, CompareFunction, RenderPipelineDescriptor,
+    SpecializedMeshPipelineError, TextureFormat,
 };
 use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
@@ -29,9 +29,13 @@ const MATERIAL_CACHE_CAP: usize = 256;
 pub struct Glowing(pub u32);
 
 #[derive(Component)]
+pub struct OutlineOnly;
+
+#[derive(Component)]
 struct GlowTwin {
     source: Entity,
     stamp: u32,
+    hides_source: bool,
 }
 
 #[derive(Component)]
@@ -62,6 +66,18 @@ pub fn set_glowing(commands: &mut Commands, root: Entity, held: &mut u32, want: 
         commands.entity(root).try_remove::<Glowing>();
     } else {
         commands.entity(root).try_insert(Glowing(want));
+    }
+}
+
+pub fn set_outline_only(commands: &mut Commands, root: Entity, held: &mut bool, want: bool) {
+    if *held == want {
+        return;
+    }
+    *held = want;
+    if want {
+        commands.entity(root).try_insert(OutlineOnly);
+    } else {
+        commands.entity(root).try_remove::<OutlineOnly>();
     }
 }
 
@@ -231,7 +247,7 @@ fn sync_glow_twins(
     mut commands: Commands,
     mut state: ResMut<GlowState>,
     mut materials: ResMut<Assets<EntityMaterial>>,
-    roots: Query<(Entity, &Glowing)>,
+    roots: Query<(Entity, &Glowing, Has<OutlineOnly>)>,
     children: Query<&Children>,
     sources: Query<
         (
@@ -256,7 +272,7 @@ fn sync_glow_twins(
     let stamp = state.stamp;
 
     if !super::terrain::pack_drawing() {
-        for (root, &Glowing(argb)) in &roots {
+        for (root, &Glowing(argb), outline_only) in &roots {
             state.stack.clear();
             state.stack.push(root);
             while let Some(node) = state.stack.pop() {
@@ -286,6 +302,10 @@ fn sync_glow_twins(
                         if twin_material.0 != glow_material {
                             twin_material.0 = glow_material;
                         }
+                        if twin.hides_source != outline_only {
+                            twin.hides_source = outline_only;
+                            set_source_hidden(&mut commands, node, outline_only);
+                        }
                     }
                     None => {
                         let twin = commands
@@ -299,6 +319,7 @@ fn sync_glow_twins(
                                 GlowTwin {
                                     source: node,
                                     stamp,
+                                    hides_source: outline_only,
                                 },
                                 ChildOf(node),
                             ))
@@ -306,6 +327,9 @@ fn sync_glow_twins(
                         #[cfg(feature = "builtin_shaders")]
                         commands.entity(twin).insert(bevy::light::NotShadowCaster);
                         commands.entity(node).insert(GlowSource(twin));
+                        if outline_only {
+                            set_source_hidden(&mut commands, node, true);
+                        }
                     }
                 }
             }
@@ -316,7 +340,18 @@ fn sync_glow_twins(
         if twin.stamp != stamp {
             commands.entity(entity).try_despawn();
             commands.entity(twin.source).try_remove::<GlowSource>();
+            if twin.hides_source {
+                set_source_hidden(&mut commands, twin.source, false);
+            }
         }
+    }
+}
+
+fn set_source_hidden(commands: &mut Commands, source: Entity, hidden: bool) {
+    if hidden {
+        commands.entity(source).try_insert(RenderLayers::none());
+    } else {
+        commands.entity(source).try_remove::<RenderLayers>();
     }
 }
 
@@ -386,18 +421,12 @@ impl Material for GlowCompositeMaterial {
         if let Some(fragment) = descriptor.fragment.as_mut()
             && let Some(Some(target)) = fragment.targets.first_mut()
         {
-            target.blend = Some(BlendState {
-                color: BlendComponent {
-                    src_factor: BlendFactor::SrcAlpha,
-                    dst_factor: BlendFactor::OneMinusSrcAlpha,
-                    operation: BlendOperation::Add,
-                },
-                alpha: BlendComponent {
-                    src_factor: BlendFactor::Zero,
-                    dst_factor: BlendFactor::One,
-                    operation: BlendOperation::Add,
-                },
-            });
+            target.blend = Some(super::blend(
+                F::SrcAlpha,
+                F::OneMinusSrcAlpha,
+                F::Zero,
+                F::One,
+            ));
             target.write_mask = ColorWrites::COLOR;
         }
         Ok(())

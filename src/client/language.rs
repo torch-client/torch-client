@@ -38,8 +38,16 @@ pub(crate) enum Fetch {
     Failed(String, &'static str),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ListFetch {
+    Idle,
+    Fetching,
+    Failed(&'static str),
+}
+
 static LIST: Mutex<Option<Arc<Vec<Language>>>> = Mutex::new(None);
 static FETCH: Mutex<Fetch> = Mutex::new(Fetch::Idle);
+static LIST_FETCH: Mutex<ListFetch> = Mutex::new(ListFetch::Idle);
 
 static APPLIED: Mutex<Option<Applied>> = Mutex::new(None);
 
@@ -86,7 +94,7 @@ pub(crate) fn strings() -> Option<(String, Arc<str>)> {
     (applied.code != ENGLISH).then_some((applied.code, applied.text))
 }
 
-fn commit(applied: Applied) {
+fn commit(applied: Applied) -> bool {
     let stored = if applied.code == ENGLISH {
         String::new()
     } else {
@@ -96,6 +104,7 @@ fn commit(applied: Applied) {
     *APPLIED.lock() = Some(applied);
     storage::LANGUAGE.store(&stored);
     crate::gui::tooltip::reset_lang();
+    storage::LANGUAGE.load().unwrap_or_default() == stored
 }
 
 pub(crate) fn apply(lang: &Language) {
@@ -116,11 +125,16 @@ pub(crate) fn apply(lang: &Language) {
     spawn(move || async move {
         match fetch_file(&hash).await {
             Ok(text) => {
-                commit(Applied {
-                    code,
+                let saved = commit(Applied {
+                    code: code.clone(),
                     text: Arc::from(text),
                 });
-                *FETCH.lock() = Fetch::Idle;
+                *FETCH.lock() = if saved {
+                    Fetch::Idle
+                } else {
+                    log_warn!("language", "{code} is in use but could not be saved");
+                    Fetch::Failed(code, "Could not save it for next time")
+                };
             }
             Err(e) => {
                 log_warn!("language", "{code}: {}", e.detail);
@@ -149,6 +163,69 @@ async fn fetch_file(hash: &str) -> Result<String, Failure> {
 
 pub(crate) fn list() -> Option<Arc<Vec<Language>>> {
     LIST.lock().clone()
+}
+
+pub(crate) fn list_fetch() -> ListFetch {
+    *LIST_FETCH.lock()
+}
+
+pub(crate) fn request_list() -> bool {
+    if LIST.lock().is_some() {
+        return false;
+    }
+    if let Some(table) = assets::archived_languages() {
+        adopt(table);
+    } else if let Some(stored) = storage::LANGUAGE_LIST.load()
+        && let Some(table) = stored_table(&stored, crate::ASSET_VERSION)
+    {
+        adopt(table.as_bytes());
+    }
+    if LIST.lock().is_some() {
+        return false;
+    }
+    {
+        let mut fetch = LIST_FETCH.lock();
+        if *fetch == ListFetch::Fetching {
+            return true;
+        }
+        *fetch = ListFetch::Fetching;
+    }
+    log_info!("language", "fetching the list");
+    spawn(|| async {
+        let state = match fetch_list().await {
+            Ok(table) => {
+                adopt(table.as_bytes());
+                storage::LANGUAGE_LIST.store(&format!("{}\n{table}", crate::ASSET_VERSION));
+                ListFetch::Idle
+            }
+            Err(e) => {
+                log_warn!("language", "no language list: {}", e.detail);
+                ListFetch::Failed(e.short)
+            }
+        };
+        *LIST_FETCH.lock() = state;
+    });
+    true
+}
+
+fn stored_table<'a>(stored: &'a str, version: &str) -> Option<&'a str> {
+    stored
+        .split_once('\n')
+        .filter(|(v, _)| *v == version)
+        .map(|(_, table)| table)
+}
+
+async fn fetch_list() -> Result<String, Failure> {
+    let manifest = assets::get_json(assets::VERSION_MANIFEST).await?;
+    let meta = assets::get_json(&assets::pick_version(&manifest, crate::ASSET_VERSION)?).await?;
+    let index_url = meta["assetIndex"]["url"]
+        .as_str()
+        .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+    let index = assets::get_json(index_url).await?;
+    let table = table_from_index(&index, &|| false)
+        .await?
+        .ok_or_else(|| Failure::plain("The download was interrupted"))?;
+    String::from_utf8(table).map_err(|e| Failure::new("Mojang sent something unreadable", e))
 }
 
 pub(crate) fn retry() {
@@ -294,5 +371,12 @@ mod tests {
         assert_eq!(back[1].label(), "Deutsch (Deutschland)");
         assert_eq!(back[1].hash, "abcd");
         assert!(parse_table(b"{}").is_none());
+    }
+
+    #[test]
+    fn a_stored_list_needs_its_own_version() {
+        assert_eq!(stored_table("26.1.1\n[]", "26.1.1"), Some("[]"));
+        assert_eq!(stored_table("26.1.0\n[]", "26.1.1"), None);
+        assert_eq!(stored_table("[]", "26.1.1"), None);
     }
 }

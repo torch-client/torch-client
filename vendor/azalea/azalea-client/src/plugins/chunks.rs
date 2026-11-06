@@ -90,10 +90,12 @@ pub fn handle_receive_chunk_event(
             heightmaps,
             &mut world.chunks,
         ) {
-            error!(
-                "Couldn't set chunk data: {e}. World height: {}",
-                world.chunks.height()
-            );
+            if azalea_registry::unknown::note_packet("level_chunk_with_light") {
+                error!(
+                    "Couldn't set chunk data: {e}. World height: {}",
+                    world.chunks.height()
+                );
+            }
         }
     }
 }

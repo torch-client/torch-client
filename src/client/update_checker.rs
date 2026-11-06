@@ -3,7 +3,8 @@ use std::sync::OnceLock;
 use crate::platform::storage;
 use crate::platform::time::{SystemTime, UNIX_EPOCH};
 
-const LATEST_API: &str = "https://api.github.com/repos/torch-client/torch-client/releases/latest";
+pub(super) const LATEST_API: &str =
+    "https://api.github.com/repos/torch-client/torch-client/releases/latest";
 pub(crate) const RELEASES_URL: &str =
     "https://github.com/torch-client/torch-client/releases/latest";
 const RECHECK_SECS: u64 = 24 * 60 * 60;
@@ -17,7 +18,11 @@ pub(crate) fn available() -> Option<&'static str> {
 pub(crate) fn spawn() {
     let started = std::thread::Builder::new()
         .name("update-check".into())
-        .spawn(check);
+        .spawn(|| {
+            check();
+            #[cfg(self_update)]
+            super::self_update::remove_leftovers();
+        });
     if let Err(e) = started {
         crate::log_warn!("update", "could not start the update check: {e}");
     }
@@ -33,6 +38,8 @@ fn check() {
         None => match fetch() {
             Some(tag) => {
                 let doc = serde_json::json!({ "checked_at": now, "latest": tag });
+                #[cfg(self_update)]
+                let doc = super::self_update::with_skip(doc);
                 storage::UPDATE_CHECK.store(&doc.to_string());
                 tag
             }
@@ -77,7 +84,7 @@ fn parse(version: &str) -> Option<[u64; 3]> {
     Some([major, minor, patch])
 }
 
-fn is_newer(tag: &str, current: &str) -> bool {
+pub(super) fn is_newer(tag: &str, current: &str) -> bool {
     match (parse(tag), parse(current)) {
         (Some(tag), Some(current)) => tag > current,
         _ => false,

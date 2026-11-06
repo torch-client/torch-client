@@ -411,6 +411,7 @@ pub fn make_basic_add_entity(
         id: id.into(),
         uuid: Uuid::from_u128(1234),
         entity_type,
+        modded_type: None,
         position: position.into(),
         x_rot: 0,
         y_rot: 0,

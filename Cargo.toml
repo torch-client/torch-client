@@ -1,6 +1,6 @@
 [package]
 name = "torch-client"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 
 [lib]
@@ -20,6 +20,8 @@ default = [
 ]
 
 update_checker = ["dep:reqwest", "dep:rustls", "dep:sha1"]
+
+self_update = ["update_checker", "asset_download", "dep:sha2"]
 
 skins = ["dep:reqwest", "dep:rustls", "dep:sha1", "dep:azalea-crypto"]
 
@@ -50,6 +52,8 @@ builtin_shaders = ["bevy/bevy_anti_alias", "bevy/bevy_post_process"]
 
 shader_support = ["dep:flate2", "dep:naga", "dep:wgpu"]
 
+animated_textures = []
+
 resourcepacks = ["dep:flate2", "dep:sha1"]
 
 explore_modrinth = ["resourcepacks", "dep:reqwest", "dep:rustls", "dep:sha1", "image/webp"]
@@ -68,7 +72,7 @@ online_mode = [
 asset_download = ["dep:flate2", "dep:reqwest", "dep:rustls", "dep:sha1"]
 multiversion = ["azalea/multiversion"]
 
-audio = ["asset_download", "dep:rodio"]
+audio = ["asset_download", "dep:rodio", "dep:alsa"]
 
 eagler = [
     "dep:tokio-tungstenite",
@@ -76,6 +80,11 @@ eagler = [
     "dep:azalea-auth",
     "dep:rustls",
 ]
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+implicit_clone = "warn"
+large_types_passed_by_value = "warn"
 
 [profile.dev]
 debug = 0
@@ -140,6 +149,7 @@ bevy = { version = "0.18", default-features = false, features = [
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 sha1 = { version = "0.11", optional = true }
+sha2 = { version = "0.11", optional = true }
 base64 = "0.22"
 
 azalea-auth = { path = "vendor/azalea/azalea-auth", default-features = false, optional = true }
@@ -266,6 +276,9 @@ features = ["full"]
 version = "1"
 default-features = false
 features = ["sync", "macros", "rt", "time"]
+
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd"))'.dependencies]
+alsa = { version = "0.9", optional = true }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 arboard = { version = "3.6", default-features = false }

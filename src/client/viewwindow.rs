@@ -1,6 +1,5 @@
 use crate::log_warn;
 use azalea::{Client, ClientInformation};
-use std::sync::Arc;
 
 use crate::session::SharedMutex;
 
@@ -99,7 +98,7 @@ pub(crate) fn note_chunk_packet(partial: &PartialWorldRef, x: i32, z: i32) {
     );
 }
 
-pub(crate) fn apply_client_information_requests(bot: &Client, shared: &Arc<SharedMutex>) {
+pub(crate) fn apply_client_information_requests(bot: &Client, shared: &SharedMutex) {
     let (view_distance, prefs) = {
         let mut s = shared.lock().unwrap();
         (

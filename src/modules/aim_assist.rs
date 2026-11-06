@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering::Relaxed};
 
 use azalea::Client;
@@ -25,7 +24,7 @@ pub fn enabled() -> bool {
     store().enabled(Id::AimAssist)
 }
 
-pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
+pub fn tick(bot: &Client, shared: &SharedMutex) {
     let s = store();
     match EDGE.poll(s) {
         Phase::Off => return,

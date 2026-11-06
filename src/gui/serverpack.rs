@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::gui::dialog::CONFIRM_BUTTON_WIDTH;
 use crate::gui::painter::Painter;
 use crate::gui::serverlist::PackPolicy;
@@ -10,7 +8,7 @@ use crate::session::SharedMutex;
 pub(crate) fn draw(
     p: &mut Painter,
     ctx: &ScreenCtx,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     state: &mut GuiState,
 ) -> Option<Screen> {
     let parent = state.server_pack_parent;

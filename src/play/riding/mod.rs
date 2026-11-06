@@ -17,8 +17,8 @@ use azalea::entity::metadata::{
     Sprinting, StaysStill, StriderBoostTime, Suffocating,
 };
 use azalea::entity::{
-    Attributes, EntityKindComponent, Jumping, LocalEntity, LookDirection, OnClimbable, Physics,
-    Position, view_vector,
+    ActiveEffects, Attributes, EntityKindComponent, Jumping, LocalEntity, LookDirection,
+    OnClimbable, Physics, Position, view_vector,
 };
 use azalea::packet::game::SendGamePacketEvent;
 use azalea::physics::PhysicsSystems;
@@ -32,7 +32,7 @@ use azalea::physics::collision::{
 use azalea::physics::fluids::{FluidPush, update_fluid_interaction};
 use azalea::physics::travel::no_collision;
 use azalea::physics::{
-    EntityMovement, InsideKind, apply_effects_from_blocks_for, block_jump_factor,
+    EntityMovement, InsideKind, apply_effects_from_blocks_for, block_jump_factor, jump_boost_power,
 };
 use azalea::world::{WorldBorder, WorldName, Worlds};
 use azalea_core::entity_id::MinecraftEntityId;
@@ -382,6 +382,7 @@ fn ride_pre_travel(
             &EntityDimensions,
             &WorldName,
             &OnClimbable,
+            &ActiveEffects,
             MountMeta,
         ),
         Without<LocalEntity>,
@@ -417,6 +418,7 @@ fn ride_pre_travel(
         dimensions,
         world_name,
         on_climbable,
+        active_effects,
         (
             standing,
             camel_dash,
@@ -581,7 +583,7 @@ fn ride_pre_travel(
             suffocating.is_some_and(|s| s.0),
             physics.is_in_water(),
         );
-        attributes.movement_speed.base = speed;
+        attributes.movement_speed.apply_snapshot(speed, &[]);
         Some(Ridden {
             input,
             rotation,
@@ -622,7 +624,7 @@ fn ride_pre_travel(
         physics_state: None,
         attributes: &attributes,
         abilities: None,
-        active_effects: None,
+        active_effects: Some(active_effects),
         powder_snow_walkable: false,
         stands_on_lava: mount == Mount::Strider,
         fall_flying: false,
@@ -686,6 +688,7 @@ fn ride_pre_travel(
                     &world,
                     movement,
                     InsideKind::Boat,
+                    active_effects,
                 );
             }
             driven.y_rot = y_rot;
@@ -718,6 +721,7 @@ fn ride_pre_travel(
                 &world,
                 movement,
                 InsideKind::Living,
+                active_effects,
             );
             if mount == Mount::Strider {
                 travel::float_strider(&mut physics, **position, &world);
@@ -764,8 +768,10 @@ fn riders_jump(
     movement_speed: f64,
 ) {
     let (world, attributes, position) = (ctx.world, ctx.attributes, **ctx.position);
+    let boost = ctx.active_effects.map_or(0.0, jump_boost_power) as f64;
     let jump_power = |amount: f32| {
         jump_strength * amount as f64 * block_jump_factor(world, Position::new(position)) as f64
+            + boost
     };
     let speed_factor = || block_speed_factor_for(world, position, attributes) as f64;
     match mount.jump() {

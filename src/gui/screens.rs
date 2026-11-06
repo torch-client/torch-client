@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::gui::hud_layout::{ElementId, Hud};
 use crate::gui::painter::Painter;
 use crate::gui::render::GuiInput;
@@ -10,13 +8,14 @@ use crate::gui::{
     tooltip,
 };
 use crate::session::{ContainerKind, InvAction, SharedMutex, SlotStack};
+use crate::text::Span;
 use crate::util::mth::wrap_degrees;
 
 pub fn draw(
     p: &mut Painter,
     state: &mut GuiState,
     input: &GuiInput,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     #[cfg(feature = "skins")] faces: &mut crate::gui::player_faces::PlayerFaces,
 ) {
     #[cfg(feature = "skins")]
@@ -50,6 +49,7 @@ pub fn draw(
             hotbar: s.session.hotbar.clone(),
             armor: s.session.armor_stacks.clone(),
             carried: s.session.carried.clone(),
+            creative_cursor: s.session.creative_cursor.take(),
             selected: s.session.hotbar_selected,
             gamemode: s.session.gamemode,
             health: s.session.health,
@@ -103,6 +103,7 @@ pub fn draw(
             advancements: (state.screen == Screen::Advancements)
                 .then(|| s.session.advancements.clone()),
             advancement_tab: s.session.advancement_tab,
+            tick_rate: s.session.tick_rate,
             active_effects: if matches!(state.screen, Screen::Inventory | Screen::Creative) {
                 s.session.active_effects.clone()
             } else {
@@ -183,6 +184,11 @@ pub fn draw(
     };
 
     state.hud_overlays.update(&mut snap, input.time);
+    #[cfg(feature = "audio")]
+    state.subtitles.update(
+        input.time,
+        state.options.toast_time as f32 / crate::gui::TOAST_TIME_DEFAULT as f32,
+    );
 
     let toast_settings = toast::ToastSettings::from_state(state);
     state.toasts.ingest(
@@ -192,6 +198,10 @@ pub fn draw(
     );
 
     let mut actions: Vec<InvAction> = Vec::new();
+
+    if let Some(answer) = snap.creative_cursor.take() {
+        state.slots.land_bundle_click(answer, &snap, &mut actions);
+    }
 
     if let Some(display) = snap.recipe_ghost.take()
         && let Some((menu, _)) =
@@ -222,6 +232,7 @@ pub fn draw(
 
     state.hud_state.layout.sync_mod_panels();
     state.hud_state.frames.begin(ctx.vw, ctx.vh);
+    tooltip::set_tick_rate(snap.tick_rate.0);
     let mut elements = Hud::new(
         &state.hud_state.layout,
         &mut state.hud_state.frames,
@@ -230,6 +241,9 @@ pub fn draw(
     );
 
     if hud_visible {
+        if shows_active_effects(state.screen, &ctx, &snap) {
+            state.hud.active_effects.clear();
+        }
         draw_hud(
             p,
             &ctx,
@@ -457,6 +471,12 @@ pub fn draw(
             crate::gui::assetdownload::draw(p, state, &ctx);
             None
         }
+        #[cfg(self_update)]
+        Screen::SelfUpdate => {
+            backdrop(p, state, &ctx);
+            crate::gui::selfupdate::draw(p, state, &ctx);
+            None
+        }
         Screen::Multiplayer => {
             multiplayer::draw(p, state, &ctx);
             None
@@ -634,6 +654,27 @@ pub fn draw(
             }
             None
         }
+        Screen::StructureBlock
+        | Screen::JigsawBlock
+        | Screen::TestBlock
+        | Screen::TestInstanceBlock => {
+            use crate::gui::op_blocks;
+            dim_background(p, ctx.vw, ctx.vh);
+            let blocks = &mut state.op_blocks;
+            let next = match state.screen {
+                Screen::StructureBlock => {
+                    op_blocks::structure::draw(p, &mut blocks.structure, &ctx, shared)
+                }
+                Screen::JigsawBlock => op_blocks::jigsaw::draw(p, &mut blocks.jigsaw, &ctx, shared),
+                Screen::TestBlock => op_blocks::test::draw(p, &mut blocks.test, &ctx, shared),
+                _ => op_blocks::test_instance::draw(p, &mut blocks.test_instance, &ctx, shared),
+            };
+            if let Some(next) = next {
+                state.nav = Some(next);
+                clear_world_clicks(shared);
+            }
+            None
+        }
         Screen::SignEdit => {
             dim_background(p, ctx.vw, ctx.vh);
             if let Some(next) = sign_edit::draw(p, &mut state.sign_edit, &ctx, shared) {
@@ -691,12 +732,30 @@ pub fn draw(
     #[cfg(not(feature = "mobile_ui"))]
     let anchor: Option<(f32, f32)> = None;
     if let Some(stack) = hovered
-        && carried.is_empty()
+        && (carried.is_empty() || stack.bundle.as_ref().is_some_and(|b| b.shows))
     {
+        let creative = state.screen == Screen::Creative && state.creative.hovered_in_list;
         if let Some(slot) = anchor {
-            tooltip::draw_over_slot(p, &stack, slot, ctx.vw, ctx.vh, state.advanced_tooltips);
+            tooltip::draw_over_slot(
+                p,
+                &stack,
+                slot,
+                ctx.vw,
+                ctx.vh,
+                state.advanced_tooltips,
+                creative,
+            );
         } else if let Some(m) = ctx.mouse() {
-            tooltip::draw(p, &stack, m.x, m.y, ctx.vw, ctx.vh, state.advanced_tooltips);
+            tooltip::draw(
+                p,
+                &stack,
+                m.x,
+                m.y,
+                ctx.vw,
+                ctx.vh,
+                state.advanced_tooltips,
+                creative,
+            );
         }
     }
 
@@ -711,6 +770,11 @@ pub fn draw(
             input.device_scale,
         );
         draw_debug_element(p, &mut debug, &ctx, &state.hud, d);
+    }
+
+    #[cfg(feature = "audio")]
+    if state.options.show_subtitles && debug_gate && !in_menu {
+        state.subtitles.draw(p, &ctx);
     }
 
     toast::draw(p, &ctx, &mut state.toasts, toast_settings);
@@ -778,11 +842,14 @@ fn local_stack(stack: &SlotStack) -> SlotStack {
         extra: crate::session::StackExtra {
             enchantments: stack.extra.enchantments.clone(),
             potion: stack.extra.potion.clone(),
+            stew_effects: stack.extra.stew_effects.clone(),
+            ominous_amplifier: stack.extra.ominous_amplifier,
             ..Default::default()
         }
         .into(),
         glint: crate::items::glint::default_foil(stack.item)
             || (stack.item != "enchanted_book" && !stack.extra.enchantments.is_empty()),
+        bundle: stack.bundle.clone(),
         ..Default::default()
     }
 }
@@ -1226,6 +1293,17 @@ fn draw_debug_element(
     });
 }
 
+static LAST_BUBBLE_POP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+fn play_bubble_pop(bubble: i32, empty: i32) {
+    use crate::util::level_events::{Bus, play_local};
+    if LAST_BUBBLE_POP.swap(bubble, std::sync::atomic::Ordering::Relaxed) != bubble {
+        let volume = 0.5 + 0.1 * (empty - 3 + 1).max(0) as f32;
+        let pitch = 1.0 + 0.1 * (empty - 5 + 1).max(0) as f32;
+        play_local("ui.hud.bubble_pop", Bus::Players, volume, pitch);
+    }
+}
+
 fn draw_air_bubbles(
     p: &mut Painter,
     snap: &Snapshot,
@@ -1239,12 +1317,19 @@ fn draw_air_bubbles(
         return;
     }
     let states = air_bubble_states(current, max, snap.eye_in_water);
-    let wobbles = p.frame % 2 == 0 && empty_bubbles(current, max, snap.eye_in_water) == 10;
+    if !snap.eye_in_water {
+        LAST_BUBBLE_POP.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    let empty = empty_bubbles(current, max, snap.eye_in_water);
+    let wobbles = p.frame % 2 == 0 && empty == 10;
     for (i, state) in states.into_iter().enumerate() {
         let x = x_right - i as f32 * 8.0 - 9.0;
         let sprite = match state {
             AirBubble::Full => "hud/air",
-            AirBubble::Popping => "hud/air_bursting",
+            AirBubble::Popping => {
+                play_bubble_pop(i as i32 + 1, empty);
+                "hud/air_bursting"
+            }
             AirBubble::Empty => "hud/air_empty",
             AirBubble::Hidden => continue,
         };
@@ -1336,7 +1421,15 @@ fn draw_inventory(
                 crate::gui::container::LABEL_COLOR,
                 false,
             );
-            draw_effects_panel(p, ctx, &snap.active_effects, left, top, INV_W);
+            draw_effects_panel(
+                p,
+                ctx,
+                &snap.active_effects,
+                left,
+                top,
+                INV_W,
+                snap.tick_rate.0,
+            );
             hovered
         },
     )
@@ -1356,35 +1449,32 @@ pub(crate) fn draw_effects_panel(
     left: f32,
     top: f32,
     image_width: f32,
+    tick_rate: f32,
 ) {
-    if effects.is_empty() {
+    if effects.is_empty() || !can_see_effects(ctx, left, image_width) {
         return;
     }
     let x0 = left + image_width + 2.0;
     let available = ctx.vw - x0;
-    if available < 32.0 {
-        return;
-    }
     let max_width = if available >= 120.0 {
         available - 7.0
     } else {
         32.0
     };
     let y_step = if effects.len() > 5 {
-        132.0 / (effects.len() - 1) as f32
+        (132 / (effects.len() - 1)) as f32
     } else {
         33.0
     };
 
-    let mut sorted: Vec<&crate::play::mob_effects::MobEffectInstance> = effects.iter().collect();
-    sorted.sort_by(|a, b| crate::play::mob_effects::compare(a, b));
-
     let mut y0 = top;
-    for effect in sorted {
+    let mut compact_tooltip = None;
+    for effect in crate::play::mob_effects::sorted(effects) {
         let name = crate::play::mob_effects::display_name(&effect.id, effect.amplifier);
-        let duration = crate::play::mob_effects::format_duration(effect.duration);
-        let name_w = 32.0 + p.atlas.font.width_str(&name) + 7.0;
-        let duration_w = 32.0 + p.atlas.font.width_str(&duration) + 7.0;
+        let duration = crate::play::mob_effects::format_duration(effect.duration, 1.0, tick_rate);
+        let name_px = p.atlas.font.width_str(&name).ceil();
+        let name_w = 32.0 + name_px + 7.0;
+        let duration_w = 32.0 + p.atlas.font.width_str(&duration).ceil() + 7.0;
         let texture_w = name_w.max(duration_w).min(max_width);
 
         let bg = if effect.ambient {
@@ -1394,13 +1484,26 @@ pub(crate) fn draw_effects_panel(
         };
         p.sprite(bg, x0.floor(), y0.floor(), texture_w.floor(), 32.0);
 
-        let icon = format!("mob_effect/{}", effect.id);
+        let icon = crate::play::mob_effects::sprite(&effect.id);
         p.sprite(&icon, (x0 + 7.0).floor(), (y0 + 7.0).floor(), 18.0, 18.0);
 
         let text_x = x0 + 32.0;
         let text_y = y0 + 7.0;
-        if texture_w - 32.0 - 7.0 > 0.0 {
-            p.text_plain(&name, text_x.floor(), text_y.floor(), 0xFFFFFF, false);
+        let max_text_w = texture_w - 32.0 - 7.0;
+        let mut compact = true;
+        if max_text_w > 0.0 {
+            compact = name_px > max_text_w;
+            if compact {
+                let room = max_text_w - p.atlas.font.width_str("...");
+                let mut clipped = p
+                    .atlas
+                    .font
+                    .trim_to_width(&[Span::colored(name.as_str(), 0xFFFFFF)], room);
+                clipped.push(Span::colored("...", 0xFFFFFF));
+                p.text(&clipped, text_x.floor(), text_y.floor(), false);
+            } else {
+                p.text_plain(&name, text_x.floor(), text_y.floor(), 0xFFFFFF, false);
+            }
             p.text_plain(
                 &duration,
                 text_x.floor(),
@@ -1409,12 +1512,37 @@ pub(crate) fn draw_effects_panel(
                 false,
             );
         }
+        if compact
+            && let Some(m) = ctx.mouse()
+            && (x0..=x0 + texture_w).contains(&m.x)
+            && (y0..=y0 + y_step).contains(&m.y)
+        {
+            compact_tooltip = Some((m, [vec![Span::new(name)], vec![Span::new(duration)]]));
+        }
 
         y0 += y_step;
     }
+    if let Some((m, lines)) = compact_tooltip {
+        tooltip::draw_lines(p, &lines, m.x, m.y, ctx.vw, ctx.vh);
+    }
 }
 
-fn clear_world_clicks(shared: &Arc<SharedMutex>) {
+fn can_see_effects(ctx: &ScreenCtx, left: f32, image_width: f32) -> bool {
+    ctx.vw - (left + image_width + 2.0) >= 32.0
+}
+
+fn shows_active_effects(screen: Screen, ctx: &ScreenCtx, snap: &Snapshot) -> bool {
+    match screen {
+        Screen::Inventory => {
+            let left = crate::gui::recipe_book_ghost::left_pos(screen, ctx, snap, INV_W);
+            can_see_effects(ctx, left, INV_W)
+        }
+        Screen::Creative => can_see_effects(ctx, creative::left_pos(ctx), creative::IMAGE_W),
+        _ => false,
+    }
+}
+
+fn clear_world_clicks(shared: &SharedMutex) {
     let mut s = shared.lock().unwrap();
     s.session.attack_held = false;
     s.session.use_held = false;
@@ -1422,7 +1550,7 @@ fn clear_world_clicks(shared: &Arc<SharedMutex>) {
     s.session.use_clicked = false;
 }
 
-fn apply_book_out(out: book::BookOut, state: &mut GuiState, shared: &Arc<SharedMutex>) {
+fn apply_book_out(out: book::BookOut, state: &mut GuiState, shared: &SharedMutex) {
     match out {
         book::BookOut::Nav(next) => state.nav = Some(next),
         book::BookOut::Send(req) => {

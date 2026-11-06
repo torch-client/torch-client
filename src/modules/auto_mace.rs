@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use azalea::Client;
 use azalea::attack::AttackQueued;
@@ -125,7 +125,7 @@ pub fn steer(bot: &Client, yaw: f32, pitch: f32, flags: u8) -> (f32, f32, u8) {
     (next.yaw, next.pitch, flags)
 }
 
-pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
+pub fn tick(bot: &Client, shared: &SharedMutex) {
     let s = store();
     match EDGE.poll(s) {
         Phase::Off => return,
@@ -231,7 +231,7 @@ struct Ready {
     mace: u8,
 }
 
-fn ready(bot: &Client, shared: &Arc<SharedMutex>) -> Option<Ready> {
+fn ready(bot: &Client, shared: &SharedMutex) -> Option<Ready> {
     let s = store();
     let falling = {
         let physics = bot.component::<Physics>().ok()?;

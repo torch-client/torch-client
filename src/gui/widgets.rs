@@ -226,6 +226,10 @@ impl TextBox {
         #[cfg(not(target_os = "android"))]
         let wants = self.focused && self.browser_keyboard;
 
+        if wants {
+            crate::platform::keyboard::claim();
+        }
+
         if wants && !self.keyboard_active {
             crate::platform::keyboard::show(&self.text, self.anchor, self.cursor);
             self.keyboard_active = true;
@@ -537,6 +541,20 @@ impl TextBox {
     }
 
     pub fn update(&mut self, p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, w: f32, h: f32) {
+        self.update_with(p, ctx, x, y, w, h, |_, _| false);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_with(
+        &mut self,
+        p: &mut Painter,
+        ctx: &ScreenCtx,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        intercept: impl FnMut(&mut TextBox, EditKey) -> bool,
+    ) {
         let ring = focus::next(true);
         self.handle_mouse(ctx.input, &p.atlas.font, x, y, w, h);
         let took = std::mem::take(&mut self.pending_focus)
@@ -560,7 +578,7 @@ impl TextBox {
         if self.focused {
             keyboard_lift::note_focused_field(y + h);
         }
-        self.handle_input(ctx.input);
+        self.handle_edits_validated(ctx.input, &p.atlas.font, intercept);
         self.draw(p, x, y, w, h);
     }
 
@@ -990,12 +1008,12 @@ fn strip_format_codes(s: &str) -> String {
 
 #[cfg(feature = "audio")]
 pub(in crate::gui) fn play_click() {
-    crate::audio::play(
-        "ui.button.click",
-        crate::audio::SoundCategory::Ambient,
-        0.25,
-        1.0,
-    );
+    play_ui("ui.button.click");
+}
+
+#[cfg(feature = "audio")]
+pub(in crate::gui) fn play_ui(event: &str) {
+    crate::audio::play(event, crate::audio::SoundCategory::Ui, 0.25, 1.0);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1141,6 +1159,8 @@ pub fn tab_bar_with(
         p.text_plain(label, x + ((tab_w - text_w) / 2.0).floor(), y, color, true);
         if !selected && enabled && hovered && ctx.input.left_click {
             picked = Some(i);
+            #[cfg(feature = "audio")]
+            play_click();
         }
     }
     picked

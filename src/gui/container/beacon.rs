@@ -52,12 +52,20 @@ pub fn draw(
     }
 
     let levels = snap.container_data[0] as i32;
-    let mouse = ctx.mouse();
     let ui = &mut state.container;
+    let mut tip = None;
 
-    if ui.beacon == BeaconPick::default() {
-        ui.beacon.primary = decode_effect(snap.container_data[1]);
-        ui.beacon.secondary = decode_effect(snap.container_data[2]);
+    let data = [
+        levels as i16,
+        snap.container_data[1],
+        snap.container_data[2],
+    ];
+    if ui.beacon.seen != Some(data) {
+        ui.beacon = BeaconPick {
+            primary: decode_effect(data[1]),
+            secondary: decode_effect(data[2]),
+            seen: Some(data),
+        };
     }
 
     for (tier, effects) in TIER_EFFECTS.iter().enumerate() {
@@ -68,7 +76,9 @@ pub fn draw(
             let id = effect_id(name);
             let active = (tier as i32) < levels;
             let selected = ui.beacon.primary == id;
-            if power_button(p, ctx, mouse, x, y, active, selected, sprite, name, false) {
+            if power_button(
+                p, ctx, &mut tip, x, y, active, selected, sprite, name, false,
+            ) {
                 ui.beacon.primary = id;
             }
         }
@@ -84,7 +94,7 @@ pub fn draw(
         if power_button(
             p,
             ctx,
-            mouse,
+            &mut tip,
             x,
             y,
             active,
@@ -102,7 +112,7 @@ pub fn draw(
         let x = left + 167.0 + 24.0 - total_w / 2.0;
         let active = levels >= 4;
         let selected = ui.beacon.secondary == Some(primary);
-        if power_button(p, ctx, mouse, x, y, active, selected, sprite, name, true) {
+        if power_button(p, ctx, &mut tip, x, y, active, selected, sprite, name, true) {
             ui.beacon.secondary = Some(primary);
         }
     }
@@ -111,10 +121,12 @@ pub fn draw(
     if action_button(
         p,
         ctx,
+        &mut tip,
         left + 164.0,
         top + 107.0,
         confirm_active,
         "container/beacon/confirm",
+        tooltip::label!("gui.done"),
     ) {
         out.push(InvAction::SetBeacon {
             primary: to_effect_option(ui.beacon.primary),
@@ -125,15 +137,17 @@ pub fn draw(
     if action_button(
         p,
         ctx,
+        &mut tip,
         left + 190.0,
         top + 107.0,
         true,
         "container/beacon/cancel",
+        tooltip::label!("gui.cancel"),
     ) {
         out.push(InvAction::Close);
     }
 
-    slots::panel(
+    let hovered = slots::panel(
         p,
         Layout::Beacon,
         (left, top),
@@ -141,14 +155,18 @@ pub fn draw(
         snap,
         &mut state.slots,
         out,
-    )
+    );
+    if let (Some(text), Some(m)) = (tip, ctx.mouse()) {
+        tooltip::draw_lines(p, &[vec![Span::new(text)]], m.x, m.y, ctx.vw, ctx.vh);
+    }
+    hovered
 }
 
 #[allow(clippy::too_many_arguments)]
 fn power_button(
     p: &mut Painter,
     ctx: &ScreenCtx,
-    mouse: Option<bevy::prelude::Vec2>,
+    tip: &mut Option<String>,
     x: f32,
     y: f32,
     active: bool,
@@ -161,32 +179,34 @@ fn power_button(
     p.sprite(button_sprite(active, selected, hovered), x, y, 22.0, 22.0);
     p.sprite(icon, x + 2.0, y + 2.0, 18.0, 18.0);
 
-    if active
-        && hovered
-        && let Some(m) = mouse
-    {
+    if hovered {
         let mut name = mob_effects::display_name(effect_name, 0);
         if is_upgrade {
             name.push_str(" II");
         }
-        let line = vec![Span::new(name)];
-        tooltip::draw_lines(p, &[line], m.x, m.y, ctx.vw, ctx.vh);
+        *tip = Some(name);
     }
 
     active && clicked
 }
 
+#[allow(clippy::too_many_arguments)]
 fn action_button(
     p: &mut Painter,
     ctx: &ScreenCtx,
+    tip: &mut Option<String>,
     x: f32,
     y: f32,
     active: bool,
     icon: &str,
+    label: &str,
 ) -> bool {
     let (hovered, clicked) = button(ctx, x, y, 22.0, 22.0);
     p.sprite(button_sprite(active, false, hovered), x, y, 22.0, 22.0);
     p.sprite(icon, x + 2.0, y + 2.0, 18.0, 18.0);
+    if hovered {
+        *tip = Some(label.to_string());
+    }
     active && clicked
 }
 

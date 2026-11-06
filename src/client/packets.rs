@@ -11,8 +11,8 @@ use std::sync::Arc;
 use crate::blockentities;
 use crate::client::tick::{held_item_patterned, item_id};
 use crate::client::tracking::{
-    GAME_TIME, LOCAL_VEHICLE_ID, add_entity_data, anim_states, apply_map_patch, entity_anims,
-    equipment, head_yaws, mark_meta_dirty, meta_index_18, on_grounds, on_living_anim,
+    GAME_TIME, LOCAL_ANIM_ID, LOCAL_VEHICLE_ID, add_entity_data, anim_states, apply_map_patch,
+    entity_anims, equipment, head_yaws, mark_meta_dirty, meta_index_18, on_grounds, on_living_anim,
     overworld_clock, passengers, record_velocity,
 };
 use crate::client::{viewwindow, worldsync};
@@ -29,7 +29,7 @@ use crate::session::{
 
 pub(crate) fn handle_packet(
     world: &WorldHolder,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     packet: &ClientboundGamePacket,
 ) {
     #[cfg(lua_mods)]
@@ -56,6 +56,7 @@ pub(crate) fn handle_packet(
             if p.reduced_debug_info { "on" } else { "off" }
         );
         s.session.health_epoch = s.session.health_epoch.wrapping_add(1);
+        s.session.last_set_health = None;
         s.session.chat_ack_pending = 0;
         s.session.chat_ack_last = None;
         s.session.remote_breaking.clear();
@@ -78,15 +79,32 @@ pub(crate) fn handle_packet(
         s.session.remote_breaking.clear();
         s.session.item_pickups.clear();
         s.session.item_activation = None;
+        s.session.last_set_health = None;
         drop(s);
         crate::play::tracking_emitter::reset();
+        if let Some(anim) = anim_states().lock().unwrap().get_mut(&LOCAL_ANIM_ID) {
+            anim.reset_hurt();
+        }
+    }
+    if let ClientboundGamePacket::SetHealth(p) = packet {
+        let last = shared
+            .lock()
+            .unwrap()
+            .session
+            .last_set_health
+            .replace(p.health);
+        if last.is_some_and(|health| p.health < health)
+            && let Some(anim) = anim_states().lock().unwrap().get_mut(&LOCAL_ANIM_ID)
+        {
+            anim.hurt();
+        }
     }
     if let ClientboundGamePacket::SetDefaultSpawnPosition(p) = packet {
         shared.lock().unwrap().session.spawn_pos = Some(p.global_pos.clone());
     }
     #[cfg(feature = "audio")]
     if matches!(packet, ClientboundGamePacket::PlayerPosition(_)) {
-        crate::client::tick::forget_step_origin();
+        crate::play::player_sounds::forget_step_origin();
     }
     if let ClientboundGamePacket::PlayerPosition(p) = packet
         && !p.relative.x
@@ -128,7 +146,7 @@ pub(crate) fn handle_packet(
 
 static UNSECURE_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn unsecure_server_warning(shared: &Arc<SharedMutex>, enforces_secure_chat: bool) {
+fn unsecure_server_warning(shared: &SharedMutex, enforces_secure_chat: bool) {
     use std::sync::atomic::Ordering;
 
     if enforces_secure_chat || UNSECURE_SEEN.swap(true, Ordering::Relaxed) {
@@ -151,7 +169,7 @@ fn unsecure_server_warning(shared: &Arc<SharedMutex>, enforces_secure_chat: bool
     );
 }
 
-fn demo_event(shared: &Arc<SharedMutex>, param: f32) {
+fn demo_event(shared: &SharedMutex, param: f32) {
     use crate::gui::keybinds::{Action, KeyBinds};
     use crate::gui::tooltip::translate;
 
@@ -310,7 +328,7 @@ fn note_bad_light_layer(len: usize) {
 
 fn horse_slots(
     world: &WorldHolder,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     container_id: i32,
     items: &[azalea_inventory::ItemStack],
 ) -> Option<Vec<crate::session::SlotStack>> {
@@ -507,7 +525,7 @@ fn server_lighting(world: &WorldHolder, packet: &ClientboundGamePacket) {
     }
 }
 
-fn block_entities(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) {
+fn block_entities(world: &WorldHolder, shared: &SharedMutex, packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::LevelChunkWithLight(p) => {
             blockentities::feed::on_chunk(p.x, p.z, &p.chunk_data.block_entities);
@@ -519,11 +537,33 @@ fn block_entities(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &Clien
         ClientboundGamePacket::BlockEvent(p) => {
             blockentities::feed::on_block_event(p, &world.shared.read());
         }
+        ClientboundGamePacket::TestInstanceBlockStatus(p) => test_instance_status(shared, p),
         _ => {}
     }
 }
 
-fn command_block_data(shared: &Arc<SharedMutex>, packet: &ClientboundBlockEntityData) {
+fn test_instance_status(
+    shared: &SharedMutex,
+    packet: &azalea_protocol::packets::game::c_test_instance_block_status::ClientboundTestInstanceBlockStatus,
+) {
+    let Some(pos) = shared.lock().unwrap().session.test_instance_pos else {
+        return;
+    };
+    let error = blockentities::feed::game_master_tag([pos.x, pos.y, pos.z])
+        .and_then(|(_, tag)| tag)
+        .and_then(|tag| blockentities::game_master::test_instance_error(&tag));
+    let status = crate::session::TestInstanceStatus {
+        status: crate::client::chat_text::to_spans(&packet.status),
+        size: packet.size.map(|s| [s.x, s.y, s.z]),
+        error,
+    };
+    let mut s = shared.lock().unwrap();
+    if s.session.test_instance_pos == Some(pos) {
+        s.session.test_instance_status.push(status);
+    }
+}
+
+fn command_block_data(shared: &SharedMutex, packet: &ClientboundBlockEntityData) {
     let mut s = shared.lock().unwrap();
     if s.session.command_block_pos != Some(packet.pos) {
         return;
@@ -604,7 +644,7 @@ fn animations(packet: &ClientboundGamePacket) {
             }
         }
         ClientboundGamePacket::HurtAnimation(p) => {
-            on_living_anim(p.id.0, HumanoidAnim::hurt, EntityAnim::hurt);
+            on_living_anim(p.id.0, |anim| anim.hurt_from(p.yaw), EntityAnim::hurt);
         }
         ClientboundGamePacket::DamageEvent(p) => {
             on_living_anim(p.entity_id.0, HumanoidAnim::damage, EntityAnim::damage);
@@ -617,6 +657,9 @@ fn animations(packet: &ClientboundGamePacket) {
                 && p.entity_id.0 == crate::client::tracking::local_entity_id() =>
         {
             crate::play::interaction::note_use_completed();
+        }
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == entity_event::ARROW_POOF => {
+            crate::play::arrow_particles::poof(p.entity_id.0);
         }
         ClientboundGamePacket::EntityEvent(p) => {
             if let Some(anim) = entity_anims().lock().unwrap().get_mut(&p.entity_id.0) {
@@ -642,7 +685,7 @@ fn animations(packet: &ClientboundGamePacket) {
     }
 }
 
-fn maps(shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) {
+fn maps(shared: &SharedMutex, packet: &ClientboundGamePacket) {
     let ClientboundGamePacket::MapItemData(p) = packet else {
         return;
     };
@@ -793,7 +836,7 @@ fn entity_state(packet: &ClientboundGamePacket) {
     }
 }
 
-fn session_state(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) {
+fn session_state(world: &WorldHolder, shared: &SharedMutex, packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::TakeItemEntity(p) => crate::play::item_pickup::take(shared, p),
         ClientboundGamePacket::BlockDestruction(p) => {
@@ -826,6 +869,9 @@ fn session_state(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &Client
         }
         ClientboundGamePacket::GameEvent(p) if p.event == EventType::ImmediateRespawn => {
             shared.lock().unwrap().session.show_death_screen = p.param == 0.0;
+        }
+        ClientboundGamePacket::TickingState(p) => {
+            shared.lock().unwrap().session.tick_rate = crate::session::TickRate(p.tick_rate);
         }
         ClientboundGamePacket::GameEvent(p) if p.event == EventType::GuardianElderEffect => {
             let mut s = shared.lock().unwrap();
@@ -1133,6 +1179,28 @@ fn session_state(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &Client
                 }),
             );
         }
+        ClientboundGamePacket::LevelEvent(p) if matches!(p.event_type, 1010 | 1011) => {
+            jukebox_event(
+                world,
+                shared,
+                p.event_type,
+                [p.pos.x, p.pos.y, p.pos.z],
+                p.data,
+            );
+        }
+        #[cfg(feature = "audio")]
+        ClientboundGamePacket::DamageEvent(p)
+            if p.entity_id.0 == crate::client::tracking::local_entity_id() =>
+        {
+            local_hurt(world, shared, p.source_type_id);
+        }
+        #[cfg(feature = "audio")]
+        ClientboundGamePacket::EntityEvent(p)
+            if p.event_id == 3 && p.entity_id.0 == crate::client::tracking::local_entity_id() =>
+        {
+            let at = shared.lock().unwrap().session.player_pos;
+            crate::play::player_sounds::death(at);
+        }
         ClientboundGamePacket::LevelEvent(p) => {
             let mut s = shared.lock().unwrap();
             crate::session::push_particle_emit(
@@ -1149,8 +1217,65 @@ fn session_state(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &Client
     }
 }
 
+#[cfg(feature = "audio")]
+fn local_hurt(world: &WorldHolder, shared: &SharedMutex, id: u32) {
+    use azalea_core::data_registry::DataRegistryWithKey;
+    use azalea_registry::DataRegistry;
+
+    let path = {
+        let world = world.shared.read();
+        azalea_registry::data::DamageKind::new_raw(id)
+            .key_owned(&world.registries)
+            .map(|key| Box::<str>::from(azalea_registry::DataRegistryKey::into_ident(key).path()))
+    };
+    let at = shared.lock().unwrap().session.player_pos;
+    crate::play::player_sounds::hurt(path.as_deref(), at);
+}
+
+#[cfg_attr(not(feature = "audio"), allow(unused_variables))]
+fn jukebox_event(world: &WorldHolder, shared: &SharedMutex, id: u32, pos: [i32; 3], data: u32) {
+    use azalea_core::data_registry::DataRegistryWithKey;
+    use azalea_registry::DataRegistry;
+
+    if id == 1011 {
+        #[cfg(feature = "audio")]
+        crate::audio::jukebox_stop(pos);
+        return;
+    }
+    let path = {
+        let world = world.shared.read();
+        let song = azalea_registry::data::JukeboxSong::new_raw(data);
+        song.key_owned(&world.registries)
+            .map(|key| Box::<str>::from(azalea_registry::DataRegistryKey::into_ident(key).path()))
+    };
+    let Some(song) = path.and_then(|path| crate::util::datapack::entry("jukebox_song", &path))
+    else {
+        return;
+    };
+    #[cfg(feature = "audio")]
+    if let Some(event) = song
+        .get("sound_event")
+        .and_then(crate::util::datapack::bare_id)
+    {
+        crate::audio::jukebox_start(pos, event);
+    }
+    let description = song
+        .get("description")
+        .and_then(|d| d.get("translate"))
+        .and_then(|key| key.as_str());
+    if let Some(key) = description {
+        use crate::gui::tooltip::translate;
+        let line = translate("record.nowPlaying", &[translate(key, &[])]);
+        shared
+            .lock()
+            .unwrap()
+            .session
+            .set_now_playing(vec![crate::text::Span::new(line)]);
+    }
+}
+
 fn level_particles(
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     p: &azalea_protocol::packets::game::c_level_particles::ClientboundLevelParticles,
 ) {
     let mut s = shared.lock().unwrap();
@@ -1199,7 +1324,7 @@ pub(crate) fn waypoint_parts(p: &ClientboundWaypoint) -> (WaypointKey, Option<Wa
     (key, Some(info))
 }
 
-fn waypoint(shared: &Arc<SharedMutex>, p: &ClientboundWaypoint) {
+fn waypoint(shared: &SharedMutex, p: &ClientboundWaypoint) {
     let (key, info) = waypoint_parts(p);
     let mut s = shared.lock().unwrap();
     let Some(info) = info else {
@@ -1214,7 +1339,7 @@ fn waypoint(shared: &Arc<SharedMutex>, p: &ClientboundWaypoint) {
     }
 }
 
-fn level_lifecycle(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) {
+fn level_lifecycle(world: &WorldHolder, shared: &SharedMutex, packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::ForgetLevelChunk(p) => {
             #[cfg(feature = "render_lod")]
@@ -1224,13 +1349,26 @@ fn level_lifecycle(world: &WorldHolder, shared: &Arc<SharedMutex>, packet: &Clie
             worldsync::forget_chunk(world, shared, p.pos.x, p.pos.z);
         }
         ClientboundGamePacket::Respawn(p) => {
+            #[cfg(feature = "audio")]
+            {
+                crate::audio::level_respawn(!crate::renderer::dimension::is_current_level(
+                    &p.common.dimension,
+                ));
+                crate::play::player_sounds::reset(false);
+            }
             worldsync::set_dimension(world, &p.common);
             worldsync::reset_level(shared);
         }
         ClientboundGamePacket::Login(p) => {
+            #[cfg(feature = "audio")]
+            crate::audio::level_login();
+            crate::client::worker::reset_biome_table();
+            #[cfg(feature = "audio")]
+            crate::audio::publish_synced(&world.shared.read().registries);
             worldsync::set_dimension(world, &p.common);
             worldsync::reset_level(shared);
         }
+        ClientboundGamePacket::StartConfiguration(_) => crate::client::worker::reset_biome_table(),
         _ => {}
     }
 }

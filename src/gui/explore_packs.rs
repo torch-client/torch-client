@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::gui::packdrop;
 use crate::gui::painter::{ClipGuard, Painter};
 use crate::gui::render::GuiInput;
+use crate::gui::tooltip::translate;
 use crate::gui::widgets::{
     self, Button, FOOTER_GAP, FOOTER_W, HeaderFooter, TAB_BAR_H, TextBox, WIDGET_HEIGHT,
     centered_row_x,
@@ -578,7 +579,7 @@ fn filter_row(p: &mut Painter, ctx: &ScreenCtx, st: &mut State, x0: f32) {
         FILTER_Y,
         w,
         WIDGET_HEIGHT,
-        &format!("Version: {version}"),
+        &translate("mco.version", &[version]),
     )
     .draw(p, ctx)
     {

@@ -21,8 +21,10 @@ const TEXTURE: &str = "misc/shadow";
 #[derive(Component)]
 pub(crate) struct ShadowNode;
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Piece {
-    at: Vec3,
+    at: [f32; 3],
     rel: [f32; 3],
     radius: f32,
     alpha: f32,
@@ -32,8 +34,9 @@ impl Piece {
     fn corners(&self) -> [[f32; 3]; 4] {
         let [x0, y, z0] = self.rel;
         let (x1, z1) = (x0 + 1.0, z0 + 1.0);
+        let at = Vec3::from_array(self.at);
         [[x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]]
-            .map(|[x, y, z]| (self.at + Vec3::new(x, y, z)).to_array())
+            .map(|[x, y, z]| (at + Vec3::new(x, y, z)).to_array())
     }
 
     fn uvs(&self) -> [[f32; 2]; 4] {
@@ -55,6 +58,7 @@ pub(crate) struct EntityShadows {
     node: Option<(Entity, Handle<Mesh>)>,
     casters: Vec<Caster>,
     pieces: Vec<Piece>,
+    written: Vec<Piece>,
 }
 
 pub(crate) fn shadow(kind: EntityKind) -> (f32, f32) {
@@ -317,7 +321,7 @@ fn cast(
         (pos.y - f64::from(depth)).floor() as i32,
         pos.y.floor() as i32,
     );
-    let at = origin.to_render_array(caster.pos);
+    let at = origin.to_render_array(caster.pos).to_array();
     for z in z0..=z1 {
         for x in x0..=x1 {
             for y in y0..=y1 {
@@ -471,6 +475,7 @@ pub(crate) fn sync_shadows(
         node,
         casters,
         pieces,
+        written,
     } = &mut *state;
     pieces.clear();
     casters.clear();
@@ -482,8 +487,11 @@ pub(crate) fn sync_shadows(
                 .unwrap()
                 .clone();
             if let Some(world) = world.as_deref() {
-                let world = world.read();
-                let light = crate::client::worldsync::light_map().read();
+                let world = crate::client::tracking::read_lock(world, "shadow");
+                let light = crate::client::tracking::read_lock(
+                    crate::client::worldsync::light_map(),
+                    "light:shadow",
+                );
                 let dim = crate::renderer::dimension::current();
                 let (darken, ambient) = (sky_darken(dim, view.day_ticks), ambient_light(dim));
                 for caster in casters.iter() {
@@ -532,11 +540,14 @@ pub(crate) fn sync_shadows(
         #[cfg(feature = "builtin_shaders")]
         spawned.insert(bevy::light::NotShadowCaster);
         *node = Some((spawned.id(), mesh));
+        written.clear();
     }
     if let Some((_, handle)) = node.as_ref()
+        && !crate::util::same_bits(&pieces[..], &written[..])
         && let Some(mesh) = meshes.get_mut(handle)
     {
         write_mesh(mesh, pieces);
+        std::mem::swap(pieces, written);
     }
     set_visible(node.as_ref(), true, &mut nodes);
 }

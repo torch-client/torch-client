@@ -27,6 +27,7 @@ pub enum SoundSource {
     Players = 7,
     Ambient = 8,
     Voice = 9,
+    Ui = 10,
 }
 
 #[cfg(test)]

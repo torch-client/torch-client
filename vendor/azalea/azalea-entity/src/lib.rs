@@ -30,7 +30,7 @@ use azalea_core::{
 use azalea_registry::builtin::EntityKind;
 pub use data::*;
 use derive_more::{Deref, DerefMut};
-pub use effects::{ActiveEffects, MobEffectData};
+pub use effects::{ActiveEffects, EffectGeneration, MobEffectData, attribute_modifier_for_effect};
 use uuid::Uuid;
 use vec_delta_codec::VecDeltaCodec;
 
@@ -226,6 +226,8 @@ pub struct Physics {
 
     pub no_jump_delay: u32,
 
+    pub auto_jump_time: i32,
+
     pub bounding_box: Aabb,
 
     pub has_impulse: bool,
@@ -260,6 +262,7 @@ impl Physics {
             last_on_ground: false,
 
             no_jump_delay: 0,
+            auto_jump_time: 0,
 
             bounding_box: dimensions.make_bounding_box(pos),
 

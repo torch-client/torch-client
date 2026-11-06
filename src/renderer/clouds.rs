@@ -109,28 +109,37 @@ pub struct CloudPlugin;
 
 impl Plugin for CloudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            setup.run_if(resource_added::<crate::renderer::systems::AssetsReady>),
-        )
-        .add_systems(
-            Update,
-            reload_texture
-                .run_if(on_message::<crate::renderer::reload::AssetsReloaded>)
-                .run_if(resource_exists::<CloudAssets>),
-        )
-        .add_systems(
-            PostUpdate,
-            update_clouds
-                .in_set(super::CameraPinnedMeshes)
-                .run_if(in_state(AppState::InGame))
-                .run_if(resource_exists::<CloudAssets>),
-        );
+        app.init_resource::<CloudEnd>()
+            .add_systems(
+                Update,
+                setup.run_if(resource_added::<crate::renderer::systems::AssetsReady>),
+            )
+            .add_systems(
+                Update,
+                reload_texture
+                    .run_if(on_message::<crate::renderer::reload::AssetsReloaded>)
+                    .run_if(resource_exists::<CloudAssets>),
+            )
+            .add_systems(
+                PostUpdate,
+                update_clouds
+                    .after(super::sky::update_sky)
+                    .in_set(super::CameraPinnedMeshes)
+                    .run_if(in_state(AppState::InGame))
+                    .run_if(resource_exists::<CloudAssets>),
+            );
     }
 }
 
 #[derive(Component)]
 pub(crate) struct CloudLayer;
+
+#[derive(Resource, Default)]
+pub(crate) struct CloudEnd(pub Option<f32>);
+
+fn vertical_gap(relative_bottom: f64, relative_top: f64) -> f64 {
+    relative_bottom.max(-relative_top).max(0.0)
+}
 
 struct CloudTexture {
     width: usize,
@@ -401,6 +410,7 @@ fn update_clouds(
     view: Res<super::frame_view::FrameView>,
     env: Res<super::environment::Environment>,
     origin: Res<super::RenderOrigin>,
+    cloud_end: Res<CloudEnd>,
     mut assets: ResMut<CloudAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -426,7 +436,6 @@ fn update_clouds(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     }
-    visibility.set_if_neq(Visibility::Visible);
 
     let Ok(camera) = camera.single() else { return };
     let camera_world = origin.to_world(camera.translation);
@@ -441,6 +450,15 @@ fn update_clouds(
     } else {
         RelativeCameraPos::InsideClouds
     };
+
+    if cloud_end
+        .0
+        .is_some_and(|end| vertical_gap(relative_bottom, relative_top) >= f64::from(end))
+    {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    }
+    visibility.set_if_neq(Visibility::Visible);
 
     let period = texture_cells_w as i64 * TICKS_PER_CELL;
     let offset = crate::client::tracking::game_time().rem_euclid(period) as f64 + partial as f64;
@@ -493,6 +511,13 @@ mod tests {
         let mut image = image::RgbaImage::new(4, 4);
         image.put_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
         CloudTexture::new(&image)
+    }
+
+    #[test]
+    fn the_gap_is_to_the_nearer_face() {
+        assert_eq!(vertical_gap(10.0, 14.0), 10.0);
+        assert_eq!(vertical_gap(-14.0, -10.0), 10.0);
+        assert_eq!(vertical_gap(-1.0, 3.0), 0.0);
     }
 
     #[test]

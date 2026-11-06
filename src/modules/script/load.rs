@@ -339,23 +339,38 @@ pub(super) fn inspect(path: &Path) -> Result<Inspected, String> {
     if !valid_id(&id) {
         return Err(format!("`{id}` is not a mod id: rename it to {ID_RULE}"));
     }
-    let mut out = Inspected {
-        id,
-        shape,
-        name: None,
-        version: None,
-        license: None,
-        description: None,
-        author: None,
-        source: None,
-        perms: Vec::new(),
-    };
+    let out = Inspected::bare(id, shape);
     if shape == Shape::File {
         return Ok(out);
     }
     let source = Source::open(path, "")?;
+    with_manifest(out, &source)
+}
+
+pub(super) fn inspect_zip(id: &str, bytes: std::sync::Arc<Vec<u8>>) -> Result<Inspected, String> {
+    let source = Source::from_shared_zip(bytes, "")?;
+    with_manifest(Inspected::bare(id.to_string(), Shape::Zip), &source)
+}
+
+impl Inspected {
+    fn bare(id: String, shape: Shape) -> Inspected {
+        Inspected {
+            id,
+            shape,
+            name: None,
+            version: None,
+            license: None,
+            description: None,
+            author: None,
+            source: None,
+            perms: Vec::new(),
+        }
+    }
+}
+
+fn with_manifest(mut out: Inspected, source: &Source) -> Result<Inspected, String> {
     let Some(text) = source.read_text("/mod.json") else {
-        return Err(missing_manifest(&source, shape));
+        return Err(missing_manifest(source, out.shape));
     };
     let m = manifest(&text, &out.id)?;
     if source.read_text("/init.lua").is_none() {

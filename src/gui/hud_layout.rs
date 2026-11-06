@@ -327,7 +327,8 @@ pub const MOBILE_CHAT_SCALE: f32 = 0.9;
 
 #[cfg(feature = "mobile_ui")]
 pub fn mobile_chat_offset(vh: f32) -> (f32, f32) {
-    (0.0, crate::gui::chat::hud_box(vh).y)
+    const CHAT_LIFT: f32 = 6.0;
+    (0.0, crate::gui::chat::hud_box(vh).y - CHAT_LIFT)
 }
 
 #[derive(Clone, Copy)]
@@ -590,6 +591,7 @@ pub const MIN_SCALE: f32 = 0.5;
 pub const MAX_SCALE: f32 = 3.0;
 
 pub const GRIDS: [f32; 4] = [0.0, 4.0, 8.0, 16.0];
+pub const DEFAULT_GRID: usize = 2;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct HudLayout {
@@ -601,6 +603,8 @@ pub struct HudLayout {
     pub areas: Vec<Area>,
     #[cfg(feature = "hud_editor")]
     pub panel: Option<Panel>,
+    #[cfg(feature = "hud_editor")]
+    pub hints: bool,
     mod_saved: Vec<(String, serde_json::Value)>,
     mod_keys: [Option<&'static str>; MOD_PANELS],
     mod_gen: u32,
@@ -700,11 +704,13 @@ impl HudLayout {
             }),
             stacks: Vec::new(),
             next_stack: 0,
-            grid: 2,
+            grid: DEFAULT_GRID,
             #[cfg(feature = "mobile_ui")]
             areas: default_areas(),
             #[cfg(feature = "hud_editor")]
             panel: None,
+            #[cfg(feature = "hud_editor")]
+            hints: true,
             mod_saved: Vec::new(),
             mod_keys: [None; MOD_PANELS],
             mod_gen: 0,
@@ -1085,6 +1091,9 @@ impl HudLayout {
         if let Some(grid) = json.get("grid").and_then(|g| g.as_u64()) {
             layout.grid = (grid as usize).min(GRIDS.len() - 1);
         }
+        if let Some(hints) = json.get("hints").and_then(|h| h.as_bool()) {
+            layout.hints = hints;
+        }
         let num =
             |e: &serde_json::Value, k: &str| e.get(k).and_then(|v| v.as_f64()).map(|v| v as f32);
         let anchor_of = |e: &serde_json::Value| {
@@ -1227,6 +1236,7 @@ impl HudLayout {
         let mut json = serde_json::json!({
             "version": 2,
             "grid": self.grid,
+            "hints": self.hints,
             "elements": elements,
             "stacks": stacks,
             "removed_stacks": self.removed_homes().map(Home::key).collect::<Vec<_>>(),

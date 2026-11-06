@@ -7,6 +7,7 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
 use azalea::entity::particle::Particle as P;
+use azalea_core::heightmap_kind::HeightmapKind;
 
 use crate::entities::quads::QUAD_INDICES;
 use crate::renderer::entity_material::{
@@ -259,6 +260,69 @@ pub(crate) struct Particle {
     grow: Grow,
     sprite: Sprite,
     flags: u8,
+    drip: Option<(Drip, DripStage)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Drip {
+    Water,
+    Lava,
+    Honey,
+    DripstoneWater,
+    DripstoneLava,
+    ObsidianTear,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DripStage {
+    Hang,
+    Fall,
+    Landed,
+    Land,
+}
+
+impl Drip {
+    fn falling(self) -> P {
+        match self {
+            Drip::Water => P::FallingWater,
+            Drip::Lava => P::FallingLava,
+            Drip::Honey => P::FallingHoney,
+            Drip::DripstoneWater => P::FallingDripstoneWater,
+            Drip::DripstoneLava => P::FallingDripstoneLava,
+            Drip::ObsidianTear => P::FallingObsidianTear,
+        }
+    }
+
+    fn landing(self) -> P {
+        match self {
+            Drip::Water | Drip::DripstoneWater => P::Splash,
+            Drip::Lava | Drip::DripstoneLava => P::LandingLava,
+            Drip::Honey => P::LandingHoney,
+            Drip::ObsidianTear => P::LandingObsidianTear,
+        }
+    }
+
+    fn landing_sound(self) -> Option<&'static str> {
+        match self {
+            Drip::DripstoneWater => Some("block.pointed_dripstone.drip_water"),
+            Drip::DripstoneLava => Some("block.pointed_dripstone.drip_lava"),
+            Drip::Honey => Some("block.beehive.drip"),
+            _ => None,
+        }
+    }
+
+    fn fluid(self) -> Option<azalea::block::fluid_state::FluidKind> {
+        use azalea::block::fluid_state::FluidKind;
+        match self {
+            Drip::Water | Drip::DripstoneWater => Some(FluidKind::Water),
+            Drip::Lava | Drip::DripstoneLava => Some(FluidKind::Lava),
+            Drip::Honey | Drip::ObsidianTear => None,
+        }
+    }
+
+    fn cools(self) -> bool {
+        matches!(self, Drip::Lava | Drip::DripstoneLava)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -309,7 +373,9 @@ fn spawn_particles(
     let status = gui.options.particles;
     let eye = view.camera_world;
     let world_arc = particle_world();
-    let world = world_arc.as_deref().map(|w| w.read());
+    let world = world_arc
+        .as_deref()
+        .map(|w| crate::client::tracking::read_lock(w, "spawn_particles"));
     let world = world.as_deref();
     let atlas = atlas.0.as_ref();
     let rng = &mut particle_rng.0;
@@ -359,6 +425,7 @@ fn spawn_particles(
                     atlas,
                     status,
                     sky_darken: frame_sky_darken(&view),
+                    day_ticks: view.day_ticks,
                     eye,
                     live: &mut live.0,
                     rng: &mut *rng,
@@ -390,6 +457,11 @@ fn spawn_particles(
                 let Some(atlas) = atlas else { continue };
                 spawn_tracking_round(&round, atlas, world, eye, status, &mut live.0, rng);
             }
+            ParticleEmit::Cloud(cloud) => {
+                levels += 1;
+                let Some(atlas) = atlas else { continue };
+                spawn_cloud_round(&cloud, atlas, world, eye, status, &mut live.0, rng);
+            }
             ParticleEmit::ItemUse(item_use) => {
                 uses += 1;
                 let Some(atlas) = atlas else { continue };
@@ -405,6 +477,7 @@ fn spawn_particles(
             atlas,
             status,
             sky_darken: frame_sky_darken(&view),
+            day_ticks: view.day_ticks,
             eye,
             live: &mut live.0,
             rng,
@@ -512,6 +585,69 @@ fn spawn_tracking_round(
             gate,
             pos,
             Vec3::new(xa, ya + 0.2, za),
+            eye,
+        );
+    }
+}
+
+fn spawn_cloud_round(
+    cloud: &crate::session::CloudEmit,
+    atlas: &Atlas,
+    world: Option<&azalea_world::World>,
+    eye: DVec3,
+    status: ParticleStatus,
+    live: &mut Vec<Particle>,
+    rng: &mut JavaRandom,
+) {
+    if cloud.waiting && rng.next_bool() {
+        return;
+    }
+    let (count, radius) = if cloud.waiting {
+        (2, 0.2)
+    } else {
+        (
+            (std::f32::consts::PI * cloud.radius * cloud.radius).ceil() as u32,
+            cloud.radius,
+        )
+    };
+    let default = crate::play::area_cloud::default_particle();
+    let entity_effect = matches!(cloud.particle, P::EntityEffect(_));
+    let [x, y, z] = cloud.pos;
+    for _ in 0..count {
+        if live.len() >= MAX_LIVE_PARTICLES {
+            break;
+        }
+        let angle = rng.next_f32() * std::f32::consts::TAU;
+        let distance = rng.next_f32().sqrt() * radius;
+        let pos = DVec3::new(
+            x + f64::from(angle.cos() * distance),
+            y,
+            z + f64::from(angle.sin() * distance),
+        );
+        let (particle, arg) = if entity_effect {
+            let kind = if cloud.waiting && rng.next_bool() {
+                &default
+            } else {
+                &cloud.particle
+            };
+            (kind, Vec3::ZERO)
+        } else if cloud.waiting {
+            (&cloud.particle, Vec3::ZERO)
+        } else {
+            let xa = ((0.5 - rng.next_f64()) * 0.15) as f32;
+            let za = ((0.5 - rng.next_f64()) * 0.15) as f32;
+            (&cloud.particle, Vec3::new(xa, 0.01, za))
+        };
+        add_level_particle(
+            live,
+            atlas,
+            world,
+            rng,
+            status,
+            particle,
+            SpawnGate::ALWAYS_SHOW,
+            pos,
+            arg,
             eye,
         );
     }
@@ -663,6 +799,7 @@ pub(crate) fn spawn_block_break(
             grow: Grow::Fixed,
             sprite: Sprite::Fixed(random_sub_uv(tile, &mut rng)),
             flags: PHYSICS | TERRAIN,
+            drip: None,
         };
         if particle.lifetime > 0 {
             particle.age = 1;
@@ -762,6 +899,14 @@ fn add_level_particle(
         spawn_explosion_seed(live, atlas, world, rng, status, pos, eye);
         return;
     }
+    if matches!(particle_kind, P::GustEmitterLarge) {
+        spawn_gust_seed(live, atlas, world, rng, status, pos, eye, 3.0, 7, 0);
+        return;
+    }
+    if matches!(particle_kind, P::GustEmitterSmall) {
+        spawn_gust_seed(live, atlas, world, rng, status, pos, eye, 1.0, 3, 2);
+        return;
+    }
     if let Some(recipe) = recipe(particle_kind, atlas, arg, rng) {
         push_recipe(live, world, rng, recipe, pos);
     }
@@ -788,6 +933,7 @@ fn push_recipe(
         grow: recipe.grow,
         sprite: recipe.sprite,
         flags: recipe.flags,
+        drip: recipe.drip,
     };
     particle.age = 1;
     advance_one_tick(&mut particle, world);
@@ -839,31 +985,98 @@ fn spawn_explosion_seed(
     pos: DVec3,
     eye: DVec3,
 ) {
-    fn spread(rng: &mut JavaRandom) -> f32 {
-        ((rng.next_f64() - rng.next_f64()) * 4.0) as f32
-    }
     for tick in 0..SEED_TICKS {
-        for _ in 0..6 {
-            if live.len() >= MAX_LIVE_PARTICLES {
-                return;
-            }
-            let offset = Vec3::new(spread(rng), spread(rng), spread(rng));
-            let len = live.len();
-            add_level_particle(
-                live,
-                atlas,
-                world,
-                rng,
-                status,
-                &P::Explosion,
-                SpawnGate::normal(&P::Explosion),
-                pos + offset.as_dvec3(),
-                Vec3::new(tick as f32 / SEED_TICKS as f32, 0.0, 0.0),
-                eye,
-            );
-            if let Some(puff) = live.get_mut(len) {
-                puff.tick_acc -= tick as f32 * TICK;
-            }
+        if !seed_puffs(
+            live,
+            atlas,
+            world,
+            rng,
+            status,
+            pos,
+            eye,
+            &P::Explosion,
+            6,
+            4.0,
+            tick,
+            SEED_TICKS,
+        ) {
+            return;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_puffs(
+    live: &mut Vec<Particle>,
+    atlas: &Atlas,
+    world: Option<&azalea_world::World>,
+    rng: &mut JavaRandom,
+    status: ParticleStatus,
+    pos: DVec3,
+    eye: DVec3,
+    kind: &P,
+    count: u32,
+    scale: f64,
+    tick: u32,
+    lifetime: u32,
+) -> bool {
+    fn spread(rng: &mut JavaRandom, scale: f64) -> f64 {
+        (rng.next_f64() - rng.next_f64()) * scale
+    }
+    for _ in 0..count {
+        if live.len() >= MAX_LIVE_PARTICLES {
+            return false;
+        }
+        let offset = DVec3::new(spread(rng, scale), spread(rng, scale), spread(rng, scale));
+        let len = live.len();
+        add_level_particle(
+            live,
+            atlas,
+            world,
+            rng,
+            status,
+            kind,
+            SpawnGate::normal(kind),
+            pos + offset,
+            Vec3::new(tick as f32 / lifetime as f32, 0.0, 0.0),
+            eye,
+        );
+        if let Some(puff) = live.get_mut(len) {
+            puff.tick_acc -= tick as f32 * TICK;
+        }
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_gust_seed(
+    live: &mut Vec<Particle>,
+    atlas: &Atlas,
+    world: Option<&azalea_world::World>,
+    rng: &mut JavaRandom,
+    status: ParticleStatus,
+    pos: DVec3,
+    eye: DVec3,
+    scale: f64,
+    lifetime: u32,
+    delay: u32,
+) {
+    for tick in (0..=lifetime).step_by(delay as usize + 1) {
+        if !seed_puffs(
+            live,
+            atlas,
+            world,
+            rng,
+            status,
+            pos,
+            eye,
+            &P::Gust,
+            3,
+            scale,
+            tick,
+            lifetime,
+        ) {
+            return;
         }
     }
 }
@@ -871,6 +1084,8 @@ fn spawn_explosion_seed(
 const ANIMATE_SAMPLES: u32 = 667;
 
 const ANIMATE_RADII: [u32; 2] = [16, 32];
+
+const SAMPLE_FOR_SOUND: bool = cfg!(feature = "audio");
 
 #[derive(Resource, Default)]
 struct AmbientClock(f32);
@@ -901,15 +1116,21 @@ fn animate_tick_particles(
     };
     let status = gui.options.particles;
     let rain = env.rain;
-    if status == ParticleStatus::Minimal && rain <= 0.0 {
+    if status == ParticleStatus::Minimal && rain <= 0.0 && !SAMPLE_FOR_SOUND {
         return;
     }
     let eye = view.camera_world;
     let world_arc = particle_world();
-    let Some(world) = world_arc.as_deref().map(|w| w.read()) else {
+    let Some(world) = world_arc
+        .as_deref()
+        .map(|w| crate::client::tracking::read_lock(w, "animate_tick"))
+    else {
         return;
     };
-    let light = crate::client::worldsync::light_map().read();
+    let light = crate::client::tracking::read_lock(
+        crate::client::worldsync::light_map(),
+        "light:animate_tick",
+    );
 
     let center = crate::renderer::lightmap::cell_of(eye.to_array());
     let before = live.0.len();
@@ -919,16 +1140,17 @@ fn animate_tick_particles(
         atlas,
         status,
         sky_darken: frame_sky_darken(&view),
+        day_ticks: view.day_ticks,
         eye,
         live: &mut live.0,
         rng: &mut particle_rng.0,
     };
     'sampling: for _ in 0..ANIMATE_SAMPLES {
-        if status == ParticleStatus::Minimal {
+        if status == ParticleStatus::Minimal && !SAMPLE_FOR_SOUND {
             break;
         }
         for radius in ANIMATE_RADII {
-            if ctx.live.len() >= MAX_LIVE_PARTICLES {
+            if ctx.live.len() >= MAX_LIVE_PARTICLES && !SAMPLE_FOR_SOUND {
                 break 'sampling;
             }
             let rng = &mut *ctx.rng;
@@ -957,11 +1179,56 @@ fn animate_tick_particles(
     }
 }
 
+fn is_quiet(state: azalea::block::BlockState) -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
+    const UNKNOWN: u8 = 0;
+    const QUIET: u8 = 1;
+    const ACTIVE: u8 = 2;
+    const STATES: usize = azalea::block::BlockState::MAX_STATE as usize + 1;
+    static CACHE: [AtomicU8; STATES] = [const { AtomicU8::new(UNKNOWN) }; STATES];
+
+    let work_out = || {
+        crate::blocks::ambient::of(state).is_none()
+            && azalea::block::fluid_state::FluidState::from(state).is_empty()
+    };
+    let Some(slot) = CACHE.get(state.id() as usize) else {
+        return work_out();
+    };
+    match slot.load(Relaxed) {
+        QUIET => true,
+        ACTIVE => false,
+        _ => {
+            let quiet = work_out();
+            slot.store(if quiet { QUIET } else { ACTIVE }, Relaxed);
+            quiet
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn only_a_cell_with_nothing_to_emit_is_quiet() {
+    use azalea::block::BlockState;
+    use azalea::block::blocks::{Air, Stone, Torch, Water};
+
+    for _ in 0..2 {
+        assert!(is_quiet(BlockState::from(Air {})));
+        assert!(is_quiet(BlockState::from(Stone {})));
+        assert!(!is_quiet(BlockState::from(Torch {})));
+        assert!(!is_quiet(BlockState::from(Water {
+            level: azalea::block::properties::WaterLevel::from(0)
+        })));
+    }
+}
+
 fn do_animate_tick(ctx: &mut Emitter, light: &crate::lighting::level::LightMap) {
     let cell = ctx.cell;
     let Some(state) = ctx.block(cell) else {
         return;
     };
+    if is_quiet(state) {
+        return;
+    }
     if let Some(ambient) = crate::blocks::ambient::of(state) {
         emit_ambient(ambient, state, ctx, light);
     }
@@ -1046,6 +1313,7 @@ pub(crate) struct Emitter<'a> {
     pub(crate) atlas: &'a Atlas,
     pub(crate) status: ParticleStatus,
     pub(crate) sky_darken: i32,
+    pub(crate) day_ticks: f64,
     pub(crate) eye: DVec3,
     pub(crate) live: &'a mut Vec<Particle>,
     pub(crate) rng: &'a mut JavaRandom,
@@ -1137,8 +1405,12 @@ fn emit_ambient(
 ) {
     use crate::blocks::ambient::{Ambient, Flame, Furnace, HORIZONTAL, Leaf, WireSide};
     use crate::renderer::lightmap::levels_in;
+    use crate::util::level_events::{Bus, play, play_local};
+    use azalea_registry::builtin::BlockKind;
+    use azalea_registry::tags::blocks as tags;
 
     let cell = ctx.cell;
+    let centre = rel(cell, [0.5, 0.5, 0.5]).to_array();
     match ambient {
         Ambient::Torch { flame, offset } => {
             let pos = rel(cell, offset);
@@ -1153,13 +1425,25 @@ fn emit_ambient(
         Ambient::Candle { wicks, count } => {
             for wick in wicks.iter().take(count as usize) {
                 let pos = rel(cell, *wick);
-                if ctx.f32() < 0.3 {
+                let chance = ctx.f32();
+                if chance < 0.3 {
                     ctx.emit(&P::Smoke, pos, Vec3::ZERO, false);
+                    if chance < 0.17 {
+                        let volume = 1.0 + ctx.f32();
+                        let pitch = ctx.f32() * 0.7 + 0.3;
+                        let at = [pos.x + 0.5, pos.y + 0.5, pos.z + 0.5];
+                        play("block.candle.ambient", Bus::Blocks, at, volume, pitch);
+                    }
                 }
                 ctx.emit(&P::SmallFlame, pos, Vec3::ZERO, false);
             }
         }
         Ambient::Fire => {
+            if ctx.one_in(24) {
+                let volume = 1.0 + ctx.f32();
+                let pitch = ctx.f32() * 0.7 + 0.3;
+                play("block.fire.ambient", Bus::Blocks, centre, volume, pitch);
+            }
             for _ in 0..3 {
                 let x = ctx.f32();
                 let y = ctx.f32() * 0.5 + 0.5;
@@ -1168,6 +1452,11 @@ fn emit_ambient(
             }
         }
         Ambient::Campfire => {
+            if ctx.one_in(10) {
+                let volume = 0.5 + ctx.f32();
+                let pitch = ctx.f32() * 0.7 + 0.6;
+                play("block.campfire.crackle", Bus::Blocks, centre, volume, pitch);
+            }
             if !ctx.one_in(5) {
                 return;
             }
@@ -1181,6 +1470,19 @@ fn emit_ambient(
             );
         }
         Ambient::Furnace { kind, front } => {
+            if ctx.rng.next_f64() < 0.1 {
+                let event = match kind {
+                    Furnace::Furnace => "block.furnace.fire_crackle",
+                    Furnace::Blast => "block.blastfurnace.fire_crackle",
+                    Furnace::Smoker => "block.smoker.smoke",
+                };
+                let at = [
+                    f64::from(cell[0]) + 0.5,
+                    f64::from(cell[1]),
+                    f64::from(cell[2]) + 0.5,
+                ];
+                play(event, Bus::Blocks, at, 1.0, 1.0);
+            }
             if kind == Furnace::Smoker {
                 ctx.emit(&P::Smoke, rel(cell, [0.5, 1.1, 0.5]), Vec3::ZERO, false);
                 return;
@@ -1227,6 +1529,10 @@ fn emit_ambient(
             ctx.emit(&P::Smoke, rel(cell, [x, 0.8, z]), Vec3::ZERO, false);
         }
         Ambient::NetherPortal { axis_x } => {
+            if ctx.one_in(100) {
+                let pitch = ctx.f32() * 0.4 + 0.8;
+                play("block.portal.ambient", Bus::Blocks, centre, 0.5, pitch);
+            }
             for _ in 0..4 {
                 let mut x = ctx.f32();
                 let y = ctx.f32();
@@ -1267,6 +1573,15 @@ fn emit_ambient(
             }
         }
         Ambient::RespawnAnchor => {
+            if ctx.one_in(100) {
+                play(
+                    "block.respawn_anchor.ambient",
+                    Bus::Blocks,
+                    centre,
+                    1.0,
+                    1.0,
+                );
+            }
             let x = 0.5 + (0.5 - ctx.f32());
             let z = 0.5 + (0.5 - ctx.f32());
             let ya = ctx.f32() * 0.04;
@@ -1450,8 +1765,38 @@ fn emit_ambient(
                 let z = ctx.f32();
                 ctx.emit(&P::BubbleColumnUp, rel(cell, [x, y, z]), up, true);
             }
+            if ctx.one_in(200) {
+                let event = if drag {
+                    "block.bubble_column.whirlpool_ambient"
+                } else {
+                    "block.bubble_column.upwards_ambient"
+                };
+                let volume = 0.2 + ctx.f32() * 0.2;
+                let pitch = 0.9 + ctx.f32() * 0.15;
+                play(
+                    event,
+                    Bus::Blocks,
+                    rel(cell, [0.0; 3]).to_array(),
+                    volume,
+                    pitch,
+                );
+            }
         }
         Ambient::DriedGhast { waterlogged } => {
+            if ctx.one_in(40) {
+                let below = [cell[0], cell[1] - 1, cell[2]];
+                if waterlogged {
+                    play(
+                        "block.dried_ghast.ambient_water",
+                        Bus::Blocks,
+                        centre,
+                        1.0,
+                        1.0,
+                    );
+                } else if in_tag(ctx, below, &tags::TRIGGERS_AMBIENT_DRIED_GHAST_BLOCK_SOUNDS) {
+                    play("block.dried_ghast.ambient", Bus::Blocks, centre, 1.0, 1.0);
+                }
+            }
             if !ctx.one_in(6) {
                 return;
             }
@@ -1584,7 +1929,10 @@ fn emit_ambient(
             let particle = dust([1.0, 0.0, 0.0], 0.5);
             ctx.emit(&particle, rel(cell, offset), Vec3::ZERO, false);
         }
-        Ambient::FallingDust => {
+        Ambient::FallingDust { sand } => {
+            if cfg!(feature = "audio") && sand {
+                sand_idle(ctx);
+            }
             if !ctx.one_in(16) {
                 return;
             }
@@ -1597,6 +1945,13 @@ fn emit_ambient(
             ctx.below(&particle);
         }
         Ambient::FireflyBush => {
+            if ctx.one_in(30)
+                && overworld_track(ctx, FIREFLY_SOUNDS)
+                && column_height(ctx.world, cell, HeightmapKind::MotionBlockingNoLeaves)
+                    .is_some_and(|h| h <= cell[1])
+            {
+                play("block.firefly_bush.idle", Bus::Ambient, centre, 1.0, 1.0);
+            }
             let (block_light, sky_light) = levels_in(light, cell);
             if i32::from(block_light).max(i32::from(sky_light) - ctx.sky_darken) > 13 {
                 return;
@@ -1608,6 +1963,166 @@ fn emit_ambient(
             let y = ctx.rng.next_f64() as f32 * 5.0;
             let z = ctx.rng.next_f64() as f32 * 10.0 - 5.0;
             ctx.emit(&P::Firefly, rel(cell, [x, y, z]), Vec3::ZERO, false);
+        }
+        Ambient::OpenEyeblossom => {
+            if ctx.one_in(700)
+                && ctx
+                    .block([cell[0], cell[1] - 1, cell[2]])
+                    .map(BlockKind::from)
+                    == Some(BlockKind::PaleMossBlock)
+            {
+                let at = rel(cell, [0.0; 3]).to_array();
+                play("block.eyeblossom.idle", Bus::Ambient, at, 1.0, 1.0);
+            }
+        }
+        Ambient::PaleHangingMoss => {
+            if ctx.one_in(500) {
+                let above = [cell[0], cell[1] + 1, cell[2]];
+                if in_tag(ctx, above, &tags::PALE_OAK_LOGS)
+                    || ctx.block(above).map(BlockKind::from) == Some(BlockKind::PaleOakLeaves)
+                {
+                    let at = rel(cell, [0.0; 3]).to_array();
+                    play("block.pale_hanging_moss.idle", Bus::Ambient, at, 1.0, 1.0);
+                }
+            }
+        }
+        Ambient::CreakingHeart => {
+            if overworld_track(ctx, CREAKING_ACTIVE) && ctx.one_in(16) {
+                const SIDES: [[i32; 3]; 6] = [
+                    [0, -1, 0],
+                    [0, 1, 0],
+                    [0, 0, -1],
+                    [0, 0, 1],
+                    [-1, 0, 0],
+                    [1, 0, 0],
+                ];
+                let boxed = SIDES.iter().all(|s| {
+                    in_tag(
+                        ctx,
+                        [cell[0] + s[0], cell[1] + s[1], cell[2] + s[2]],
+                        &tags::PALE_OAK_LOGS,
+                    )
+                });
+                if boxed {
+                    let at = rel(cell, [0.0; 3]).to_array();
+                    play("block.creaking_heart.idle", Bus::Blocks, at, 1.0, 1.0);
+                }
+            }
+        }
+        Ambient::DeadBush => {
+            if ctx.one_in(130) {
+                let below = [cell[0], cell[1] - 1, cell[2]];
+                let on_red = ctx.block(below).map(BlockKind::from) == Some(BlockKind::RedSand)
+                    || in_tag(ctx, below, &tags::TERRACOTTA);
+                if on_red && ctx.rng.next_int(3) != 0 {
+                    return;
+                }
+                if desert_dry_vegetation_ok(ctx, below) {
+                    let at = rel(cell, [0.0; 3]).to_array();
+                    play("block.deadbush.idle", Bus::Ambient, at, 1.0, 1.0);
+                }
+            }
+        }
+        Ambient::DryGrass => {
+            if ctx.one_in(200) && desert_dry_vegetation_ok(ctx, [cell[0], cell[1] - 1, cell[2]]) {
+                play_local("block.dry_grass.ambient", Bus::Ambient, 1.0, 1.0);
+            }
+        }
+    }
+}
+
+const FIREFLY_SOUNDS: [f64; 2] = [12600.0, 23401.0];
+const CREAKING_ACTIVE: [f64; 2] = [12600.0, 23401.0];
+
+fn overworld_track(ctx: &Emitter, [on, off]: [f64; 2]) -> bool {
+    if crate::renderer::dimension::current() != crate::renderer::dimension::Dimension::Overworld {
+        return false;
+    }
+    let t = ctx.day_ticks.rem_euclid(24000.0);
+    t >= on && t < off
+}
+
+fn in_tag(
+    ctx: &Emitter,
+    cell: [i32; 3],
+    tag: &azalea_registry::tags::RegistryTag<azalea_registry::builtin::BlockKind>,
+) -> bool {
+    ctx.block(cell)
+        .is_some_and(|s| tag.contains(&azalea_registry::builtin::BlockKind::from(s)))
+}
+
+fn desert_dry_vegetation_ok(ctx: &Emitter, below: [i32; 3]) -> bool {
+    use azalea_registry::tags::blocks::TRIGGERS_AMBIENT_DESERT_DRY_VEGETATION_BLOCK_SOUNDS as TAG;
+    in_tag(ctx, below, &TAG) && in_tag(ctx, [below[0], below[1] - 1, below[2]], &TAG)
+}
+
+fn column_height(world: &azalea_world::World, cell: [i32; 3], kind: HeightmapKind) -> Option<i32> {
+    let chunk = world.chunks.get(&azalea_core::position::ChunkPos {
+        x: cell[0] >> 4,
+        z: cell[2] >> 4,
+    })?;
+    let chunk = chunk.read();
+    let map = chunk.heightmaps.get(&kind)?;
+    Some(map.get_first_available((cell[0] & 15) as u8, (cell[2] & 15) as u8))
+}
+
+fn sand_idle(ctx: &mut Emitter) {
+    use crate::util::level_events::{Bus, play};
+    use azalea_registry::tags::blocks::TRIGGERS_AMBIENT_DESERT_SAND_BLOCK_SOUNDS as SAND;
+    let cell = ctx.cell;
+    if !ctx.one_in(2100)
+        || !ctx
+            .block([cell[0], cell[1] + 1, cell[2]])
+            .is_some_and(|s| s.is_air())
+    {
+        return;
+    }
+    let column = |ctx: &Emitter, x: i32, y: i32, z: i32| -> bool {
+        let Some(surface) = column_height(ctx.world, [x, y, z], HeightmapKind::WorldSurface) else {
+            return false;
+        };
+        let surface = surface - 1;
+        if (surface - y).abs() > 5 {
+            let mut at = y + 6;
+            let mut above = ctx.block([x, at, z]);
+            at -= 1;
+            for _ in 0..10 {
+                let current = ctx.block([x, at, z]);
+                if above.is_some_and(state_is_air)
+                    && current.is_some_and(|s| {
+                        SAND.contains(&azalea_registry::builtin::BlockKind::from(s))
+                    })
+                {
+                    return true;
+                }
+                above = current;
+                at -= 1;
+            }
+            false
+        } else {
+            ctx.block([x, surface + 1, z]).is_some_and(state_is_air)
+                && in_tag(ctx, [x, surface, z], &SAND)
+        }
+    };
+    let mut found = 0;
+    let mut checked = 0;
+    for [dx, dz] in [[0, -8], [8, 0], [0, 8], [-8, 0]] {
+        if column(ctx, cell[0] + dx, cell[1], cell[2] + dz) {
+            found += 1;
+            if found > 3 {
+                play(
+                    "block.sand.idle",
+                    Bus::Ambient,
+                    rel(cell, [0.0; 3]).to_array(),
+                    1.0,
+                    1.0,
+                );
+                return;
+            }
+        }
+        checked += 1;
+        if 4 - checked + found < 3 {
+            return;
         }
     }
 }
@@ -1679,22 +2194,39 @@ fn random_open_face(ctx: &mut Emitter, inset: f32) -> Option<DVec3> {
     Some(rel(cell, [x, y, z]))
 }
 
+use crate::blocks::state_is_air;
+
 fn emit_fluid_ambient(fluid: &azalea::block::fluid_state::FluidState, ctx: &mut Emitter) {
+    use crate::util::level_events::{Bus, play};
     use azalea::block::fluid_state::FluidKind;
 
     let cell = ctx.cell;
     match fluid.kind {
         FluidKind::Lava => {
             let above = [cell[0], cell[1] + 1, cell[2]];
-            if ctx.block(above).is_some_and(|s| !s.is_air()) {
+            if ctx.block(above).is_some_and(|s| !state_is_air(s)) {
                 return;
             }
-            if !ctx.one_in(100) {
-                return;
+            if ctx.one_in(100) {
+                let x = ctx.f32();
+                let z = ctx.f32();
+                let at = rel(cell, [x, 1.0, z]);
+                ctx.emit(&P::Lava, at, Vec3::ZERO, false);
+                let volume = 0.2 + ctx.f32() * 0.2;
+                let pitch = 0.9 + ctx.f32() * 0.15;
+                play("block.lava.pop", Bus::Ambient, at.to_array(), volume, pitch);
             }
-            let x = ctx.f32();
-            let z = ctx.f32();
-            ctx.emit(&P::Lava, rel(cell, [x, 1.0, z]), Vec3::ZERO, false);
+            if ctx.one_in(200) {
+                let volume = 0.2 + ctx.f32() * 0.2;
+                let pitch = 0.9 + ctx.f32() * 0.15;
+                play(
+                    "block.lava.ambient",
+                    Bus::Ambient,
+                    rel(cell, [0.0; 3]).to_array(),
+                    volume,
+                    pitch,
+                );
+            }
         }
         FluidKind::Water => {
             if fluid.is_empty() {
@@ -1706,16 +2238,13 @@ fn emit_fluid_ambient(fluid: &azalea::block::fluid_state::FluidState, ctx: &mut 
                 }
                 let volume = ctx.f32() * 0.25 + 0.75;
                 let pitch = ctx.f32() + 0.5;
-                #[cfg(feature = "audio")]
-                crate::audio::play_at(
+                play(
                     "block.water.ambient",
-                    crate::audio::SoundCategory::Ambient,
+                    Bus::Ambient,
                     rel(cell, [0.5, 0.5, 0.5]).to_array(),
                     volume,
                     pitch,
                 );
-                #[cfg(not(feature = "audio"))]
-                let _ = (volume, pitch);
                 return;
             }
             if !ctx.one_in(10) {
@@ -1740,6 +2269,7 @@ struct Recipe {
     grow: Grow,
     sprite: Sprite,
     flags: u8,
+    drip: Option<(Drip, DripStage)>,
 }
 
 fn base_recipe(sprite: Sprite, rng: &mut JavaRandom) -> Recipe {
@@ -1753,6 +2283,7 @@ fn base_recipe(sprite: Sprite, rng: &mut JavaRandom) -> Recipe {
         grow: Grow::Fixed,
         sprite,
         flags: PHYSICS,
+        drip: None,
     }
 }
 
@@ -2213,6 +2744,50 @@ fn recipe(
         P::ItemSnowball => item_recipe(atlas, "snowball", None, rng),
         P::ItemCobweb => item_recipe(atlas, "cobweb", None, rng),
 
+        P::DrippingWater => drip_recipe(atlas, name, Drip::Water, DripStage::Hang, rng),
+        P::DrippingLava => drip_recipe(atlas, name, Drip::Lava, DripStage::Hang, rng),
+        P::DrippingHoney => drip_recipe(atlas, name, Drip::Honey, DripStage::Hang, rng),
+        P::DrippingDripstoneWater => {
+            drip_recipe(atlas, name, Drip::DripstoneWater, DripStage::Hang, rng)
+        }
+        P::DrippingDripstoneLava => {
+            drip_recipe(atlas, name, Drip::DripstoneLava, DripStage::Hang, rng)
+        }
+        P::DrippingObsidianTear => {
+            drip_recipe(atlas, name, Drip::ObsidianTear, DripStage::Hang, rng)
+        }
+        P::FallingWater => drip_recipe(atlas, name, Drip::Water, DripStage::Fall, rng),
+        P::FallingLava => drip_recipe(atlas, name, Drip::Lava, DripStage::Fall, rng),
+        P::FallingHoney => drip_recipe(atlas, name, Drip::Honey, DripStage::Fall, rng),
+        P::FallingDripstoneWater => {
+            drip_recipe(atlas, name, Drip::DripstoneWater, DripStage::Fall, rng)
+        }
+        P::FallingDripstoneLava => {
+            drip_recipe(atlas, name, Drip::DripstoneLava, DripStage::Fall, rng)
+        }
+        P::FallingObsidianTear => {
+            drip_recipe(atlas, name, Drip::ObsidianTear, DripStage::Fall, rng)
+        }
+        P::LandingLava => drip_recipe(atlas, name, Drip::Lava, DripStage::Land, rng),
+        P::LandingHoney => drip_recipe(atlas, name, Drip::Honey, DripStage::Land, rng),
+        P::LandingObsidianTear => {
+            drip_recipe(atlas, name, Drip::ObsidianTear, DripStage::Land, rng)
+        }
+
+        P::Gust | P::SmallGust => {
+            let mut r = base_recipe(Sprite::Animated(atlas.sheet_index(name)?), rng);
+            r.gravity = 0.0;
+            r.friction = 1.0;
+            r.lifetime = 12 + rng.next_int(4);
+            r.size = if matches!(particle, P::SmallGust) {
+                0.15
+            } else {
+                1.0
+            };
+            r.flags = FULLBRIGHT;
+            Some(r)
+        }
+
         P::GustEmitterLarge | P::GustEmitterSmall => None,
 
         _ => generic_recipe(atlas, name, arg, rng),
@@ -2440,6 +3015,57 @@ fn generic_recipe(atlas: &Atlas, name: &str, arg: Vec3, rng: &mut JavaRandom) ->
     Some(r)
 }
 
+fn drip_recipe(
+    atlas: &Atlas,
+    name: &str,
+    drip: Drip,
+    stage: DripStage,
+    rng: &mut JavaRandom,
+) -> Option<Recipe> {
+    const GRAVITY: f32 = 0.06;
+    let mut r = base_recipe(Sprite::Fixed(random_frame(atlas, name, rng)?), rng);
+    let viscous = matches!(drip, Drip::Honey | Drip::ObsidianTear);
+    let rgb = match (drip, stage) {
+        (Drip::Water | Drip::DripstoneWater, _) => [0.2, 0.3, 1.0],
+        (Drip::Lava | Drip::DripstoneLava, _) => [1.0, 0.2857143, 0.083333336],
+        (Drip::Honey, DripStage::Hang) => [0.622, 0.508, 0.082],
+        (Drip::Honey, DripStage::Land) => [0.522, 0.408, 0.082],
+        (Drip::Honey, _) => [0.582, 0.448, 0.082],
+        (Drip::ObsidianTear, _) => [0.51171875, 0.03125, 0.890625],
+    };
+    r.tint = [rgb[0], rgb[1], rgb[2], 1.0];
+    let spread = f64::from(rng.next_f32()) * 0.8 + 0.2;
+    let gravity = match stage {
+        DripStage::Hang => {
+            r.lifetime = if viscous { 100 } else { 40 };
+            r.friction = 0.98 * 0.02;
+            GRAVITY * 0.02 * if viscous { 0.01 } else { 1.0 }
+        }
+        DripStage::Fall | DripStage::Landed => {
+            r.lifetime = (64.0 / spread) as u32;
+            if viscous { 0.01 } else { GRAVITY }
+        }
+        DripStage::Land => {
+            let life = match drip {
+                Drip::Honey => 128.0,
+                Drip::ObsidianTear => 28.0,
+                _ => 16.0,
+            };
+            r.lifetime = (life / spread) as u32;
+            GRAVITY
+        }
+    };
+    r.gravity = gravity / 0.04;
+    if drip == Drip::ObsidianTear {
+        r.flags |= FULLBRIGHT;
+    }
+    if stage != DripStage::Land {
+        r.flags &= !PHYSICS;
+    }
+    r.drip = Some((drip, stage));
+    Some(r)
+}
+
 fn random_frame(atlas: &Atlas, name: &str, rng: &mut JavaRandom) -> Option<[f32; 4]> {
     let sheet = atlas.sheet_index(name)?;
     let len = atlas.sheets[sheet as usize].len();
@@ -2483,6 +3109,47 @@ fn is_solid_at(world: Option<&azalea_world::World>, pos: DVec3) -> bool {
         .is_some_and(crate::util::block_model::is_solid)
 }
 
+fn drip_floor(world: &azalea_world::World, from: DVec3, to: DVec3) -> Option<f64> {
+    use azalea::physics::collision::BlockWithShape;
+    use azalea_core::position::{BlockPos, Vec3 as WorldVec3};
+
+    let (start, end) = (
+        WorldVec3::new(from.x, from.y, from.z),
+        WorldVec3::new(to.x, to.y, to.z),
+    );
+    let (x, z) = (from.x.floor() as i32, from.z.floor() as i32);
+    (to.y.floor() as i32..=from.y.floor() as i32)
+        .rev()
+        .find_map(|y| {
+            let pos = BlockPos::new(x, y, z);
+            let hit = world
+                .get_block_state(pos)?
+                .collision_shape(pos)
+                .clip(start, end, pos)?;
+            Some(hit.location.y)
+        })
+}
+
+fn drip_fall(p: &mut Particle, world: Option<&azalea_world::World>, drip: Drip, next: &mut DVec3) {
+    let Some(world) = world else { return };
+    if let Some(floor) = drip_floor(world, p.pos, *next) {
+        next.y = floor;
+        p.drip = Some((drip, DripStage::Landed));
+        p.lifetime = p.age;
+        return;
+    }
+    let cell = next.floor().as_ivec3();
+    let (x, z) = (next.x - f64::from(cell.x), next.z - f64::from(cell.z));
+    if let Some(kind) = drip.fluid()
+        && let Some(state) = block_at(world, cell.to_array())
+        && azalea::block::fluid_state::FluidState::from(state).kind == kind
+        && next.y
+            < f64::from(cell.y) + crate::renderer::weather::surface_top(world, state, cell, x, z)
+    {
+        p.lifetime = p.age;
+    }
+}
+
 fn advance_one_tick(p: &mut Particle, world: Option<&azalea_world::World>) {
     p.prev = p.pos;
     p.velocity.y -= 0.04 * p.gravity;
@@ -2507,6 +3174,14 @@ fn advance_one_tick(p: &mut Particle, world: Option<&azalea_world::World>) {
             next.z = p.pos.z;
             p.velocity.z = 0.0;
         }
+    }
+    match p.drip {
+        Some((drip, DripStage::Fall)) => drip_fall(p, world, drip, &mut next),
+        Some((drip, DripStage::Hang)) if drip.cools() => {
+            let age = p.age as f32;
+            p.tint = [1.0, 16.0 / (age + 16.0), 4.0 / (age + 8.0), 1.0];
+        }
+        _ => {}
     }
     p.pos = next;
 
@@ -2552,13 +3227,80 @@ fn particle_world() -> Option<std::sync::Arc<parking_lot::RwLock<azalea_world::W
 
 const TICK: f32 = 1.0 / 20.0;
 
-fn tick_particles(time: Res<Time>, mut live: ResMut<LiveParticles>) {
+struct DripNext<'a> {
+    atlas: Option<&'a Atlas>,
+    rng: &'a mut JavaRandom,
+    status: ParticleStatus,
+    eye: DVec3,
+}
+
+fn drip_stage_ended(particle: &mut Particle, next: &mut DripNext) -> bool {
+    let Some((drip, stage)) = particle.drip else {
+        return false;
+    };
+    let kind = match stage {
+        DripStage::Hang => drip.falling(),
+        DripStage::Landed => {
+            if let Some(event) = drip.landing_sound() {
+                let volume = next.rng.next_f32() * (1.0 - 0.3) + 0.3;
+                crate::util::level_events::play(
+                    event,
+                    crate::util::level_events::Bus::Blocks,
+                    particle.pos.to_array(),
+                    volume,
+                    1.0,
+                );
+            }
+            drip.landing()
+        }
+        DripStage::Fall | DripStage::Land => return false,
+    };
+    let Some(atlas) = next.atlas else {
+        return false;
+    };
+    if !SpawnGate::normal(&kind).allows(particle.pos, next.eye, next.status, next.rng) {
+        return false;
+    }
+    let Some(recipe) = recipe(&kind, atlas, Vec3::ZERO, next.rng) else {
+        return false;
+    };
+    particle.prev = particle.pos;
+    particle.velocity = recipe.velocity;
+    particle.gravity = recipe.gravity;
+    particle.friction = recipe.friction;
+    particle.age = 0;
+    particle.lifetime = recipe.lifetime.max(1);
+    particle.tint = recipe.tint;
+    particle.size = recipe.size;
+    particle.grow = recipe.grow;
+    particle.sprite = recipe.sprite;
+    particle.flags = recipe.flags;
+    particle.drip = recipe.drip;
+    true
+}
+
+fn tick_particles(
+    time: Res<Time>,
+    gui: Res<crate::gui::GuiState>,
+    view: Res<crate::renderer::FrameView>,
+    atlas: Res<ParticleAtlas>,
+    mut particle_rng: ResMut<ParticleRng>,
+    mut live: ResMut<LiveParticles>,
+) {
     if live.0.is_empty() {
         return;
     }
+    let mut next = DripNext {
+        atlas: atlas.0.as_ref(),
+        rng: &mut particle_rng.0,
+        status: gui.options.particles,
+        eye: view.camera_world,
+    };
     let dt = time.delta_secs();
     let world_arc = particle_world();
-    let world = world_arc.as_deref().map(|w| w.read());
+    let world = world_arc
+        .as_deref()
+        .map(|w| crate::client::tracking::read_lock(w, "tick_particles"));
     let world = world.as_deref();
 
     live.0.retain_mut(|particle| {
@@ -2571,7 +3313,7 @@ fn tick_particles(time: Res<Time>, mut live: ResMut<LiveParticles>) {
             particle.age += 1;
             advance_one_tick(particle, world);
         }
-        particle.age < particle.lifetime
+        particle.age < particle.lifetime || drip_stage_ended(particle, &mut next)
     });
 }
 
@@ -2612,7 +3354,10 @@ fn draw_particles(
     let normal = (rotation * Vec3::Z).to_array();
 
     let used = {
-        let light_map = crate::client::worldsync::light_map().read();
+        let light_map = crate::client::tracking::read_lock(
+            crate::client::worldsync::light_map(),
+            "light:tick_particles",
+        );
         let ParticleBatches {
             index,
             keys,

@@ -48,10 +48,57 @@ macro_rules! global {
 }
 pub(crate) use global;
 
+#[cfg(any(feature = "audio", feature = "shader_support"))]
+macro_rules! indexed_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $($(#[$variant_meta:meta])* $variant:ident),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis enum $name {
+            $($(#[$variant_meta])* $variant),*
+        }
+
+        impl $name {
+            $vis const COUNT: usize = [$($name::$variant),*].len();
+
+            $vis const ALL: [$name; Self::COUNT] = [$($name::$variant),*];
+
+            #[allow(dead_code)]
+            $vis const fn index(self) -> usize {
+                self as usize
+            }
+        }
+    };
+}
+#[cfg(any(feature = "audio", feature = "shader_support"))]
+pub(crate) use indexed_enum;
+
 pub fn block_centre(cell: [i32; 3]) -> DVec3 {
     bevy::math::IVec3::from_array(cell).as_dvec3() + 0.5
 }
 
 pub fn offset_f32(from: [f64; 3], to: [f64; 3]) -> [f32; 3] {
     std::array::from_fn(|i| (to[i] - from[i]) as f32)
+}
+
+pub(crate) fn same_bits<T: bytemuck::Pod>(a: &[T], b: &[T]) -> bool {
+    bytemuck::cast_slice::<T, u8>(a) == bytemuck::cast_slice::<T, u8>(b)
+}
+
+#[cfg(any(feature = "audio", lua_mods))]
+pub(crate) fn intern(s: String) -> &'static str {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, PoisonError};
+    static SEEN: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap_or_else(PoisonError::into_inner);
+    let seen = seen.get_or_insert_with(HashSet::new);
+    if let Some(&s) = seen.get(s.as_str()) {
+        return s;
+    }
+    let s: &'static str = Box::leak(s.into_boxed_str());
+    seen.insert(s);
+    s
 }

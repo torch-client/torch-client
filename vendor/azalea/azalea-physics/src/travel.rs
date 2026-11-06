@@ -21,6 +21,7 @@ use crate::{
     client_movement::ClientMovementState,
     collision::{
         BorderSource, MoveCtx, MoverType, Shapes,
+        auto_jump::update_auto_jump,
         entity_collisions::{AabbQuery, CollidableEntityQuery, get_entity_collisions},
         move_colliding,
         world_collisions::{
@@ -91,6 +92,7 @@ pub fn travel(
         let world = world_lock.read();
 
         let sprinting = *sprinting.unwrap_or(&Sprinting(false));
+        let start = **position;
 
         let mut ctx = MoveCtx {
             mover_type: MoverType::Own,
@@ -117,11 +119,16 @@ pub fn travel(
             no_physics: matches!(gamemode, Some(GameMode::Spectator)),
         };
 
+        if has_effect(&ctx, MobEffect::SlowFalling) || has_effect(&ctx, MobEffect::Levitation) {
+            ctx.physics.reset_fall_distance();
+        }
+
         if swimming.is_some_and(|s| **s) {
             apply_swim_pitch(&mut ctx);
         }
 
         travel_ctx(&mut ctx);
+        update_auto_jump(&mut ctx, start);
     }
 }
 
@@ -467,8 +474,7 @@ fn effective_gravity(ctx: &MoveCtx) -> f64 {
 }
 
 fn has_effect(ctx: &MoveCtx, effect: MobEffect) -> bool {
-    ctx.active_effects
-        .is_some_and(|effects| effects.get(effect).is_some())
+    ctx.active_effects.is_some_and(|effects| effects.has(effect))
 }
 
 pub fn fluid_jump_threshold() -> f64 {

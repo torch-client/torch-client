@@ -18,27 +18,38 @@ pub(crate) fn hide() {
 }
 
 pub(crate) fn arm() {
-    #[cfg(target_arch = "wasm32")]
-    web::arm();
+    #[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
+    touch::arm();
+}
+
+pub(crate) fn claim() {
+    arm();
+    #[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
+    touch::unprime();
+}
+
+pub(crate) fn disarm() {
+    #[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
+    touch::disarm();
 }
 
 pub(crate) fn arm_zone(x: f32, y: f32, w: f32, h: f32) {
-    #[cfg(target_arch = "wasm32")]
-    web::arm_zone(x, y, w, h);
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
+    touch::arm_zone(x, y, w, h);
+    #[cfg(not(all(target_arch = "wasm32", feature = "mobile_ui")))]
     let _ = (x, y, w, h);
 }
 
 pub(crate) fn take_zone_tap() -> bool {
-    #[cfg(target_arch = "wasm32")]
-    return web::take_zone_tap();
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
+    return touch::take_zone_tap();
+    #[cfg(not(all(target_arch = "wasm32", feature = "mobile_ui")))]
     false
 }
 
 pub(crate) fn settle() {
-    #[cfg(target_arch = "wasm32")]
-    web::settle();
+    #[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
+    touch::settle();
 }
 
 pub(crate) fn dismiss() {
@@ -213,24 +224,12 @@ pub(crate) fn install_devtools_passthrough() {
 
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use wasm_bindgen::{JsCast, prelude::Closure};
-    use web_sys::{HtmlInputElement, KeyboardEvent, TouchEvent};
+    use web_sys::{HtmlInputElement, KeyboardEvent};
 
     const ID: &str = "mc-text-input";
-
-    const ARM_WINDOW_MS: f64 = 250.0;
-    const SETTLE_FRAMES: u8 = 3;
-
-    static ARMED_AT: AtomicU64 = AtomicU64::new(0);
-    static LISTENERS: AtomicBool = AtomicBool::new(false);
-    static PRIMED: AtomicBool = AtomicBool::new(false);
-    static PRIMED_AGE: AtomicU8 = AtomicU8::new(0);
-    static ZONE_AT: AtomicU64 = AtomicU64::new(0);
-    static ZONE: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
-    static ZONE_TAP: AtomicBool = AtomicBool::new(false);
-    static ZONE_HELD: AtomicBool = AtomicBool::new(false);
 
     static ENTER: AtomicBool = AtomicBool::new(false);
     static BACKSPACE: AtomicBool = AtomicBool::new(false);
@@ -261,7 +260,7 @@ mod web {
         on_keydown.forget();
     }
 
-    fn field() -> Option<HtmlInputElement> {
+    pub(super) fn field() -> Option<HtmlInputElement> {
         let doc = web_sys::window()?.document()?;
         if let Some(el) = doc.get_element_by_id(ID) {
             return el.dyn_into().ok();
@@ -281,7 +280,8 @@ mod web {
         doc.body()?.append_child(&el).ok()?;
 
         let on_blur = Closure::<dyn FnMut()>::new(|| {
-            ZONE_HELD.store(false, Ordering::Relaxed);
+            #[cfg(feature = "mobile_ui")]
+            super::touch::release_zone();
             if let Some(canvas) = canvas() {
                 let _ = canvas.focus();
             }
@@ -331,7 +331,7 @@ mod web {
         Some(el)
     }
 
-    fn canvas() -> Option<web_sys::HtmlElement> {
+    pub(super) fn canvas() -> Option<web_sys::HtmlElement> {
         web_sys::window()?
             .document()?
             .get_element_by_id("canvas")?
@@ -339,109 +339,7 @@ mod web {
             .ok()
     }
 
-    pub(super) fn arm() {
-        ARMED_AT.store(js_sys::Date::now().to_bits(), Ordering::Relaxed);
-        install();
-    }
-
-    pub(super) fn arm_zone(x: f32, y: f32, w: f32, h: f32) {
-        ZONE_AT.store(js_sys::Date::now().to_bits(), Ordering::Relaxed);
-        for (slot, v) in ZONE.iter().zip([x, y, w, h]) {
-            slot.store(v.to_bits(), Ordering::Relaxed);
-        }
-        install();
-    }
-
-    pub(super) fn take_zone_tap() -> bool {
-        ZONE_TAP.swap(false, Ordering::Relaxed)
-    }
-
-    fn prime(refocus: bool) {
-        let armed = f64::from_bits(ARMED_AT.load(Ordering::Relaxed));
-        let held = has_focus();
-        if js_sys::Date::now() - armed > ARM_WINDOW_MS || (held && !refocus) {
-            return;
-        }
-        let Some(el) = field() else { return };
-        if held {
-            let start = el.selection_start().ok().flatten();
-            let end = el.selection_end().ok().flatten();
-            let _ = el.blur();
-            let _ = el.focus();
-            if let (Some(start), Some(end)) = (start, end) {
-                let _ = el.set_selection_range(start, end);
-            }
-        } else {
-            let _ = el.focus();
-            PRIMED_AGE.store(0, Ordering::Relaxed);
-            PRIMED.store(true, Ordering::Relaxed);
-        }
-    }
-
-    fn zone_touch(event: &TouchEvent) -> bool {
-        let at = f64::from_bits(ZONE_AT.load(Ordering::Relaxed));
-        if js_sys::Date::now() - at > ARM_WINDOW_MS {
-            return false;
-        }
-        let (Some(touch), Some(canvas)) = (event.changed_touches().get(0), canvas()) else {
-            return false;
-        };
-        let rect = canvas.get_bounding_client_rect();
-        if rect.width() <= 0.0 || rect.height() <= 0.0 {
-            return false;
-        }
-        let fx = ((f64::from(touch.client_x()) - rect.left()) / rect.width()) as f32;
-        let fy = ((f64::from(touch.client_y()) - rect.top()) / rect.height()) as f32;
-        let [x, y, w, h] = [0, 1, 2, 3].map(|i| f32::from_bits(ZONE[i].load(Ordering::Relaxed)));
-        if fx >= x && fx <= x + w && fy >= y && fy <= y + h {
-            if let Some(el) = field() {
-                let _ = el.focus();
-                ZONE_TAP.store(true, Ordering::Relaxed);
-                ZONE_HELD.store(true, Ordering::Relaxed);
-            }
-            return true;
-        }
-        if ZONE_HELD.swap(false, Ordering::Relaxed) {
-            ARMED_AT.store(0, Ordering::Relaxed);
-            hide();
-            return true;
-        }
-        false
-    }
-
-    fn install() {
-        if LISTENERS.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        let (Some(canvas), Some(_)) = (canvas(), field()) else {
-            LISTENERS.store(false, Ordering::Relaxed);
-            return;
-        };
-        let on_touch = Closure::<dyn FnMut(TouchEvent)>::new(|event: TouchEvent| {
-            if !zone_touch(&event) {
-                prime(true);
-            }
-        });
-        let _ =
-            canvas.add_event_listener_with_callback("touchend", on_touch.as_ref().unchecked_ref());
-        on_touch.forget();
-        let on_click = Closure::<dyn FnMut()>::new(|| prime(false));
-        let _ = canvas.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
-        on_click.forget();
-    }
-
-    pub(super) fn settle() {
-        if !PRIMED.load(Ordering::Relaxed) {
-            return;
-        }
-        if PRIMED_AGE.fetch_add(1, Ordering::Relaxed) + 1 >= SETTLE_FRAMES {
-            PRIMED.store(false, Ordering::Relaxed);
-            hide();
-        }
-    }
-
     pub(super) fn show(text: &str, anchor: usize, cursor: usize) {
-        PRIMED.store(false, Ordering::Relaxed);
         sync_selection(text, anchor, cursor);
         if let Some(el) = field() {
             let _ = el.focus();
@@ -559,6 +457,179 @@ mod web {
             }
         };
         Some((value, cursor, anchor))
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
+mod touch {
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+
+    use wasm_bindgen::{JsCast, prelude::Closure};
+    use web_sys::{HtmlInputElement, TouchEvent};
+
+    use super::web::{canvas, field, has_focus, hide};
+
+    const ARM_WINDOW_MS: f64 = 250.0;
+    const SETTLE_FRAMES: u8 = 3;
+
+    static ARMED_AT: AtomicU64 = AtomicU64::new(0);
+    static LISTENERS: AtomicBool = AtomicBool::new(false);
+    static PRIMED: AtomicBool = AtomicBool::new(false);
+    static PRIMED_AGE: AtomicU8 = AtomicU8::new(0);
+    static ZONE_AT: AtomicU64 = AtomicU64::new(0);
+    static ZONE: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
+    static ZONE_TAP: AtomicBool = AtomicBool::new(false);
+    static ZONE_HELD: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn arm() {
+        ARMED_AT.store(js_sys::Date::now().to_bits(), Ordering::Relaxed);
+        install();
+    }
+
+    pub(super) fn arm_zone(x: f32, y: f32, w: f32, h: f32) {
+        ZONE_AT.store(js_sys::Date::now().to_bits(), Ordering::Relaxed);
+        for (slot, v) in ZONE.iter().zip([x, y, w, h]) {
+            slot.store(v.to_bits(), Ordering::Relaxed);
+        }
+        install();
+    }
+
+    pub(super) fn disarm() {
+        ARMED_AT.store(0, Ordering::Relaxed);
+        ZONE_AT.store(0, Ordering::Relaxed);
+    }
+
+    pub(super) fn take_zone_tap() -> bool {
+        ZONE_TAP.swap(false, Ordering::Relaxed)
+    }
+
+    pub(super) fn release_zone() {
+        ZONE_HELD.store(false, Ordering::Relaxed);
+    }
+
+    pub(super) fn unprime() {
+        PRIMED.store(false, Ordering::Relaxed);
+    }
+
+    fn refocus(el: &HtmlInputElement) {
+        let start = el.selection_start().ok().flatten();
+        let end = el.selection_end().ok().flatten();
+        let _ = el.blur();
+        let _ = el.focus();
+        if let (Some(start), Some(end)) = (start, end) {
+            let _ = el.set_selection_range(start, end);
+        }
+    }
+
+    fn prime(cycle: bool) {
+        let armed = f64::from_bits(ARMED_AT.load(Ordering::Relaxed));
+        let held = has_focus();
+        if js_sys::Date::now() - armed > ARM_WINDOW_MS || (held && !cycle) {
+            return;
+        }
+        let Some(el) = field() else { return };
+        if held {
+            refocus(&el);
+        } else {
+            let _ = el.focus();
+            PRIMED_AGE.store(0, Ordering::Relaxed);
+            PRIMED.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn zone_hit(event: &TouchEvent) -> Option<bool> {
+        let at = f64::from_bits(ZONE_AT.load(Ordering::Relaxed));
+        if js_sys::Date::now() - at > ARM_WINDOW_MS {
+            return None;
+        }
+        let touch = event.changed_touches().get(0)?;
+        let rect = canvas()?.get_bounding_client_rect();
+        if rect.width() <= 0.0 || rect.height() <= 0.0 {
+            return None;
+        }
+        let fx = ((f64::from(touch.client_x()) - rect.left()) / rect.width()) as f32;
+        let fy = ((f64::from(touch.client_y()) - rect.top()) / rect.height()) as f32;
+        let [x, y, w, h] = [0, 1, 2, 3].map(|i| f32::from_bits(ZONE[i].load(Ordering::Relaxed)));
+        let inside = fx >= x && fx <= x + w && fy >= y && fy <= y + h;
+        crate::log_info!(
+            "input",
+            "keyboard zone {}: ({fx:.3}, {fy:.3}) against ({x:.3}, {y:.3}) {w:.3}x{h:.3}, inside: {inside}",
+            event.type_(),
+        );
+        Some(inside)
+    }
+
+    fn claim_zone() {
+        ZONE_TAP.store(true, Ordering::Relaxed);
+        ZONE_HELD.store(true, Ordering::Relaxed);
+    }
+
+    fn zone_press(event: &TouchEvent) {
+        if zone_hit(event) == Some(true)
+            && let Some(el) = field()
+        {
+            let _ = el.focus();
+            claim_zone();
+        }
+    }
+
+    fn zone_touch(event: &TouchEvent) -> bool {
+        let Some(inside) = zone_hit(event) else {
+            return false;
+        };
+        if inside {
+            if let Some(el) = field() {
+                if has_focus() {
+                    refocus(&el);
+                } else {
+                    let _ = el.focus();
+                }
+                claim_zone();
+            }
+            return true;
+        }
+        if ZONE_HELD.swap(false, Ordering::Relaxed) {
+            ARMED_AT.store(0, Ordering::Relaxed);
+            hide();
+            return true;
+        }
+        false
+    }
+
+    fn install() {
+        if LISTENERS.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let (Some(canvas), Some(_)) = (canvas(), field()) else {
+            LISTENERS.store(false, Ordering::Relaxed);
+            return;
+        };
+        let on_press =
+            Closure::<dyn FnMut(TouchEvent)>::new(|event: TouchEvent| zone_press(&event));
+        let _ = canvas
+            .add_event_listener_with_callback("touchstart", on_press.as_ref().unchecked_ref());
+        on_press.forget();
+        let on_touch = Closure::<dyn FnMut(TouchEvent)>::new(|event: TouchEvent| {
+            if !zone_touch(&event) {
+                prime(true);
+            }
+        });
+        let _ =
+            canvas.add_event_listener_with_callback("touchend", on_touch.as_ref().unchecked_ref());
+        on_touch.forget();
+        let on_click = Closure::<dyn FnMut()>::new(|| prime(false));
+        let _ = canvas.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
+        on_click.forget();
+    }
+
+    pub(super) fn settle() {
+        if !PRIMED.load(Ordering::Relaxed) {
+            return;
+        }
+        if PRIMED_AGE.fetch_add(1, Ordering::Relaxed) + 1 >= SETTLE_FRAMES {
+            PRIMED.store(false, Ordering::Relaxed);
+            hide();
+        }
     }
 }
 

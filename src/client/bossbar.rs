@@ -20,6 +20,8 @@ pub struct BossBar {
     pub color: u8,
     pub overlay: u8,
     pub darken: bool,
+    #[cfg_attr(not(feature = "audio"), allow(dead_code))]
+    pub music: bool,
     #[allow(
         dead_code,
         reason = "published boss-bar state the renderer does not consume yet"
@@ -45,7 +47,7 @@ pub(crate) fn reset() {
     state().lock().unwrap().clear();
 }
 
-pub(crate) fn packet(shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) {
+pub(crate) fn packet(shared: &SharedMutex, packet: &ClientboundGamePacket) {
     let ClientboundGamePacket::BossEvent(p) = packet else {
         return;
     };
@@ -62,6 +64,7 @@ pub(crate) fn packet(shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) 
                 color: color_index(add.style.color),
                 overlay: overlay_index(add.style.overlay),
                 darken: add.properties.darken_screen,
+                music: add.properties.play_music,
                 fog: add.properties.create_world_fog,
             };
             match bars.iter_mut().find(|b| b.id == id) {
@@ -91,6 +94,7 @@ pub(crate) fn packet(shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) 
         Operation::UpdateProperties(properties) => {
             if let Some(b) = bars.iter_mut().find(|b| b.id == id) {
                 b.bar.darken = properties.darken_screen;
+                b.bar.music = properties.play_music;
                 b.bar.fog = properties.create_world_fog;
             }
         }

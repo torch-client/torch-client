@@ -12,7 +12,7 @@ use crate::gui::{ScreenCtx, Snapshot};
 use crate::items::potions;
 use crate::session::{InvAction, SlotStack};
 
-const IMAGE_W: f32 = 195.0;
+pub(crate) const IMAGE_W: f32 = 195.0;
 const IMAGE_H: f32 = 136.0;
 
 const GRID_X: f32 = 9.0;
@@ -57,6 +57,7 @@ pub struct CreativeState {
     pub visible: Vec<ListItem>,
     pub dirty: bool,
     pub hovered_tab_title: Option<&'static str>,
+    pub hovered_in_list: bool,
 }
 
 impl CreativeState {
@@ -80,6 +81,7 @@ impl Default for CreativeState {
             visible: Vec::new(),
             dirty: true,
             hovered_tab_title: None,
+            hovered_in_list: false,
         }
     }
 }
@@ -211,6 +213,13 @@ pub enum ListItem {
         item: &'static str,
         potion: &'static str,
     },
+    Stew {
+        effect: &'static str,
+        duration: i32,
+    },
+    OminousBottle {
+        amplifier: i32,
+    },
 }
 
 impl ListItem {
@@ -219,6 +228,22 @@ impl ListItem {
             ListItem::Plain(id) => id,
             ListItem::EnchantedBook { .. } => "enchanted_book",
             ListItem::Potion { item, .. } => item,
+            ListItem::Stew { .. } => "suspicious_stew",
+            ListItem::OminousBottle { .. } => "ominous_bottle",
+        }
+    }
+
+    fn stew_effects(&self) -> Option<Vec<(String, i32)>> {
+        match self {
+            ListItem::Stew { effect, duration } => Some(vec![(effect.to_string(), *duration)]),
+            _ => None,
+        }
+    }
+
+    fn ominous_amplifier(&self) -> Option<i32> {
+        match self {
+            ListItem::OminousBottle { amplifier } => Some(*amplifier),
+            _ => None,
         }
     }
 
@@ -278,11 +303,33 @@ fn potion_variants(item: &'static str) -> Vec<ListItem> {
         .collect()
 }
 
+const STEWS: [(&str, i32); 10] = [
+    ("saturation", 7),
+    ("blindness", 220),
+    ("nausea", 140),
+    ("night_vision", 100),
+    ("fire_resistance", 60),
+    ("weakness", 140),
+    ("regeneration", 140),
+    ("jump_boost", 100),
+    ("poison", 220),
+    ("wither", 140),
+];
+
 fn expand(id: &'static str) -> Vec<ListItem> {
     if id == "enchanted_book" {
         enchanted_books(false)
     } else if potions::is_potion_item(id) {
         potion_variants(id)
+    } else if id == "suspicious_stew" {
+        STEWS
+            .iter()
+            .map(|&(effect, duration)| ListItem::Stew { effect, duration })
+            .collect()
+    } else if id == "ominous_bottle" {
+        (0..=4)
+            .map(|amplifier| ListItem::OminousBottle { amplifier })
+            .collect()
     } else {
         vec![ListItem::Plain(id)]
     }
@@ -324,8 +371,10 @@ fn search_filter(query: &str) -> Vec<ListItem> {
     search_corpus()
         .iter()
         .filter(|it| match it {
-            ListItem::Plain(id) => {
-                let Some(def) = item(id) else { return false };
+            ListItem::Plain(_) | ListItem::Stew { .. } | ListItem::OminousBottle { .. } => {
+                let Some(def) = item(it.base_id()) else {
+                    return false;
+                };
                 def.name.to_lowercase().contains(&q) || def.id.contains(&q)
             }
             ListItem::EnchantedBook { enchantment, .. } => {
@@ -419,12 +468,22 @@ fn list_stack(it: &ListItem, count: u8) -> SlotStack {
         extra: crate::session::StackExtra {
             enchantments: it.enchantments(),
             potion: it.potion(),
+            stew_effects: it.stew_effects(),
+            ominous_amplifier: it.ominous_amplifier(),
             ..Default::default()
         }
         .into(),
         glint: crate::items::glint::default_foil(id),
+        bundle: id
+            .parse()
+            .is_ok_and(azalea_inventory::bundle::is_bundle)
+            .then(crate::session::BundleView::empty),
         ..Default::default()
     }
+}
+
+pub(crate) fn left_pos(ctx: &ScreenCtx) -> f32 {
+    ((ctx.vw - IMAGE_W) / 2.0).floor()
 }
 
 pub fn draw(
@@ -436,11 +495,12 @@ pub fn draw(
     snap: &Snapshot,
     out: &mut Vec<InvAction>,
 ) -> Option<SlotStack> {
-    let left = ((ctx.vw - IMAGE_W) / 2.0).floor();
+    let left = left_pos(ctx);
     let top = ((ctx.vh - IMAGE_H) / 2.0).floor();
 
     st.tab = st.tab.min(TAB_COUNT - 1);
     st.hovered_tab_title = None;
+    st.hovered_in_list = false;
 
     if st.tab == TAB_SEARCH && ctx.input.left_click {
         st.search
@@ -591,20 +651,31 @@ pub fn draw(
             .or(grid_cell);
     }
 
+    let wire = |slot: usize| {
+        let offset = if st.tab == TAB_INVENTORY { 0 } else { 9 };
+        (slot, (slot + offset) as i32)
+    };
+    slots::bundle_mouse(ctx.input, snap, hovered_slot.map(wire), slot_state, out);
+
+    let click_slot = hovered_slot.filter(|_| !slot_state.clicks_held());
     let consumed = slots::drag_step(
         ctx,
         snap,
         Layout::PlayerMenu,
-        hovered_slot,
+        click_slot,
         slot_state,
         &mut cursor,
         out,
     );
-    if !consumed && let Some(slot) = hovered_slot {
+    if !consumed && let Some(slot) = click_slot {
         slot_click(slot, snap, ctx, &mut cursor, out, st.tab != TAB_INVENTORY);
     }
 
-    if scrollable && ctx.input.scroll != 0.0 && ctx.hovering(left, top, IMAGE_W, IMAGE_H) {
+    if scrollable
+        && !slot_state.wheel_on_bundle
+        && ctx.input.scroll != 0.0
+        && ctx.hovering(left, top, IMAGE_W, IMAGE_H)
+    {
         st.scroll = subtract_input_from_scroll(st.scroll, ctx.input.scroll, len);
     }
 
@@ -624,7 +695,7 @@ pub fn draw(
         IMAGE_W + 2.0 * margin,
         IMAGE_H + 2.0 * margin,
     ) && !on_tab;
-    if outside && !consumed {
+    if outside && !consumed && !slot_state.clicks_held() {
         for right in [false, true] {
             let released = if right {
                 ctx.input.right_release
@@ -681,6 +752,7 @@ pub fn draw(
         select_tab(st, i);
     }
 
+    slot_state.note_bundle_click(out);
     slot_state.set_cursor(cursor.clone(), snap);
 
     if let Some(title) = st.hovered_tab_title
@@ -689,13 +761,19 @@ pub fn draw(
         draw_tab_tooltip(p, title, m.x, m.y, ctx.vw);
     }
 
-    crate::gui::screens::draw_effects_panel(p, ctx, &snap.active_effects, left, top, IMAGE_W);
+    crate::gui::screens::draw_effects_panel(
+        p,
+        ctx,
+        &snap.active_effects,
+        left,
+        top,
+        IMAGE_W,
+        snap.tick_rate.0,
+    );
 
-    if cursor.is_empty() && st.hovered_tab_title.is_none() {
-        hovered
-    } else {
-        None
-    }
+    let shown =
+        |stack: &SlotStack| cursor.is_empty() || stack.bundle.as_ref().is_some_and(|b| b.shows);
+    hovered.filter(|stack| shown(stack) && st.hovered_tab_title.is_none())
 }
 
 fn select_tab(st: &mut CreativeState, tab: usize) {
@@ -785,6 +863,7 @@ fn draw_item_grid(
         if hover_cell == Some(cell) {
             p.slot_highlight(x, y);
             *hovered = Some(list_stack(&it, 1));
+            st.hovered_in_list = true;
             list_click(&it, ctx, cursor, out);
         }
     }
@@ -794,6 +873,8 @@ fn same_item(cursor: &SlotStack, it: &ListItem) -> bool {
     cursor.item == it.base_id()
         && cursor.extra.enchantments == it.enchantments()
         && cursor.extra.potion == it.potion()
+        && cursor.extra.stew_effects == it.stew_effects()
+        && cursor.extra.ominous_amplifier == it.ominous_amplifier()
 }
 
 fn list_click(it: &ListItem, ctx: &ScreenCtx, cursor: &mut SlotStack, out: &mut Vec<InvAction>) {
@@ -973,8 +1054,10 @@ fn slot_click(
         return;
     }
     let mut menu = MenuModel::from_snapshot(snap, cursor.clone());
+    menu.picker = items_tab;
     for click in clicks {
         if items_tab && matches!(click, SlotClick::QuickMove { .. }) {
+            menu.unselect_bundle(click, slot, out);
             menu.slots[slot] = SlotStack::default();
             continue;
         }

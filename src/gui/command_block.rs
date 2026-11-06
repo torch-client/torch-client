@@ -111,7 +111,7 @@ fn anchor(ctx: &ScreenCtx) -> suggestions::Anchor {
     }
 }
 
-fn center(ctx: &ScreenCtx) -> f32 {
+pub(in crate::gui) fn center(ctx: &ScreenCtx) -> f32 {
     (ctx.vw / 2.0).floor()
 }
 
@@ -123,7 +123,7 @@ pub fn draw(
     p: &mut Painter,
     state: &mut CommandBlockState,
     ctx: &ScreenCtx,
-    shared: &std::sync::Arc<SharedMutex>,
+    shared: &SharedMutex,
 ) -> Option<Screen> {
     let (data, block_gone) = {
         let mut s = shared.lock().unwrap();

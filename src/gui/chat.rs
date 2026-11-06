@@ -607,7 +607,7 @@ pub fn draw(
     incoming: Vec<ChatEntry>,
     error: Option<String>,
     advanced_tooltips: bool,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
 ) {
     let tick = p.frame;
     chat.field.input.focused = focused;
@@ -690,7 +690,7 @@ fn draw_span_tooltip(
             true
         }
         Some(Hover::Item(stack)) => {
-            crate::gui::tooltip::draw(p, stack, m.x, m.y, ctx.vw, ctx.vh, advanced_tooltips);
+            crate::gui::tooltip::draw(p, stack, m.x, m.y, ctx.vw, ctx.vh, advanced_tooltips, false);
             true
         }
         None => false,
@@ -746,7 +746,7 @@ fn click_span(
     my: f32,
     bottom: f32,
     shift: bool,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
 ) -> bool {
     let Some(event) = chat.event_at(&p.atlas.font, mx, my, bottom) else {
         return false;
@@ -776,7 +776,7 @@ fn click_span(
     true
 }
 
-fn handle_input(p: &mut Painter, chat: &mut ChatState, ctx: &ScreenCtx, shared: &Arc<SharedMutex>) {
+fn handle_input(p: &mut Painter, chat: &mut ChatState, ctx: &ScreenCtx, shared: &SharedMutex) {
     let input: &GuiInput = ctx.input;
     let bottom = chat_bottom(ctx);
 
@@ -1469,7 +1469,7 @@ pub(crate) mod tests {
 
     fn press(
         chat: &mut ChatState,
-        shared: &std::sync::Arc<crate::session::SharedMutex>,
+        shared: &crate::session::SharedMutex,
         atlas: &crate::gui::atlas::GuiAtlas,
         input: GuiInput,
     ) {

@@ -1,5 +1,6 @@
 pub mod banner;
 pub mod feed;
+pub mod game_master;
 pub mod models;
 pub mod render;
 pub mod sim;

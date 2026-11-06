@@ -34,6 +34,12 @@ pub struct ToastSettings {
     pub system: bool,
     pub display_time: f32,
     pub hide_gui: bool,
+    #[cfg(feature = "audio")]
+    pub music: crate::gui::now_playing::MusicToast,
+    #[cfg(feature = "audio")]
+    pub music_on: bool,
+    #[cfg(feature = "audio")]
+    pub on_pause: bool,
 }
 
 impl ToastSettings {
@@ -44,6 +50,17 @@ impl ToastSettings {
             system: state.options.toast_system,
             display_time: state.options.toast_time as f32 / 10.0,
             hide_gui: state.hide_gui,
+            #[cfg(feature = "audio")]
+            music: state.options.music_toast,
+            #[cfg(feature = "audio")]
+            music_on: {
+                use crate::audio::SoundCategory;
+                let volumes = &state.options.volumes;
+                volumes[SoundCategory::Master.index()] > 0
+                    && volumes[SoundCategory::Music.index()] > 0
+            },
+            #[cfg(feature = "audio")]
+            on_pause: state.screen == crate::gui::Screen::Pause,
         }
     }
 }
@@ -164,12 +181,16 @@ enum Toast {
     Advancement(Advancement),
     Recipe(Recipe),
     System(System),
+    #[cfg(feature = "audio")]
+    NowPlaying(crate::gui::now_playing::Slot),
 }
 
 impl Toast {
     fn width(&self) -> f32 {
         match self {
             Toast::System(s) => s.width,
+            #[cfg(feature = "audio")]
+            Toast::NowPlaying(n) => n.width,
             _ => DEFAULT_WIDTH,
         }
     }
@@ -177,6 +198,8 @@ impl Toast {
     fn height(&self) -> f32 {
         match self {
             Toast::System(s) => 20.0 + s.lines.len().max(1) as f32 * 12.0,
+            #[cfg(feature = "audio")]
+            Toast::NowPlaying(_) => crate::gui::now_playing::HEIGHT,
             _ => SLOT_HEIGHT,
         }
     }
@@ -197,6 +220,8 @@ impl Toast {
             Toast::Advancement(a) => a.hide,
             Toast::Recipe(r) => r.hide,
             Toast::System(s) => s.hide,
+            #[cfg(feature = "audio")]
+            Toast::NowPlaying(n) => !n.show,
         };
         if hide {
             Visibility::Hide
@@ -227,6 +252,8 @@ impl Toast {
                 }
                 s.hide = s.force_hide || t - s.last_changed >= display_time;
             }
+            #[cfg(feature = "audio")]
+            Toast::NowPlaying(n) => n.update(t, display_time),
         }
     }
 
@@ -235,6 +262,8 @@ impl Toast {
             Toast::Advancement(a) => a.draw(p, ox, oy, t),
             Toast::Recipe(r) => r.draw(p, ox, oy),
             Toast::System(s) => s.draw(p, ox, oy, self.height()),
+            #[cfg(feature = "audio")]
+            Toast::NowPlaying(_) => {}
         }
     }
 }
@@ -347,11 +376,23 @@ impl Instance {
             self.visibility = wanted;
         }
 
-        self.finished = self.visibility == Visibility::Hide && now - start > SLIDE;
+        let finished = self.visibility == Visibility::Hide && now - start > SLIDE;
+        #[cfg(feature = "audio")]
+        if finished
+            && !self.finished
+            && let Toast::NowPlaying(n) = &mut self.toast
+        {
+            n.update = false;
+        }
+        self.finished = finished;
         (self.visibility != previous).then(|| self.visibility.sound())
     }
 
     fn x(&self, screen_w: f32) -> f32 {
+        #[cfg(feature = "audio")]
+        if matches!(self.toast, Toast::NowPlaying(_)) {
+            return self.toast.width() * (self.visible_portion - 1.0);
+        }
         screen_w - self.toast.width() * self.visible_portion
     }
 
@@ -365,9 +406,19 @@ pub struct Toasts {
     visible: Vec<Instance>,
     queued: VecDeque<Toast>,
     occupied: u8,
+    #[cfg(feature = "audio")]
+    now_playing: Option<Instance>,
+    #[cfg(feature = "audio")]
+    music: crate::gui::now_playing::Music,
 }
 
 impl Toasts {
+    pub fn clear(&mut self) {
+        self.visible.clear();
+        self.queued.clear();
+        self.occupied = 0;
+    }
+
     pub fn ingest(&mut self, events: Vec<ToastEvent>, font: &Font, opts: ToastSettings) {
         for event in events {
             match event {
@@ -502,6 +553,57 @@ impl Toasts {
         None
     }
 
+    #[cfg(feature = "audio")]
+    fn update_music(&mut self, font: &Font, now: f32, opts: ToastSettings) {
+        use crate::gui::now_playing::{MusicToast, Poll, Slot};
+        let fresh = |width: f32, shown: bool| {
+            Instance::new(
+                Toast::NowPlaying(Slot {
+                    width,
+                    update: shown,
+                    show: shown,
+                }),
+                0,
+                1,
+            )
+        };
+        if opts.music != self.music.mode {
+            self.music.mode = opts.music;
+            self.now_playing = match opts.music {
+                MusicToast::Never => None,
+                MusicToast::Pause => Some(fresh(self.music.width(), false)),
+                MusicToast::PauseAndToast => Some(fresh(self.music.width(), opts.music_on)),
+            };
+        }
+        let polled = self.music.poll(font);
+        if let Some(instance) = &mut self.now_playing {
+            match polled {
+                Poll::Started if opts.music_on => {
+                    *instance = fresh(self.music.width(), true);
+                    self.music.toast_shown = true;
+                }
+                Poll::Started => self.music.toast_shown = false,
+                Poll::Same if opts.music_on && !self.music.toast_shown && self.music.playing() => {
+                    *instance = fresh(self.music.width(), true);
+                    self.music.toast_shown = true;
+                }
+                Poll::Stopped => {
+                    if let Toast::NowPlaying(slot) = &mut instance.toast {
+                        slot.show = false;
+                    }
+                }
+                _ => {}
+            }
+            if let Toast::NowPlaying(slot) = &mut instance.toast {
+                slot.width = self.music.width();
+            }
+            instance.update(now, opts.display_time);
+        }
+        if opts.music.in_pause() {
+            self.music.tick_notes(now);
+        }
+    }
+
     fn update(&mut self, now: f32, display_time: f32) {
         let mut flip_sound = None;
         let occupied = &mut self.occupied;
@@ -574,15 +676,22 @@ fn system_lines(font: &Font, message: &[Span], multiline: bool) -> (Vec<Vec<Span
 
 #[cfg(feature = "audio")]
 fn play_ui(event: &str) {
-    crate::audio::play(event, crate::audio::SoundCategory::Ambient, 1.0, 1.0);
+    crate::audio::play(event, crate::audio::SoundCategory::Ui, 1.0, 1.0);
 }
 
 #[cfg(not(feature = "audio"))]
 fn play_ui(_event: &str) {}
 
 pub fn draw(p: &mut Painter, ctx: &ScreenCtx, toasts: &mut Toasts, opts: ToastSettings) {
-    toasts.update(ctx.input.time, opts.display_time);
-    if opts.hide_gui || toasts.visible.is_empty() {
+    let now = ctx.input.time;
+    #[cfg(feature = "audio")]
+    toasts.update_music(&p.atlas.font, now, opts);
+    toasts.update(now, opts.display_time);
+    #[cfg(feature = "audio")]
+    if opts.on_pause && opts.music.in_pause() && opts.music_on {
+        toasts.music.draw(p, 0.0, 0.0, now);
+    }
+    if opts.hide_gui {
         return;
     }
     for instance in &toasts.visible {
@@ -595,5 +704,13 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, toasts: &mut Toasts, opts: ToastSe
             instance.y(),
             instance.fully_visible_for,
         );
+    }
+    #[cfg(feature = "audio")]
+    if opts.music.as_toast()
+        && !opts.on_pause
+        && let Some(instance) = &toasts.now_playing
+        && !instance.finished
+    {
+        toasts.music.draw(p, instance.x(ctx.vw), instance.y(), now);
     }
 }

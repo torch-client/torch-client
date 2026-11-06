@@ -42,9 +42,9 @@ pub(super) const PENDING: u32 = 0xFF_FF_55;
 pub(super) const ERROR: u32 = 0xFF_55_55;
 pub(super) const OK: u32 = 0x55_FF_55;
 
-const CARD_PAD: f32 = 5.0;
-const CARD_GAP: f32 = 5.0;
-const STRIP_W: f32 = 2.0;
+pub(super) const CARD_PAD: f32 = 5.0;
+pub(super) const CARD_GAP: f32 = 5.0;
+pub(super) const STRIP_W: f32 = 2.0;
 
 enum Act {
     Reload,
@@ -56,14 +56,13 @@ enum Act {
     Uninstall(String),
     Install,
     Cancel,
-    DismissNote,
     SetEnabled(String, bool),
     SetGrant(String, &'static str, bool),
     Select(String),
     Author(Option<String>),
 }
 
-const MODS_W: f32 = 330.0;
+pub(super) const MODS_W: f32 = 330.0;
 const TILE_MIN_W: f32 = 100.0;
 const TILE_H: f32 = 2.0 * CARD_PAD + 3.0 * TIP_LINE;
 const TILE_GAP: f32 = 4.0;
@@ -106,6 +105,9 @@ impl ClickGuiState {
     pub(super) fn mods_window(&mut self, p: &mut Painter, ui: &Ui) {
         if self.mod_editor.is_some() {
             return self.mod_editor_window(p, ui);
+        }
+        if self.mod_explore {
+            return self.explore_window(p, ui);
         }
         let look = self.look;
         let active = self.focus == Focus::On(Window::Config) && self.drag.is_none();
@@ -202,24 +204,7 @@ impl ClickGuiState {
             cy = self.install_card(p, ui, ix, cy, iw, busy, active, &mut act);
             cy += CARD_GAP + 2.0;
         }
-        if let Some(note) = script::install_note() {
-            cy = self.paragraph(p, ix, cy, iw, &note, ERROR);
-            let dw = (p.atlas.font.width_str("Dismiss") + 12.0).floor();
-            if self.button(
-                p,
-                ui,
-                ix + iw - dw,
-                cy + 2.0,
-                dw,
-                bh,
-                "Dismiss",
-                Style::Plain,
-                active,
-            ) {
-                act = Some(Act::DismissNote);
-            }
-            cy += bh + 2.0 + CARD_GAP;
-        }
+        cy = self.install_note(p, ui, ix, cy, iw, active);
 
         script::with_mods(|mods| {
             use std::fmt::Write;
@@ -333,14 +318,7 @@ impl ClickGuiState {
                 }
                 self.label(p, &self.scratch, cx, cy, cw, look.text_dim());
                 cy += TIP_LINE;
-                for (prefix, value) in [("By ", &m.author), ("Source: ", &m.source)] {
-                    let Some(value) = value else { continue };
-                    let mut line = std::mem::take(&mut self.scratch);
-                    line.clear();
-                    let _ = write!(line, "{prefix}{value}");
-                    cy = self.paragraph(p, cx, cy, cw, &line, look.text_dim());
-                    self.scratch = line;
-                }
+                cy = self.credits(p, cx, cy, cw, &m.author, &m.source);
                 if let Some(d) = &m.description {
                     let ink = if m.disabled {
                         look.text_dim()
@@ -511,7 +489,7 @@ impl ClickGuiState {
             Some(Act::Reload) => script::reload(),
             #[cfg(not(target_arch = "wasm32"))]
             Some(Act::Folder) => crate::platform::url::open_folder(&script::folder()),
-            Some(Act::Explore) => crate::platform::url::open(script::EXPLORE_URL),
+            Some(Act::Explore) => self.open_explore(),
             Some(Act::Reset(id)) => script::reset(id),
             Some(Act::AskUninstall(id)) => self.mod_uninstall = id,
             Some(Act::Uninstall(id)) => {
@@ -520,7 +498,6 @@ impl ClickGuiState {
             }
             Some(Act::Install) => self.answer_mod_drop(true),
             Some(Act::Cancel) => self.answer_mod_drop(false),
-            Some(Act::DismissNote) => script::clear_install_note(),
             Some(Act::SetEnabled(id, on)) => script::set_mod_enabled(id, on),
             Some(Act::SetGrant(id, perm, on)) => script::set_granted(&id, perm, on),
             Some(Act::Select(id)) => {
@@ -732,8 +709,70 @@ impl ClickGuiState {
         cy
     }
 
+    pub(super) fn install_note(
+        &mut self,
+        p: &mut Painter,
+        ui: &Ui,
+        ix: f32,
+        cy: f32,
+        iw: f32,
+        active: bool,
+    ) -> f32 {
+        let Some(note) = script::install_note() else {
+            return cy;
+        };
+        let bh = BIND_H - 1.0;
+        let cy = self.paragraph(p, ix, cy, iw, &note, ERROR);
+        let dw = (p.atlas.font.width_str("Dismiss") + 12.0).floor();
+        if self.button(
+            p,
+            ui,
+            ix + iw - dw,
+            cy + 2.0,
+            dw,
+            bh,
+            "Dismiss",
+            Style::Plain,
+            active,
+        ) {
+            script::clear_install_note();
+        }
+        cy + bh + 2.0 + CARD_GAP
+    }
+
     #[allow(clippy::too_many_arguments, reason = "one widget, flat arguments")]
-    fn paragraph(&mut self, p: &mut Painter, x: f32, y: f32, w: f32, text: &str, argb: u32) -> f32 {
+    pub(super) fn credits(
+        &mut self,
+        p: &mut Painter,
+        x: f32,
+        mut y: f32,
+        w: f32,
+        author: &Option<String>,
+        source: &Option<String>,
+    ) -> f32 {
+        use std::fmt::Write;
+        let ink = self.look.text_dim();
+        for (prefix, value) in [("By ", author), ("Source: ", source)] {
+            let Some(value) = value else { continue };
+            let mut line = std::mem::take(&mut self.scratch);
+            line.clear();
+            let _ = write!(line, "{prefix}{value}");
+            y = self.paragraph(p, x, y, w, &line, ink);
+            self.scratch = line;
+        }
+        y
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "one widget, flat arguments")]
+    pub(super) fn paragraph(
+        &mut self,
+        p: &mut Painter,
+        x: f32,
+        y: f32,
+        w: f32,
+        text: &str,
+        argb: u32,
+    ) -> f32 {
         self.wrap(p, text, w);
         for (i, &(a, b)) in self.tip_lines.iter().enumerate() {
             self.label(p, &text[a..b], x, y + i as f32 * TIP_LINE, w, argb);

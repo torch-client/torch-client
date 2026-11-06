@@ -86,7 +86,7 @@ impl LightMap {
         )
     }
 
-    #[cfg(any(feature = "render_lod", lua_mods))]
+    #[cfg(any(feature = "render_lod", feature = "audio", lua_mods))]
     pub fn is_lit(&self, col: ColumnPos) -> bool {
         self.lit.contains(&col)
     }

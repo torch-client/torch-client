@@ -70,7 +70,7 @@ impl Source {
         Source::from_shared_zip(Arc::new(bytes), root)
     }
 
-    fn from_shared_zip(bytes: Arc<Vec<u8>>, root: &str) -> Result<Source, String> {
+    pub(crate) fn from_shared_zip(bytes: Arc<Vec<u8>>, root: &str) -> Result<Source, String> {
         let missing = || format!("the pack has no {root} directory");
         let entries = zip::entries(&bytes)?;
         let prefix = if root.is_empty() {

@@ -77,96 +77,6 @@ pub fn emissive_rendering(name: &str, props: &HashMap<&str, &str>) -> bool {
     }
 }
 
-#[cfg(feature = "audio")]
-pub struct SoundGroup {
-    pub break_event: &'static str,
-    pub place_event: &'static str,
-    pub step_event: &'static str,
-}
-
-#[cfg(feature = "audio")]
-macro_rules! sound_group {
-    ($name:literal) => {
-        SoundGroup {
-            break_event: concat!("block.", $name, ".break"),
-            place_event: concat!("block.", $name, ".place"),
-            step_event: concat!("block.", $name, ".step"),
-        }
-    };
-}
-
-#[cfg(feature = "audio")]
-static WOOD: SoundGroup = sound_group!("wood");
-#[cfg(feature = "audio")]
-static SAND: SoundGroup = sound_group!("sand");
-#[cfg(feature = "audio")]
-static GRAVEL: SoundGroup = sound_group!("gravel");
-#[cfg(feature = "audio")]
-static GRASS: SoundGroup = sound_group!("grass");
-#[cfg(feature = "audio")]
-static GLASS: SoundGroup = sound_group!("glass");
-#[cfg(feature = "audio")]
-static METAL: SoundGroup = sound_group!("metal");
-#[cfg(feature = "audio")]
-static WOOL: SoundGroup = sound_group!("wool");
-#[cfg(feature = "audio")]
-static STONE: SoundGroup = sound_group!("stone");
-
-#[cfg(feature = "audio")]
-pub fn sound_group(name: &str) -> &'static SoundGroup {
-    if name.ends_with("_planks")
-        || name.contains("_log")
-        || name.contains("_wood")
-        || name.ends_with("_fence")
-        || name.ends_with("_fence_gate")
-        || name.ends_with("_door")
-        || name.ends_with("_trapdoor")
-        || name.ends_with("_button")
-        || name.ends_with("_pressure_plate")
-        || name.contains("bamboo")
-        || name.contains("chest")
-    {
-        &WOOD
-    } else if name == "sand" || name == "red_sand" || name.contains("sandstone") {
-        &SAND
-    } else if name == "gravel" {
-        &GRAVEL
-    } else if name.contains("grass") || name.contains("dirt") || name.contains("farmland") {
-        &GRASS
-    } else if name.contains("glass") {
-        &GLASS
-    } else if name.contains("iron")
-        || name.contains("copper")
-        || name.contains("gold")
-        || name.contains("anvil")
-        || name.contains("chain")
-    {
-        &METAL
-    } else if name.ends_with("_wool") || name.ends_with("_carpet") {
-        &WOOL
-    } else {
-        &STONE
-    }
-}
-
-#[cfg(all(test, feature = "audio"))]
-mod sound_group_tests {
-    use super::*;
-
-    #[test]
-    fn a_family_names_its_three_events() {
-        assert_eq!(sound_group("oak_planks").place_event, "block.wood.place");
-        assert_eq!(sound_group("oak_planks").break_event, "block.wood.break");
-        assert_eq!(sound_group("oak_planks").step_event, "block.wood.step");
-    }
-
-    #[test]
-    fn an_unrecognised_block_falls_back_to_stone() {
-        assert_eq!(sound_group("obsidian").break_event, "block.stone.break");
-        assert_eq!(sound_group("").break_event, "block.stone.break");
-    }
-}
-
 pub fn block_visual(state: azalea::block::BlockState) -> RenderedBlock {
     block_visual_in(state, &crate::blocks::registry())
 }
@@ -367,7 +277,7 @@ pub fn powder_snow_at(x: f64, y: f64, z: f64) -> bool {
     else {
         return false;
     };
-    let world = world.read();
+    let world = crate::client::tracking::read_lock(&world, "powder_snow_at");
     let pos =
         azalea_core::position::BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
     world.get_block_state(pos).is_some_and(|state| {
@@ -389,7 +299,7 @@ pub fn solid_at(pos: bevy::math::DVec3) -> bool {
         pos.y.floor() as i32,
         pos.z.floor() as i32,
     );
-    let state = world.read().get_block_state(pos);
+    let state = crate::client::tracking::read_lock(&world, "solid_at").get_block_state(pos);
     state.is_some_and(is_solid)
 }
 
@@ -398,7 +308,7 @@ pub fn eye_fluid_at(x: f64, y: f64, z: f64) -> Option<EyeFluid> {
         .lock()
         .unwrap()
         .clone()?;
-    let world = world.read();
+    let world = crate::client::tracking::read_lock(&world, "eye_fluid_at");
     let pos =
         azalea_core::position::BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
     let state = world.get_block_state(pos)?;

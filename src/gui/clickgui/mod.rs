@@ -4,6 +4,8 @@ mod columns;
 mod mod_editor;
 #[cfg(lua_mods)]
 pub(crate) mod mods;
+#[cfg(lua_mods)]
+mod mods_explore;
 #[cfg(feature = "module_panel")]
 mod panel;
 mod picker;
@@ -125,7 +127,7 @@ fn cfg_shown(row: CfgRow) -> bool {
         ))
 }
 
-const CFG: [CfgRow; 11] = [
+const CFG: &[CfgRow] = &[
     CfgRow::Profile,
     CfgRow::Accent,
     CfgRow::Surface,
@@ -182,6 +184,11 @@ const CFG: [CfgRow; 11] = [
         name: "Text shadow",
         field: |l| &mut l.shadow,
     },
+    #[cfg(feature = "audio")]
+    CfgRow::Toggle {
+        name: "UI Sounds",
+        field: |l| &mut l.ui_sounds,
+    },
 ];
 
 #[cfg(not(feature = "module_panel"))]
@@ -206,6 +213,10 @@ pub(crate) struct Look {
     animate: bool,
     pub(crate) shadow: bool,
     scrim: bool,
+    #[cfg(feature = "audio")]
+    ui_sounds: bool,
+    #[cfg(feature = "audio")]
+    play_hover: bool,
 }
 
 const SCRIM: u32 = 0x73_00_00_00;
@@ -225,6 +236,10 @@ impl Default for Look {
             animate: true,
             shadow: false,
             scrim: true,
+            #[cfg(feature = "audio")]
+            ui_sounds: false,
+            #[cfg(feature = "audio")]
+            play_hover: false,
         }
     }
 }
@@ -581,6 +596,10 @@ pub struct ClickGuiState {
     drop_card_h: f32,
     #[cfg(lua_mods)]
     mod_editor: Option<mod_editor::ModEditor>,
+    #[cfg(lua_mods)]
+    mod_explore: bool,
+    #[cfg(lua_mods)]
+    explore_h: Vec<f32>,
     selected: usize,
     match_top: usize,
     scratch: String,
@@ -595,6 +614,10 @@ pub struct ClickGuiState {
     applied: f32,
     scale_set: bool,
     opened_at: Option<f32>,
+    #[cfg(feature = "audio")]
+    hover_row: Option<ModuleIx>,
+    #[cfg(feature = "audio")]
+    hover_last: Option<ModuleIx>,
     #[cfg(feature = "module_panel")]
     modules: panel::State,
     #[cfg(feature = "module_panel")]
@@ -636,6 +659,10 @@ impl Default for ClickGuiState {
             drop_card_h: 0.0,
             #[cfg(lua_mods)]
             mod_editor: None,
+            #[cfg(lua_mods)]
+            mod_explore: false,
+            #[cfg(lua_mods)]
+            explore_h: Vec::new(),
             selected: 0,
             match_top: 0,
             scratch: String::with_capacity(16),
@@ -650,6 +677,10 @@ impl Default for ClickGuiState {
             applied: 1.0,
             scale_set: false,
             opened_at: None,
+            #[cfg(feature = "audio")]
+            hover_row: None,
+            #[cfg(feature = "audio")]
+            hover_last: None,
             #[cfg(feature = "module_panel")]
             modules: panel::State::default(),
             #[cfg(feature = "module_panel")]
@@ -691,6 +722,8 @@ pub fn draw(p: &mut Painter, st: &mut ClickGuiState, ctx: &ScreenCtx) {
     p.scaled(total, cx * (1.0 - pop), cy * (1.0 - pop), |p| {
         st.contents(p, &ui)
     });
+    #[cfg(feature = "audio")]
+    st.hover_sound();
 }
 
 pub(crate) fn text_y(top: f32, h: f32) -> f32 {
@@ -829,6 +862,11 @@ impl ClickGuiState {
         #[cfg(lua_mods)]
         if self.typing() {
             self.cancel_mod_editor();
+            return true;
+        }
+        #[cfg(lua_mods)]
+        if self.tab == Tab::Mods && self.mod_explore {
+            self.close_explore();
             return true;
         }
         #[cfg(lua_mods)]
@@ -1014,6 +1052,10 @@ impl ClickGuiState {
         #[cfg(feature = "module_panel")]
         self.track_touch(ui);
         let press = ui.input.left_click || ui.input.right_click;
+        #[cfg(feature = "audio")]
+        if press && self.look.ui_sounds && self.focus != Focus::None {
+            crate::gui::widgets::play_click();
+        }
         if press
             && let Focus::On(Window::Column(pi)) = self.focus
             && let Some(i) = self.order.iter().position(|&o| o == pi)
@@ -1027,6 +1069,22 @@ impl ClickGuiState {
         {
             self.overlay = None;
         }
+    }
+
+    #[cfg(feature = "audio")]
+    fn play_hover(&self) {
+        if self.look.play_hover {
+            crate::audio::play("ui.button.click", crate::audio::SoundCategory::Ui, 0.1, 1.6);
+        }
+    }
+
+    #[cfg(feature = "audio")]
+    fn hover_sound(&mut self) {
+        let now = self.hover_row.take();
+        if now.is_some() && now != self.hover_last {
+            self.play_hover();
+        }
+        self.hover_last = now;
     }
 
     fn live(&self, focus: Focus) -> bool {
@@ -1152,6 +1210,10 @@ impl ClickGuiState {
         }
         if ui.input.up_arrow {
             self.selected = (self.selected + self.matches.len() - 1) % self.matches.len();
+        }
+        #[cfg(feature = "audio")]
+        if ui.input.down_arrow || ui.input.up_arrow {
+            self.play_hover();
         }
         self.match_top = self
             .match_top
@@ -2182,7 +2244,7 @@ impl ClickGuiState {
         let mut cy = top + 3.0 - scroll;
         let def = Look::default();
 
-        for row in CFG {
+        for &row in CFG {
             if !cfg_shown(row) {
                 continue;
             }

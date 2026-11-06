@@ -638,9 +638,7 @@ fn sound_holder_way(ids: &Ids, way: Way, r: &mut Reader, out: &mut Vec<u8>) -> O
         let name = r.count()?;
         write_varint(out, name as i32);
         out.extend_from_slice(r.take(name)?);
-        let ranged = r.u8()?;
-        out.push(ranged);
-        if ranged != 0 {
+        if flag(r, out)? {
             out.extend_from_slice(r.take(4)?);
         }
         return Some(());
@@ -842,23 +840,17 @@ fn widened(
             write_varint(out, n as i32);
             for _ in 0..n {
                 out.extend_from_slice(r.take(4)?);
-                let present = r.u8()?;
-                out.push(present);
-                if present != 0 {
+                if flag(r, out)? {
                     copy_holder_set(r, out)?;
                 }
                 out.extend_from_slice(r.take(8)?);
             }
             out.extend_from_slice(r.take(12)?);
-            let present = r.u8()?;
-            out.push(present);
-            if present != 0 {
+            if flag(r, out)? {
                 tag_or_holder_set(way, r, out)?;
             }
             for _ in 0..2 {
-                let present = r.u8()?;
-                out.push(present);
-                if present != 0 {
+                if flag(r, out)? {
                     sound_holder_way(ids, way, r, out)?;
                 }
             }
@@ -1305,14 +1297,10 @@ fn update_advancements(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     write_varint(&mut out, added as i32);
     for _ in 0..added {
         identifier(&mut r, &mut out)?;
-        let parent = r.u8()?;
-        out.push(parent);
-        if parent != 0 {
+        if flag(&mut r, &mut out)? {
             identifier(&mut r, &mut out)?;
         }
-        let display = r.u8()?;
-        out.push(display);
-        if display != 0 {
+        if flag(&mut r, &mut out)? {
             nbt_tag(&mut r, &mut out)?;
             nbt_tag(&mut r, &mut out)?;
             stack_template(ids, &mut r, &mut out)?;
@@ -1349,9 +1337,7 @@ fn recipe_book_add(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
         recipe_display(ids, &mut r, &mut out)?;
         write_varint(&mut out, r.varint()?);
         write_varint(&mut out, r.varint()?);
-        let requirements = r.u8()?;
-        out.push(requirements);
-        if requirements != 0 {
+        if flag(&mut r, &mut out)? {
             let n = r.count()?;
             write_varint(&mut out, n as i32);
             for _ in 0..n {
@@ -1412,9 +1398,7 @@ fn merchant_offers(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     for _ in 0..offers {
         item_cost(ids, &mut r, &mut out)?;
         item_stack(ids, &mut r, &mut out)?;
-        let second = r.u8()?;
-        out.push(second);
-        if second != 0 {
+        if flag(&mut r, &mut out)? {
             item_cost(ids, &mut r, &mut out)?;
         }
         out.extend_from_slice(r.take(1 + 6 * 4)?);
@@ -1459,9 +1443,7 @@ fn set_equipment(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
 }
 
 fn hashed_stack(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<bool> {
-    let present = r.u8()?;
-    out.push(present);
-    if present == 0 {
+    if !flag(r, out)? {
         return Some(true);
     }
 
@@ -1621,9 +1603,7 @@ fn explode(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let mut out = Vec::with_capacity(body.len() + 8);
     out.extend_from_slice(r.take(3 * 8 + 4 + 4)?);
-    let knockback = r.u8()?;
-    out.push(knockback);
-    if knockback != 0 {
+    if flag(&mut r, &mut out)? {
         out.extend_from_slice(r.take(3 * 8)?);
     }
 

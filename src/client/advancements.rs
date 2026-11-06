@@ -123,11 +123,7 @@ fn convert(
     }
 }
 
-pub(crate) fn packet(
-    world: &WorldHolder,
-    shared: &Arc<SharedMutex>,
-    packet: &ClientboundGamePacket,
-) {
+pub(crate) fn packet(world: &WorldHolder, shared: &SharedMutex, packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::UpdateAdvancements(p) => {
             let added: Vec<Added> = if p.added.is_empty() {

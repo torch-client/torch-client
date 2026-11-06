@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use azalea::ecs::query::{Has, QueryState};
 use azalea::ecs::world::WorldId;
 use azalea::entity::dimensions::EntityDimensions;
@@ -9,11 +7,9 @@ use azalea::prelude::*;
 use azalea_core::entity_id::MinecraftEntityId;
 use azalea_world::WorldName;
 
-use crate::client::tracking::EntityAttributes;
+use crate::play::emit::{self, Viewer};
 use crate::session::{LevelParticle, ParticleEmit, SharedMutex, SideMutex};
 use crate::util::javarandom::JavaRandom;
-
-const EMIT_RANGE: f64 = 36.0;
 
 type EffectQuery = QueryState<(
     &'static WorldName,
@@ -36,13 +32,9 @@ static STATE: SideMutex<State> = SideMutex::new(State {
     rng: None,
 });
 
-pub(crate) fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
-    let Ok(origin) = bot.position() else { return };
-    let world_name = {
-        let Ok(name) = bot.component::<WorldName>() else {
-            return;
-        };
-        name.clone()
+pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
+    let Some(viewer) = Viewer::of(bot) else {
+        return;
     };
 
     let mut state = STATE.lock().unwrap();
@@ -54,10 +46,7 @@ pub(crate) fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
     let ecs = bot.ecs.read();
     let mut emits = Vec::new();
     for (name, pos, dims, id, particles, ambience, invisible, local) in query.iter(&ecs) {
-        if particles.0.is_empty()
-            || *name != world_name
-            || pos.distance_squared_to(origin) > EMIT_RANGE * EMIT_RANGE
-        {
+        if particles.0.is_empty() || !viewer.in_world(name) || !viewer.near(**pos) {
             continue;
         }
         let bound = if invisible.0 { 15 } else { 4 };
@@ -66,38 +55,17 @@ pub(crate) fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
             continue;
         }
         let particle = &particles.0[rng.next_int(particles.0.len() as u32) as usize];
-        let scale = if local {
-            1.0
-        } else {
-            EntityAttributes::of(&attributes, id.0).scale()
-        };
+        let scale = emit::box_scale(&attributes, id.0, local);
         let (width, height) = (
             f64::from(dims.width * scale),
             f64::from(dims.height * scale),
         );
-        let x = pos.x + (2.0 * rng.next_f64() - 1.0) * 0.5 * width;
-        let y = pos.y + rng.next_f64() * height;
-        let z = pos.z + (2.0 * rng.next_f64() - 1.0) * 0.5 * width;
-        emits.push(LevelParticle {
-            particle: particle.clone(),
-            pos: [x, y, z],
-            dist: [1.0; 3],
-            max_speed: 1.0,
-            count: 0,
-            override_limiter: false,
-            always_show: false,
-        });
+        let at = emit::random_point(rng, [pos.x, pos.y, pos.z], width, height, 0.5);
+        emits.push(LevelParticle::add(particle.clone(), at, [1.0; 3]));
     }
     drop(ecs);
     drop(attributes);
     drop(state);
 
-    if emits.is_empty() {
-        return;
-    }
-    let mut s = shared.lock().unwrap();
-    crate::session::push_particle_emits(
-        &mut s.session.particle_emits,
-        emits.into_iter().map(ParticleEmit::Level),
-    );
+    emit::queue(shared, emits, ParticleEmit::Level);
 }

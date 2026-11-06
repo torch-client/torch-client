@@ -187,6 +187,8 @@ pub struct PerspectiveProjection {
     pub far: f32,
 
     pub near_clip_plane: Vec4,
+
+    pub view_warp: Mat4,
 }
 
 impl CameraProjection for PerspectiveProjection {
@@ -194,7 +196,7 @@ impl CameraProjection for PerspectiveProjection {
         let mut matrix =
             Mat4::perspective_infinite_reverse_rh(self.fov, self.aspect_ratio, self.near);
         self.adjust_perspective_matrix_for_clip_plane(&mut matrix);
-        matrix
+        matrix * self.view_warp
     }
 
     fn get_clip_from_view_for_sub(&self, sub_view: &super::SubCameraView) -> Mat4 {
@@ -233,7 +235,7 @@ impl CameraProjection for PerspectiveProjection {
         );
 
         self.adjust_perspective_matrix_for_clip_plane(&mut matrix);
-        matrix
+        matrix * self.view_warp
     }
 
     fn update(&mut self, width: f32, height: f32) {
@@ -272,6 +274,7 @@ impl Default for PerspectiveProjection {
             far: 1000.0,
             aspect_ratio: 1.0,
             near_clip_plane: vec4(0.0, 0.0, -1.0, -0.1),
+            view_warp: Mat4::IDENTITY,
         }
     }
 }

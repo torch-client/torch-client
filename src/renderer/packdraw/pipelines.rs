@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendComponent,
-    BlendFactor, BlendOperation, BlendState, BufferBindingType, ColorTargetState, ColorWrites,
+    BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
+    BlendFactor as F, BlendState, BufferBindingType, ColorTargetState, ColorWrites,
     CompareFunction, ComputePipeline, DepthStencilState, Face, FrontFace, MultisampleState,
     PrimitiveState, PrimitiveTopology, RenderPipeline, SamplerBindingType, ShaderStages,
     TextureFormat, TextureSampleType, TextureViewDimension,
@@ -375,14 +375,7 @@ fn entity_pass_state(kind: EntityKind, second: bool) -> EntityPassState {
         | EntityKind::ParticleTranslucent => blended,
         EntityKind::SkyBasic | EntityKind::SkyTextured => EntityPassState {
             blend: Some(if second {
-                BlendState {
-                    color: BlendComponent {
-                        src_factor: BlendFactor::SrcAlpha,
-                        dst_factor: BlendFactor::One,
-                        operation: BlendOperation::Add,
-                    },
-                    alpha: BlendComponent::OVER,
-                }
+                crate::renderer::blend(F::SrcAlpha, F::One, F::One, F::OneMinusSrcAlpha)
             } else {
                 BlendState::ALPHA_BLENDING
             }),
@@ -400,14 +393,7 @@ fn entity_pass_state(kind: EntityKind, second: bool) -> EntityPassState {
             cull: None,
         },
         EntityKind::DamagedBlock => EntityPassState {
-            blend: Some(BlendState {
-                color: BlendComponent {
-                    src_factor: BlendFactor::Dst,
-                    dst_factor: BlendFactor::Src,
-                    operation: BlendOperation::Add,
-                },
-                alpha: BlendComponent::REPLACE,
-            }),
+            blend: Some(crate::renderer::blend(F::Dst, F::Src, F::One, F::Zero)),
             depth: Some((false, CompareFunction::LessEqual)),
             cull: None,
         },
@@ -417,18 +403,7 @@ fn entity_pass_state(kind: EntityKind, second: bool) -> EntityPassState {
             cull: None,
         },
         EntityKind::SpiderEyes => EntityPassState {
-            blend: Some(BlendState {
-                color: BlendComponent {
-                    src_factor: BlendFactor::SrcAlpha,
-                    dst_factor: BlendFactor::One,
-                    operation: BlendOperation::Add,
-                },
-                alpha: BlendComponent {
-                    src_factor: BlendFactor::Zero,
-                    dst_factor: BlendFactor::One,
-                    operation: BlendOperation::Add,
-                },
-            }),
+            blend: Some(crate::renderer::blend(F::SrcAlpha, F::One, F::Zero, F::One)),
             depth: Some((false, CompareFunction::LessEqual)),
             cull: None,
         },
@@ -728,7 +703,7 @@ mod tests {
         assert!(sky.depth.is_none() && sky.blend.is_some());
         assert_eq!(EntityKind::SkyTextured.alpha_tests(), [None; 2]);
         let stars = state(EntityKind::SkyBasic, true).blend.expect("blends");
-        assert_eq!(stars.color.dst_factor, BlendFactor::One, "additive");
+        assert_eq!(stars.color.dst_factor, F::One, "additive");
         let clouds = state(EntityKind::Clouds, false);
         assert_eq!(clouds.depth, Some((true, CompareFunction::Less)));
         assert_eq!(clouds.cull, Some(Face::Back));

@@ -57,6 +57,7 @@ async fn run_client(
         .add_plugins(chat_sign::ChatSigningPlugin)
         .add_plugins(flight::FlightPlugin)
         .add_plugins(crate::play::elytra::ElytraPlugin)
+        .add_plugins(crate::play::riptide::RiptidePlugin)
         .add_plugins(no_fall::NoFallPlugin)
         .add_plugins(crate::play::vclip::VClipPlugin)
         .add_plugins(crate::play::riding::RidingPlugin)
@@ -158,6 +159,10 @@ impl azalea::app::Plugin for PacketRelayPlugin {
         app.add_systems(
             azalea::app::Update,
             crate::client::server_sounds::play_server_sounds,
+        );
+        app.add_systems(
+            azalea::app::Update,
+            crate::play::event_particles::emit_event_particles,
         );
     }
 }
@@ -463,7 +468,7 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
 async fn handle_event(
     bot: Client,
     event: Event,
-    shared: &'static std::sync::Arc<crate::session::SharedMutex>,
+    shared: &'static crate::session::SharedMutex,
 ) -> eyre::Result<()> {
     match event {
         Event::Init => {
@@ -569,6 +574,7 @@ async fn handle_event(
 }
 
 fn reset_session_side_tables(blocking: bool) {
+    azalea::registry::unknown::reset();
     if blocking {
         reset_chunk_tracking();
     } else {
@@ -619,8 +625,12 @@ fn reset_session_side_tables(blocking: bool) {
         clear(leashes());
         crate::play::tracking_emitter::reset();
         crate::play::item_use::reset();
+        crate::play::arrow_particles::reset();
+        crate::play::entity_feed::reset_snapshots();
         #[cfg(feature = "audio")]
         crate::play::riding::sound::reset();
+        #[cfg(feature = "audio")]
+        crate::play::entity_sounds::reset();
     }
     crate::client::tracking::LOCAL_ENTITY_ID.store(i32::MIN, std::sync::atomic::Ordering::Relaxed);
     crate::play::riding::reset(blocking);

@@ -341,7 +341,7 @@ fn draw_proxy_menu(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locke
     use crate::eagler::proxy;
 
     let name = proxy::selected().name;
-    let full = format!("Selected proxy: {name}");
+    let full = format!("Java proxy: {name}");
     let short = format!("Proxy: {name}");
     let font = &p.atlas.font;
     let width = |label: &str| (font.width_str(label) + PROXY_PAD).max(PROXY_MIN_W);

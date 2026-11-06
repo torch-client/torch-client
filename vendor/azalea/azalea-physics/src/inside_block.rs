@@ -59,7 +59,7 @@ pub(crate) fn handle_entity_inside_block(
 ) {
     match BlockKind::from(block) {
         BlockKind::Cobweb => {
-            let multiplier = if ctx.active_effects.get(MobEffect::Weaving).is_some() {
+            let multiplier = if ctx.active_effects.has(MobEffect::Weaving) {
                 COBWEB_WEAVING
             } else {
                 COBWEB

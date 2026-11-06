@@ -6,7 +6,7 @@ use crate::text::{LINE_HEIGHT, Span, Style};
 
 const MESSAGE_PADDING: f32 = 100.0;
 const MESSAGE_CELL_PADDING: f32 = 12.0;
-const INNER_PADDING: f32 = 4.0;
+pub(in crate::gui) const INNER_PADDING: f32 = 4.0;
 const SPACING: f32 = 8.0;
 const BUTTON_W: f32 = 150.0;
 const RECONFIG_CELL_PADDING: f32 = 10.0;
@@ -58,37 +58,17 @@ pub fn draw_code_of_conduct(p: &mut Painter, state: &mut GuiState, ctx: &ScreenC
 
     let box_x = ((ctx.vw - box_w) / 2.0).floor();
     let box_y = top + LINE_HEIGHT + SPACING + MESSAGE_CELL_PADDING;
-    p.fill(box_x, box_y, box_w, box_h, 0xFFA0_A0A0);
-    p.fill(
-        box_x + 1.0,
-        box_y + 1.0,
-        box_w - 2.0,
-        box_h - 2.0,
-        0xFF00_0000,
-    );
-
-    let (list_x, list_y) = (box_x + INNER_PADDING, box_y + INNER_PADDING);
-    let (list_w, list_h) = (box_w - 2.0 * INNER_PADDING, box_h - 2.0 * INNER_PADDING);
-    options::scroll_input(
+    text_area(
+        p,
+        ctx,
+        &lines,
+        box_x,
+        box_y,
+        box_w,
+        box_h,
         &mut st.scroll,
         &mut st.scroll_drag,
-        ctx,
-        list_x,
-        list_w,
-        list_y,
-        list_h,
-        content_h,
     );
-    let clip = p.push_clip(list_x, list_y, list_w, list_h);
-    let mut y = (list_y - st.scroll).floor();
-    for line in &lines {
-        if y + LINE_HEIGHT > list_y && y < list_y + list_h {
-            p.text(line, list_x, y, true);
-        }
-        y += LINE_HEIGHT;
-    }
-    p.pop_clip(clip);
-    options::draw_scrollbar(p, st.scroll, list_x, list_w, list_y, list_h, content_h);
 
     let row_y = box_y + box_h + MESSAGE_CELL_PADDING + SPACING;
     let row_x = ((ctx.vw - (2.0 * BUTTON_W + SPACING)) / 2.0).floor();
@@ -119,6 +99,37 @@ pub fn draw_code_of_conduct(p: &mut Painter, state: &mut GuiState, ctx: &ScreenC
         )));
         state.nav = Some(Screen::Disconnected);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::gui) fn text_area(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    lines: &[Vec<Span>],
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    scroll: &mut f32,
+    drag: &mut Option<f32>,
+) {
+    p.fill(x, y, w, h, 0xFFA0_A0A0);
+    p.fill(x + 1.0, y + 1.0, w - 2.0, h - 2.0, 0xFF00_0000);
+
+    let content_h = lines.len() as f32 * LINE_HEIGHT;
+    let (list_x, list_y) = (x + INNER_PADDING, y + INNER_PADDING);
+    let (list_w, list_h) = (w - 2.0 * INNER_PADDING, h - 2.0 * INNER_PADDING);
+    options::scroll_input(scroll, drag, ctx, list_x, list_w, list_y, list_h, content_h);
+    let clip = p.push_clip(list_x, list_y, list_w, list_h);
+    let mut row_y = (list_y - *scroll).floor();
+    for line in lines {
+        if row_y + LINE_HEIGHT > list_y && row_y < list_y + list_h {
+            p.text(line, list_x, row_y, true);
+        }
+        row_y += LINE_HEIGHT;
+    }
+    p.pop_clip(clip);
+    options::draw_scrollbar(p, *scroll, list_x, list_w, list_y, list_h, content_h);
 }
 
 pub fn draw_reconfig(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {

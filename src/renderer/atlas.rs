@@ -4,6 +4,9 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 
+#[cfg(feature = "animated_textures")]
+use super::atlas_anim::{self, AnimatedSprite, AtlasFrames};
+use super::atlas_meta::{self, FrameRect, SpriteLayout, SpriteMeta};
 use super::{ATLAS_COLS, TILE_PX};
 
 pub struct Sprites {
@@ -70,6 +73,8 @@ pub struct AtlasTables {
     tints: Option<crate::util::biome_color::Tints>,
     #[cfg(feature = "shader_support")]
     untinted: Option<std::sync::Arc<UntintedTiles>>,
+    #[cfg(feature = "animated_textures")]
+    frames: Option<AtlasFrames>,
 }
 
 impl AtlasTables {
@@ -79,6 +84,8 @@ impl AtlasTables {
         {
             *UNTINTED.write() = self.untinted;
         }
+        #[cfg(feature = "animated_textures")]
+        atlas_anim::publish(self.frames);
     }
 }
 
@@ -88,23 +95,34 @@ fn is_fully_opaque(rgba: &image::RgbaImage) -> bool {
 
 pub struct Textures {
     pub block: BTreeMap<String, image::RgbaImage>,
+    pub meta: BTreeMap<String, SpriteMeta>,
 }
 
 impl Textures {
     pub fn blocks(textures_dir: &str) -> Textures {
-        Textures {
-            block: decode_dir(&format!("{textures_dir}/block")),
+        let mut textures = Textures {
+            block: BTreeMap::new(),
+            meta: BTreeMap::new(),
+        };
+        for (stem, rgba, meta) in decode_dir(&format!("{textures_dir}/block")) {
+            if let Some(meta) = meta {
+                textures.meta.insert(stem.clone(), meta);
+            }
+            textures.block.insert(stem, rgba);
         }
+        textures
     }
 }
 
-fn decode_dir(dir: &str) -> BTreeMap<String, image::RgbaImage> {
+type Decoded = (String, image::RgbaImage, Option<SpriteMeta>);
+
+fn decode_dir(dir: &str) -> Vec<Decoded> {
     let paths: Vec<std::path::PathBuf> = crate::platform::assets::walk(dir)
         .into_iter()
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))
         .collect();
 
-    let decode = |path: &std::path::Path| -> Option<(String, image::RgbaImage)> {
+    let decode = |path: &std::path::Path| -> Option<Decoded> {
         let stem = path
             .strip_prefix(dir)
             .ok()?
@@ -113,15 +131,14 @@ fn decode_dir(dir: &str) -> BTreeMap<String, image::RgbaImage> {
             .replace('\\', "/");
         let bytes = crate::platform::assets::read(path)?;
         let decoded = image::load_from_memory(&bytes).ok()?;
-        Some((stem, decoded.to_rgba8()))
+        let meta = crate::platform::assets::read_metadata(path)
+            .and_then(|bytes| atlas_meta::parse_meta(&bytes));
+        Some((stem, decoded.to_rgba8(), meta))
     };
 
     #[cfg(target_arch = "wasm32")]
     {
-        paths
-            .iter()
-            .filter_map(|p| decode(p))
-            .collect::<BTreeMap<String, image::RgbaImage>>()
+        paths.iter().filter_map(|p| decode(p)).collect()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -140,17 +157,15 @@ fn decode_dir(dir: &str) -> BTreeMap<String, image::RgbaImage> {
                         slice
                             .iter()
                             .filter_map(|p| decode(p))
-                            .collect::<BTreeMap<String, image::RgbaImage>>()
+                            .collect::<Vec<Decoded>>()
                     })
                 })
                 .collect();
-            handles.into_iter().filter_map(|h| h.join().ok()).fold(
-                BTreeMap::<String, image::RgbaImage>::new(),
-                |mut acc, part| {
-                    acc.extend(part);
-                    acc
-                },
-            )
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .flatten()
+                .collect()
         })
     }
 }
@@ -169,13 +184,12 @@ pub(crate) fn untinted_tiles() -> Option<std::sync::Arc<UntintedTiles>> {
 
 #[cfg(feature = "shader_support")]
 fn collect_untinted(
-    entries: &[(&str, &image::RgbaImage)],
+    entries: &[PackEntry],
     biome_tinted: &[&str],
     tiles: &HashMap<String, u32>,
     n_mips: u32,
 ) -> UntintedTiles {
     let (level0, atlas_w, atlas_h, _) = pack_tiles(entries);
-    let tile_px = atlas_w / ATLAS_COLS;
     let chain = if n_mips > 1 {
         build_mip_chain(&level0, atlas_w, atlas_h, n_mips)
     } else {
@@ -186,26 +200,41 @@ fn collect_untinted(
         let Some(&tile) = tiles.get(*stem) else {
             continue;
         };
-        let (tx, ty) = (tile % ATLAS_COLS, tile / ATLAS_COLS);
-        let mut offset = 0usize;
-        let mut levels = Vec::with_capacity(n_mips as usize);
-        for level in 0..n_mips {
-            let (lw, lh, ts) = (atlas_w >> level, atlas_h >> level, tile_px >> level);
-            let mut bytes = Vec::with_capacity((ts * ts * 4) as usize);
-            for row in 0..ts {
-                let start = offset + (((ty * ts + row) * lw + tx * ts) * 4) as usize;
-                bytes.extend_from_slice(&chain[start..start + (ts * 4) as usize]);
-            }
-            levels.push(bytes);
-            offset += (lw * lh * 4) as usize;
-        }
-        out.push((tile, levels));
+        out.push((tile, tile_levels(&chain, atlas_w, atlas_h, tile, n_mips)));
     }
     out
 }
 
-pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas {
+#[cfg(any(feature = "shader_support", feature = "animated_textures", test))]
+pub(super) fn tile_levels(
+    chain: &[u8],
+    atlas_w: u32,
+    atlas_h: u32,
+    tile: u32,
+    n_mips: u32,
+) -> Vec<Vec<u8>> {
+    let tile_px = atlas_w / ATLAS_COLS;
+    let (tx, ty) = (tile % ATLAS_COLS, tile / ATLAS_COLS);
+    let mut offset = 0usize;
+    let mut levels = Vec::with_capacity(n_mips as usize);
+    for level in 0..n_mips {
+        let (lw, lh, ts) = (atlas_w >> level, atlas_h >> level, tile_px >> level);
+        let mut bytes = Vec::with_capacity((ts * ts * 4) as usize);
+        for row in 0..ts {
+            let start = offset + (((ty * ts + row) * lw + tx * ts) * 4) as usize;
+            bytes.extend_from_slice(&chain[start..start + (ts * 4) as usize]);
+        }
+        levels.push(bytes);
+        offset += (lw * lh * 4) as usize;
+    }
+    levels
+}
+
+pub fn build_block_atlas(textures: &Textures, textures_dir: &str, with_frames: bool) -> BlockAtlas {
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+    #[cfg(not(feature = "animated_textures"))]
+    let _ = with_frames;
 
     let tints = crate::util::biome_color::Tints::load(&format!("{textures_dir}/colormap"));
     let plains = crate::util::biome_color::Tints::plains(tints.as_ref());
@@ -224,6 +253,8 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
                 tints,
                 #[cfg(feature = "shader_support")]
                 untinted: None,
+                #[cfg(feature = "animated_textures")]
+                frames: None,
             },
         };
     }
@@ -252,7 +283,9 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
             let _ = biome;
         }
     }
-    let mut entries: Vec<(&str, &image::RgbaImage)> = Vec::with_capacity(textures.block.len());
+    let mut entries: Vec<PackEntry> = Vec::with_capacity(textures.block.len());
+    #[cfg(feature = "animated_textures")]
+    let mut layouts: Vec<SpriteLayout> = Vec::with_capacity(textures.block.len());
     for (stem, rgba) in &textures.block {
         if stem == "grass_block_side_overlay" {
             continue;
@@ -261,7 +294,16 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
         if is_fully_opaque(rgba) {
             opaque.insert(stem.clone());
         }
-        entries.push((stem.as_str(), rgba));
+        let layout = SpriteLayout::of(textures.meta.get(stem), rgba.width(), rgba.height());
+        if layout == SpriteLayout::Broken {
+            crate::log_warn!(
+                "atlas",
+                "{stem} has bad animation metadata, drawing the placeholder"
+            );
+        }
+        entries.push((stem.as_str(), rgba, layout.first_rect()));
+        #[cfg(feature = "animated_textures")]
+        layouts.push(layout);
     }
     let opaque_count = opaque.len();
 
@@ -273,11 +315,11 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
         atlas_h,
     ));
     #[cfg(feature = "shader_support")]
-    let untinted_entries: Vec<(&str, &image::RgbaImage)> = entries
+    let untinted_entries: Vec<PackEntry> = entries
         .iter()
-        .map(|(stem, rgba)| match textures.block.get(*stem) {
-            Some(source) if biome_tinted.contains(stem) => (*stem, source),
-            _ => (*stem, *rgba),
+        .map(|(stem, rgba, rect)| match textures.block.get(*stem) {
+            Some(source) if biome_tinted.contains(stem) => (*stem, source, *rect),
+            _ => (*stem, *rgba, *rect),
         })
         .collect();
 
@@ -294,6 +336,30 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
         &tex_to_tile,
         n_mips,
     ));
+    #[cfg(feature = "animated_textures")]
+    let frames = with_frames.then(|| {
+        let sprites: Vec<AnimatedSprite> = entries
+            .iter()
+            .enumerate()
+            .zip(&layouts)
+            .filter_map(|((at, (stem, rgba, _)), layout)| {
+                let SpriteLayout::Animated(layout) = layout else {
+                    return None;
+                };
+                #[cfg(feature = "shader_support")]
+                let pack_image = biome_tinted.contains(stem).then(|| untinted_entries[at].1);
+                #[cfg(not(feature = "shader_support"))]
+                let (pack_image, _) = (None, at);
+                Some(AnimatedSprite {
+                    atlas_tile: *tex_to_tile.get(*stem)?,
+                    image: rgba,
+                    pack_image,
+                    layout,
+                })
+            })
+            .collect();
+        atlas_anim::build_frames(&sprites, (atlas_w, atlas_h), n_mips)
+    });
 
     let mut image = Image::new_uninit(
         Extent3d {
@@ -339,6 +405,8 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str) -> BlockAtlas 
             tints,
             #[cfg(feature = "shader_support")]
             untinted: Some(untinted),
+            #[cfg(feature = "animated_textures")]
+            frames: frames.flatten(),
         },
     }
 }
@@ -353,7 +421,7 @@ fn block_atlas_sampler() -> ImageSampler {
     })
 }
 
-fn build_mip_chain(level0: &[u8], atlas_w: u32, atlas_h: u32, n_mips: u32) -> Vec<u8> {
+pub(super) fn build_mip_chain(level0: &[u8], atlas_w: u32, atlas_h: u32, n_mips: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(level0.len() * 2);
     out.extend_from_slice(level0);
 
@@ -607,16 +675,21 @@ fn composite_over(base: &mut image::RgbaImage, overlay: &image::RgbaImage) {
     }
 }
 
-fn blit_tile(atlas: &mut [u8], tile: u32, atlas_w: u32, rgba: &image::RgbaImage) {
+pub(super) fn blit_tile(
+    atlas: &mut [u8],
+    tile: u32,
+    atlas_w: u32,
+    rgba: &image::RgbaImage,
+    rect: FrameRect,
+) {
     let tile_px = atlas_w / ATLAS_COLS;
     let col = tile % ATLAS_COLS;
     let row = tile / ATLAS_COLS;
     let (ox, oy) = (col * tile_px, row * tile_px);
-    let frame = rgba.width().min(rgba.height());
     for py in 0..tile_px {
         for px in 0..tile_px {
-            let sx = (px * frame / tile_px).min(rgba.width() - 1);
-            let sy = (py * frame / tile_px).min(rgba.height() - 1);
+            let sx = (rect.x + px * rect.w / tile_px).min(rgba.width() - 1);
+            let sy = (rect.y + py * rect.h / tile_px).min(rgba.height() - 1);
             let p = rgba.get_pixel(sx, sy);
             let dst = (((oy + py) * atlas_w + (ox + px)) * 4) as usize;
             atlas[dst..dst + 4].copy_from_slice(&p.0);
@@ -661,10 +734,14 @@ pub fn placeholder_atlas() -> Image {
 
 const MAX_TILE_PX: u32 = 64;
 
-fn tile_px(entries: &[(&str, &image::RgbaImage)]) -> u32 {
+type PackEntry<'a> = (&'a str, &'a image::RgbaImage, Option<FrameRect>);
+
+fn tile_px(entries: &[PackEntry]) -> u32 {
     let mut counts: HashMap<u32, u32> = HashMap::new();
-    for (_, rgba) in entries {
-        let side = rgba.width().min(rgba.height()).next_power_of_two();
+    for (_, rgba, rect) in entries {
+        let side = rect
+            .map_or(rgba.width().min(rgba.height()), |rect| rect.w.min(rect.h))
+            .next_power_of_two();
         *counts.entry(side.clamp(TILE_PX, MAX_TILE_PX)).or_default() += 1;
     }
     counts
@@ -673,7 +750,7 @@ fn tile_px(entries: &[(&str, &image::RgbaImage)]) -> u32 {
         .map_or(TILE_PX, |(side, _)| side)
 }
 
-fn pack_tiles(entries: &[(&str, &image::RgbaImage)]) -> (Vec<u8>, u32, u32, HashMap<String, u32>) {
+fn pack_tiles(entries: &[PackEntry]) -> (Vec<u8>, u32, u32, HashMap<String, u32>) {
     let tile_px = tile_px(entries);
     let n_tiles = 1 + entries.len() as u32;
     let atlas_w = ATLAS_COLS * tile_px;
@@ -683,11 +760,163 @@ fn pack_tiles(entries: &[(&str, &image::RgbaImage)]) -> (Vec<u8>, u32, u32, Hash
     blit_gray_placeholder(&mut data, 0, atlas_w, tile_px);
 
     let mut tiles: HashMap<String, u32> = HashMap::new();
-    for (idx, (stem, rgba)) in entries.iter().enumerate() {
+    for (idx, (stem, rgba, rect)) in entries.iter().enumerate() {
         let tile = idx as u32 + 1;
-        blit_tile(&mut data, tile, atlas_w, rgba);
+        match rect {
+            Some(rect) => blit_tile(&mut data, tile, atlas_w, rgba, *rect),
+            None => blit_gray_placeholder(&mut data, tile, atlas_w, tile_px),
+        }
         tiles.insert((*stem).to_owned(), tile);
     }
 
     (data, atlas_w, atlas_h, tiles)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strip(side: u32, count: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(side, side * count, |x, y| {
+            let frame = y / side;
+            let alpha = if frame == 1 && x < side / 2 && y % side < side / 2 {
+                0
+            } else {
+                255
+            };
+            image::Rgba([
+                40 * frame as u8 + 10,
+                (x * 7) as u8,
+                (y % side * 9) as u8,
+                alpha,
+            ])
+        })
+    }
+
+    fn textures(sprites: Vec<(&str, image::RgbaImage, Option<&str>)>) -> Textures {
+        let mut textures = Textures {
+            block: BTreeMap::new(),
+            meta: BTreeMap::new(),
+        };
+        for (stem, rgba, meta) in sprites {
+            textures.block.insert(stem.to_owned(), rgba);
+            if let Some(meta) = meta.and_then(|json| atlas_meta::parse_meta(json.as_bytes())) {
+                textures.meta.insert(stem.to_owned(), meta);
+            }
+        }
+        textures
+    }
+
+    fn atlas_levels(atlas: &BlockAtlas, tile: u32) -> Vec<Vec<u8>> {
+        let image = &atlas.image;
+        let chain = image
+            .data
+            .as_ref()
+            .expect("the atlas keeps its bytes until it is uploaded");
+        let size = image.texture_descriptor.size;
+        tile_levels(
+            chain,
+            size.width,
+            size.height,
+            tile,
+            image.texture_descriptor.mip_level_count,
+        )
+    }
+
+    #[test]
+    fn a_tile_starts_on_its_first_listed_frame() {
+        let textures = textures(vec![(
+            "fire",
+            strip(16, 4),
+            Some(r#"{"animation":{"frames":[2,3,0,1]}}"#),
+        )]);
+        let atlas = build_block_atlas(&textures, "/nonexistent", true);
+        let tile = atlas.sprites.tile("fire").unwrap();
+        assert_eq!(atlas_levels(&atlas, tile)[0][0], 90);
+    }
+
+    #[cfg(feature = "animated_textures")]
+    #[test]
+    fn every_level_of_a_frame_matches_the_tile_it_would_be() {
+        for side in [16, 64] {
+            let meta = r#"{"animation":{"frames":[1,0,2]}}"#;
+            let textures_now = textures(vec![
+                ("a", strip(side, 3), Some(meta)),
+                ("filler_a", strip(side, 1), None),
+                ("filler_b", strip(side, 1), None),
+            ]);
+            let atlas = build_block_atlas(&textures_now, "/nonexistent", true);
+            let tile = atlas.sprites.tile("a").unwrap();
+            let frames = atlas.tables.frames.as_ref().expect("one animated sprite");
+            let first = frames.animations[0].frames[0].tile;
+            assert_eq!(
+                frames.block_levels(first),
+                atlas_levels(&atlas, tile),
+                "side {side}"
+            );
+        }
+    }
+
+    #[test]
+    fn frames_change_neither_the_atlas_size_nor_its_tiles() {
+        let sprites = || {
+            vec![
+                ("a", strip(16, 8), Some(r#"{"animation":{"frametime":2}}"#)),
+                ("b", strip(16, 1), None),
+                ("c", strip(16, 2), None),
+            ]
+        };
+        let plain: Vec<_> = sprites()
+            .into_iter()
+            .map(|(stem, rgba, _)| (stem, rgba, None))
+            .collect();
+        let (with, without) = (
+            build_block_atlas(&textures(sprites()), "/nonexistent", true),
+            build_block_atlas(&textures(plain), "/nonexistent", true),
+        );
+        assert_eq!(
+            with.image.texture_descriptor.size,
+            without.image.texture_descriptor.size
+        );
+        assert_eq!(
+            with.image.texture_descriptor.mip_level_count,
+            without.image.texture_descriptor.mip_level_count
+        );
+        for stem in ["a", "b", "c"] {
+            assert_eq!(with.sprites.tile(stem), without.sprites.tile(stem));
+        }
+        assert_eq!(with.image.data, without.image.data);
+    }
+
+    #[test]
+    fn broken_metadata_draws_the_placeholder_in_its_own_tile() {
+        let textures = textures(vec![
+            ("bad", strip(16, 2), Some("not json")),
+            ("good", strip(16, 1), None),
+        ]);
+        let atlas = build_block_atlas(&textures, "/nonexistent", true);
+        assert_eq!(atlas.sprites.tile("bad"), Some(1));
+        assert_eq!(atlas.sprites.tile("good"), Some(2));
+        assert_eq!(atlas_levels(&atlas, 1), atlas_levels(&atlas, 0));
+        #[cfg(feature = "animated_textures")]
+        assert!(atlas.tables.frames.is_none());
+    }
+
+    #[cfg(feature = "animated_textures")]
+    #[test]
+    fn the_worker_builds_no_frames() {
+        let textures = textures(vec![("a", strip(16, 2), Some(r#"{"animation":{}}"#))]);
+        assert!(
+            build_block_atlas(&textures, "/nonexistent", false)
+                .tables
+                .frames
+                .is_none()
+        );
+        assert!(
+            build_block_atlas(&textures, "/nonexistent", true)
+                .tables
+                .frames
+                .is_some()
+        );
+    }
 }

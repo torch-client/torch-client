@@ -4,36 +4,24 @@ use super::directives::SampleKind;
 
 const MAX_IMAGES: usize = 16;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ImageFormat {
-    R8Ui,
-    R32Ui,
-    R32I,
-    R32F,
-    Rg32F,
-    Rgba8,
-    Rgba8Ui,
-    Rgba16F,
-    Rgba16Ui,
-    Rgba32F,
-    Rgba32Ui,
+crate::util::indexed_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum ImageFormat {
+        R8Ui,
+        R32Ui,
+        R32I,
+        R32F,
+        Rg32F,
+        Rgba8,
+        Rgba8Ui,
+        Rgba16F,
+        Rgba16Ui,
+        Rgba32F,
+        Rgba32Ui,
+    }
 }
 
 impl ImageFormat {
-    const ALL: [ImageFormat; 11] = [
-        ImageFormat::R8Ui,
-        ImageFormat::R32Ui,
-        ImageFormat::R32I,
-        ImageFormat::R32F,
-        ImageFormat::Rg32F,
-        ImageFormat::Rgba8,
-        ImageFormat::Rgba8Ui,
-        ImageFormat::Rgba16F,
-        ImageFormat::Rgba16Ui,
-        ImageFormat::Rgba32F,
-        ImageFormat::Rgba32Ui,
-    ];
-
     pub(crate) fn glsl(self) -> &'static str {
         match self {
             ImageFormat::R8Ui => "r8ui",

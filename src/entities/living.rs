@@ -2,6 +2,7 @@ use crate::util::interp::{Interpolation, Target};
 use crate::util::mth::{lerp, lerp_f64, rot_lerp, wrap_degrees};
 
 pub const SWING_DURATION: i32 = 6;
+pub const HURT_DURATION: u32 = 10;
 
 pub const MAX_HEAD_ROTATION: f32 = 50.0;
 
@@ -133,6 +134,7 @@ pub struct LivingCore {
     attack_anim: f32,
     attack_anim_old: f32,
     swing_duration: i32,
+    swing_effect: i32,
     death_time: u32,
     hurt_time: u32,
 }
@@ -266,15 +268,24 @@ impl LivingCore {
         } else {
             self.swing_time = 0;
         }
-        self.attack_anim = self.swing_time as f32 / duration as f32;
+        self.attack_anim = if duration == 0 {
+            0.0
+        } else {
+            self.swing_time as f32 / duration as f32
+        };
     }
 
     fn swing_duration(&self) -> i32 {
-        if self.swing_duration > 0 {
+        let item = if self.swing_duration > 0 {
             self.swing_duration
         } else {
             SWING_DURATION
-        }
+        };
+        item + self.swing_effect
+    }
+
+    pub fn set_swing_effect(&mut self, ticks: i32) {
+        self.swing_effect = ticks;
     }
 
     pub fn set_swing_duration(&mut self, ticks: u8) {
@@ -319,7 +330,16 @@ impl LivingCore {
     }
 
     pub fn hurt(&mut self) {
-        self.hurt_time = 10;
+        self.hurt_time = HURT_DURATION;
+    }
+
+    pub fn clear_hurt(&mut self) {
+        self.hurt_time = 0;
+        self.death_time = 0;
+    }
+
+    pub fn hurt_time(&self, partial: f32) -> f32 {
+        self.hurt_time as f32 - partial
     }
 
     pub fn damage(&mut self) {

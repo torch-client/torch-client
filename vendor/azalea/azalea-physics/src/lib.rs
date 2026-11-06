@@ -219,15 +219,15 @@ pub fn apply_effects_from_blocks_for(
     world: &World,
     movement: EntityMovement,
     kind: InsideKind,
+    active_effects: &ActiveEffects,
 ) {
-    let no_effects = ActiveEffects::default();
     check_inside_blocks(
         physics,
         dimensions,
         world,
         &[movement],
         &InsideBlockCtx {
-            active_effects: &no_effects,
+            active_effects,
             abilities: None,
             position: movement.to,
             width: dimensions.width,
@@ -475,7 +475,7 @@ fn jump_power(world: &World, position: Position) -> f32 {
     0.42 * block_jump_factor(world, position)
 }
 
-fn jump_boost_power(active_effects: &ActiveEffects) -> f32 {
+pub fn jump_boost_power(active_effects: &ActiveEffects) -> f32 {
     active_effects
         .get_level(MobEffect::JumpBoost)
         .map(|level| 0.1 * (level + 1) as f32)

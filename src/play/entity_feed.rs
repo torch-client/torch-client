@@ -13,8 +13,10 @@ use crate::client::tracking::{
     has_map, head_yaws, meta_index_18, on_grounds, passengers, velocities,
 };
 use crate::entities;
+use crate::entities::physics::{CollideMemo, MEMO_CELLS, RestMemo};
 
 pub(crate) mod entity_event {
+    pub const ARROW_POOF: u8 = 0;
     pub const JUMP: u8 = 1;
     pub const KINETIC_HIT: u8 = 2;
     pub const START_ATTACKING: u8 = 4;
@@ -1516,7 +1518,7 @@ pub(crate) fn collect_entities(
         }
     }
     let live: Vec<&EntityAnim> = ticked.iter().filter_map(|id| anims.get(id)).collect();
-    let out = std::sync::Arc::new(par_map(&live, |anim| (*anim).clone()));
+    let out = publish_snapshot(&live);
 
     drop(_snap_timer);
     drop(_anim_timer);
@@ -1549,6 +1551,43 @@ pub(crate) fn collect_entities(
     evict(equipment(), live);
 
     out
+}
+
+type SnapshotRing = [Option<std::sync::Arc<Vec<entities::feed::EntityAnim>>>; 2];
+
+const SNAPSHOT_SLACK: usize = 2;
+
+static SNAPSHOTS: crate::session::SideMutex<SnapshotRing> =
+    crate::session::SideMutex::new([None, None]);
+
+fn publish_snapshot(
+    live: &[&entities::feed::EntityAnim],
+) -> std::sync::Arc<Vec<entities::feed::EntityAnim>> {
+    let mut ring = SNAPSHOTS.lock().unwrap();
+    let recycled = ring[1].take().and_then(|mut spare| {
+        let buf = std::sync::Arc::get_mut(&mut spare)?;
+        if buf.capacity() > live.len().saturating_mul(SNAPSHOT_SLACK) {
+            return None;
+        }
+        buf.truncate(live.len());
+        let reused = buf.len();
+        let mut pairs: Vec<(&mut entities::feed::EntityAnim, &entities::feed::EntityAnim)> =
+            buf.iter_mut().zip(live.iter().copied()).collect();
+        par_for_each_mut(&mut pairs, |(dst, src)| dst.refresh_snapshot(src));
+        drop(pairs);
+        buf.extend(live[reused..].iter().map(|anim| (*anim).clone()));
+        Some(spare)
+    });
+    let out =
+        recycled.unwrap_or_else(|| std::sync::Arc::new(par_map(live, |anim| (*anim).clone())));
+    ring[1] = ring[0].replace(out.clone());
+    out
+}
+
+pub(crate) fn reset_snapshots() {
+    if let Ok(mut ring) = SNAPSHOTS.try_lock() {
+        *ring = [None, None];
+    }
 }
 
 fn evict<V>(map: &crate::session::SideMutex<HashMap<i32, V>>, keep: impl Fn(&i32) -> bool) {
@@ -1615,6 +1654,33 @@ fn cube_collide(axis: usize, entity: &Aabb, cell: AzBlockPos, mut movement: f64)
     movement
 }
 
+fn scan_range(area: &Aabb) -> ([i32; 3], [i32; 3]) {
+    use azalea_core::math::EPSILON;
+
+    let lo = [
+        (area.min.x - EPSILON).floor() as i32 - 1,
+        (area.min.y - EPSILON).floor() as i32 - 1,
+        (area.min.z - EPSILON).floor() as i32 - 1,
+    ];
+    let hi = [
+        (area.max.x + EPSILON).floor() as i32 + 1,
+        (area.max.y + EPSILON).floor() as i32 + 1,
+        (area.max.z + EPSILON).floor() as i32 + 1,
+    ];
+    (lo, hi)
+}
+
+fn unit_cube(pos: AzBlockPos) -> Aabb {
+    Aabb {
+        min: pos.to_vec3_floored(),
+        max: (pos + 1).to_vec3_floored(),
+    }
+}
+
+const UNLOADED_VERSION: u64 = 0;
+
+const _: () = assert!(MEMO_CELLS <= MAX_FAST_CELLS);
+
 fn sweep_cubes(axis: usize, entity: &Aabb, cells: &[AzBlockPos], mut movement: f64) -> f64 {
     use azalea_core::math::EPSILON;
 
@@ -1629,30 +1695,47 @@ fn sweep_cubes(axis: usize, entity: &Aabb, cells: &[AzBlockPos], mut movement: f
 
 impl ChunkLevel<'_> {
     fn full_cube_cells(&self, area: &Aabb, out: &mut [AzBlockPos]) -> Option<usize> {
-        use azalea_core::math::EPSILON;
+        let (lo, hi) = scan_range(area);
+        let mut found = 0;
+        let whole = self.scan_cubes(
+            lo,
+            hi,
+            |_, _, _| {},
+            |pos| {
+                if !area.intersects_aabb(&unit_cube(pos)) {
+                    return true;
+                }
+                if found == out.len() {
+                    return false;
+                }
+                out[found] = pos;
+                found += 1;
+                true
+            },
+        );
+        whole.then_some(found)
+    }
+
+    fn scan_cubes(
+        &self,
+        lo: [i32; 3],
+        hi: [i32; 3],
+        mut column: impl FnMut(i32, i32, u64),
+        mut full: impl FnMut(AzBlockPos) -> bool,
+    ) -> bool {
         use azalea_core::position::{ChunkBlockPos, ChunkPos, ChunkSectionPos};
         use azalea_physics::collision::BlockWithShape;
 
         let min_y = self.world.chunks.min_y();
-        let lo = [
-            (area.min.x - EPSILON).floor() as i32 - 1,
-            (area.min.y - EPSILON).floor() as i32 - 1,
-            (area.min.z - EPSILON).floor() as i32 - 1,
-        ];
-        let hi = [
-            (area.max.x + EPSILON).floor() as i32 + 1,
-            (area.max.y + EPSILON).floor() as i32 + 1,
-            (area.max.z + EPSILON).floor() as i32 + 1,
-        ];
-
         let section = ChunkSectionPos::block_to_section_coord;
-        let mut found = 0;
         for chunk_x in section(lo[0])..=section(hi[0]) {
             for chunk_z in section(lo[2])..=section(hi[2]) {
                 let chunk = self.world.chunks.get(&ChunkPos::new(chunk_x, chunk_z));
                 let Some(chunk) = chunk.as_deref().map(|c| c.read()) else {
+                    column(chunk_x, chunk_z, UNLOADED_VERSION);
                     continue;
                 };
+                column(chunk_x, chunk_z, chunk.version());
                 for x in lo[0].max(chunk_x * 16)..=hi[0].min(chunk_x * 16 + 15) {
                     for z in lo[2].max(chunk_z * 16)..=hi[2].min(chunk_z * 16 + 15) {
                         for y in lo[1]..=hi[1] {
@@ -1665,26 +1748,68 @@ impl ChunkLevel<'_> {
                             if state.is_collision_shape_empty() {
                                 continue;
                             }
-                            if !state.is_collision_shape_full() {
-                                return None;
+                            if !state.is_collision_shape_full() || !full(pos) {
+                                return false;
                             }
-                            if !area.intersects_aabb(&Aabb {
-                                min: pos.to_vec3_floored(),
-                                max: (pos + 1).to_vec3_floored(),
-                            }) {
-                                continue;
-                            }
-                            if found == out.len() {
-                                return None;
-                            }
-                            out[found] = pos;
-                            found += 1;
                         }
                     }
                 }
             }
         }
-        Some(found)
+        true
+    }
+
+    fn memo_current(&self, memo: &CollideMemo) -> bool {
+        use azalea_core::position::ChunkPos;
+
+        memo.columns[..memo.column_count]
+            .iter()
+            .all(|&(x, z, version)| {
+                let now = self
+                    .world
+                    .chunks
+                    .get(&ChunkPos::new(x, z))
+                    .map_or(UNLOADED_VERSION, |c| c.read().version());
+                now == version
+            })
+    }
+
+    fn fill_memo(&self, lo: [i32; 3], hi: [i32; 3], memo: &mut CollideMemo) -> bool {
+        memo.filled = false;
+        memo.lo = lo;
+        memo.hi = hi;
+        memo.column_count = 0;
+        memo.cell_count = 0;
+        let CollideMemo {
+            columns,
+            column_count,
+            cells,
+            cell_count,
+            ..
+        } = &mut *memo;
+        let whole = self.scan_cubes(
+            lo,
+            hi,
+            |x, z, version| {
+                if *column_count == columns.len() {
+                    columns[columns.len() - 1] = (x, z, u64::MAX);
+                    return;
+                }
+                columns[*column_count] = (x, z, version);
+                *column_count += 1;
+            },
+            |pos| {
+                cells[*cell_count] = [
+                    (pos.x - lo[0]) as u8,
+                    (pos.y - lo[1]) as u8,
+                    (pos.z - lo[2]) as u8,
+                ];
+                *cell_count += 1;
+                true
+            },
+        );
+        memo.filled = whole;
+        whole
     }
 
     fn collide_shapes(&self, mut aabb: Aabb, mut movement: AzVec3) -> [f64; 3] {
@@ -1720,23 +1845,14 @@ impl ChunkLevel<'_> {
         }
         [movement.x, movement.y, movement.z]
     }
-}
 
-impl entities::physics::Level for ChunkLevel<'_> {
-    fn collide(&self, min: [f64; 3], max: [f64; 3], movement: [f64; 3]) -> [f64; 3] {
-        let mut movement = AzVec3::new(movement[0], movement[1], movement[2]);
-        let mut aabb = Aabb {
-            min: AzVec3::new(min[0], min[1], min[2]),
-            max: AzVec3::new(max[0], max[1], max[2]),
-        };
-
+    fn collide_cubes(
+        &self,
+        mut aabb: Aabb,
+        mut movement: AzVec3,
+        cells: &[AzBlockPos],
+    ) -> [f64; 3] {
         let (entry_box, entry_movement) = (aabb, movement);
-        let mut cells = [AzBlockPos::new(0, 0, 0); MAX_FAST_CELLS];
-        let Some(found) = self.full_cube_cells(&aabb.expand_towards(movement), &mut cells) else {
-            return self.collide_shapes(aabb, movement);
-        };
-        let cells = &cells[..found];
-
         if movement.y != 0.0 {
             movement.y = sweep_cubes(1, &aabb, cells, movement.y);
             if movement.y != 0.0 {
@@ -1779,6 +1895,65 @@ impl entities::physics::Level for ChunkLevel<'_> {
             }
         }
         fast
+    }
+}
+
+fn query(min: [f64; 3], max: [f64; 3], movement: [f64; 3]) -> (Aabb, AzVec3) {
+    (
+        Aabb {
+            min: AzVec3::new(min[0], min[1], min[2]),
+            max: AzVec3::new(max[0], max[1], max[2]),
+        },
+        AzVec3::new(movement[0], movement[1], movement[2]),
+    )
+}
+
+impl entities::physics::Level for ChunkLevel<'_> {
+    fn collide(&self, min: [f64; 3], max: [f64; 3], movement: [f64; 3]) -> [f64; 3] {
+        let (aabb, movement) = query(min, max, movement);
+        let mut cells = [AzBlockPos::new(0, 0, 0); MAX_FAST_CELLS];
+        let Some(found) = self.full_cube_cells(&aabb.expand_towards(movement), &mut cells) else {
+            return self.collide_shapes(aabb, movement);
+        };
+        self.collide_cubes(aabb, movement, &cells[..found])
+    }
+
+    fn collide_resting(
+        &self,
+        min: [f64; 3],
+        max: [f64; 3],
+        movement: [f64; 3],
+        memo: &mut RestMemo,
+    ) -> [f64; 3] {
+        let (aabb, delta) = query(min, max, movement);
+        let area = aabb.expand_towards(delta);
+        let (lo, hi) = scan_range(&area);
+        let widths = (0..3).map(|i| hi[i] as i64 - lo[i] as i64 + 1);
+        let fits = widths.clone().all(|w| w > 0) && widths.product::<i64>() <= MEMO_CELLS as i64;
+        if !fits {
+            return self.collide(min, max, movement);
+        }
+
+        let memo = memo.get();
+        let covered = memo.filled && (0..3).all(|i| memo.lo[i] <= lo[i] && hi[i] <= memo.hi[i]);
+        if !(covered && self.memo_current(memo)) && !self.fill_memo(lo, hi, memo) {
+            return self.collide_shapes(aabb, delta);
+        }
+
+        let mut cells = [AzBlockPos::new(0, 0, 0); MEMO_CELLS];
+        let mut found = 0;
+        for offset in &memo.cells[..memo.cell_count] {
+            let pos = AzBlockPos::new(
+                memo.lo[0] + offset[0] as i32,
+                memo.lo[1] + offset[1] as i32,
+                memo.lo[2] + offset[2] as i32,
+            );
+            if area.intersects_aabb(&unit_cube(pos)) {
+                cells[found] = pos;
+                found += 1;
+            }
+        }
+        self.collide_cubes(aabb, delta, &cells[..found])
     }
 
     fn friction(&self, pos: [i32; 3]) -> f32 {

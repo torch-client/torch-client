@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use super::registry::{Id, spam as setting};
@@ -11,7 +10,7 @@ static COOLDOWN: AtomicU32 = AtomicU32::new(0);
 
 static EDGE: Edge = Edge::new(Id::Spam);
 
-pub fn tick(shared: &Arc<SharedMutex>) {
+pub fn tick(shared: &SharedMutex) {
     let s = store();
     match EDGE.poll(s) {
         Phase::Off | Phase::Stopped => return,

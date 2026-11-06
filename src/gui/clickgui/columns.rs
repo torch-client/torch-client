@@ -107,6 +107,10 @@ impl ClickGuiState {
         let look = self.look;
         let on = store().armed(m.id);
         let hovered = active && self.hit(ui, x, y, w, look.row_h);
+        #[cfg(feature = "audio")]
+        if hovered {
+            self.hover_row = Some(m.id);
+        }
         let bg = match (on, hovered) {
             (true, true) => look.accent_hi(),
             (true, false) => look.accent(),

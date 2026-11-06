@@ -24,7 +24,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 #ifdef VERTEX_POSITIONS
     let p = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0)).xyz;
     out.world_position = view.world_from_view * vec4<f32>(p, 1.0);
-    let aspect = view.clip_from_view[1][1] / view.clip_from_view[0][0];
+    let aspect = view.viewport.z / view.viewport.w;
     let f = 1.0 / tan(hand_fov * 0.5);
     let w = -p.z;
     out.position = vec4<f32>(p.x * f / aspect, p.y * f, w * (1.0 - hand_band) + hand_band * hand_near, w);

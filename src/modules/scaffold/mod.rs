@@ -4,8 +4,8 @@ mod target;
 mod tower;
 
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
-use std::sync::{Arc, Mutex};
 
 use azalea::Client;
 use azalea::entity::Physics;
@@ -184,7 +184,7 @@ pub(crate) fn note_hand_place(pos: BlockPos) {
 
 pub fn steer(
     bot: &Client,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     yaw: f32,
     pitch: f32,
     flags: u8,
@@ -245,7 +245,7 @@ pub fn steer(
     result
 }
 
-pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
+pub fn tick(bot: &Client, shared: &SharedMutex) {
     if !enabled() {
         return;
     }
@@ -419,7 +419,7 @@ fn auto_block(bot: &Client, run: &mut Run) {
     }
 }
 
-fn decide(bot: &Client, shared: &Arc<SharedMutex>, run: &mut Run, snap: &Snap) -> Out {
+fn decide(bot: &Client, shared: &SharedMutex, run: &mut Run, snap: &Snap) -> Out {
     let s = store();
     let me = &snap.me;
 

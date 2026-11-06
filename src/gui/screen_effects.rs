@@ -1,4 +1,5 @@
 use crate::gui::painter::{self, Painter};
+use crate::util::mth::as_8bit_channel;
 
 const FIRE_X_OFFSET: f32 = 0.24;
 const FIRE_Y_OFFSET: f32 = -0.3;
@@ -39,8 +40,12 @@ fn vignette_color(border: &azalea::world::WorldBorder, x: f64, z: f64) -> u32 {
         return 0;
     }
     let strength = (1.0 - (dist / warning) as f32).clamp(0.0, 1.0);
-    let gb = (strength * 255.0) as u32;
+    let gb = as_8bit_channel(strength);
     0xFF00_0000 | gb << 8 | gb
+}
+
+pub(crate) fn screen_effect_scale(screen_effects: u32) -> f32 {
+    screen_effects.min(100) as f32 / 100.0
 }
 
 impl ScreenEffects {
@@ -56,7 +61,7 @@ impl ScreenEffects {
         let spectator = view.gamemode == crate::session::Gamemode::Spectator;
         let view_blocked = first_person && !spectator && view_blocking(view);
         let portal = view.portal;
-        let scale = screen_effects.min(100) as f32 / 100.0;
+        let scale = screen_effect_scale(screen_effects);
         let confusion = if portal <= 0.0 && view.nausea > 0.0 && scale < 1.0 {
             view.nausea * (1.0 - scale)
         } else {
@@ -81,7 +86,7 @@ fn view_blocking(view: &crate::renderer::frame_view::FrameView) -> bool {
     else {
         return false;
     };
-    let world = world.read();
+    let world = crate::client::tracking::read_lock(&world, "view_blocking");
     let body = &view.local_body;
     let [x, y, z] = view.player_pos;
     let eye = y + body.eye_height as f64;
@@ -159,7 +164,7 @@ pub fn draw_portal(p: &mut Painter, fx: &ScreenEffects, vw: f32, vh: f32) {
     if alpha < 1.0 {
         alpha = alpha.powi(4) * (1.0 - PORTAL_MIN_ALPHA) + PORTAL_MIN_ALPHA;
     }
-    let argb = painter::argb(alpha, 0x00FF_FFFF);
+    let argb = painter::white(alpha);
     let v0 = fx.portal_frame as f32 / PORTAL_FRAMES as f32;
     let v1 = v0 + 1.0 / PORTAL_FRAMES as f32;
     p.sprite_quad(
@@ -176,10 +181,10 @@ pub fn draw_confusion(p: &mut Painter, fx: &ScreenEffects, vw: f32, vh: f32) {
     if strength <= 0.0 {
         return;
     }
-    let size = NAUSEA_SIZE.0 + (NAUSEA_SIZE.1 - NAUSEA_SIZE.0) * strength;
+    let size = crate::util::mth::lerp(strength, NAUSEA_SIZE.0, NAUSEA_SIZE.1);
     let (w, h) = (vw * size, vh * size);
     let (x, y) = ((vw - w) / 2.0, (vh - h) / 2.0);
-    let channel = |c: f32| ((c * strength).clamp(0.0, 1.0) * 255.0).round() as u32;
+    let channel = |c: f32| as_8bit_channel((c * strength).clamp(0.0, 1.0));
     let argb = 0xFF00_0000
         | channel(NAUSEA_TINT[0]) << 16
         | channel(NAUSEA_TINT[1]) << 8

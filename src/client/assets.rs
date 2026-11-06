@@ -237,10 +237,7 @@ pub(crate) fn mount() -> bool {
     #[cfg(feature = "asset_download")]
     match jar_layer.get(LANGUAGES_KEY) {
         Some(table) => super::language::adopt(table),
-        None => log_info!(
-            "assets",
-            "the {version} archive lists no languages; English only"
-        ),
+        None => log_info!("assets", "the {version} archive lists no languages"),
     }
 
     let index = meta["index"].as_str();
@@ -546,6 +543,16 @@ impl Stage {
     }
 }
 
+pub(crate) const FETCHES_SOUNDS: bool = cfg!(all(feature = "audio", not(target_arch = "wasm32")));
+
+pub(crate) fn offers_assets() -> bool {
+    missing() == 0 || missing() & piece::OBJECTS != 0
+}
+
+pub(crate) fn offers_sounds() -> bool {
+    FETCHES_SOUNDS && (missing() == 0 || missing() & piece::SOUNDS != 0)
+}
+
 pub(crate) struct Download {
     stage: AtomicU8,
     done: AtomicU64,
@@ -575,6 +582,16 @@ pub(crate) fn download() -> &'static Download {
 
 #[cfg(not(target_arch = "wasm32"))]
 static MISSING: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn missing() -> u8 {
+    MISSING.load(Ordering::Relaxed)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn missing() -> u8 {
+    0
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 static WANTED: AtomicU8 = AtomicU8::new(0);
@@ -619,6 +636,11 @@ pub(crate) fn check_missing() -> bool {
     false
 }
 
+#[cfg(feature = "asset_download")]
+pub(super) fn archived_languages() -> Option<&'static [u8]> {
+    crate::platform::assets::archive::get(LANGUAGES_KEY)
+}
+
 pub(crate) fn adopt_sounds() {
     #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
     if SOUNDS_FETCHED.swap(false, Ordering::Relaxed)
@@ -661,8 +683,12 @@ impl Download {
         )
     }
 
+    pub(crate) fn sounds_skipped(&self) -> bool {
+        self.sound_skip.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn sounds_running(&self) -> bool {
-        cfg!(all(feature = "audio", not(target_arch = "wasm32")))
+        FETCHES_SOUNDS
             && self.sound_active.load(Ordering::Relaxed)
             && !self.sound_skip.load(Ordering::Relaxed)
     }
@@ -685,7 +711,7 @@ impl Download {
         self.fail(short, detail);
     }
 
-    pub(crate) fn start(&'static self, version: String) {
+    pub(crate) fn start(&'static self, version: String, sounds: bool) {
         if matches!(
             self.stage(),
             Stage::Asking
@@ -701,7 +727,7 @@ impl Download {
         self.total.store(0, Ordering::Relaxed);
         self.sound_done.store(0, Ordering::Relaxed);
         self.sound_total.store(0, Ordering::Relaxed);
-        self.sound_skip.store(false, Ordering::Relaxed);
+        self.sound_skip.store(!sounds, Ordering::Relaxed);
         *self.error.lock().unwrap() = "";
         self.set(Stage::Asking);
 
@@ -827,6 +853,18 @@ impl Download {
         let sha1 = client["sha1"].as_str().unwrap_or("");
         let size = client["size"].as_u64().unwrap_or(0);
 
+        let id = meta["assetIndex"]["id"]
+            .as_str()
+            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+        let index_url = meta["assetIndex"]["url"]
+            .as_str()
+            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+        let index = get_json(index_url).await?;
+        let expected = expected_objects(id);
+        let objects_size =
+            listed_size(&listed_objects(&index, |key| object_wanted(expected, key))?);
+        self.total.store(size + objects_size, Ordering::Relaxed);
+
         let Some(jar) = self.fetch_jar(url, sha1, size).await? else {
             return Ok(false);
         };
@@ -846,14 +884,6 @@ impl Download {
         let wants_languages = cfg!(feature = "asset_download");
         let mut index_id = None;
         if CAN_FETCH_OBJECTS && (wants_objects != 0 || wants_sounds || wants_languages) {
-            let id = meta["assetIndex"]["id"]
-                .as_str()
-                .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
-            let index_url = meta["assetIndex"]["url"]
-                .as_str()
-                .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
-            let index = get_json(index_url).await?;
-
             #[cfg(feature = "asset_download")]
             match super::language::table_from_index(&index, &|| self.cancelled()).await {
                 Ok(Some(table)) => entries.push((LANGUAGES_KEY.to_owned(), table)),
@@ -900,6 +930,8 @@ impl Download {
             }
             index_id = (!cfg!(target_arch = "wasm32")).then(|| id.to_owned());
         }
+        self.total
+            .store(self.done.load(Ordering::Relaxed), Ordering::Relaxed);
 
         #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
         if !sounds.finish()? {
@@ -920,7 +952,6 @@ impl Download {
         size: u64,
     ) -> Result<Option<Vec<u8>>, Failure> {
         log_info!("assets", "downloading {size} bytes from {url}");
-        self.total.store(size, Ordering::Relaxed);
         self.done.store(0, Ordering::Relaxed);
         self.set(Stage::Downloading);
 
@@ -930,9 +961,6 @@ impl Download {
                 reported = 0;
             }
             self.done.store(done, Ordering::Relaxed);
-            if total > 0 {
-                self.total.store(total, Ordering::Relaxed);
-            }
             if done >= reported + REPORT_STEP {
                 reported = done;
                 log_info!("assets", "jar: {}", progress_line(done, total.max(size)));
@@ -970,18 +998,14 @@ impl Download {
         let entries =
             zip::entries(jar).map_err(|e| Failure::new("The jar is not a readable archive", e))?;
 
-        let count = entries.len();
-        self.total.store(count as u64, Ordering::Relaxed);
-        self.done.store(0, Ordering::Relaxed);
         self.set(Stage::Extracting);
-        log_info!("assets", "reading {count} entries");
+        log_info!("assets", "reading {} entries", entries.len());
 
         let mut out = Vec::new();
-        for (i, entry) in entries.iter().enumerate() {
+        for entry in &entries {
             if self.cancelled() {
                 return Ok(None);
             }
-            self.done.store(i as u64, Ordering::Relaxed);
 
             let Some(key) = jar_key(&entry.name) else {
                 continue;
@@ -1000,7 +1024,6 @@ impl Download {
             out.push((PACK_ICON_KEY.to_owned(), bytes));
         }
 
-        self.done.store(count as u64, Ordering::Relaxed);
         let bytes: usize = out.iter().map(|(_, b)| b.len()).sum();
         log_info!("assets", "kept {} entries, {bytes} bytes", out.len());
         Ok(Some(out))
@@ -1012,30 +1035,14 @@ impl Download {
         want: impl Fn(&str) -> bool,
     ) -> Result<Option<Vec<(String, Vec<u8>)>>, Failure> {
         self.set(Stage::Fetching);
-        self.done.store(0, Ordering::Relaxed);
-        self.total.store(0, Ordering::Relaxed);
 
-        let objects = index["objects"]
-            .as_object()
-            .ok_or_else(|| Failure::plain("Mojang sent something unreadable"))?;
-        let wanted: Vec<(String, String, u64)> = objects
-            .iter()
-            .filter_map(|(name, info)| {
-                let key = name.strip_prefix(NAMESPACE_PREFIX)?;
-                if !want(key) {
-                    return None;
-                }
-                let key = format!("{ASSET_KEY_PREFIX}{key}");
-                let hash = info["hash"].as_str().filter(|h| h.len() >= 2)?;
-                Some((key, hash.to_owned(), info["size"].as_u64().unwrap_or(0)))
-            })
-            .collect();
-        let total: u64 = wanted.iter().map(|(_, _, size)| size).sum();
-        self.total.store(total, Ordering::Relaxed);
+        let wanted = listed_objects(index, want)?;
+        let total = listed_size(&wanted);
+        let mut done = self.done.load(Ordering::Relaxed);
+        self.total.store(done + total, Ordering::Relaxed);
         log_info!("assets", "fetching {} objects, {total} bytes", wanted.len());
 
         let mut out = Vec::with_capacity(wanted.len());
-        let mut done = 0u64;
         for (key, hash, _) in wanted {
             if self.cancelled() {
                 return Ok(None);
@@ -1086,6 +1093,9 @@ impl Download {
             log_info!("assets", "the sound set for index {index_id} is installed");
             return Ok(true);
         }
+        if self.sound_skip.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
         self.sound_active.store(true, Ordering::Relaxed);
         let result = self.fetch_sounds(index_url, index_id).await;
         self.sound_active.store(false, Ordering::Relaxed);
@@ -1118,7 +1128,7 @@ impl Download {
         let defs = crate::audio::defs::Defs::parse(&defs_text)
             .map_err(|e| Failure::new("sounds.json will not parse", e))?;
 
-        let wanted: Vec<(String, String, u64)> = defs
+        let wanted: Vec<Listed> = defs
             .object_keys()
             .into_iter()
             .filter_map(|key| {
@@ -1126,7 +1136,7 @@ impl Download {
                 Some((key, hash, size))
             })
             .collect();
-        let total: u64 = wanted.iter().map(|(_, _, size)| size).sum();
+        let total = listed_size(&wanted);
         self.sound_total.store(total, Ordering::Relaxed);
         log_info!(
             "assets",
@@ -1202,6 +1212,45 @@ impl Download {
     async fn fetch_object(&self, hash: &str) -> Result<Option<Vec<u8>>, Failure> {
         get_object(hash, &|| self.cancelled()).await
     }
+}
+
+type Listed = (String, String, u64);
+
+fn listed_size(list: &[Listed]) -> u64 {
+    list.iter().map(|(_, _, size)| size).sum()
+}
+
+fn listed_objects(
+    index: &serde_json::Value,
+    want: impl Fn(&str) -> bool,
+) -> Result<Vec<Listed>, Failure> {
+    let objects = index["objects"]
+        .as_object()
+        .ok_or_else(|| Failure::plain("Mojang sent something unreadable"))?;
+    Ok(objects
+        .iter()
+        .filter_map(|(name, info)| {
+            let key = name.strip_prefix(NAMESPACE_PREFIX)?;
+            if !want(key) {
+                return None;
+            }
+            let key = format!("{ASSET_KEY_PREFIX}{key}");
+            let hash = info["hash"].as_str().filter(|h| h.len() >= 2)?;
+            Some((key, hash.to_owned(), info["size"].as_u64().unwrap_or(0)))
+        })
+        .collect())
+}
+
+fn expected_objects(id: &str) -> u8 {
+    let mut wanted = 0;
+    if CAN_FETCH_OBJECTS {
+        wanted |= piece::PANORAMA;
+        if cfg!(feature = "full_font") {
+            wanted |= piece::UNIFONT;
+        }
+    }
+    let held = store::index_keys(id).map_or(0, |keys| objects_hold(|key| keys.contains(key)));
+    if wanted & !held == 0 { 0 } else { wanted }
 }
 
 pub(super) async fn get_object(

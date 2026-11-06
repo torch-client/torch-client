@@ -5,7 +5,6 @@ use azalea::{Client, FormattedText};
 use azalea_core::bitset::BitSet;
 use azalea_protocol::packets::game::c_player_chat::{ClientboundPlayerChat, FilterMask};
 use azalea_registry::identifier::Identifier;
-use std::sync::Arc;
 
 use crate::client::chat_text;
 use crate::session::{ChatEntry, ChatTag, SharedMutex};
@@ -48,7 +47,7 @@ const CHAT_DISABLED_KEYS: &[(&str, &str, bool)] = &[
     ),
 ];
 
-pub(crate) fn handle_chat(bot: &Client, shared: &Arc<SharedMutex>, m: ChatPacket) {
+pub(crate) fn handle_chat(bot: &Client, shared: &SharedMutex, m: ChatPacket) {
     if let (Some(sender), msg) = m.split_sender_and_content() {
         log_info!("chat", "<{sender}> {msg}");
     } else {
@@ -170,7 +169,7 @@ pub(crate) fn handle_chat(bot: &Client, shared: &Arc<SharedMutex>, m: ChatPacket
     }
 }
 
-fn acknowledge(bot: &Client, shared: &Arc<SharedMutex>, p: &ClientboundPlayerChat) {
+fn acknowledge(bot: &Client, shared: &SharedMutex, p: &ClientboundPlayerChat) {
     use azalea_protocol::packets::game::s_chat_ack::ServerboundChatAck;
 
     const ACK_AFTER: u32 = 64;

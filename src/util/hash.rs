@@ -7,9 +7,26 @@ pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+#[cfg(self_update)]
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    <sha2::Sha256 as sha2::Digest>::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(self_update)]
+    #[test]
+    fn sha256_matches_the_published_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn sha1_matches_the_published_vectors() {

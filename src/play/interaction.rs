@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc, Mutex,
+    Mutex,
     atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
@@ -96,7 +96,7 @@ pub(crate) fn reset_session_state() {
     }
 }
 
-pub fn handle_interaction(bot: &Client, shared: &Arc<SharedMutex>) {
+pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
     let hit = block_hit(bot);
 
     let target = hit
@@ -428,7 +428,7 @@ fn break_step(
 
 fn apply_break(
     bot: &Client,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     hit: Option<&BlockHitResult>,
     held: bool,
     clicked: bool,
@@ -524,13 +524,7 @@ fn place_step(
     (swing, RIGHT_CLICK_DELAY)
 }
 
-fn apply_place(
-    bot: &Client,
-    shared: &Arc<SharedMutex>,
-    held: bool,
-    clicked: bool,
-    hands_busy: bool,
-) {
+fn apply_place(bot: &Client, shared: &SharedMutex, held: bool, clicked: bool, hands_busy: bool) {
     let game_mode = bot
         .component::<GameMode>()
         .map(|gm| *gm)
@@ -601,13 +595,16 @@ enum Used {
     Done { swing: bool },
 }
 
-fn use_hand(bot: &Client, shared: &Arc<SharedMutex>, hand: InteractionHand, click: &Click) -> Used {
+fn use_hand(bot: &Client, shared: &SharedMutex, hand: InteractionHand, click: &Click) -> Used {
     if predict_place(bot, click.secondary_use, hand) {
         consume_held_item(bot, hand);
         item_used(shared, hand);
         return Used::Done { swing: true };
     }
-    if predict_bucket_use(bot, hand) {
+    let block_takes_it = matches!(click.hit, Some(HitResult::Block(hit))
+        if !hit.miss && !click.spectator && used_block_interaction(bot, hit, hand, click.secondary_use));
+    let entity_first = matches!(click.hit, Some(HitResult::Entity(_)));
+    if !block_takes_it && !entity_first && predict_bucket_use(bot, shared, hand) {
         item_used(shared, hand);
         return Used::Done { swing: true };
     }
@@ -623,19 +620,37 @@ fn use_hand(bot: &Client, shared: &Arc<SharedMutex>, hand: InteractionHand, clic
             match interact_entity(bot, hit, click, hand, stack.map(|s| s.kind)) {
                 EntityUse::Success => return Used::Done { swing: true },
                 EntityUse::Unknown => return Used::Done { swing: false },
-                EntityUse::Pass => {}
+                EntityUse::Pass => {
+                    if predict_bucket_use(bot, shared, hand) {
+                        item_used(shared, hand);
+                        return Used::Done { swing: true };
+                    }
+                }
             }
         }
         Some(HitResult::Block(hit)) if !hit.miss => {
             if !within_border(bot, hit.block_pos) {
                 return Used::Done { swing: false };
             }
-            let consumed =
-                !click.spectator && used_block_interaction(bot, hit, hand, click.secondary_use);
+            let consumed = block_takes_it;
             if consumed {
-                open_command_block(bot, shared, hit);
+                open_game_master_block(bot, shared, hit);
             }
             send_use_item_on(bot, hit, consumed, hand);
+            #[cfg(feature = "audio")]
+            if consumed && let Some(stack) = stack.as_ref().filter(|s| !s.on_cooldown) {
+                use crate::play::player_sounds as sounds;
+                if sounds::item_runs_past_block(bot, stack.kind, hit) {
+                    sounds::item_used_on(
+                        bot,
+                        shared,
+                        stack.kind,
+                        hit,
+                        axe_declines(bot, hand, click),
+                    );
+                }
+                sounds::bottle_on_hive(bot, stack.kind, hit);
+            }
             if consumed {
                 return Used::Done { swing: true };
             }
@@ -645,6 +660,14 @@ fn use_hand(bot: &Client, shared: &Arc<SharedMutex>, hand: InteractionHand, clic
             if let Some(stack) = stack
                 && !stack.on_cooldown
             {
+                #[cfg(feature = "audio")]
+                crate::play::player_sounds::item_used_on(
+                    bot,
+                    shared,
+                    stack.kind,
+                    hit,
+                    axe_declines(bot, hand, click),
+                );
                 if stack.kind == ItemKind::FireworkRocket && !fall_flying(bot) {
                     return Used::Done { swing: true };
                 }
@@ -662,6 +685,21 @@ fn use_hand(bot: &Client, shared: &Arc<SharedMutex>, hand: InteractionHand, clic
         Some(stack) => use_item(bot, shared, hand, stack, click),
         None => Used::Pass,
     }
+}
+
+#[cfg(feature = "audio")]
+fn axe_declines(bot: &Client, hand: InteractionHand, click: &Click) -> bool {
+    use azalea_inventory::components::BlocksAttacks;
+
+    hand == InteractionHand::Main
+        && !click.secondary_use
+        && bot
+            .component::<azalea::entity::inventory::Inventory>()
+            .is_ok_and(|inv| {
+                inv.get_equipment(InteractionHand::Off.equipment())
+                    .and_then(ItemStack::as_present)
+                    .is_some_and(|off| off.get_component::<BlocksAttacks>().is_some())
+            })
 }
 
 fn within_border(bot: &Client, pos: BlockPos) -> bool {
@@ -691,6 +729,10 @@ fn interact_entity(
     let Some(target) = entity_target(bot, hit.entity) else {
         return EntityUse::Unknown;
     };
+    #[cfg(feature = "audio")]
+    if let Some(item) = held {
+        crate::play::player_sounds::dye_sheep(bot, hit.entity, item);
+    }
     entity_use(target, click.secondary_use, held)
 }
 
@@ -869,7 +911,7 @@ fn other_entity_use(
 
 fn use_item(
     bot: &Client,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     hand: InteractionHand,
     stack: HandStack,
     click: &Click,
@@ -881,11 +923,20 @@ fn use_item(
     if stack.on_cooldown {
         return Used::Pass;
     }
-    let used = if stack.use_duration > 0 {
+    if stack.kind == ItemKind::Trident && !crate::play::riptide::can_start_use(bot, hand) {
+        return Used::Pass;
+    }
+    let used = if stack.use_duration > 0 && stack.kind != ItemKind::Brush {
         if !start_use(bot, shared, hand, &stack) {
             return Used::Pass;
         }
-        Used::Done { swing: false }
+        #[cfg(feature = "audio")]
+        if stack.kind == ItemKind::Spyglass {
+            crate::play::player_sounds::spyglass(bot, true);
+        }
+        Used::Done {
+            swing: is_bundle(stack.kind),
+        }
     } else {
         let used = match instant_use(bot, hand, &stack) {
             Used::Pass => return Used::Pass,
@@ -911,12 +962,7 @@ fn use_item(
     used
 }
 
-fn start_use(
-    bot: &Client,
-    shared: &Arc<SharedMutex>,
-    hand: InteractionHand,
-    stack: &HandStack,
-) -> bool {
+fn start_use(bot: &Client, shared: &SharedMutex, hand: InteractionHand, stack: &HandStack) -> bool {
     if stack.needs_appetite && !can_eat(bot) {
         return false;
     }
@@ -1047,10 +1093,14 @@ fn instant_use(bot: &Client, hand: InteractionHand, stack: &HandStack) -> Used {
         | I::TropicalFishBucket
         | I::AxolotlBucket
         | I::TadpoleBucket => pass_unless(pov_hit(bot, Fluid::None).is_some(), SUCCESS),
-        I::GlassBottle => pass_unless(
-            fluid_at(pov_hit(bot, Fluid::SourceOnly)).kind == FluidKind::Water,
-            SUCCESS,
-        ),
+        I::GlassBottle => {
+            let fills = fluid_at(pov_hit(bot, Fluid::SourceOnly)).kind == FluidKind::Water;
+            #[cfg(feature = "audio")]
+            if fills {
+                crate::play::player_sounds::bottle_filled(bot);
+            }
+            pass_unless(fills, SUCCESS)
+        }
         I::WritableBook
         | I::WrittenBook
         | I::WindCharge
@@ -1065,8 +1115,12 @@ fn instant_use(bot: &Client, hand: InteractionHand, stack: &HandStack) -> Used {
         | I::FishingRod
         | I::ExperienceBottle
         | I::EnderPearl => SUCCESS,
-        _ if id.ends_with("bundle") => SUCCESS,
-        I::Trident | I::Spyglass | I::GoatHorn => CONSUME,
+        I::GoatHorn => {
+            #[cfg(feature = "audio")]
+            crate::play::player_sounds::goat_horn(bot, hand);
+            start_using_item(stack.kind, 140, hand, None);
+            CONSUME
+        }
         _ if id.ends_with("_boat") || id.ends_with("_raft") => {
             pass_unless(pov_hit(bot, Fluid::Any).is_some(), SUCCESS)
         }
@@ -1080,6 +1134,14 @@ fn instant_use(bot: &Client, hand: InteractionHand, stack: &HandStack) -> Used {
 }
 
 fn pov_hit(bot: &Client, fluid: azalea::physics::clip::FluidPickType) -> Option<BlockState> {
+    let hit = pov_block_hit(bot, fluid)?;
+    bot.world().ok()?.read().get_block_state(hit.block_pos)
+}
+
+fn pov_block_hit(
+    bot: &Client,
+    fluid: azalea::physics::clip::FluidPickType,
+) -> Option<BlockHitResult> {
     use azalea::physics::clip::{BlockShapeType, ClipContext, clip};
 
     let eye = bot.eye_position().ok()?;
@@ -1100,10 +1162,7 @@ fn pov_hit(bot: &Client, fluid: azalea::physics::clip::FluidPickType) -> Option<
             fluid_pick_type: fluid,
         },
     );
-    if hit.miss {
-        return None;
-    }
-    world.get_block_state(hit.block_pos)
+    (!hit.miss).then_some(hit)
 }
 
 fn has_ammo(bot: &Client, fireworks: bool) -> bool {
@@ -1180,7 +1239,7 @@ pub(crate) fn note_use_completed() {
     USE_COMPLETED.store(true, Ordering::Relaxed);
 }
 
-fn complete_using_item(bot: &Client, shared: &Arc<SharedMutex>) {
+fn complete_using_item(bot: &Client, shared: &SharedMutex) {
     let (item, consume, hand) = {
         let mut use_item = USE_ITEM.lock().unwrap();
         if !use_item.started {
@@ -1189,6 +1248,10 @@ fn complete_using_item(bot: &Client, shared: &Arc<SharedMutex>) {
         (use_item.item, use_item.consume.take(), use_item.hand)
     };
     let (Some(kind), Some(consume)) = (item, consume) else {
+        #[cfg(feature = "audio")]
+        if item == Some(ItemKind::Spyglass) {
+            crate::play::player_sounds::spyglass(bot, false);
+        }
         stop_using_item();
         return;
     };
@@ -1219,10 +1282,21 @@ fn release_using_item(bot: &Client) {
         direction: Direction::Down,
         seq: 0,
     });
+    let (item, remaining, hand) = {
+        let use_item = USE_ITEM.lock().unwrap();
+        (use_item.item, use_item.remaining, use_item.hand)
+    };
+    if item == Some(ItemKind::Trident) && held_item_kind(bot, hand) == item {
+        crate::play::riptide::release(bot, hand, HELD_INDEFINITELY - remaining);
+    }
+    #[cfg(feature = "audio")]
+    if item == Some(ItemKind::Spyglass) && held_item_kind(bot, hand) == item {
+        crate::play::player_sounds::spyglass(bot, false);
+    }
     stop_using_item();
 }
 
-fn updating_using_item(bot: &Client, shared: &Arc<SharedMutex>) {
+fn updating_using_item(bot: &Client, shared: &SharedMutex) {
     let (started, item, hand) = {
         let use_item = USE_ITEM.lock().unwrap();
         (use_item.started, use_item.item, use_item.hand)
@@ -1234,16 +1308,35 @@ fn updating_using_item(bot: &Client, shared: &Arc<SharedMutex>) {
         stop_using_item();
         return;
     }
-    let due = {
+    let (due, _remaining) = {
         let mut use_item = USE_ITEM.lock().unwrap();
         let remaining = use_item.remaining;
         use_item.remaining -= 1;
-        use_item
+        let due = use_item
             .consume
             .as_ref()
             .filter(|consume| consume.should_emit(remaining))
-            .cloned()
+            .cloned();
+        (due, remaining)
     };
+    #[cfg(feature = "audio")]
+    if item == Some(ItemKind::Brush)
+        && _remaining >= 0
+        && (BRUSH_USE_DURATION - _remaining + 1) % 10 == 5
+        && let Some(hit) = block_hit(bot)
+        && let Ok(world) = bot.world()
+        && let Some(state) = world.read().get_block_state(hit.block_pos)
+    {
+        crate::play::player_sounds::brush_stroke(state, hit.block_pos);
+    }
+    #[cfg(feature = "audio")]
+    if item.is_some_and(is_bundle)
+        && _remaining > 0
+        && (_remaining == BUNDLE_USE_DURATION
+            || (_remaining < BUNDLE_USE_DURATION - 10 && _remaining % 2 == 0))
+    {
+        crate::play::player_sounds::bundle_drop(bot, hand, _remaining == BUNDLE_USE_DURATION);
+    }
     if let (Some(consume), Some(kind)) = (due, item) {
         crate::play::item_use::emit_local(
             bot,
@@ -1255,7 +1348,7 @@ fn updating_using_item(bot: &Client, shared: &Arc<SharedMutex>) {
     }
 }
 
-fn sync_server_using_item(bot: &Client, shared: &Arc<SharedMutex>) {
+fn sync_server_using_item(bot: &Client, shared: &SharedMutex) {
     let completed = USE_COMPLETED.swap(false, Ordering::Relaxed);
     if completed {
         complete_using_item(bot, shared);
@@ -1304,18 +1397,32 @@ fn held_item_kind(bot: &Client, hand: InteractionHand) -> Option<ItemKind> {
 fn use_duration(held: &azalea_inventory::ItemStackData) -> i32 {
     use azalea_inventory::components::{BlocksAttacks, KineticWeapon};
 
-    const HELD_INDEFINITELY: i32 = 72000;
-
     if let Some(consume) = Consumption::of(held) {
         return consume.ticks;
     }
-    if held.get_component::<BlocksAttacks>().is_some()
+    if held.kind == ItemKind::Trident
+        || held.get_component::<BlocksAttacks>().is_some()
         || held.get_component::<KineticWeapon>().is_some()
     {
         return HELD_INDEFINITELY;
     }
-    0
+    match held.kind {
+        ItemKind::Spyglass => SPYGLASS_USE_DURATION,
+        ItemKind::Brush => BRUSH_USE_DURATION,
+        kind if is_bundle(kind) => BUNDLE_USE_DURATION,
+        _ => 0,
+    }
 }
+
+const SPYGLASS_USE_DURATION: i32 = 1200;
+const BRUSH_USE_DURATION: i32 = 200;
+const BUNDLE_USE_DURATION: i32 = 200;
+
+fn is_bundle(kind: ItemKind) -> bool {
+    azalea_inventory::bundle::is_bundle(kind)
+}
+
+const HELD_INDEFINITELY: i32 = 72000;
 
 fn send_use_item_on(bot: &Client, hit: &BlockHitResult, interacted: bool, hand: InteractionHand) {
     use azalea_protocol::packets::game::s_use_item_on::ServerboundUseItemOn;
@@ -1393,6 +1500,18 @@ fn predict_open_toggle(bot: &Client, hit: &BlockHitResult) {
         return;
     };
 
+    #[cfg(feature = "audio")]
+    {
+        let clicked = world.read().get_block_state(hit.block_pos);
+        let may_build = !matches!(
+            bot.component::<GameMode>().map(|gm| *gm),
+            Ok(GameMode::Adventure)
+        );
+        if let Some(clicked) = clicked {
+            crate::play::player_sounds::block_used(clicked, hit.block_pos, may_build);
+        }
+    }
+
     let writes = {
         let world = world.read();
         let Some(old) = world.get_block_state(hit.block_pos) else {
@@ -1426,7 +1545,7 @@ fn predict_open_toggle(bot: &Client, hit: &BlockHitResult) {
     }
 }
 
-pub(crate) fn swing_hand(bot: &Client, shared: &Arc<SharedMutex>, hand: InteractionHand) {
+pub(crate) fn swing_hand(bot: &Client, shared: &SharedMutex, hand: InteractionHand) {
     use azalea_protocol::packets::game::s_swing::ServerboundSwing;
 
     crate::client::tick::swing_local_player(hand == InteractionHand::Off, shared);
@@ -1435,7 +1554,7 @@ pub(crate) fn swing_hand(bot: &Client, shared: &Arc<SharedMutex>, hand: Interact
     });
 }
 
-fn item_used(shared: &Arc<SharedMutex>, hand: InteractionHand) {
+fn item_used(shared: &SharedMutex, hand: InteractionHand) {
     let mut s = shared.lock().unwrap();
     let used = &mut s.session.item_used[hand as usize];
     *used = used.wrapping_add(1);
@@ -1464,10 +1583,10 @@ fn consume_held_item(bot: &Client, hand: InteractionHand) {
     }
 }
 
-fn fill_held_bucket(bot: &Client, is_lava: bool, hand: InteractionHand) {
+fn fill_held_bucket(bot: &Client, filled: ItemKind, hand: InteractionHand) {
     if !matches!(
         bot.component::<GameMode>().map(|gm| *gm),
-        Ok(GameMode::Survival) | Ok(GameMode::Creative)
+        Ok(GameMode::Survival)
     ) {
         return;
     }
@@ -1482,11 +1601,7 @@ fn fill_held_bucket(bot: &Client, is_lava: bool, hand: InteractionHand) {
         && data.kind == ItemKind::Bucket
         && data.count == 1
     {
-        data.kind = if is_lava {
-            ItemKind::LavaBucket
-        } else {
-            ItemKind::WaterBucket
-        };
+        data.kind = filled;
     }
 }
 
@@ -1512,10 +1627,26 @@ fn used_block_interaction(
     }
     let Ok(world) = bot.world() else { return false };
     let state = world.read().get_block_state(hit.block_pos);
-    state.is_some_and(crate::play::placement::has_use_interaction)
+    let held = held_item_kind(bot, hand);
+    state.is_some_and(|state| {
+        crate::play::placement::has_use_interaction(state) || cauldron_takes(state, held)
+    })
 }
 
-fn open_command_block(bot: &Client, shared: &Arc<SharedMutex>, hit: &BlockHitResult) {
+fn cauldron_takes(state: BlockState, held: Option<ItemKind>) -> bool {
+    use azalea_registry::builtin::BlockKind;
+    let fills = matches!(
+        held,
+        Some(ItemKind::WaterBucket | ItemKind::LavaBucket | ItemKind::PowderSnowBucket)
+    );
+    match state.as_block_kind() {
+        BlockKind::Cauldron => fills,
+        BlockKind::LavaCauldron => fills || held == Some(ItemKind::Bucket),
+        _ => false,
+    }
+}
+
+fn open_game_master_block(bot: &Client, shared: &SharedMutex, hit: &BlockHitResult) {
     let creative = bot
         .component::<GameMode>()
         .is_ok_and(|gm| *gm == GameMode::Creative);
@@ -1526,9 +1657,56 @@ fn open_command_block(bot: &Client, shared: &Arc<SharedMutex>, hit: &BlockHitRes
     let Some(state) = world.read().get_block_state(hit.block_pos) else {
         return;
     };
-    let Some(mode) = command_block_mode(state) else {
+    match command_block_mode(state) {
+        Some(mode) => open_command_block(shared, hit, state, mode),
+        None => open_operator_block(shared, hit, state),
+    }
+}
+
+fn open_operator_block(shared: &SharedMutex, hit: &BlockHitResult, state: BlockState) {
+    use crate::blockentities::game_master::{
+        JigsawEdit, StructureEdit, TestBlockEdit, TestInstanceEdit,
+    };
+    use crate::session::GameMasterOpen;
+    use azalea_registry::builtin::BlockEntityKind;
+
+    let pos = hit.block_pos;
+    let Some((kind, tag)) = crate::blockentities::feed::game_master_tag([pos.x, pos.y, pos.z])
+    else {
         return;
     };
+    let block = Box::<dyn azalea::block::BlockTrait>::from(state);
+    let tag = tag.as_deref();
+    let open = match (crate::blocks::block_name(state), kind) {
+        ("structure_block", BlockEntityKind::StructureBlock) => {
+            GameMasterOpen::Structure(pos, StructureEdit::decode(tag, block.get_property("mode")))
+        }
+        ("jigsaw", BlockEntityKind::Jigsaw) => GameMasterOpen::Jigsaw(
+            pos,
+            JigsawEdit::decode(tag, block.get_property("orientation").unwrap_or("")),
+        ),
+        ("test_block", BlockEntityKind::TestBlock) => {
+            GameMasterOpen::Test(pos, TestBlockEdit::decode(tag, block.get_property("mode")))
+        }
+        ("test_instance_block", BlockEntityKind::TestInstanceBlock) => {
+            GameMasterOpen::TestInstance(pos, TestInstanceEdit::decode(tag))
+        }
+        _ => return,
+    };
+    let mut s = shared.lock().unwrap();
+    if let GameMasterOpen::TestInstance(..) = open {
+        s.session.test_instance_pos = Some(pos);
+        s.session.test_instance_status.clear();
+    }
+    s.session.game_master_open = Some(open);
+}
+
+fn open_command_block(
+    shared: &SharedMutex,
+    hit: &BlockHitResult,
+    state: BlockState,
+    mode: CommandBlockMode,
+) {
     let conditional = Box::<dyn azalea::block::BlockTrait>::from(state).get_property("conditional")
         == Some("true");
     let mut s = shared.lock().unwrap();
@@ -1567,7 +1745,7 @@ fn predict_place(bot: &Client, secondary_use: bool, hand: InteractionHand) -> bo
 
 pub(crate) fn module_place(
     bot: &Client,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     hit: &BlockHitResult,
     look: (f32, f32),
     secondary_use: bool,
@@ -1610,23 +1788,58 @@ pub(crate) fn select_hotbar_slot(bot: &Client, slot: u8) {
         .insert(LastSentSelectedHotbarSlot { slot });
 }
 
-fn predict_bucket_use(bot: &Client, hand: InteractionHand) -> bool {
+fn predict_bucket_use(bot: &Client, shared: &SharedMutex, hand: InteractionHand) -> bool {
     use azalea_protocol::packets::game::ServerboundUseItem;
+    use azalea_protocol::packets::game::s_use_item_on::ServerboundUseItemOn;
 
     let Some(predicted) = predict_use(bot, UseKind::Bucket, false, None, hand) else {
         return false;
     };
 
+    if let Some((hit, seq)) = &predicted.use_on {
+        bot.write_packet(ServerboundUseItemOn {
+            hand: hand.packet(),
+            block_hit: hit.into(),
+            seq: *seq,
+        });
+    }
     bot.write_packet(ServerboundUseItem {
         hand: hand.packet(),
         seq: predicted.seq,
         x_rot: predicted.x_rot,
         y_rot: predicted.y_rot,
     });
+    if predicted.evaporated {
+        evaporate(shared, predicted.pos);
+    }
     true
 }
 
-fn open_book_editor(bot: &Client, shared: &Arc<SharedMutex>, hand: InteractionHand) {
+fn evaporate(shared: &SharedMutex, pos: BlockPos) {
+    use crate::session::{LevelParticle, ParticleEmit, push_particle_emits};
+    use crate::util::javarandom::JavaRandom;
+    use crate::util::level_events::{Bus, play};
+
+    let mut rng = JavaRandom::time_seeded();
+    let pitch = 2.6 + (rng.next_f32() - rng.next_f32()) * 0.8;
+    let at = crate::util::block_centre([pos.x, pos.y, pos.z]).to_array();
+    play("block.fire.extinguish", Bus::Blocks, at, 0.5, pitch);
+    let smoke = (0..8).map(|_| {
+        let [x, y, z] = [rng.next_f32(), rng.next_f32(), rng.next_f32()];
+        ParticleEmit::Level(LevelParticle::add(
+            azalea::entity::particle::Particle::LargeSmoke,
+            [
+                f64::from(pos.x as f32 + x),
+                f64::from(pos.y as f32 + y),
+                f64::from(pos.z as f32 + z),
+            ],
+            [0.0; 3],
+        ))
+    });
+    push_particle_emits(&mut shared.lock().unwrap().session.particle_emits, smoke);
+}
+
+fn open_book_editor(bot: &Client, shared: &SharedMutex, hand: InteractionHand) {
     let author = bot.username();
     shared.lock().unwrap().session.book_edit_open =
         Some(crate::session::BookEditRequest { hand, author });
@@ -1667,8 +1880,9 @@ enum UseKind {
 }
 
 enum BucketAction {
-    Empty(bool),
-    Fill(bool),
+    Empty(ItemKind),
+    Evaporate,
+    Fill(ItemKind),
 }
 
 struct PlannedWrite {
@@ -1684,6 +1898,8 @@ struct Predicted {
     x_rot: f32,
     y_rot: f32,
     seq: u32,
+    use_on: Option<(BlockHitResult, u32)>,
+    evaporated: bool,
 }
 
 fn predict_use(
@@ -1695,24 +1911,36 @@ fn predict_use(
 ) -> Option<Predicted> {
     use azalea::interact::BlockStatePredictionHandler;
 
-    match bot.component::<GameMode>().map(|gm| *gm) {
-        Ok(GameMode::Survival) | Ok(GameMode::Creative) => {}
+    let creative = match bot.component::<GameMode>().map(|gm| *gm) {
+        Ok(GameMode::Survival) => false,
+        Ok(GameMode::Creative) => true,
         _ => return None,
-    }
+    };
 
     if bot.is_mining() {
         return None;
     }
 
+    let crosshair = block_hit(bot);
     let (hit, (x_rot, y_rot)) = match aimed {
         Some(aimed) => aimed,
         None => {
-            let hit = block_hit(bot)?;
+            let fills = matches!(kind, UseKind::Bucket)
+                && held_item_kind(bot, hand) == Some(ItemKind::Bucket);
+            let hit = if fills {
+                pov_block_hit(bot, azalea::physics::clip::FluidPickType::SourceOnly)?
+            } else {
+                crosshair.clone()?
+            };
             let look = bot.component::<azalea::entity::LookDirection>().ok()?;
             (hit, (look.x_rot(), look.y_rot()))
         }
     };
-    if !within_border(bot, hit.block_pos) {
+    if !within_border(bot, hit.block_pos)
+        || crosshair
+            .as_ref()
+            .is_some_and(|c| !within_border(bot, c.block_pos))
+    {
         return None;
     }
     let (Ok(world), Ok(inventory), Ok(player_pos), Ok(physics)) = (
@@ -1749,25 +1977,39 @@ fn predict_use(
             .map(|(pos, state)| (pos, state, None)),
             UseKind::Bucket => match held {
                 ItemStack::Present(item)
-                    if matches!(item.kind, ItemKind::WaterBucket | ItemKind::LavaBucket) =>
+                    if crate::play::placement::bucket_fluid(item.kind).is_some() =>
                 {
-                    let is_lava = item.kind == ItemKind::LavaBucket;
+                    let evaporates = crate::play::placement::bucket_fluid(item.kind)
+                        == Some(azalea_registry::builtin::BlockKind::Water)
+                        && crate::renderer::dimension::current()
+                            == crate::renderer::dimension::Dimension::Nether;
                     crate::play::placement::predict_bucket(held, &hit, min_y, height, |pos| {
                         world.get_block_state(pos)
                     })
-                    .map(|(pos, state)| (pos, state, Some(BucketAction::Empty(is_lava))))
+                    .map(|(pos, state)| {
+                        let action = if evaporates {
+                            BucketAction::Evaporate
+                        } else {
+                            BucketAction::Empty(item.kind)
+                        };
+                        (pos, state, Some(action))
+                    })
                 }
-                _ => crate::play::placement::predict_bucket_fill(held, &hit, |pos| {
+                _ => crate::play::placement::predict_bucket_fill(held, &hit, creative, |pos| {
                     world.get_block_state(pos)
                 })
-                .map(|(pos, is_lava)| (pos, BlockState::AIR, Some(BucketAction::Fill(is_lava)))),
+                .map(|(pos, new, filled)| (pos, new, Some(BucketAction::Fill(filled)))),
             },
         };
 
         placed.and_then(|(pos, new, bucket)| {
             world.get_block_state(pos).map(|old| PlannedWrite {
                 pos,
-                new,
+                new: if matches!(bucket, Some(BucketAction::Evaporate)) {
+                    old
+                } else {
+                    new
+                },
                 old,
                 bucket,
             })
@@ -1781,54 +2023,74 @@ fn predict_use(
         bucket: bucket_action,
     } = predicted?;
 
-    let seq = {
+    let (seq, use_on) = {
         let mut ecs = bot.ecs.write();
         let mut handler = ecs.get_mut::<BlockStatePredictionHandler>(bot.entity)?;
+        let use_on = crosshair
+            .filter(|_| matches!(kind, UseKind::Bucket))
+            .map(|hit| (hit, handler.start_predicting()));
         let seq = handler.start_predicting();
         handler.retain_known_server_state(pos, old_state, player_pos);
-        seq
+        (seq, use_on)
     };
 
-    world.read().set_block_state(pos, state);
+    if state != old_state {
+        world.read().set_block_state(pos, state);
+    }
+    let evaporated = matches!(bucket_action, Some(BucketAction::Evaporate));
 
     match bucket_action {
-        Some(BucketAction::Empty(_is_lava)) => {
-            #[cfg(feature = "audio")]
-            {
-                let at = crate::util::block_centre([pos.x, pos.y, pos.z]).to_array();
-                let event = if _is_lava {
-                    "item.bucket.empty_lava"
-                } else {
-                    "item.bucket.empty"
-                };
-                crate::audio::play_at(event, crate::audio::SoundCategory::Blocks, at, 1.0, 1.0);
-            }
+        Some(BucketAction::Empty(bucket)) => {
+            use crate::util::level_events::{Bus, play};
+            let (event, bus) = match bucket {
+                ItemKind::LavaBucket => ("item.bucket.empty_lava", Bus::Blocks),
+                ItemKind::WaterBucket => ("item.bucket.empty", Bus::Blocks),
+                ItemKind::AxolotlBucket => ("item.bucket.empty_axolotl", Bus::Neutral),
+                ItemKind::TadpoleBucket => ("item.bucket.empty_tadpole", Bus::Neutral),
+                _ => ("item.bucket.empty_fish", Bus::Neutral),
+            };
+            play(
+                event,
+                bus,
+                crate::util::block_centre([pos.x, pos.y, pos.z]).to_array(),
+                1.0,
+                1.0,
+            );
         }
-        Some(BucketAction::Fill(is_lava)) => {
-            fill_held_bucket(bot, is_lava, hand);
-            #[cfg(feature = "audio")]
-            {
-                let at = crate::util::block_centre([pos.x, pos.y, pos.z]).to_array();
-                let event = if is_lava {
-                    "item.bucket.fill_lava"
-                } else {
-                    "item.bucket.fill"
-                };
-                crate::audio::play_at(event, crate::audio::SoundCategory::Blocks, at, 1.0, 1.0);
-            }
+        Some(BucketAction::Evaporate) => {}
+        Some(BucketAction::Fill(filled)) => {
+            use crate::util::level_events::{Bus, play};
+            fill_held_bucket(bot, filled, hand);
+            let event = match filled {
+                ItemKind::LavaBucket => "item.bucket.fill_lava",
+                ItemKind::PowderSnowBucket => "item.bucket.fill_powder_snow",
+                _ => "item.bucket.fill",
+            };
+            play(
+                event,
+                Bus::Players,
+                [player_pos.x, player_pos.y, player_pos.z],
+                1.0,
+                1.0,
+            );
         }
         None => {
             #[cfg(feature = "audio")]
             {
-                use azalea::block::BlockTrait;
-                let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
+                let group = crate::blocks::sound_types::of(state);
                 let at = crate::util::block_centre([pos.x, pos.y, pos.z]).to_array();
+                let event =
+                    if state.as_block_kind() == azalea_registry::builtin::BlockKind::PowderSnow {
+                        "item.bucket.empty_powder_snow"
+                    } else {
+                        group.place_event
+                    };
                 crate::audio::play_at(
-                    crate::util::block_model::sound_group(block.id()).place_event,
+                    event,
                     crate::audio::SoundCategory::Blocks,
                     at,
-                    1.0,
-                    0.8,
+                    (group.volume + 1.0) / 2.0,
+                    group.pitch * 0.8,
                 );
             }
         }
@@ -1840,6 +2102,8 @@ fn predict_use(
         x_rot,
         y_rot,
         seq,
+        use_on,
+        evaporated,
     })
 }
 

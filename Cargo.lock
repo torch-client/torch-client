@@ -714,6 +714,7 @@ dependencies = [
  "azalea-registry-macros",
  "serde",
  "simdnbt",
+ "tracing",
 ]
 
 [[package]]
@@ -6358,8 +6359,9 @@ dependencies = [
 
 [[package]]
 name = "torch-client"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
+ "alsa",
  "arboard",
  "azalea",
  "azalea-auth",
@@ -6393,6 +6395,7 @@ dependencies = [
  "rustls",
  "serde_json",
  "sha1",
+ "sha2",
  "simdnbt",
  "tokio",
  "tokio-tungstenite",

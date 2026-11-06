@@ -105,22 +105,17 @@ pub(crate) struct Program {
     pub(crate) mipmapped: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ScreenStage {
-    Begin,
-    Prepare,
-    Deferred,
-    Composite,
+crate::util::indexed_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum ScreenStage {
+        Begin,
+        Prepare,
+        Deferred,
+        Composite,
+    }
 }
 
 impl ScreenStage {
-    pub(crate) const ALL: [ScreenStage; 4] = [
-        ScreenStage::Begin,
-        ScreenStage::Prepare,
-        ScreenStage::Deferred,
-        ScreenStage::Composite,
-    ];
-
     fn prefix(self) -> &'static str {
         match self {
             ScreenStage::Begin => "begin",
@@ -128,10 +123,6 @@ impl ScreenStage {
             ScreenStage::Deferred => "deferred",
             ScreenStage::Composite => "composite",
         }
-    }
-
-    pub(crate) fn index(self) -> usize {
-        self as usize
     }
 }
 

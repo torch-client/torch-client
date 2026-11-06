@@ -26,9 +26,17 @@ pub struct FrameView {
     pub nausea: f32,
     pub night_vision: Option<f32>,
     pub conduit_power: bool,
+    pub fire_resistance: bool,
     pub darkness: f32,
+    pub has_darkness: bool,
+    pub blindness: Option<i32>,
     pub boss_darken: bool,
+    #[cfg(feature = "audio")]
+    pub boss_music: bool,
+    #[cfg(feature = "audio")]
+    pub reconfiguring: bool,
     pub portal: f32,
+    pub spin_degrees: f32,
     pub day_ticks: f64,
     pub day_rate: f32,
     pub biome: Option<BiomeLayer>,
@@ -38,8 +46,10 @@ pub struct FrameView {
     pub camera_world: DVec3,
     pub camera_render: Vec3,
     pub camera_rotation: Quat,
+    pub hurt_tilt: Quat,
     pub in_world: bool,
     pub gamemode: Gamemode,
+    pub health_epoch: u32,
     pub flying: bool,
     pub hotbar_selected: u8,
     pub item_used: [u32; 2],
@@ -82,22 +92,26 @@ impl FrameView {
             .camera_distance
             .unwrap_or(crate::client::tracking::DEFAULT_CAMERA_DISTANCE as f32);
         self.local_body = session.local_body;
-        self.nausea = crate::play::mob_effects::effect_blend_factor(
-            &session.active_effects,
-            "nausea",
-            partial,
-        );
-        self.night_vision = crate::play::mob_effects::find(&session.active_effects, "night_vision")
-            .map(|e| crate::play::mob_effects::night_vision_scale(e.duration, partial));
-        self.conduit_power =
-            crate::play::mob_effects::find(&session.active_effects, "conduit_power").is_some();
-        self.darkness = crate::play::mob_effects::effect_blend_factor(
-            &session.active_effects,
-            "darkness",
-            partial,
-        );
+        {
+            use crate::play::mob_effects::{effect_blend_factor, find, has, night_vision_scale};
+            let effects = &session.active_effects;
+            self.nausea = effect_blend_factor(effects, "nausea", partial);
+            self.night_vision =
+                find(effects, "night_vision").map(|e| night_vision_scale(e.duration, partial));
+            self.conduit_power = has(effects, "conduit_power");
+            self.fire_resistance = has(effects, "fire_resistance");
+            self.has_darkness = has(effects, "darkness");
+            self.darkness = effect_blend_factor(effects, "darkness", partial);
+            self.blindness = find(effects, "blindness").map(|e| e.duration);
+        }
         self.boss_darken = session.boss_bars.iter().any(|b| b.darken);
+        #[cfg(feature = "audio")]
+        {
+            self.boss_music = session.boss_bars.iter().any(|b| b.music);
+            self.reconfiguring = session.reconfiguring;
+        }
         self.portal = session.portal_effect.sample(partial);
+        self.spin_degrees = session.spinning_effect.sample(partial);
         self.day_ticks = session.day_clock.at(partial);
         self.day_rate = session.day_clock.rate;
         self.biome = match (session.env_prev, session.env) {
@@ -109,6 +123,7 @@ impl FrameView {
         self.camera_pitch = s.camera_pitch;
         self.in_world = s.in_world;
         self.gamemode = session.gamemode;
+        self.health_epoch = session.health_epoch;
         self.flying = session.flying;
         self.hotbar_selected = session.hotbar_selected;
         self.item_used = session.item_used;

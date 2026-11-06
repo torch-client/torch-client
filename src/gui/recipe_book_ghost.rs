@@ -134,6 +134,16 @@ pub fn book_menu(screen: Screen, container_id: i32) -> Option<(BookMenu, i32)> {
     }
 }
 
+pub fn left_pos(screen: Screen, ctx: &ScreenCtx, snap: &Snapshot, w: f32) -> f32 {
+    match (&snap.recipe_book, book_menu(screen, snap.container_id)) {
+        (Some(book), Some((menu, _))) => {
+            let open = book.settings().get(menu.book).open;
+            recipe_book::left_pos(open, ctx.vw as i32, w as i32) as f32
+        }
+        _ => ((ctx.vw - w) / 2.0).floor(),
+    }
+}
+
 fn clicked_slot(op: &ClickOperation) -> Option<u16> {
     match op {
         ClickOperation::Pickup(PickupClick::Left { slot } | PickupClick::Right { slot }) => *slot,

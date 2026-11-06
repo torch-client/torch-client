@@ -6,7 +6,7 @@ use azalea_core::position::BlockPos;
 use azalea_registry::builtin::BlockKind;
 
 use crate::blockentities::feed::BlockEntityData;
-use crate::blocks::facing;
+use crate::blocks::{facing, is_air};
 use push_reactions::{has_block_entity, push_reaction};
 
 const MAX_PUSH_DEPTH: usize = 12;
@@ -438,13 +438,6 @@ impl<F: Fn([i32; 3]) -> BlockState> Resolver<'_, F> {
 
 fn reaction(state: BlockState) -> PushReaction {
     push_reaction(crate::blocks::block_name(state))
-}
-
-fn is_air(kind: BlockKind) -> bool {
-    matches!(
-        kind,
-        BlockKind::Air | BlockKind::CaveAir | BlockKind::VoidAir
-    )
 }
 
 fn is_piston(kind: BlockKind) -> bool {

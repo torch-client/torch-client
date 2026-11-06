@@ -12,6 +12,8 @@ pub struct ClientMovementState {
 
     pub move_direction: WalkDirection,
     pub move_vector: Vec2,
+
+    pub auto_jump: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

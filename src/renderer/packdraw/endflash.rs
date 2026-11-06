@@ -29,19 +29,10 @@ fn flash(clock_time: i64) -> Flash {
     let mut random = JavaRandom::new(clock_time.div_euclid(FLASH_INTERVAL));
     random.next_f32();
     let offset = between_inclusive(&mut random, 0, MAX_OFFSET);
-    let duration = between_inclusive(
-        &mut random,
-        MIN_DURATION,
-        MAX_DURATION.min(FLASH_INTERVAL - offset),
-    );
+    let duration = between_inclusive(&mut random, MIN_DURATION, MAX_DURATION.min(FLASH_INTERVAL - offset));
     let x_angle = random.next_f32() * 70.0 - 60.0;
     let y_angle = random.next_f32() * 360.0 - 180.0;
-    Flash {
-        offset,
-        duration,
-        x_angle,
-        y_angle,
-    }
+    Flash { offset, duration, x_angle, y_angle }
 }
 
 fn intensity(clock_time: i64) -> f32 {

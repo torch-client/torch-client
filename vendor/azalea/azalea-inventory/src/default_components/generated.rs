@@ -2240,7 +2240,10 @@ impl DefaultableComponent for BundleContents {
             ItemKind::YellowBundle => vec![],
             _ => return None,
         };
-        Some(BundleContents { items: value })
+        Some(BundleContents {
+            items: value,
+            selected_item: crate::bundle::NO_SELECTED_ITEM,
+        })
     }
 }
 impl DefaultableComponent for ChargedProjectiles {

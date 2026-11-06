@@ -68,19 +68,21 @@ pub struct Flags {
     pub ignore_entities: bool,
     pub show_air: bool,
     pub show_bounding_box: bool,
+    pub strict: bool,
 }
 
 impl AzBuf for Flags {
     fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let set = FixedBitSet::<3>::azalea_read(buf)?;
+        let set = FixedBitSet::<4>::azalea_read(buf)?;
         Ok(Self {
             ignore_entities: set.index(0),
             show_air: set.index(1),
             show_bounding_box: set.index(2),
+            strict: set.index(3),
         })
     }
     fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
-        let mut set = FixedBitSet::<3>::new();
+        let mut set = FixedBitSet::<4>::new();
         if self.ignore_entities {
             set.set(0);
         }
@@ -89,6 +91,9 @@ impl AzBuf for Flags {
         }
         if self.show_bounding_box {
             set.set(2);
+        }
+        if self.strict {
+            set.set(3);
         }
         set.azalea_write(buf)?;
         Ok(())

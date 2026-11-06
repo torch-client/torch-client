@@ -98,6 +98,36 @@ fn enchantment_map(
     Ok(Value::Table(t))
 }
 
+fn restore_counts(kind: DataComponentKind, json: &mut serde_json::Value) {
+    use serde_json::Value as Json;
+
+    fn stack(json: &mut Json) {
+        let Json::Object(item) = json else {
+            return;
+        };
+        item.entry("count").or_insert(Json::from(1));
+        if let Some(Json::Object(components)) = item.get_mut("components") {
+            for (key, value) in components.iter_mut() {
+                if let Ok(kind) = DataComponentKind::from_str(key) {
+                    restore_counts(kind, value);
+                }
+            }
+        }
+    }
+
+    match kind {
+        DataComponentKind::BundleContents
+        | DataComponentKind::ChargedProjectiles
+        | DataComponentKind::Container => {
+            if let Json::Array(items) = json {
+                items.iter_mut().for_each(stack);
+            }
+        }
+        DataComponentKind::UseRemainder => stack(json),
+        _ => {}
+    }
+}
+
 pub(super) fn read(lua: &Lua, bot: &Client, slot: Slot, raw: bool) -> mlua::Result<Value> {
     let Some(ItemStack::Present(data)) = live(bot, slot) else {
         return Ok(Value::Nil);
@@ -129,7 +159,10 @@ pub(super) fn read(lua: &Lua, bot: &Client, slot: Slot, raw: bool) -> mlua::Resu
                 }
                 _ => match serde_json::to_value(&value) {
                     Ok(serde_json::Value::Null) => Value::Boolean(true),
-                    Ok(json) => super::json::plain_to_lua(lua, &json)?,
+                    Ok(mut json) => {
+                        restore_counts(kind, &mut json);
+                        super::json::plain_to_lua(lua, &json)?
+                    }
                     Err(_) => {
                         let t = lua.create_table()?;
                         t.raw_set("raw", lua.create_string(encode(&data, kind))?)?;

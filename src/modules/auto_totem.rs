@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering::Relaxed};
 
 use azalea::Client;
@@ -38,7 +37,7 @@ pub fn enabled() -> bool {
     store().enabled(Id::AutoTotem)
 }
 
-pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
+pub fn tick(bot: &Client, shared: &SharedMutex) {
     if !enabled() {
         return;
     }

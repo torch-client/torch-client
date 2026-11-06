@@ -54,6 +54,28 @@ impl TickCtx<'_> {
     }
 }
 
+fn idle_sound(ctx: &TickCtx, event: &str) {
+    let [x, y, z] = ctx.pos.map(|v| v as u32 as u64);
+    let mut state = ((x << 40) ^ (y << 20) ^ z) ^ ctx.game_time.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut next = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32
+    };
+    if next() <= 0.02 {
+        let (volume, pitch) = (next() * 0.25 + 0.75, next() + 0.5);
+        crate::util::level_events::play(
+            event,
+            crate::util::level_events::Bus::Blocks,
+            ctx.center(),
+            volume,
+            pitch,
+        );
+    }
+}
+
 fn dist_sq(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
 }

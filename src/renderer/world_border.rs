@@ -7,8 +7,8 @@ use bevy::mesh::{
 use bevy::pbr::{Material, MaterialPipeline, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, DepthBiasState,
-    RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+    AsBindGroup, BlendFactor as F, DepthBiasState, RenderPipelineDescriptor, ShaderType,
+    SpecializedMeshPipelineError,
 };
 use bevy::shader::ShaderRef;
 
@@ -65,18 +65,7 @@ impl Material for WorldBorderMaterial {
             .and_then(|f| f.targets.first_mut())
             .and_then(Option::as_mut)
         {
-            target.blend = Some(BlendState {
-                color: BlendComponent {
-                    src_factor: BlendFactor::SrcAlpha,
-                    dst_factor: BlendFactor::One,
-                    operation: BlendOperation::Add,
-                },
-                alpha: BlendComponent {
-                    src_factor: BlendFactor::One,
-                    dst_factor: BlendFactor::Zero,
-                    operation: BlendOperation::Add,
-                },
-            });
+            target.blend = Some(super::blend(F::SrcAlpha, F::One, F::One, F::Zero));
         }
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             depth.bias = DepthBiasState {

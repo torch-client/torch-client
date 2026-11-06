@@ -49,8 +49,12 @@ slots! {
     MODS_PACKETS = "mods_packets.json";
     #[cfg(lua_mods)]
     MODS_LARGE_FILES = "mods_large_files.json";
+    #[cfg(lua_mods)]
+    MODS_ONLINE = "mods_online.json";
     #[cfg(feature = "asset_download")]
     LANGUAGE = "language.txt";
+    #[cfg(feature = "asset_download")]
+    LANGUAGE_LIST = "language_list.txt";
 }
 
 impl Slot {

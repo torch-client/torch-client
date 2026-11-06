@@ -1,37 +1,21 @@
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SoundCategory {
-    Master,
-    Music,
-    Records,
-    Weather,
-    Blocks,
-    Hostile,
-    Neutral,
-    Players,
-    Ambient,
-    Voice,
+crate::util::indexed_enum! {
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum SoundCategory {
+        Master,
+        Music,
+        Records,
+        Weather,
+        Blocks,
+        Hostile,
+        Neutral,
+        Players,
+        Ambient,
+        Voice,
+        Ui,
+    }
 }
 
 impl SoundCategory {
-    pub const ALL: [SoundCategory; Self::COUNT] = [
-        SoundCategory::Master,
-        SoundCategory::Music,
-        SoundCategory::Records,
-        SoundCategory::Weather,
-        SoundCategory::Blocks,
-        SoundCategory::Hostile,
-        SoundCategory::Neutral,
-        SoundCategory::Players,
-        SoundCategory::Ambient,
-        SoundCategory::Voice,
-    ];
-
-    pub const COUNT: usize = 10;
-
-    pub const fn index(self) -> usize {
-        self as usize
-    }
-
     pub const fn key(self) -> &'static str {
         match self {
             SoundCategory::Master => "master",
@@ -44,6 +28,7 @@ impl SoundCategory {
             SoundCategory::Players => "player",
             SoundCategory::Ambient => "ambient",
             SoundCategory::Voice => "voice",
+            SoundCategory::Ui => "ui",
         }
     }
 
@@ -54,11 +39,12 @@ impl SoundCategory {
             SoundCategory::Records => "Jukebox/Note Blocks",
             SoundCategory::Weather => "Weather",
             SoundCategory::Blocks => "Blocks",
-            SoundCategory::Hostile => "Hostile Creatures",
-            SoundCategory::Neutral => "Friendly Creatures",
+            SoundCategory::Hostile => "Hostile Mobs",
+            SoundCategory::Neutral => "Friendly Mobs",
             SoundCategory::Players => "Players",
             SoundCategory::Ambient => "Ambient/Environment",
-            SoundCategory::Voice => "Voice/Speech",
+            SoundCategory::Voice => "Narrator/Voice",
+            SoundCategory::Ui => "UI",
         }
     }
 }
@@ -66,14 +52,6 @@ impl SoundCategory {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_category_indexes_its_own_slot() {
-        for (slot, category) in SoundCategory::ALL.iter().enumerate() {
-            assert_eq!(category.index(), slot, "{category:?}");
-        }
-        assert_eq!(SoundCategory::ALL.len(), SoundCategory::COUNT);
-    }
 
     #[test]
     fn no_two_categories_share_a_saved_key() {

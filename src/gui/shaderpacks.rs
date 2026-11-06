@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::gui::packdrop::{self, Drops, Search};
 use crate::gui::painter::Painter;
 use crate::gui::widgets::{Button, Slider, TextBox};
@@ -323,12 +321,7 @@ fn collect_profile(
 const ON_VALUE: &str = "true";
 const OFF_VALUE: &str = "false";
 
-pub fn draw_packs(
-    p: &mut Painter,
-    state: &mut GuiState,
-    ctx: &ScreenCtx,
-    shared: &Arc<SharedMutex>,
-) {
+pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &SharedMutex) {
     let packs = &mut state.shaderpacks;
     if let Some(copied) = packs
         .drops

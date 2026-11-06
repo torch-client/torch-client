@@ -129,7 +129,7 @@ impl DialogState {
         matches!(&self.phase, Phase::Showing(dialog) if dialog.pause)
     }
 
-    pub fn on_escape(&mut self, shared: &Arc<SharedMutex>) -> Outcome {
+    pub fn on_escape(&mut self, shared: &SharedMutex) -> Outcome {
         match &self.overlay {
             Overlay::Warning | Overlay::Link(_) => {
                 self.overlay = Overlay::None;
@@ -161,12 +161,7 @@ impl DialogState {
             .collect()
     }
 
-    fn press(
-        &mut self,
-        dialog: &Dialog,
-        action: Option<&Action>,
-        shared: &Arc<SharedMutex>,
-    ) -> Outcome {
+    fn press(&mut self, dialog: &Dialog, action: Option<&Action>, shared: &SharedMutex) -> Outcome {
         let values = self.values(dialog);
         let click = action.and_then(|action| action.resolve(&values));
         let mut out = Outcome::default();
@@ -185,7 +180,7 @@ impl DialogState {
         out
     }
 
-    fn dispatch(&mut self, click: Click, shared: &Arc<SharedMutex>, out: &mut Outcome) {
+    fn dispatch(&mut self, click: Click, shared: &SharedMutex, out: &mut Outcome) {
         match clickevent::dispatch(click, shared) {
             Followup::None => {}
             Followup::Suggest(command) => out.chat = Some(command),
@@ -344,7 +339,7 @@ pub fn draw(
     p: &mut Painter,
     state: &mut DialogState,
     ctx: &ScreenCtx,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
 ) -> Outcome {
     let masked_input;
     let masked_ctx;
@@ -370,7 +365,7 @@ fn draw_dialog(
     p: &mut Painter,
     state: &mut DialogState,
     ctx: &ScreenCtx,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     dialog: &Arc<Dialog>,
 ) -> Outcome {
     let mut out = Outcome::default();
@@ -524,7 +519,7 @@ fn draw_dialog(
             if let Some(stack) = hovered_item
                 && let Some(m) = ctx.mouse()
             {
-                tooltip::draw(p, &stack, m.x, m.y, ctx.vw, ctx.vh, false);
+                tooltip::draw(p, &stack, m.x, m.y, ctx.vw, ctx.vh, false, false);
             }
         }
     }
@@ -575,12 +570,7 @@ impl Layout {
         self.dialog == Arc::as_ptr(dialog) as usize && self.vw == ctx.vw && self.vh == ctx.vh
     }
 
-    fn measure(
-        p: &Painter,
-        dialog: &Arc<Dialog>,
-        ctx: &ScreenCtx,
-        shared: &Arc<SharedMutex>,
-    ) -> Layout {
+    fn measure(p: &Painter, dialog: &Arc<Dialog>, ctx: &ScreenCtx, shared: &SharedMutex) -> Layout {
         let links = match dialog.kind {
             Kind::ServerLinks { .. } => shared.lock().unwrap().session.server_links.clone(),
             _ => Vec::new(),

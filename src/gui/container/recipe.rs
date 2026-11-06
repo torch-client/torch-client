@@ -71,6 +71,8 @@ pub fn draw_stonecutter(
         p.item_icon(recipe.result.item, bx, by + 2.0);
         if clicked {
             out.push(InvAction::ButtonClick(cell.min(255) as u8));
+            #[cfg(feature = "audio")]
+            crate::gui::widgets::play_ui("ui.stonecutter.select_recipe");
         }
     }
 
@@ -158,6 +160,8 @@ pub fn draw_loom(
         banner::swatch(p, pattern, bx + 4.0, by + 2.0);
         if clicked {
             out.push(InvAction::ButtonClick(cell.min(255) as u8));
+            #[cfg(feature = "audio")]
+            crate::gui::widgets::play_ui("ui.loom.select_pattern");
         }
     }
 

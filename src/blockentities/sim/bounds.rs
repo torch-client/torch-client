@@ -1,5 +1,10 @@
+use azalea_protocol::packets::game::s_set_structure_block::{Mirror, Rotation};
 use azalea_registry::builtin::BlockEntityKind;
 use simdnbt::owned::{Nbt, NbtCompound};
+
+use crate::blockentities::game_master::{
+    MAX_OFFSET, MAX_SIZE, axes, mirror_legacy, rotation_legacy, rotation_named, vec3i,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
@@ -7,23 +12,6 @@ pub enum Mode {
     None,
     Box,
     BoxAndInvisibleBlocks,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Turn {
-    #[default]
-    None,
-    Cw90,
-    Cw180,
-    Ccw90,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Flip {
-    #[default]
-    None,
-    LeftRight,
-    FrontBack,
 }
 
 const STRUCTURE_OFFSET: [i32; 3] = [0, 1, 1];
@@ -50,17 +38,6 @@ pub fn beam_color(data: &Data) -> Option<u32> {
     data.beam
 }
 
-fn vec3(tag: &NbtCompound, key: &str, default: [i32; 3], range: (i32, i32)) -> [i32; 3] {
-    let mut out = [0; 3];
-    for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
-        out[i] = tag
-            .int(&format!("{key}{axis}"))
-            .unwrap_or(default[i])
-            .clamp(range.0, range.1);
-    }
-    out
-}
-
 fn structure(tag: &Nbt) -> Data {
     let tag: &NbtCompound = tag;
     let mode = tag.string("mode").map(|s| s.to_string());
@@ -72,19 +49,16 @@ fn structure(tag: &Nbt) -> Data {
         Some("LOAD") if show_box => Mode::Box,
         _ => Mode::None,
     };
-    let pos = vec3(tag, "pos", [0, 1, 0], (-48, 48));
-    let size = vec3(tag, "size", [0; 3], (0, 48));
-    let turn = match tag.string("rotation").map(|s| s.to_string()).as_deref() {
-        Some("CLOCKWISE_90") => Turn::Cw90,
-        Some("CLOCKWISE_180") => Turn::Cw180,
-        Some("COUNTERCLOCKWISE_90") => Turn::Ccw90,
-        _ => Turn::None,
-    };
-    let flip = match tag.string("mirror").map(|s| s.to_string()).as_deref() {
-        Some("LEFT_RIGHT") => Flip::LeftRight,
-        Some("FRONT_BACK") => Flip::FrontBack,
-        _ => Flip::None,
-    };
+    let pos = axes(tag, "pos", [0, 1, 0], -MAX_OFFSET, MAX_OFFSET);
+    let size = axes(tag, "size", [0; 3], 0, MAX_SIZE);
+    let turn = tag
+        .string("rotation")
+        .and_then(|s| rotation_legacy(&s.to_string()))
+        .unwrap_or(Rotation::None);
+    let flip = tag
+        .string("mirror")
+        .and_then(|s| mirror_legacy(&s.to_string()))
+        .unwrap_or(Mirror::None);
     let (local, size) = structure_box(pos, size, turn, flip);
     Data {
         mode,
@@ -94,31 +68,36 @@ fn structure(tag: &Nbt) -> Data {
     }
 }
 
-fn structure_box(pos: [i32; 3], size: [i32; 3], turn: Turn, flip: Flip) -> ([i32; 3], [i32; 3]) {
+fn structure_box(
+    pos: [i32; 3],
+    size: [i32; 3],
+    turn: Rotation,
+    flip: Mirror,
+) -> ([i32; 3], [i32; 3]) {
     let [xo, y0, zo] = pos;
     let y1 = y0 + size[1];
     let (xd, zd) = match flip {
-        Flip::LeftRight => (size[0], -size[2]),
-        Flip::FrontBack => (-size[0], size[2]),
-        Flip::None => (size[0], size[2]),
+        Mirror::LeftRight => (size[0], -size[2]),
+        Mirror::FrontBack => (-size[0], size[2]),
+        Mirror::None => (size[0], size[2]),
     };
     let (x0, z0, x1, z1) = match turn {
-        Turn::Cw90 => {
+        Rotation::Clockwise90 => {
             let x0 = if zd < 0 { xo } else { xo + 1 };
             let z0 = if xd < 0 { zo + 1 } else { zo };
             (x0, z0, x0 - zd, z0 + xd)
         }
-        Turn::Cw180 => {
+        Rotation::Clockwise180 => {
             let x0 = if xd < 0 { xo } else { xo + 1 };
             let z0 = if zd < 0 { zo } else { zo + 1 };
             (x0, z0, x0 - xd, z0 - zd)
         }
-        Turn::Ccw90 => {
+        Rotation::Counterclockwise90 => {
             let x0 = if zd < 0 { xo + 1 } else { xo };
             let z0 = if xd < 0 { zo } else { zo + 1 };
             (x0, z0, x0 + zd, z0 - xd)
         }
-        Turn::None => {
+        Rotation::None => {
             let x0 = if xd < 0 { xo + 1 } else { xo };
             let z0 = if zd < 0 { zo + 1 } else { zo };
             (x0, z0, x0 + xd, z0 + zd)
@@ -136,17 +115,12 @@ fn test_instance(tag: &Nbt) -> Data {
         ..Data::default()
     };
     if let Some(data) = tag.compound("data") {
-        let size = data
-            .int_array("size")
-            .filter(|a| a.len() == 3)
-            .map_or([0; 3], |a| [a[0], a[1], a[2]]);
-        let turn = match data.string("rotation").map(|s| s.to_string()).as_deref() {
-            Some("clockwise_90") => Turn::Cw90,
-            Some("180") => Turn::Cw180,
-            Some("counterclockwise_90") => Turn::Ccw90,
-            _ => Turn::None,
-        };
-        let size = if matches!(turn, Turn::Cw90 | Turn::Ccw90) {
+        let size = vec3i(data, "size").unwrap_or([0; 3]);
+        let turn = data
+            .string("rotation")
+            .and_then(|s| rotation_named(&s.to_string()))
+            .unwrap_or(Rotation::None);
+        let size = if matches!(turn, Rotation::Clockwise90 | Rotation::Counterclockwise90) {
             [size[2], size[1], size[0]]
         } else {
             size
@@ -179,20 +153,21 @@ mod tests {
 
     #[test]
     fn unrotated_box_starts_at_the_offset() {
-        let (local, size) = structure_box([2, 3, 4], [5, 6, 7], Turn::None, Flip::None);
+        let (local, size) = structure_box([2, 3, 4], [5, 6, 7], Rotation::None, Mirror::None);
         assert_eq!((local, size), ([2, 3, 4], [5, 6, 7]));
     }
 
     #[test]
     fn clockwise_90_swaps_the_horizontal_axes() {
-        let (local, size) = structure_box([0, 0, 0], [3, 2, 5], Turn::Cw90, Flip::None);
+        let (local, size) =
+            structure_box([0, 0, 0], [3, 2, 5], Rotation::Clockwise90, Mirror::None);
         assert_eq!(size, [5, 2, 3]);
         assert_eq!(local, [-4, 0, 0]);
     }
 
     #[test]
     fn mirror_extends_the_box_backwards() {
-        let (local, size) = structure_box([0, 0, 0], [3, 2, 5], Turn::None, Flip::FrontBack);
+        let (local, size) = structure_box([0, 0, 0], [3, 2, 5], Rotation::None, Mirror::FrontBack);
         assert_eq!((local, size), ([-2, 0, 0], [3, 2, 5]));
     }
 

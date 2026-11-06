@@ -1,5 +1,6 @@
 #![feature(min_specialization)]
 
+pub mod bundle;
 pub mod components;
 pub mod default_components;
 pub mod item;

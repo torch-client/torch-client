@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use azalea::entity::particle::Particle;
 use azalea::prelude::*;
 
@@ -37,7 +35,7 @@ pub(crate) fn reset() {
     }
 }
 
-pub(crate) fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
+pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
     let rounds = {
         let mut emitters = EMITTERS.lock().unwrap();
         if emitters.is_empty() {
@@ -45,14 +43,7 @@ pub(crate) fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
         }
         advance(bot, &mut emitters)
     };
-    if rounds.is_empty() {
-        return;
-    }
-    let mut s = shared.lock().unwrap();
-    crate::session::push_particle_emits(
-        &mut s.session.particle_emits,
-        rounds.into_iter().map(ParticleEmit::Tracking),
-    );
+    crate::play::emit::queue(shared, rounds, ParticleEmit::Tracking);
 }
 
 fn advance(bot: &Client, emitters: &mut Vec<Emitter>) -> Vec<TrackingEmit> {
@@ -62,6 +53,7 @@ fn advance(bot: &Client, emitters: &mut Vec<Emitter>) -> Vec<TrackingEmit> {
     use azalea_core::entity_id::MinecraftEntityId;
 
     let local = crate::client::tracking::local_entity_id();
+    let attributes = crate::client::tracking::attributes().lock().unwrap();
     let ecs = bot.ecs.read();
     let index = ecs.get::<EntityIdIndex>(bot.entity);
     let mut rounds = Vec::with_capacity(emitters.len());
@@ -90,10 +82,12 @@ fn advance(bot: &Client, emitters: &mut Vec<Emitter>) -> Vec<TrackingEmit> {
                 });
             crate::audio::play_at(sound, source, feet, 1.0, 1.0);
         }
+        let scale =
+            crate::play::emit::box_scale(&attributes, emitter.entity, emitter.entity == local);
         rounds.push(TrackingEmit {
             particle: emitter.particle.clone(),
             pos: feet,
-            size: [dims.width, dims.height],
+            size: [dims.width * scale, dims.height * scale],
         });
         emitter.life += 1;
         emitter.life < emitter.life_time

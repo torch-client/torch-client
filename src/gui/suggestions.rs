@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::gui::ScreenCtx;
 use crate::gui::painter::Painter;
 use crate::gui::render::GuiInput;
@@ -372,7 +370,7 @@ impl Field {
         consumed
     }
 
-    pub fn refresh(&mut self, font: &Font, shared: &Arc<SharedMutex>, st: Style, a: Anchor) {
+    pub fn refresh(&mut self, font: &Font, shared: &SharedMutex, st: Style, a: Anchor) {
         let reply = shared.lock().unwrap().session.suggestion_reply.take();
         let accepted = match reply {
             Some((id, suggestions)) => self.suggest.client.accept(id, suggestions),

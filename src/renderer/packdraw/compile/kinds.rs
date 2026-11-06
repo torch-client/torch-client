@@ -1,4 +1,4 @@
-use bevy::render::render_resource::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+use bevy::render::render_resource::{BlendFactor, BlendState};
 
 use crate::shaderpack::programs::Geometry;
 
@@ -199,34 +199,30 @@ fn blend_mode(value: &str) -> Option<BlendState> {
     let [src_color, dst_color, src_alpha, dst_alpha, ..] = factors[..] else {
         return None;
     };
-    let add = |src_factor, dst_factor| BlendComponent {
-        src_factor,
-        dst_factor,
-        operation: BlendOperation::Add,
-    };
-    Some(BlendState {
-        color: add(src_color, dst_color),
-        alpha: add(src_alpha, dst_alpha),
-    })
+    Some(crate::renderer::blend(
+        src_color, dst_color, src_alpha, dst_alpha,
+    ))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum EntityKind {
-    Entity,
-    Block,
-    Particle,
-    SkyBasic,
-    SkyTextured,
-    Clouds,
-    Hand,
-    HandWater,
-    ShadowCaster,
-    EntityTranslucent,
-    BlockTranslucent,
-    ParticleTranslucent,
-    DamagedBlock,
-    Line,
-    SpiderEyes,
+crate::util::indexed_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub(crate) enum EntityKind {
+        Entity,
+        Block,
+        Particle,
+        SkyBasic,
+        SkyTextured,
+        Clouds,
+        Hand,
+        HandWater,
+        ShadowCaster,
+        EntityTranslucent,
+        BlockTranslucent,
+        ParticleTranslucent,
+        DamagedBlock,
+        Line,
+        SpiderEyes,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -241,29 +237,6 @@ pub(crate) enum Segment {
 }
 
 impl EntityKind {
-    pub(crate) const COUNT: usize = 15;
-    pub(crate) const ALL: [EntityKind; EntityKind::COUNT] = [
-        EntityKind::Entity,
-        EntityKind::Block,
-        EntityKind::Particle,
-        EntityKind::SkyBasic,
-        EntityKind::SkyTextured,
-        EntityKind::Clouds,
-        EntityKind::Hand,
-        EntityKind::HandWater,
-        EntityKind::ShadowCaster,
-        EntityKind::EntityTranslucent,
-        EntityKind::BlockTranslucent,
-        EntityKind::ParticleTranslucent,
-        EntityKind::DamagedBlock,
-        EntityKind::Line,
-        EntityKind::SpiderEyes,
-    ];
-
-    pub(crate) fn index(self) -> usize {
-        self as usize
-    }
-
     fn programs(self) -> &'static [&'static str] {
         match self {
             EntityKind::Entity => &[

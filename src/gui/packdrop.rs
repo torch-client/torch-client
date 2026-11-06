@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use crate::gui::dialog::CONFIRM_BUTTON_WIDTH;
 use crate::gui::painter::Painter;
@@ -215,7 +214,7 @@ impl Drops {
         &mut self,
         p: &mut Painter,
         ctx: &ScreenCtx,
-        shared: &Arc<SharedMutex>,
+        shared: &SharedMutex,
         dir: &Path,
         is_pack_dir: fn(&Path) -> bool,
     ) -> Option<bool> {
@@ -324,7 +323,7 @@ fn discard(paths: &[PathBuf]) {
     let _ = paths;
 }
 
-pub(in crate::gui) fn copy_failure_toast(shared: &Arc<SharedMutex>, detail: &str) {
+pub(in crate::gui) fn copy_failure_toast(shared: &SharedMutex, detail: &str) {
     use crate::gui::toast::{SystemId, ToastEvent};
     crate::session::queue_toasts(
         shared,

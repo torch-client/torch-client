@@ -558,6 +558,7 @@ dependencies = [
  "azalea-registry-macros",
  "serde",
  "simdnbt",
+ "tracing",
 ]
 
 [[package]]

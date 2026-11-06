@@ -1,19 +1,15 @@
 use super::options::{Kind, Options, Values};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Geometry {
-    TerrainSolid,
-    TerrainCutout,
-    Water,
+crate::util::indexed_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub(crate) enum Geometry {
+        TerrainSolid,
+        TerrainCutout,
+        Water,
+    }
 }
 
 impl Geometry {
-    pub(crate) const ALL: [Geometry; 3] = [
-        Geometry::TerrainSolid,
-        Geometry::TerrainCutout,
-        Geometry::Water,
-    ];
-
     pub(crate) fn chain(self) -> &'static [&'static str] {
         const TAIL: [&str; 4] = [
             "gbuffers_terrain",

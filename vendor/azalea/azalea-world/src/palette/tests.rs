@@ -23,6 +23,64 @@ fn test_resize_0_bits_to_1() {
 }
 
 #[test]
+fn test_resize_8_bits_to_global_keeps_every_state() {
+    let mut palette_container = PalettedContainer::<BlockState>::new();
+    let state = |i: usize| BlockState::try_from(20_000 + i as u32).unwrap();
+
+    for i in 0..257 {
+        palette_container.set_at_index(i, state(i));
+    }
+
+    assert_eq!(
+        PaletteKind::from(&palette_container.palette),
+        PaletteKind::Global
+    );
+    assert_eq!(
+        palette_container.bits_per_entry,
+        BlockState::storage_bits(9)
+    );
+    for i in 0..257 {
+        assert_eq!(palette_container.get_at_index(i), state(i));
+    }
+}
+
+#[test]
+fn test_unknown_palette_entry_reads_as_stand_in() {
+    use std::io::Cursor;
+
+    use azalea_buf::{AzBuf, AzBufVar};
+
+    let unknown = u32::from(BlockState::MAX_STATE) + 1;
+    let mut bytes = Vec::new();
+    2_u8.azalea_write(&mut bytes).unwrap();
+    vec![1_u32, unknown].azalea_write_var(&mut bytes).unwrap();
+    for _ in 0..256 {
+        0x1010_1010_1010_1010_u64.azalea_write(&mut bytes).unwrap();
+    }
+
+    let mut cursor = Cursor::new(bytes.as_slice());
+    let container = PalettedContainer::<BlockState>::read(&mut cursor).unwrap();
+
+    assert_eq!(cursor.position(), bytes.len() as u64);
+    assert_eq!(
+        container.get_at_index(0),
+        BlockState::try_from(1_u32).unwrap()
+    );
+    assert_eq!(container.get_at_index(1), BlockState::stand_in());
+    assert!(azalea_registry::unknown::snapshot().blocks >= 1);
+}
+
+#[test]
+fn test_unknown_biome_keeps_its_default() {
+    use azalea_registry::data::Biome;
+
+    assert_eq!(
+        <Biome as PalletedContainerKind>::from_network(u32::MAX),
+        Biome::try_from(u32::MAX).unwrap_or_default()
+    );
+}
+
+#[test]
 fn test_resize_0_bits_to_5() {
     let mut palette_container = PalettedContainer::<BlockState>::new();
 
@@ -34,14 +92,14 @@ fn test_resize_0_bits_to_5() {
     assert_eq!(palette_container.bits_per_entry, 0);
 
     set(&mut palette_container, 1, 1);
-    assert_eq!(palette_container.bits_per_entry, 1);
+    assert_eq!(palette_container.bits_per_entry, 4);
 
     set(&mut palette_container, 2, 2);
-    assert_eq!(palette_container.bits_per_entry, 2);
+    assert_eq!(palette_container.bits_per_entry, 4);
     set(&mut palette_container, 3, 3);
 
     set(&mut palette_container, 4, 4);
-    assert_eq!(palette_container.bits_per_entry, 3);
+    assert_eq!(palette_container.bits_per_entry, 4);
     set(&mut palette_container, 5, 5);
     set(&mut palette_container, 6, 6);
     set(&mut palette_container, 7, 7);

@@ -160,7 +160,6 @@ struct Entry {
     anim: Anim,
     private: sim::Private,
     state: Option<Arc<BlockStateInfo>>,
-    #[cfg(lua_mods)]
     raw: Option<Arc<Nbt>>,
 }
 
@@ -172,10 +171,26 @@ impl Entry {
             data,
             private: sim::Private::None,
             state: None,
-            #[cfg(lua_mods)]
             raw: None,
         }
     }
+}
+
+fn keeps_tag(kind: BlockEntityKind) -> bool {
+    cfg!(lua_mods)
+        || matches!(
+            kind,
+            BlockEntityKind::StructureBlock
+                | BlockEntityKind::Jigsaw
+                | BlockEntityKind::TestBlock
+                | BlockEntityKind::TestInstanceBlock
+        )
+}
+
+pub fn game_master_tag(pos: [i32; 3]) -> Option<(BlockEntityKind, Option<Arc<Nbt>>)> {
+    let store = store();
+    let entry = store.entries.get(&pos)?;
+    Some((entry.kind, entry.raw.clone()))
 }
 
 #[cfg(lua_mods)]
@@ -215,8 +230,11 @@ pub fn on_chunk(chunk_x: i32, chunk_z: i32, entities: &[PacketBlockEntity]) {
 }
 
 pub fn on_block_entity_data(packet: &ClientboundBlockEntityData) {
+    let Ok(kind) = packet.block_entity_type else {
+        return;
+    };
     let pos = [packet.pos.x, packet.pos.y, packet.pos.z];
-    store().insert(pos, packet.block_entity_type, &packet.tag);
+    store().insert(pos, kind, &packet.tag);
 }
 
 pub fn on_block_event(packet: &ClientboundBlockEvent, world: &azalea_world::World) {
@@ -280,8 +298,9 @@ impl Store {
 
     fn insert(&mut self, pos: [i32; 3], kind: BlockEntityKind, tag: &Nbt) {
         self.put(pos, kind, decode(kind, tag));
-        #[cfg(lua_mods)]
-        if let Some(entry) = self.entries.get_mut(&pos) {
+        if keeps_tag(kind)
+            && let Some(entry) = self.entries.get_mut(&pos)
+        {
             entry.raw = Some(Arc::new(tag.clone()));
         }
     }
@@ -331,6 +350,8 @@ pub(crate) fn kind_for_block(id: &str) -> Option<BlockEntityKind> {
         "beacon" => BlockEntityKind::Beacon,
         "structure_block" => BlockEntityKind::StructureBlock,
         "test_instance_block" => BlockEntityKind::TestInstanceBlock,
+        "jigsaw" => BlockEntityKind::Jigsaw,
+        "test_block" => BlockEntityKind::TestBlock,
         "conduit" => BlockEntityKind::Conduit,
         "bell" => BlockEntityKind::Bell,
         "decorated_pot" => BlockEntityKind::DecoratedPot,

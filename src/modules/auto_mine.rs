@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use azalea::Client;
 use azalea::block::fluid_state::{FluidKind, FluidState};
@@ -49,7 +49,7 @@ enum Stage {
     Walk,
 }
 
-pub fn tick(bot: &Client, shared: &Arc<SharedMutex>, hit: Option<&BlockHitResult>) -> bool {
+pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) -> bool {
     let s = store();
     match EDGE.poll(s) {
         Phase::Off => return false,
@@ -312,11 +312,11 @@ fn column_centre(run: &Run) -> f64 {
     (origin + axis_sign(run.step) * run.col) as f64 + 0.5
 }
 
-fn clear(shared: &Arc<SharedMutex>) {
+fn clear(shared: &SharedMutex) {
     shared.lock().unwrap().session.auto_mine = None;
 }
 
-fn stop(shared: &Arc<SharedMutex>, why: Halt) -> bool {
+fn stop(shared: &SharedMutex, why: Halt) -> bool {
     *RUN.lock().unwrap() = None;
     store().set_enabled(Id::AutoMine, false);
     let mut st = shared.lock().unwrap();

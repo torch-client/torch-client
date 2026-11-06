@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::gui::painter::Painter;
 use crate::gui::{Screen, ScreenCtx};
 use crate::session::SharedMutex;
@@ -127,7 +125,7 @@ pub fn draw(
     p: &mut Painter,
     st: &mut WinState,
     ctx: &ScreenCtx,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
 ) -> Option<Screen> {
     if !st.built {
         st.build(&p.atlas.font);

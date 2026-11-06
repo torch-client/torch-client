@@ -1,8 +1,14 @@
+pub(crate) mod area_cloud;
+pub(crate) mod arrow_particles;
 pub(crate) mod commands;
 pub(crate) mod dialog;
 pub(crate) mod effect_particles;
 pub(crate) mod elytra;
+pub(crate) mod emit;
 pub(crate) mod entity_feed;
+#[cfg(feature = "audio")]
+pub(crate) mod entity_sounds;
+pub(crate) mod event_particles;
 pub(crate) mod flight;
 pub(crate) mod interaction;
 pub(crate) mod inventory_bridge;
@@ -12,8 +18,11 @@ pub(crate) mod mob_effects;
 pub(crate) mod no_fall;
 pub(crate) mod pick_box;
 pub(crate) mod placement;
+#[cfg(feature = "audio")]
+pub(crate) mod player_sounds;
 pub(crate) mod redstone;
 pub(crate) mod riding;
+pub(crate) mod riptide;
 pub(crate) mod spear;
 pub(crate) mod speed;
 pub(crate) mod totem;

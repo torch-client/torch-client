@@ -89,7 +89,7 @@ impl Material for SkyMaterial {
 
 #[cfg(feature = "builtin_shaders")]
 #[derive(Component)]
-struct SkyDome;
+pub(super) struct SkyDome;
 
 #[cfg(feature = "builtin_shaders")]
 const DOME_SECTORS: u32 = 48;
@@ -181,7 +181,7 @@ pub(crate) enum SkyPart {
 }
 
 #[derive(Resource)]
-struct SkyAssets {
+pub(super) struct SkyAssets {
     sky_disc_mesh: Handle<Mesh>,
     dark_disc_mesh: Handle<Mesh>,
     sunrise_material: Handle<BackdropMaterial>,
@@ -655,12 +655,54 @@ use crate::util::block_model::{EyeFluid, eye_fluid_at};
 
 const LAVA_FOG_COLOR: Argb = Argb(0xFF99_1900);
 
-const LAVA_FOG_RANGE: (f32, f32) = (0.25, 1.0);
+fn lava_fog_range(spectator: bool, fire_resistance: bool, render_distance: f32) -> (f32, f32) {
+    if spectator {
+        (-8.0, render_distance * 0.5)
+    } else if fire_resistance {
+        (0.0, 5.0)
+    } else {
+        (0.25, 1.0)
+    }
+}
+
+fn water_fog_end(end: f32, water_vision: f32) -> f32 {
+    end * water_vision.max(0.25)
+}
+
+fn shade_fog(color: Argb, darkness: f32, brighten: f32) -> Argb {
+    let dim = (1.0 - darkness) * (1.0 - darkness);
+    let [r, g, b] = [16, 8, 0].map(|shift| color.channel(shift) as f32 * dim);
+    let mut scale = dim;
+    if r != 0.0 && g != 0.0 && b != 0.0 {
+        let target = 255.0 / r.max(g).max(b);
+        scale *= 1.0 + (target - 1.0) * brighten;
+    }
+    color.scale_rgb(scale, scale, scale)
+}
+
+fn blindness_fog_distance(duration: i32, render_distance: f32) -> f32 {
+    if duration == -1 {
+        5.0
+    } else {
+        crate::util::mth::lerp((duration as f32 / 20.0).min(1.0), render_distance, 5.0)
+    }
+}
+
+fn blindness_darkness(duration: i32) -> f32 {
+    if crate::play::mob_effects::ends_within(duration, 19) {
+        duration as f32 / 20.0
+    } else {
+        1.0
+    }
+}
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn update_sky(
+pub(super) fn update_sky(
     env: Res<super::environment::Environment>,
     origin: Res<super::RenderOrigin>,
+    view: Res<super::frame_view::FrameView>,
+    lightmap: Res<super::systems::LightmapState>,
+    mut cloud_end: ResMut<super::clouds::CloudEnd>,
     mut assets: ResMut<SkyAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<BackdropMaterial>>,
@@ -700,24 +742,60 @@ fn update_sky(
     sky.fog_color = super::environment::fog_base_color(
         &sky,
         env.sky_fog_end,
-        world_transform.forward().x,
+        (view.camera_rotation * Vec3::NEG_Z).x,
         env.render_distance,
         env.rain,
         env.thunder,
     );
 
     let eye_fluid = eye_fluid_at(eye_x, eye_y, eye_z);
-    let environmental = match eye_fluid {
+    let under_water = eye_fluid == Some(EyeFluid::Water);
+    let mut sky_end = env.sky_fog_end;
+    cloud_end.0 = None;
+    let darkness = view.blindness.map_or(view.darkness, blindness_darkness);
+    let mut environmental = match eye_fluid {
         Some(EyeFluid::Water) => {
-            sky.fog_color = env.water_fog_color;
-            env.water_fog_distance
+            sky.fog_color = shade_fog(env.water_fog_color, darkness, lightmap.water_vision);
+            let (start, end) = env.water_fog_distance;
+            let end = water_fog_end(end, lightmap.water_vision);
+            sky_end = end;
+            cloud_end.0 = Some(end);
+            (start, end)
         }
         Some(EyeFluid::Lava) => {
             sky.fog_color = LAVA_FOG_COLOR;
-            LAVA_FOG_RANGE
+            let spectator = view.gamemode == crate::session::Gamemode::Spectator;
+            let range = lava_fog_range(
+                spectator,
+                view.fire_resistance,
+                env.render_distance as f32 * 16.0,
+            );
+            cloud_end.0 = Some(range.1);
+            range
         }
-        None => env.fog_distance,
+        None => {
+            let night_vision = view.night_vision.filter(|_| !view.has_darkness);
+            sky.fog_color = shade_fog(sky.fog_color, darkness, night_vision.unwrap_or(0.0));
+            env.fog_distance
+        }
     };
+    let render_end = env.render_fog_distance.1;
+    let effect_fog = match (eye_fluid, view.blindness) {
+        (Some(EyeFluid::Lava), _) => None,
+        (_, Some(duration)) => {
+            let distance = blindness_fog_distance(duration, render_end);
+            Some((distance * 0.25, distance, distance * 0.8))
+        }
+        _ if view.has_darkness => {
+            let distance = crate::util::mth::lerp(view.darkness, render_end, 15.0);
+            Some((distance * 0.75, distance, distance))
+        }
+        _ => None,
+    };
+    if let Some((start, end, clouds)) = effect_fog {
+        environmental = (start, end);
+        cloud_end.0 = Some(clouds);
+    }
     let fog_color = sky.fog_color.to_color();
 
     if let Ok((mut fog, mut camera)) = world_view.single_mut() {
@@ -738,7 +816,14 @@ fn update_sky(
         rig.scale = Vec3::splat(SKY_SCALE);
     }
 
-    rebuild_discs(&mut assets, &mut meshes, &sky, env.sky_fog_end);
+    let sky_blocked =
+        view.blindness.is_some() || view.has_darkness || eye_fluid == Some(EyeFluid::Lava);
+
+    let dome_on = dome_sky() && !under_water && !sky_blocked;
+
+    if skybox == Skybox::Overworld && !dome_on && !sky_blocked {
+        rebuild_discs(&mut assets, &mut meshes, &sky, sky_end);
+    }
 
     let yaw = Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
     let place = |angle: f32, height: f32, size: f32| {
@@ -754,7 +839,7 @@ fn update_sky(
 
     #[cfg(feature = "builtin_shaders")]
     if let Ok((handle, mut dome_visibility)) = dome.single_mut() {
-        let fancy = dome_sky();
+        let fancy = dome_on;
         *dome_visibility = if skybox == Skybox::Overworld && fancy {
             Visibility::Inherited
         } else {
@@ -794,6 +879,10 @@ fn update_sky(
     }
 
     for (part, mut transform, mut visibility, mut material) in parts.iter_mut() {
+        if sky_blocked {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        }
         if *part == SkyPart::EndSky {
             visibility.set_if_neq(if skybox == Skybox::End {
                 Visibility::Inherited
@@ -806,7 +895,7 @@ fn update_sky(
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         }
-        if dome_sky() && matches!(part, SkyPart::SkyDisc | SkyPart::DarkDisc) {
+        if dome_on && matches!(part, SkyPart::SkyDisc | SkyPart::DarkDisc) {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         }
@@ -822,6 +911,7 @@ fn update_sky(
                 });
             }
             SkyPart::Sun | SkyPart::Moon => {
+                visibility.set_if_neq(Visibility::Inherited);
                 if *part == SkyPart::Sun {
                     transform.set_if_neq(place(sky.sun_angle, SUN_HEIGHT, SUN_SIZE));
                 } else {
@@ -956,6 +1046,42 @@ mod tests {
         let count = mesh.count_vertices();
         assert!(count % 4 == 0);
         assert!(count / 4 > 600 && count / 4 < STAR_COUNT, "{count}");
+    }
+
+    #[test]
+    fn water_fog_end_ramps_from_a_quarter() {
+        assert_eq!(water_fog_end(96.0, 0.0), 24.0);
+        assert_eq!(water_fog_end(96.0, 0.1), 24.0);
+        assert_eq!(water_fog_end(96.0, 0.5), 48.0);
+        assert_eq!(water_fog_end(96.0, 1.0), 96.0);
+    }
+
+    #[test]
+    fn fog_brightens_toward_a_full_channel() {
+        let color = Argb(0xFF05_0533);
+        assert_eq!(shade_fog(color, 0.0, 0.0), color);
+        assert_eq!(shade_fog(color, 0.0, 0.5), Argb(0xFF0F_0F99));
+        assert_eq!(shade_fog(color, 0.0, 1.0), Argb(0xFF19_19FF));
+        assert_eq!(shade_fog(Argb(0xFF00_0533), 0.0, 1.0), Argb(0xFF00_0533));
+    }
+
+    #[test]
+    fn fog_dims_by_the_square_of_what_darkness_leaves() {
+        let color = Argb(0xFF40_8080);
+        assert_eq!(shade_fog(color, 0.5, 0.0), Argb(0xFF10_2020));
+        assert_eq!(shade_fog(color, 1.0, 1.0), Argb(0xFF00_0000));
+    }
+
+    #[test]
+    fn blindness_opens_up_over_its_last_second() {
+        assert_eq!(blindness_fog_distance(-1, 128.0), 5.0);
+        assert_eq!(blindness_fog_distance(400, 128.0), 5.0);
+        assert_eq!(blindness_fog_distance(20, 128.0), 5.0);
+        assert_eq!(blindness_fog_distance(0, 128.0), 128.0);
+        assert_eq!(blindness_darkness(-1), 1.0);
+        assert_eq!(blindness_darkness(20), 1.0);
+        assert_eq!(blindness_darkness(10), 0.5);
+        assert_eq!(blindness_darkness(0), 0.0);
     }
 
     #[test]

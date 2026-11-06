@@ -201,7 +201,7 @@ pub(crate) fn reset() {
     crate::client::skins::reset();
 }
 
-pub(crate) fn packet(shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) {
+pub(crate) fn packet(shared: &SharedMutex, packet: &ClientboundGamePacket) {
     let mut s = match packet {
         ClientboundGamePacket::PlayerInfoUpdate(_)
         | ClientboundGamePacket::PlayerInfoRemove(_)

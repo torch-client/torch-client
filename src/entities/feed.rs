@@ -1,7 +1,7 @@
 use azalea_registry::builtin::EntityKind;
 
 use super::living::{LivingCore, MAX_HEAD_ROTATION, SwimAmount};
-use super::physics::{Body, Level, Motion, Shape, Void};
+use super::physics::{Body, Level, Motion, RestMemo, Shape, Void};
 use super::state::{Direction, EntityState, Extras, ExtrasShared, Pose};
 use crate::util::interp::Interpolation;
 use crate::util::javarandom::JavaRandom;
@@ -493,6 +493,7 @@ pub struct EntityAnim {
     is_living: bool,
     motion: Motion,
     body: Body,
+    rest_memo: RestMemo,
     velocity_seq: u64,
     vehicle_body_rot: Option<(f32, f32)>,
     ticks: u32,
@@ -538,6 +539,7 @@ impl EntityAnim {
                 acceleration_power: super::physics::INITIAL_ACCELERATION_POWER,
                 ..Body::default()
             },
+            rest_memo: RestMemo::default(),
             velocity_seq: 0,
             vehicle_body_rot: None,
             ticks: 0,
@@ -570,6 +572,42 @@ impl EntityAnim {
 
     pub fn set_vehicle_body_rot(&mut self, pair: Option<(f32, f32)>) {
         self.vehicle_body_rot = pair;
+    }
+
+    pub fn refresh_snapshot(&mut self, src: &EntityAnim) {
+        let EntityAnim {
+            id,
+            kind,
+            core,
+            is_living,
+            motion,
+            body,
+            rest_memo: _,
+            velocity_seq,
+            vehicle_body_rot,
+            ticks,
+            kinetic_hit_at,
+            rng,
+            speed_sqr,
+            sampled,
+            started,
+            kind_state,
+        } = src;
+        self.id = *id;
+        self.kind = *kind;
+        self.core.clone_from(core);
+        self.is_living = *is_living;
+        self.motion = *motion;
+        self.body = *body;
+        self.velocity_seq = *velocity_seq;
+        self.vehicle_body_rot = *vehicle_body_rot;
+        self.ticks = *ticks;
+        self.kinetic_hit_at = *kinetic_hit_at;
+        self.rng = *rng;
+        self.speed_sqr = *speed_sqr;
+        self.sampled.clone_from(sampled);
+        self.started = *started;
+        self.kind_state.clone_from(kind_state);
     }
 
     fn solve_body_rot(&self, head_rot: f32, partial: f32) -> f32 {
@@ -711,8 +749,14 @@ impl EntityAnim {
                 ticks: self.ticks,
                 id: self.id,
             };
-            self.core.pos =
-                super::physics::step(self.motion, self.core.pos, &mut self.body, &shape, level);
+            self.core.pos = super::physics::step(
+                self.motion,
+                self.core.pos,
+                &mut self.body,
+                &mut self.rest_memo,
+                &shape,
+                level,
+            );
         }
 
         if !self.is_living {
@@ -1215,6 +1259,10 @@ impl EntityAnim {
 
     pub fn bounding_box_height(&self) -> f32 {
         self.sampled.bounding_box_height
+    }
+
+    pub fn bounding_box_width(&self) -> f32 {
+        self.sampled.bounding_box_width
     }
 
     pub fn eye_height(&self) -> f32 {

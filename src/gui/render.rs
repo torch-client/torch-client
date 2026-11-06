@@ -61,6 +61,7 @@ pub struct GuiInput {
     pub left_release: bool,
     pub right_release: bool,
     pub scroll: f32,
+    pub scroll_x: f32,
     pub typed: Vec<char>,
     pub edits: Vec<EditKey>,
     pub backspace: bool,
@@ -92,6 +93,8 @@ pub struct GuiInput {
     pub select_all: bool,
     #[cfg(feature = "hud_editor")]
     pub undo: bool,
+    #[cfg(feature = "hud_editor")]
+    pub redo: bool,
     #[cfg(feature = "hud_editor")]
     pub hud_hide: bool,
     #[cfg(feature = "hud_editor")]
@@ -188,7 +191,12 @@ impl Plugin for GuiPlugin {
     fn build(&self, app: &mut App) {
         let options = crate::gui::GuiOptions::default();
         #[cfg(feature = "audio")]
-        crate::audio::set_volumes(&options.volumes);
+        {
+            crate::audio::set_volumes(&options.volumes);
+            crate::audio::set_subtitles(options.show_subtitles);
+            crate::audio::set_music_frequency(options.music_frequency);
+            crate::audio::devices::set_device(options.sound_device);
+        }
         app.init_resource::<GuiFrames>().add_plugins(
             bevy::render::extract_resource::ExtractResourcePlugin::<GuiTextures>::default(),
         );
@@ -623,12 +631,13 @@ pub(crate) fn collect_input(
         });
     }
     let notches = crate::renderer::input::wheel_notches(&wheel);
-    let (_, wy) = crate::renderer::input::accumulate_scroll(
+    let (wx, wy) = crate::renderer::input::accumulate_scroll(
         &mut wheel_acc,
         notches.x as f64,
         notches.y as f64,
     );
     input.scroll = wy as f32;
+    input.scroll_x = wx as f32;
 
     input.ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     input.shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -688,6 +697,9 @@ pub(crate) fn collect_input(
     #[cfg(feature = "hud_editor")]
     {
         input.undo = shortcut && keys.just_pressed(KeyCode::KeyZ);
+        let shift_shortcut = !elsewhere && input.ctrl && input.shift && !input.alt;
+        input.redo = (shortcut && keys.just_pressed(KeyCode::KeyY))
+            || (shift_shortcut && keys.just_pressed(KeyCode::KeyZ));
         let bare = !elsewhere && !input.ctrl && !input.alt;
         input.hud_hide = bare && keys.just_pressed(KeyCode::KeyH);
         input.hud_remove = bare && keys.just_pressed(KeyCode::Delete);

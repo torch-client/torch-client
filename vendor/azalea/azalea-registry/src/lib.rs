@@ -2,6 +2,7 @@ pub mod builtin;
 pub mod data;
 pub mod identifier;
 pub mod tags;
+pub mod unknown;
 
 use std::{
     fmt::{self, Debug},

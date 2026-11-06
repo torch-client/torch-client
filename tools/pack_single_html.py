@@ -69,7 +69,7 @@ window.__ready = (async () => {
   }
   const packed = new Uint8Array(%(size)d);
   const hi = %(high)s, inv = new Uint8Array(0x2123), tab = %(table)s;
-  for (let b = 128; b < 160; b++) inv[b] = b; // decoders that read the page as ISO-8859-1
+  for (let b = 128; b < 160; b++) inv[b] = b;
   for (let b = 0; b < 256; b++) inv[b < 128 || b >= 160 ? b : hi.charCodeAt(b - 128)] = b;
   let j = 0;
   for (let i = 0; i < text.length; i++) {

@@ -63,7 +63,8 @@ pub(super) fn add_world(lua: &Lua, ctx: &Arc<Ctx>, world: &Table) -> mlua::Resul
                     return Ok(Value::Nil);
                 };
                 let t = info(lua, state)?;
-                if let Some((block, sky)) = light_at(pos.x, pos.y, pos.z) {
+                if let Some((block, sky)) = crate::client::worldsync::light_at(pos.x, pos.y, pos.z)
+                {
                     t.raw_set("blocklight", block)?;
                     t.raw_set("skylight", sky)?;
                 }
@@ -103,13 +104,6 @@ pub(super) fn add_world(lua: &Lua, ctx: &Arc<Ctx>, world: &Table) -> mlua::Resul
     Ok(())
 }
 
-fn light_at(x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
-    use crate::lighting::SectionPos;
-    let map = crate::client::worldsync::light_map().read();
-    map.is_lit(SectionPos::of_block(x, y, z).column())
-        .then(|| map.at(x, y, z))
-}
-
 fn info(lua: &Lua, state: BlockState) -> mlua::Result<Table> {
     let kind = state.as_block_kind();
     let block = Box::<dyn BlockTrait>::from(state);
@@ -125,13 +119,7 @@ fn info(lua: &Lua, state: BlockState) -> mlua::Result<Table> {
         t.raw_set("state", format!("minecraft:{id}[{}]", inner.join(",")))?;
     }
     t.raw_set("stateid", state.id())?;
-    t.raw_set(
-        "air",
-        matches!(
-            kind,
-            BlockKind::Air | BlockKind::CaveAir | BlockKind::VoidAir
-        ),
-    )?;
+    t.raw_set("air", crate::blocks::is_air(kind))?;
     t.raw_set("replaceable", replaceable(kind, &*block))?;
     t.raw_set("solid", is_solid(state))?;
     t.raw_set("fullcube", state.is_collision_shape_full())?;

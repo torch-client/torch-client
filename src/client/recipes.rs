@@ -152,11 +152,7 @@ fn resolve_entry(ctx: &mut Ctx, raw: Arc<RecipeDisplayEntry>) -> RecipeEntry {
     }
 }
 
-pub(crate) fn packet(
-    world: &WorldHolder,
-    shared: &Arc<SharedMutex>,
-    packet: &ClientboundGamePacket,
-) {
+pub(crate) fn packet(world: &WorldHolder, shared: &SharedMutex, packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::RecipeBookAdd(p) => {
             let added: Vec<(Arc<RecipeEntry>, u8)> = {
@@ -263,7 +259,7 @@ pub(crate) fn packet(
     }
 }
 
-pub(crate) fn send_queued(bot: &Client, shared: &Arc<SharedMutex>) {
+pub(crate) fn send_queued(bot: &Client, shared: &SharedMutex) {
     use azalea_protocol::packets::game::s_place_recipe::ServerboundPlaceRecipe;
     use azalea_protocol::packets::game::s_recipe_book_change_settings::ServerboundRecipeBookChangeSettings;
     use azalea_protocol::packets::game::s_recipe_book_seen_recipe::ServerboundRecipeBookSeenRecipe;

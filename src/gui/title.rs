@@ -143,6 +143,17 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         }
     }
 
+    #[cfg(self_update)]
+    {
+        #[cfg(feature = "tutorial")]
+        let tutorial = crate::gui::tutorial::running();
+        #[cfg(not(feature = "tutorial"))]
+        let tutorial = false;
+        if !tutorial && state.nav.is_none() && crate::client::self_update::take_offer() {
+            state.nav = Some(Screen::SelfUpdate);
+        }
+    }
+
     #[cfg(all(feature = "mobile_ui", target_arch = "wasm32"))]
     {
         const W: f32 = 90.0;

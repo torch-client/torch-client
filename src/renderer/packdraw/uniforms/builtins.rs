@@ -113,6 +113,7 @@ pub(crate) enum Builtin {
     Blindness,
     NightVision,
     DarknessFactor,
+    DarknessLightFactor,
     HideGui,
     EndFlashIntensity,
     PreviousEndFlashIntensity,
@@ -234,6 +235,7 @@ pub(crate) const BUILTINS: &[(&str, &str, Builtin)] = &[
     ("blindness", "float", Builtin::Blindness),
     ("nightVision", "float", Builtin::NightVision),
     ("darknessFactor", "float", Builtin::DarknessFactor),
+    ("darknessLightFactor", "float", Builtin::DarknessLightFactor),
     ("hideGUI", "int", Builtin::HideGui),
     ("endFlashIntensity", "float", Builtin::EndFlashIntensity),
     (

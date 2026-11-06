@@ -92,8 +92,17 @@ impl Spin {
             return;
         };
         if data.trial {
-            if let Some(speed) = trial_spin_speed(ctx.state.prop("trial_spawner_state")) {
+            let state = ctx.state.prop("trial_spawner_state");
+            if let Some(speed) = trial_spin_speed(state) {
                 self.advance(speed / 200.0);
+            }
+            if matches!(state, "waiting_for_players" | "active") {
+                let event = if ctx.state.prop("ominous") == "true" {
+                    "block.trial_spawner.ambient_ominous"
+                } else {
+                    "block.trial_spawner.ambient"
+                };
+                super::idle_sound(ctx, event);
             }
         } else if !ctx.player_within(ctx.center(), f64::from(data.range)) {
             self.o_spin = self.spin;

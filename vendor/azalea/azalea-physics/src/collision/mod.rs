@@ -1,3 +1,4 @@
+pub mod auto_jump;
 mod blocks;
 mod discrete_voxel_shape;
 pub mod entity_collisions;

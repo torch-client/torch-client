@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::gui::painter::Painter;
 use crate::gui::widgets::{self, Button, WIDGET_HEIGHT, WIDGET_WIDTH_BIG};
 use crate::gui::{Screen, ScreenCtx};
@@ -80,7 +78,7 @@ pub fn draw(
     p: &mut Painter,
     state: &mut DeathState,
     ctx: &ScreenCtx,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
 ) -> Option<Screen> {
     background(p, ctx.vw, ctx.vh);
 
@@ -151,7 +149,7 @@ fn draw_confirm(
     p: &mut Painter,
     state: &mut DeathState,
     ctx: &ScreenCtx,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     opened: u32,
 ) -> Option<Screen> {
     let block_h = LINE_HEIGHT + CONFIRM_PAD + WIDGET_HEIGHT;

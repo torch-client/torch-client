@@ -11,6 +11,7 @@ azalea-buf.workspace = true
 azalea-registry-macros.workspace = true
 serde = { workspace = true, optional = true, features = ["derive"] }
 simdnbt.workspace = true
+tracing.workspace = true
 
 [features]
 serde = ["azalea-registry-macros/serde", "dep:serde"]

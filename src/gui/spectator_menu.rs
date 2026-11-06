@@ -1,6 +1,7 @@
 use crate::client::tablist::TabList;
 use crate::gui::painter::Painter;
 use crate::gui::tablist::DEFAULT_SKINS;
+use crate::gui::tooltip::label;
 use crate::gui::{ScreenCtx, screens::HotbarGeom};
 use crate::text::{Span, Style, styled};
 
@@ -40,7 +41,9 @@ fn category_prompt(category: &Category) -> Vec<Span> {
 
 fn item_name(item: &Item) -> Vec<Span> {
     match item {
-        Item::Category(Category::Players { .. }) => styled("Teleport to Player", Style::default()),
+        Item::Category(Category::Players { .. }) => {
+            styled(label!("spectatorMenu.teleport"), Style::default())
+        }
         Item::Category(Category::Teams) => styled("Teleport to Team", Style::default()),
         Item::Category(Category::Root) => Vec::new(),
         Item::Player { name, .. } => name.clone(),

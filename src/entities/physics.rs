@@ -3,9 +3,62 @@ use azalea_registry::builtin::EntityKind;
 pub trait Level {
     fn collide(&self, min: [f64; 3], max: [f64; 3], movement: [f64; 3]) -> [f64; 3];
 
+    fn collide_resting(
+        &self,
+        min: [f64; 3],
+        max: [f64; 3],
+        movement: [f64; 3],
+        memo: &mut RestMemo,
+    ) -> [f64; 3] {
+        let _ = memo;
+        self.collide(min, max, movement)
+    }
+
     fn friction(&self, pos: [i32; 3]) -> f32;
 
     fn speed_factor(&self, pos: [i32; 3]) -> (f32, bool);
+}
+
+pub const MEMO_CELLS: usize = 64;
+
+pub const MEMO_COLUMNS: usize = 4;
+
+#[derive(Debug)]
+pub struct CollideMemo {
+    pub lo: [i32; 3],
+    pub hi: [i32; 3],
+    pub columns: [(i32, i32, u64); MEMO_COLUMNS],
+    pub column_count: usize,
+    pub cells: [[u8; 3]; MEMO_CELLS],
+    pub cell_count: usize,
+    pub filled: bool,
+}
+
+impl CollideMemo {
+    const EMPTY: CollideMemo = CollideMemo {
+        lo: [0; 3],
+        hi: [0; 3],
+        columns: [(0, 0, 0); MEMO_COLUMNS],
+        column_count: 0,
+        cells: [[0; 3]; MEMO_CELLS],
+        cell_count: 0,
+        filled: false,
+    };
+}
+
+#[derive(Debug, Default)]
+pub struct RestMemo(Option<Box<CollideMemo>>);
+
+impl Clone for RestMemo {
+    fn clone(&self) -> RestMemo {
+        RestMemo(None)
+    }
+}
+
+impl RestMemo {
+    pub fn get(&mut self) -> &mut CollideMemo {
+        self.0.get_or_insert_with(|| Box::new(CollideMemo::EMPTY))
+    }
 }
 
 pub struct Void;
@@ -114,13 +167,18 @@ fn block_below(pos: [f64; 3], offset: f64) -> [i32; 3] {
 fn move_self(
     pos: [f64; 3],
     body: &mut Body,
+    memo: &mut RestMemo,
     shape: &Shape,
     level: &dyn Level,
     below_offset: f64,
 ) -> [f64; 3] {
     let delta = body.velocity;
     let (min, max) = bounding_box(pos, shape);
-    let movement = level.collide(min, max, delta);
+    let movement = if body.on_ground {
+        level.collide_resting(min, max, delta, memo)
+    } else {
+        level.collide(min, max, delta)
+    };
 
     let moved_sqr =
         movement[0] * movement[0] + movement[1] * movement[1] + movement[2] * movement[2];
@@ -177,6 +235,7 @@ pub fn step(
     motion: Motion,
     mut pos: [f64; 3],
     body: &mut Body,
+    memo: &mut RestMemo,
     shape: &Shape,
     level: &dyn Level,
 ) -> [f64; 3] {
@@ -196,7 +255,7 @@ pub fn step(
                 return pos;
             }
 
-            pos = move_self(pos, body, shape, level, 0.999_999);
+            pos = move_self(pos, body, memo, shape, level, 0.999_999);
 
             let mut friction = 0.98f32;
             if body.on_ground {
@@ -218,7 +277,7 @@ pub fn step(
                 return pos;
             }
 
-            pos = move_self(pos, body, shape, level, 0.500_001);
+            pos = move_self(pos, body, memo, shape, level, 0.500_001);
             for axis in &mut body.velocity {
                 *axis *= 0.98;
             }
@@ -332,6 +391,7 @@ mod tests {
             Motion::Item,
             [0.0, 10.0, 0.0],
             &mut body,
+            &mut RestMemo::default(),
             &item_shape(),
             &Void,
         );
@@ -348,9 +408,10 @@ mod tests {
         let mut body = Body::default();
         let mut pos = [0.0, 3.0, 0.0];
         let mut shape = item_shape();
+        let mut memo = RestMemo::default();
         for tick in 0..200u32 {
             shape.ticks = tick;
-            pos = step(Motion::Item, pos, &mut body, &shape, &Floor);
+            pos = step(Motion::Item, pos, &mut body, &mut memo, &shape, &Floor);
         }
         assert!(body.on_ground);
         assert!(pos[1].abs() < 1e-6, "{}", pos[1]);
@@ -364,7 +425,14 @@ mod tests {
         };
         let mut pos = [0.0, 10.0, 0.0];
         for _ in 0..5 {
-            pos = step(Motion::Item, pos, &mut body, &item_shape(), &Void);
+            pos = step(
+                Motion::Item,
+                pos,
+                &mut body,
+                &mut RestMemo::default(),
+                &item_shape(),
+                &Void,
+            );
         }
         assert!(pos[0] > 0.5, "{}", pos[0]);
         assert!(pos[1] > 10.0, "{}", pos[1]);
@@ -385,7 +453,14 @@ mod tests {
         let mut last = 0.0;
         for _ in 0..5 {
             let before = pos[1];
-            pos = step(Motion::FallingBlock, pos, &mut body, &shape, &Void);
+            pos = step(
+                Motion::FallingBlock,
+                pos,
+                &mut body,
+                &mut RestMemo::default(),
+                &shape,
+                &Void,
+            );
             let fell = before - pos[1];
             assert!(fell > last, "{fell} did not exceed {last}");
             last = fell;
@@ -407,7 +482,14 @@ mod tests {
             ticks: 0,
             id: 0,
         };
-        let pos = step(Motion::Arrow, [0.0, 10.0, 0.0], &mut body, &shape, &Void);
+        let pos = step(
+            Motion::Arrow,
+            [0.0, 10.0, 0.0],
+            &mut body,
+            &mut RestMemo::default(),
+            &shape,
+            &Void,
+        );
         assert_eq!(pos, [0.0, 10.0, 0.0]);
         assert_eq!(body.velocity, [1.0, 0.0, 0.0]);
     }
@@ -426,7 +508,14 @@ mod tests {
             ticks: 0,
             id: 0,
         };
-        let pos = step(Motion::Fireball, [0.0, 10.0, 0.0], &mut body, &shape, &Void);
+        let pos = step(
+            Motion::Fireball,
+            [0.0, 10.0, 0.0],
+            &mut body,
+            &mut RestMemo::default(),
+            &shape,
+            &Void,
+        );
         assert_eq!(pos[1], 10.0);
         assert!((pos[0] - 0.95).abs() < 1e-9, "{}", pos[0]);
     }

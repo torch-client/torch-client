@@ -200,7 +200,7 @@ impl Dimension {
         self.attributes().has_ceiling
     }
 
-    #[cfg(feature = "shader_support")]
+    #[cfg(any(feature = "audio", feature = "shader_support"))]
     pub fn has_skylight(self) -> bool {
         self.attributes().has_skylight
     }

@@ -3,8 +3,11 @@ use std::{cmp, collections::HashSet};
 use azalea_chat::FormattedText;
 use azalea_inventory::{
     ItemStack, ItemStackData, Menu, MenuLocation,
-    components::EquipmentSlot,
-    item::MaxStackSizeExt,
+    bundle::{
+        Mutable, NO_SELECTED_ITEM, can_item_be_in_bundle, is_bundle, item_weight, max_stack_size,
+        set_contents, toggle_selected_item,
+    },
+    components::{BundleContents, EquipmentSlot},
     operations::{
         ClickOperation, CloneClick, PickupAllClick, PickupClick, QuickCraftKind, QuickCraftStatus,
         QuickCraftStatusKind, QuickMoveClick, ThrowClick,
@@ -35,6 +38,15 @@ pub struct Inventory {
     pub selected_hotbar_slot: u8,
 
     pub crafter_disabled_slots: u16,
+
+    pub bundle_sound: Option<BundleSound>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BundleSound {
+    Insert,
+    InsertFail,
+    RemoveOne,
 }
 
 impl Inventory {
@@ -150,6 +162,7 @@ impl Inventory {
     }
 
     pub fn simulate_click(&mut self, operation: &ClickOperation, player_abilities: &PlayerAbilities) {
+        self.bundle_sound = None;
         self.simulate_click_inner(operation, player_abilities);
         self.sync_player_slots(true);
     }
@@ -194,7 +207,7 @@ impl Inventory {
                 {
                     if can_item_quick_replace(slot_item, &self.carried, true)
                         && self.menu().may_place(slot as usize, carried)
-                        && (self.quick_craft_kind == QuickCraftKind::Right
+                        && (self.quick_craft_kind == QuickCraftKind::Middle
                             || carried.count as usize > self.quick_craft_slots.len())
                     {
                         self.quick_craft_slots.insert(slot);
@@ -239,7 +252,7 @@ impl Inventory {
                         loop {
                             let Some(&next_slot) = quick_craft_slots_iter.next() else {
                                 carried.count = carried_count;
-                                self.carried = ItemStack::Present(carried);
+                                self.carried = carried.into();
                                 return self.reset_quick_craft();
                             };
 
@@ -248,6 +261,7 @@ impl Inventory {
                             item_stack = &self.carried;
 
                             if can_item_quick_replace(slot, item_stack, true)
+                                    && self.menu().may_place(next_slot as usize, &carried)
                                     && (
                                         self.quick_craft_kind == QuickCraftKind::Middle
                                         || item_stack.count()  >= self.quick_craft_slots.len() as i32
@@ -266,9 +280,10 @@ impl Inventory {
                             &mut new_carried,
                             slot_item_count,
                         );
-                        let max_stack_size = new_carried.kind.max_stack_size();
-                        if new_carried.count > max_stack_size {
-                            new_carried.count = max_stack_size;
+                        let limit = max_stack_size(&new_carried)
+                            .min(self.menu().max_stack_size(slot_index as usize));
+                        if new_carried.count > limit {
+                            new_carried.count = limit;
                         }
 
                         carried_count -= new_carried.count - slot_item_count;
@@ -276,8 +291,7 @@ impl Inventory {
                             Some(menu) => menu,
                             _ => &mut self.inventory_menu,
                         };
-                        *menu.slot_mut(slot_index as usize).unwrap() =
-                            ItemStack::Present(new_carried);
+                        *menu.slot_mut(slot_index as usize).unwrap() = new_carried.into();
                     }
                 }
             } else {
@@ -305,15 +319,17 @@ impl Inventory {
                 | PickupClick::Right { slot: Some(slot) }),
             ) => {
                 let slot = slot as usize;
-                let Some(slot_item) = self.menu().slot(slot) else {
-                    return;
-                };
-
-                if self.try_item_click_behavior_override(operation, slot) {
+                if self.menu().slot(slot).is_none() {
                     return;
                 }
 
                 let is_left_click = matches!(pickup, PickupClick::Left { .. });
+                if self.try_item_click_behavior_override(is_left_click, slot) {
+                    return;
+                }
+                let Some(slot_item) = self.menu().slot(slot) else {
+                    return;
+                };
 
                 match slot_item {
                     ItemStack::Empty => {
@@ -345,7 +361,7 @@ impl Inventory {
                                     <= self
                                         .menu()
                                         .max_stack_size(slot)
-                                        .min(carried.kind.max_stack_size())
+                                        .min(max_stack_size(&carried))
                                 {
                                     self.carried = slot_item.clone();
                                     let slot_item = self.menu_mut().slot_mut(slot).unwrap();
@@ -355,10 +371,11 @@ impl Inventory {
                                 && let Some(removed) = self.try_remove(
                                     slot,
                                     slot_item.count(),
-                                    carried.kind.max_stack_size() - carried.count,
+                                    max_stack_size(&carried) - carried.count,
                                 )
                             {
                                 self.carried.as_present_mut().unwrap().count += removed.count();
+                                self.on_take_craft_result(slot);
                             }
                         } else {
                             let pickup_count = if is_left_click {
@@ -471,7 +488,7 @@ impl Inventory {
                     return;
                 };
                 let mut new_carried = source_item.clone();
-                new_carried.count = new_carried.kind.max_stack_size();
+                new_carried.count = max_stack_size(&new_carried);
                 self.carried = ItemStack::Present(new_carried);
             }
             ClickOperation::Throw(c) => {
@@ -482,23 +499,17 @@ impl Inventory {
                 let (ThrowClick::Single { slot: slot_index }
                 | ThrowClick::All { slot: slot_index }) = c;
                 let slot_index = *slot_index as usize;
-                if !self.menu().may_pickup(slot_index) {
-                    return;
-                }
-
-                let Some(slot) = self.menu_mut().slot_mut(slot_index) else {
+                let Some(held) = self.menu().slot(slot_index).map(ItemStack::count) else {
                     return;
                 };
-                let ItemStack::Present(slot_item) = slot else {
-                    return;
-                };
-
                 let dropping_count = match c {
                     ThrowClick::Single { .. } => 1,
-                    ThrowClick::All { .. } => slot_item.count,
+                    ThrowClick::All { .. } => held,
                 };
 
-                let _dropping = slot_item.split(dropping_count as u32);
+                if self.try_remove(slot_index, dropping_count, i32::MAX).is_some() {
+                    self.on_take_craft_result(slot_index);
+                }
             }
             ClickOperation::PickupAll(PickupAllClick {
                 slot: source_slot_index,
@@ -519,7 +530,7 @@ impl Inventory {
                     unreachable!("target slot is not empty but is not present");
                 };
 
-                let max = target_slot_item.kind.max_stack_size();
+                let max = max_stack_size(target_slot_item);
                 for round in 0..2 {
                     let iterator: Box<dyn Iterator<Item = usize>> = if *reversed {
                         Box::new((0..self.menu().len()).rev())
@@ -537,12 +548,12 @@ impl Inventory {
                             && can_item_quick_replace(checking_slot, &target_slot, true)
                             && self.menu().may_pickup(i)
                             && self.menu().can_take_item_for_pick_all(i)
-                            && (round != 0
-                                || checking_item.count != checking_item.kind.max_stack_size())
+                            && (round != 0 || checking_item.count != max_stack_size(checking_item))
                         {
-                            let take = cmp::min(checking_item.count, max - carried);
-                            let checking_slot = self.menu_mut().slot_mut(i).unwrap();
-                            let taken_item = checking_slot.split(take as u32);
+                            let count = checking_item.count;
+                            let Some(taken_item) = self.try_remove(i, count, max - carried) else {
+                                continue;
+                            };
 
                             let ItemStack::Present(carried_item) = &mut self.carried else {
                                 unreachable!("target slot is not empty but is not present");
@@ -566,28 +577,117 @@ impl Inventory {
             .expect("The main hand item should always be present")
     }
 
-    fn try_item_click_behavior_override(
-        &self,
-        _operation: &ClickOperation,
-        _slot_item_index: usize,
-    ) -> bool {
-        false
+    fn try_item_click_behavior_override(&mut self, primary: bool, slot: usize) -> bool {
+        self.bundle_stacked_on_other(slot, primary) || self.bundle_other_stacked_on_me(slot, primary)
+    }
+
+    fn bundle_stacked_on_other(&mut self, slot: usize, primary: bool) -> bool {
+        let contents = self.carried.as_present().filter(|item| is_bundle(item.kind));
+        let Some(mut contents) = contents
+            .and_then(|item| item.get_unless_removed::<BundleContents>())
+            .map(|contents| Mutable::new(&contents))
+        else {
+            return false;
+        };
+        let other = self.menu().slot(slot).cloned().unwrap_or_default();
+        if primary && let ItemStack::Present(other) = &other {
+            let inserted = self.bundle_try_transfer(&mut contents, slot, other);
+            self.bundle_sound =
+                Some(if inserted > 0 { BundleSound::Insert } else { BundleSound::InsertFail });
+        } else if !primary && other.is_empty() {
+            if let Some(removed) = contents.remove_one() {
+                let count = removed.count();
+                let mut remainder = self.safe_insert(slot, removed, count);
+                if remainder.count() > 0 {
+                    contents.try_insert(&mut remainder);
+                } else {
+                    self.bundle_sound = Some(BundleSound::RemoveOne);
+                }
+            }
+        } else {
+            return false;
+        }
+        if let ItemStack::Present(bundle) = &mut self.carried {
+            set_contents(bundle, contents.into_contents());
+        }
+        true
+    }
+
+    fn bundle_try_transfer(
+        &mut self,
+        contents: &mut Mutable,
+        slot: usize,
+        other: &ItemStackData,
+    ) -> i32 {
+        let Some(weight) = item_weight(other).filter(|_| can_item_be_in_bundle(other)) else {
+            return 0;
+        };
+        let limit = contents.max_amount_to_add(weight);
+        let Some(mut taken) = self.try_remove(slot, other.count, limit) else {
+            return 0;
+        };
+        self.on_take_craft_result(slot);
+        contents.try_insert(&mut taken)
+    }
+
+    fn bundle_other_stacked_on_me(&mut self, slot: usize, primary: bool) -> bool {
+        let clicked = self.menu().slot(slot).and_then(ItemStack::as_present);
+        let Some(clicked) = clicked.filter(|item| is_bundle(item.kind)) else {
+            return false;
+        };
+        let carried_empty = self.carried.is_empty();
+        let contents = clicked.get_unless_removed::<BundleContents>().map(|c| Mutable::new(&c));
+        if primary && carried_empty {
+            self.toggle_bundle_selection(slot);
+            return false;
+        }
+        let Some(mut contents) = contents else {
+            return false;
+        };
+        let allowed = self.menu().allow_modification(slot);
+        if primary {
+            self.bundle_sound = Some(if allowed && contents.try_insert(&mut self.carried) > 0 {
+                BundleSound::Insert
+            } else {
+                BundleSound::InsertFail
+            });
+        } else if carried_empty {
+            if allowed && let Some(removed) = contents.remove_one() {
+                self.bundle_sound = Some(BundleSound::RemoveOne);
+                self.carried = removed;
+            }
+        } else {
+            self.toggle_bundle_selection(slot);
+            return false;
+        }
+        if let Some(ItemStack::Present(bundle)) = self.menu_mut().slot_mut(slot) {
+            set_contents(bundle, contents.into_contents());
+        }
+        true
+    }
+
+    fn toggle_bundle_selection(&mut self, slot: usize) {
+        if let Some(stack) = self.menu_mut().slot_mut(slot) {
+            toggle_selected_item(stack, NO_SELECTED_ITEM);
+        }
     }
 
     fn safe_insert(&mut self, slot: usize, src_item: ItemStack, take_count: i32) -> ItemStack {
         let ItemStack::Present(mut src_item) = src_item else {
             return src_item;
         };
-        if !self.menu().may_place(slot, &src_item) {
+        let disabled = slot < 9 && self.crafter_disabled_slots >> slot & 1 == 1;
+        if disabled || !self.menu().may_place(slot, &src_item) {
             return src_item.into();
         }
+        let slot_max = self.menu().max_stack_size(slot);
         let Some(slot_item) = self.menu_mut().slot_mut(slot) else {
             return src_item.into();
         };
 
         let take_count = cmp::min(
             cmp::min(take_count, src_item.count),
-            src_item.kind.max_stack_size() - slot_item.count(),
+            cmp::min(slot_max, max_stack_size(&src_item)) - slot_item.count(),
         );
         if take_count <= 0 {
             return src_item.into();
@@ -610,8 +710,8 @@ impl Inventory {
         if !self.menu().may_pickup(slot) {
             return None;
         }
-        let mut slot_item = self.menu().slot(slot)?.clone();
-        if !self.menu().allow_modification(slot) && limit < slot_item.count() {
+        let held = self.menu().slot(slot)?.count();
+        if !self.menu().allow_modification(slot) && limit < held {
             return None;
         }
 
@@ -619,13 +719,9 @@ impl Inventory {
         if count <= 0 {
             return None;
         }
-        let removed = slot_item.split(count as u32);
-
-        if removed.is_present() && slot_item.is_empty() {
-            *self.menu_mut().slot_mut(slot).unwrap() = ItemStack::Empty;
-        }
-
-        Some(removed)
+        let count = if self.menu().result_takes_whole_stack(slot) { held } else { count };
+        let removed = self.menu_mut().slot_mut(slot)?.split(count as u32);
+        removed.is_present().then_some(removed)
     }
 
     pub fn get_equipment(&self, equipment_slot: EquipmentSlot) -> Option<&ItemStack> {
@@ -668,7 +764,7 @@ fn can_item_quick_replace(
             } else {
                 item.count as u16
             };
-        return count <= item.kind.max_stack_size() as u16;
+        return count <= max_stack_size(item) as u16;
     }
     slot_is_empty
 }
@@ -682,7 +778,7 @@ fn get_quick_craft_slot_count(
     item.count = match quick_craft_kind {
         QuickCraftKind::Left => item.count / quick_craft_slots.len() as i32,
         QuickCraftKind::Right => 1,
-        QuickCraftKind::Middle => item.kind.max_stack_size(),
+        QuickCraftKind::Middle => max_stack_size(item),
     };
     item.count += slot_item_count;
 }
@@ -702,6 +798,7 @@ impl Default for Inventory {
             quick_craft_slots: HashSet::new(),
             selected_hotbar_slot: 0,
             crafter_disabled_slots: 0,
+            bundle_sound: None,
         }
     }
 }
@@ -734,6 +831,7 @@ mod tests {
             quick_craft_slots: HashSet::new(),
             selected_hotbar_slot: 0,
             crafter_disabled_slots: 0,
+            bundle_sound: None,
         };
 
         inventory.simulate_click(
@@ -742,10 +840,192 @@ mod tests {
         );
 
         let new_slots = inventory.menu().slots();
-        assert_eq!(&new_slots[0], &ItemStack::Empty);
-        assert_eq!(
-            &new_slots[*Menu::CRAFTING_PLAYER_SLOTS.start()],
-            &spruce_planks
-        );
+        assert_eq!(&new_slots[0], &spruce_planks);
+        assert!(new_slots[*Menu::CRAFTING_PLAYER_SLOTS.start()].is_empty());
+    }
+
+    #[test]
+    fn a_right_click_takes_a_whole_craft_result() {
+        let mut inv = inventory(ItemStack::Empty, ItemStack::Empty);
+        *inv.inventory_menu.slot_mut(0).unwrap() = ItemStack::new(ItemKind::Stick, 4);
+        click(&mut inv, 0, true);
+        assert_eq!(inv.carried.count(), 4);
+        assert!(inv.menu().slot(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn merging_a_craft_result_into_the_cursor_consumes_the_grid() {
+        let mut inv = inventory(ItemStack::Empty, ItemStack::new(ItemKind::Stick, 4));
+        *inv.inventory_menu.slot_mut(0).unwrap() = ItemStack::new(ItemKind::Stick, 4);
+        *inv.inventory_menu.slot_mut(1).unwrap() = ItemStack::new(ItemKind::OakPlanks, 2);
+        click(&mut inv, 0, false);
+        assert_eq!(inv.carried.count(), 8);
+        assert_eq!(inv.menu().slot(1).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_drag_pays_out_no_more_than_a_slot_holds() {
+        use azalea_inventory::operations::{QuickCraftClick, QuickCraftStatus};
+
+        let helmets = ItemStack::new(ItemKind::DiamondHelmet, 1)
+            .with_component(azalea_inventory::components::MaxStackSize { count: 4 });
+        let mut inv = inventory(ItemStack::Empty, ItemStack::Empty);
+        inv.carried = helmets;
+        inv.carried.as_present_mut().unwrap().count = 4;
+        for status in [
+            QuickCraftStatus::Start,
+            QuickCraftStatus::Add { slot: 5 },
+            QuickCraftStatus::Add { slot: 9 },
+            QuickCraftStatus::End,
+        ] {
+            let operation = ClickOperation::QuickCraft(QuickCraftClick {
+                kind: QuickCraftKind::Left,
+                status,
+            });
+            inv.simulate_click(&operation, &PlayerAbilities::default());
+        }
+        assert_eq!(inv.menu().slot(5).unwrap().count(), 1);
+        assert_eq!(inv.menu().slot(9).unwrap().count(), 2);
+        assert_eq!(inv.carried.count(), 1);
+    }
+
+    #[test]
+    fn throwing_the_last_item_leaves_an_empty_slot() {
+        let mut inv = inventory(ItemStack::new(ItemKind::Stone, 1), ItemStack::Empty);
+        let operation = ClickOperation::Throw(ThrowClick::Single { slot: 9 });
+        inv.simulate_click(&operation, &PlayerAbilities::default());
+        assert_eq!(inv.menu().slot(9), Some(&ItemStack::Empty));
+    }
+
+    fn bundle(items: Vec<ItemStack>) -> ItemStack {
+        ItemStack::new(ItemKind::Bundle, 1).with_component(BundleContents {
+            items,
+            selected_item: NO_SELECTED_ITEM,
+        })
+    }
+
+    fn contents(stack: &ItemStack) -> Vec<(ItemKind, i32)> {
+        let contents = stack.get_component::<BundleContents>().unwrap();
+        contents.items.iter().map(|i| (i.kind(), i.count())).collect()
+    }
+
+    fn inventory(clicked: ItemStack, carried: ItemStack) -> Inventory {
+        let mut inventory = Inventory { carried, ..Inventory::default() };
+        *inventory.inventory_menu.slot_mut(9).unwrap() = clicked;
+        inventory
+    }
+
+    fn click(inventory: &mut Inventory, slot: u16, right: bool) {
+        let operation = if right {
+            PickupClick::Right { slot: Some(slot) }
+        } else {
+            PickupClick::Left { slot: Some(slot) }
+        };
+        inventory.simulate_click(&operation.into(), &PlayerAbilities::default());
+    }
+
+    #[test]
+    fn a_carried_stack_goes_into_a_bundle_in_a_slot() {
+        let mut inv = inventory(bundle(Vec::new()), ItemStack::new(ItemKind::Stone, 10));
+        click(&mut inv, 9, false);
+        assert!(inv.carried.is_empty());
+        assert_eq!(contents(inv.menu().slot(9).unwrap()), [(ItemKind::Stone, 10)]);
+        assert_eq!(inv.bundle_sound, Some(BundleSound::Insert));
+    }
+
+    #[test]
+    fn a_full_bundle_refuses_and_keeps_the_cursor() {
+        let full = bundle(vec![ItemStack::new(ItemKind::DiamondSword, 1)]);
+        let mut inv = inventory(full, ItemStack::new(ItemKind::Stone, 10));
+        click(&mut inv, 9, false);
+        assert_eq!(inv.carried.count(), 10);
+        assert_eq!(inv.bundle_sound, Some(BundleSound::InsertFail));
+    }
+
+    #[test]
+    fn a_carried_bundle_takes_part_of_a_stack_and_leaves_the_rest() {
+        let held = bundle(vec![ItemStack::new(ItemKind::EnderPearl, 15)]);
+        let mut inv = inventory(ItemStack::new(ItemKind::Stone, 10), held);
+        click(&mut inv, 9, false);
+        assert_eq!(inv.menu().slot(9).unwrap().count(), 6);
+        assert_eq!(contents(&inv.carried)[0], (ItemKind::Stone, 4));
+        assert_eq!(inv.bundle_sound, Some(BundleSound::Insert));
+    }
+
+    #[test]
+    fn right_clicking_a_bundle_takes_its_selected_stack_onto_the_cursor() {
+        let held = vec![ItemStack::new(ItemKind::Dirt, 1), ItemStack::new(ItemKind::Stone, 2)];
+        let mut inv = inventory(bundle(held), ItemStack::Empty);
+        toggle_selected_item(inv.inventory_menu.slot_mut(9).unwrap(), 1);
+        click(&mut inv, 9, true);
+        assert_eq!((inv.carried.kind(), inv.carried.count()), (ItemKind::Stone, 2));
+        assert_eq!(contents(inv.menu().slot(9).unwrap()), [(ItemKind::Dirt, 1)]);
+        assert_eq!(inv.bundle_sound, Some(BundleSound::RemoveOne));
+    }
+
+    #[test]
+    fn a_carried_bundle_right_clicked_on_an_empty_slot_empties_into_it() {
+        let held = bundle(vec![ItemStack::new(ItemKind::Stone, 3)]);
+        let mut inv = inventory(ItemStack::Empty, held);
+        click(&mut inv, 9, true);
+        assert_eq!(inv.menu().slot(9).unwrap().count(), 3);
+        assert_eq!(inv.carried, ItemStack::new(ItemKind::Bundle, 1));
+        assert_eq!(inv.bundle_sound, Some(BundleSound::RemoveOne));
+    }
+
+    #[test]
+    fn a_slot_that_refuses_the_removed_stack_returns_it_to_the_front() {
+        let held = vec![ItemStack::new(ItemKind::Dirt, 1), ItemStack::new(ItemKind::Stone, 2)];
+        let mut carried = bundle(held);
+        toggle_selected_item(&mut carried, 1);
+        let mut inv = inventory(ItemStack::Empty, carried);
+        click(&mut inv, 5, true);
+        assert!(inv.menu().slot(5).unwrap().is_empty());
+        assert_eq!(contents(&inv.carried), [(ItemKind::Stone, 2), (ItemKind::Dirt, 1)]);
+        assert_eq!(inv.bundle_sound, None);
+    }
+
+    #[test]
+    fn a_result_slot_never_allows_modification() {
+        let mut inv = inventory(ItemStack::Empty, ItemStack::new(ItemKind::Stone, 1));
+        *inv.inventory_menu.slot_mut(0).unwrap() = bundle(Vec::new());
+        click(&mut inv, 0, false);
+        assert_eq!(inv.carried.count(), 1);
+        assert_eq!(inv.bundle_sound, Some(BundleSound::InsertFail));
+
+        let almost_full = bundle(vec![ItemStack::new(ItemKind::EnderPearl, 15)]);
+        let mut inv = inventory(ItemStack::Empty, almost_full);
+        *inv.inventory_menu.slot_mut(0).unwrap() = ItemStack::new(ItemKind::Stone, 10);
+        click(&mut inv, 0, false);
+        assert_eq!(inv.menu().slot(0).unwrap().count(), 10);
+        assert_eq!(inv.bundle_sound, Some(BundleSound::InsertFail));
+    }
+
+    #[test]
+    fn a_plain_left_click_picks_the_bundle_up_and_clears_its_selection() {
+        let mut held = bundle(vec![ItemStack::new(ItemKind::Stone, 1)]);
+        toggle_selected_item(&mut held, 0);
+        let mut inv = inventory(held, ItemStack::Empty);
+        click(&mut inv, 9, false);
+        assert!(inv.menu().slot(9).unwrap().is_empty());
+        let selected = inv.carried.get_component::<BundleContents>().unwrap().selected_item;
+        assert_eq!(selected, NO_SELECTED_ITEM);
+    }
+
+    #[test]
+    fn right_clicking_a_bundle_with_a_stack_in_hand_is_an_ordinary_click() {
+        let mut inv = inventory(bundle(Vec::new()), ItemStack::new(ItemKind::Stone, 1));
+        click(&mut inv, 9, true);
+        assert_eq!(inv.menu().slot(9).unwrap().kind(), ItemKind::Stone);
+        assert_eq!(inv.carried.kind(), ItemKind::Bundle);
+        assert_eq!(inv.bundle_sound, None);
+    }
+
+    #[test]
+    fn a_right_click_pickup_leaves_the_other_half_in_the_slot() {
+        let mut inv = inventory(ItemStack::new(ItemKind::Stone, 9), ItemStack::Empty);
+        click(&mut inv, 9, true);
+        assert_eq!(inv.carried.count(), 5);
+        assert_eq!(inv.menu().slot(9).unwrap().count(), 4);
     }
 }

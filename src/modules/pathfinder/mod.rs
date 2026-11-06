@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 use azalea::Client;
 use azalea::ecs::entity::Entity;
@@ -256,7 +256,7 @@ pub fn reset() {
     world_draw::clear(OWNER);
 }
 
-fn say(shared: &Arc<SharedMutex>, text: &str, color: u32) {
+fn say(shared: &SharedMutex, text: &str, color: u32) {
     show_local_colored(&mut shared.lock().unwrap().session, text, color);
 }
 
@@ -299,7 +299,7 @@ fn find_player(bot: &Client, name: &str) -> Option<(Uuid, String)> {
     Some((profile.0.uuid, profile.0.name.clone()))
 }
 
-pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
+pub fn tick(bot: &Client, shared: &SharedMutex) {
     if !BUSY.load(Relaxed) {
         return;
     }
@@ -362,9 +362,9 @@ pub fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
     }
 }
 
-fn start(bot: &Client, shared: &Arc<SharedMutex>, req: Request, feet: Vec3) -> bool {
+fn start(bot: &Client, shared: &SharedMutex, req: Request, feet: Vec3) -> bool {
     let was = following();
-    let stopped = |shared: &Arc<SharedMutex>| {
+    let stopped = |shared: &SharedMutex| {
         if let Some(name) = &was {
             say(shared, &format!("Stopped following {name}"), GREEN);
         }
@@ -463,7 +463,7 @@ fn start(bot: &Client, shared: &Arc<SharedMutex>, req: Request, feet: Vec3) -> b
     }
 }
 
-fn keep_or_finish(shared: &Arc<SharedMutex>) -> bool {
+fn keep_or_finish(shared: &SharedMutex) -> bool {
     if GOING.load(Relaxed) {
         return true;
     }
@@ -484,7 +484,7 @@ fn begin(target: Target) {
 
 fn tick_goto(
     bot: &Client,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     feet: Vec3,
     goal: BlockPos,
     age: u32,
@@ -510,7 +510,7 @@ fn tick_goto(
     Some(goal)
 }
 
-fn tick_follow(bot: &Client, shared: &Arc<SharedMutex>, feet: Vec3) -> Option<BlockPos> {
+fn tick_follow(bot: &Client, shared: &SharedMutex, feet: Vec3) -> Option<BlockPos> {
     let uuid = match &run().target {
         Some(Target::Player(f)) => f.uuid,
         _ => return None,
@@ -551,7 +551,7 @@ fn tick_follow(bot: &Client, shared: &Arc<SharedMutex>, feet: Vec3) -> Option<Bl
     Some(BlockPos::from(pos))
 }
 
-fn finish(shared: &Arc<SharedMutex>, note: Option<(&str, u32)>) {
+fn finish(shared: &SharedMutex, note: Option<(&str, u32)>) {
     GOING.store(false, Relaxed);
     IDLE.store(false, Relaxed);
     BUSY.store(false, Relaxed);

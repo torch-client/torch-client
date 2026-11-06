@@ -15,7 +15,7 @@ pub(crate) fn atlas_once() {
     ONCE.call_once(|| {
         let dir = crate::textures_dir().to_string_lossy().into_owned();
         let textures = crate::renderer::Textures::blocks(&dir);
-        let atlas = crate::renderer::build_block_atlas(&textures, &dir);
+        let atlas = crate::renderer::build_block_atlas(&textures, &dir, false);
         atlas.tables.publish();
         super::install(super::Blocks::load(atlas.sprites));
     });

@@ -21,9 +21,7 @@ impl AzBuf for BlockStateWithPosition {
     fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
         let data = u64::azalea_read_var(buf)?;
         let position_part = data & 4095;
-        let state = (data >> 12) as u32;
-        let state = BlockState::try_from(state)
-            .map_err(|_| BufReadError::UnexpectedEnumVariant { id: state as i32 })?;
+        let state = BlockState::from_network((data >> 12) as u32);
         let pos = ChunkSectionBlockPos {
             x: ((position_part >> 8) & 15) as u8,
             y: (position_part & 15) as u8,
@@ -36,5 +34,22 @@ impl AzBuf for BlockStateWithPosition {
             | ((u64::from(self.pos.x) << 8) | (u64::from(self.pos.z) << 4) | u64::from(self.pos.y));
         u64::azalea_write_var(&data, buf)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_state_keeps_its_position() {
+        let id = u64::from(BlockState::MAX_STATE) + 1;
+        let mut bytes = Vec::new();
+        ((id << 12) | 0x123).azalea_write_var(&mut bytes).unwrap();
+
+        let read = BlockStateWithPosition::azalea_read(&mut Cursor::new(&bytes[..])).unwrap();
+
+        assert_eq!(read.state, BlockState::stand_in());
+        assert_eq!((read.pos.x, read.pos.z, read.pos.y), (1, 2, 3));
     }
 }

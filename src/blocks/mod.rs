@@ -14,6 +14,8 @@ pub mod direction;
 pub mod facing;
 pub mod rand;
 pub mod rotation;
+#[cfg(feature = "audio")]
+pub mod sound_types;
 pub mod state;
 
 #[cfg(test)]
@@ -21,6 +23,18 @@ pub(crate) mod tests;
 
 pub use bake::{BakedBlock, BakedModel, BakedQuad};
 use state::{ModelRef, Rot, StateDef};
+
+pub(crate) fn is_air(kind: azalea_registry::builtin::BlockKind) -> bool {
+    use azalea_registry::builtin::BlockKind;
+    matches!(
+        kind,
+        BlockKind::Air | BlockKind::CaveAir | BlockKind::VoidAir
+    )
+}
+
+pub(crate) fn state_is_air(state: azalea::block::BlockState) -> bool {
+    is_air(state.as_block_kind())
+}
 
 type ModelKey = (String, Rot);
 

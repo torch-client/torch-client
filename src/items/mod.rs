@@ -16,12 +16,5 @@ use azalea_inventory::ItemStackData;
 use azalea_inventory::components::DataComponentTrait;
 
 pub(crate) fn component<T: DataComponentTrait>(data: &ItemStackData) -> Option<Cow<'_, T>> {
-    match data
-        .component_patch
-        .iter()
-        .find(|(kind, _)| *kind == T::KIND)
-    {
-        Some((_, None)) => None,
-        _ => data.get_component::<T>(),
-    }
+    data.get_unless_removed::<T>()
 }

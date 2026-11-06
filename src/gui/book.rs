@@ -49,6 +49,7 @@ pub fn arrows(
     top: f32,
     back: bool,
     forward: bool,
+    sound: bool,
 ) -> i32 {
     let mut turn = 0;
     if back && arrow(p, ctx, left + ARROW_BACK_X, top + ARROW_Y, "backward") {
@@ -57,6 +58,12 @@ pub fn arrows(
     if forward && arrow(p, ctx, left + ARROW_FORWARD_X, top + ARROW_Y, "forward") {
         turn = 1;
     }
+    #[cfg(feature = "audio")]
+    if turn != 0 && sound {
+        crate::gui::widgets::play_ui("item.book.page_turn");
+    }
+    #[cfg(not(feature = "audio"))]
+    let _ = sound;
     turn
 }
 
@@ -201,6 +208,7 @@ pub fn draw_view(p: &mut Painter, state: &mut BookState, ctx: &ScreenCtx) -> Opt
         top,
         back_visible(state.page),
         forward_visible(state.page, num_pages),
+        true,
     )
     .saturating_add(page_key(ctx.input))
     .signum();
@@ -225,7 +233,7 @@ pub enum BookOut {
 pub fn draw_edit(p: &mut Painter, state: &mut BookState, ctx: &ScreenCtx) -> Option<BookOut> {
     let (left, top) = frame(p, ctx);
 
-    let turn = arrows(p, ctx, left, top, back_visible(state.page), true)
+    let turn = arrows(p, ctx, left, top, back_visible(state.page), true, true)
         .saturating_add(page_key(ctx.input))
         .signum();
     state.turn(turn);

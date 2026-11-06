@@ -1,7 +1,8 @@
 use crate::client::chat_text;
 use crate::items::potions;
 use crate::session::{
-    Book, ContainerKind, FurnaceKind, HorseMenu, InvAction, SlotStack, StackExtra,
+    Book, BundleView, ContainerKind, CreativeAnswer, FurnaceKind, HorseMenu, InvAction, SlotStack,
+    StackExtra,
 };
 use azalea::inventory::ContainerClickEvent;
 use azalea::prelude::*;
@@ -106,6 +107,20 @@ pub(crate) fn slot_stack(
             lore,
             enchantments,
             potion: potion_contents(data),
+            stew_effects: data
+                .get_component::<comp::SuspiciousStewEffects>()
+                .map(|c| {
+                    c.effects
+                        .iter()
+                        .map(|e| {
+                            let id = e.effect.to_str().trim_start_matches("minecraft:");
+                            (id.to_string(), e.duration)
+                        })
+                        .collect()
+                }),
+            ominous_amplifier: data
+                .get_component::<comp::OminousBottleAmplifier>()
+                .map(|c| c.amplifier),
             banner_patterns: banner_patterns(data, registries),
             banner_layers: banner_layers(data, registries),
             book: book(data).map(Box::new),
@@ -126,12 +141,50 @@ pub(crate) fn slot_stack(
         map_id: data.get_component::<comp::MapId>().map(|m| m.id),
         component_count: data.component_patch.iter().count() as u16,
         nbt_bytes,
+        bundle: bundle_view(data, registries),
         raw: (data.component_patch.iter().next().is_some()).then(|| {
             let mut data = data.clone();
             data.count = 1;
             std::sync::Arc::new(ItemStack::Present(data))
         }),
     }
+}
+
+fn bundle_view(
+    data: &azalea_inventory::ItemStackData,
+    registries: Option<&azalea_core::registry_holder::RegistryHolder>,
+) -> Option<std::sync::Arc<BundleView>> {
+    use azalea_inventory::bundle::{Fraction, NO_SELECTED_ITEM, contents_weight, is_bundle};
+    use azalea_inventory::components::{BundleContents, DataComponentTrait, TooltipDisplay};
+
+    if !is_bundle(data.kind) {
+        return None;
+    }
+    let contents = data.get_unless_removed::<BundleContents>();
+    let shows = contents.is_some()
+        && data
+            .get_unless_removed::<TooltipDisplay>()
+            .is_none_or(|display| {
+                !display.hide_tooltip && !display.hidden_components.contains(&BundleContents::KIND)
+            });
+    let (items, selected, weight) = match &contents {
+        Some(contents) => (
+            contents
+                .items
+                .iter()
+                .map(|item| slot_stack(item, registries, false))
+                .collect(),
+            contents.selected_item,
+            contents_weight(contents),
+        ),
+        None => (Vec::new(), NO_SELECTED_ITEM, Some(Fraction::ZERO)),
+    };
+    Some(std::sync::Arc::new(BundleView {
+        items,
+        selected,
+        weight,
+        shows,
+    }))
 }
 
 pub(crate) fn slot_stack_nbt(item: &simdnbt::owned::NbtCompound) -> Option<SlotStack> {
@@ -337,11 +390,14 @@ pub(crate) fn potion_contents(
             .iter()
             .map(|e| potions::PotionEffectInstance {
                 effect: bare(e.id.to_str()),
-                duration: e.details.duration,
-                amplifier: e.details.amplifier,
+                details: e.details.clone(),
             })
             .collect(),
         custom_name: c.custom_name.clone(),
+        duration_scale: data
+            .component_patch
+            .get::<comp::PotionDurationScale>()
+            .map(|c| c.value),
     })
 }
 
@@ -405,7 +461,12 @@ fn creative_stack(
     {
         let mut data = data.clone();
         data.count = stack.count as i32;
-        return ItemStack::Present(data);
+        let mut out = ItemStack::Present(data);
+        azalea_inventory::bundle::toggle_selected_item(
+            &mut out,
+            azalea_inventory::bundle::NO_SELECTED_ITEM,
+        );
+        return out;
     }
     let mut out = ItemStack::new(kind, stack.count as i32);
     if !stack.extra.enchantments.is_empty() {
@@ -435,11 +496,7 @@ fn creative_stack(
             .filter_map(|e| {
                 Some(comp::MobEffectInstance {
                     id: MobEffect::from_str(&e.effect).ok()?,
-                    details: comp::MobEffectDetails {
-                        duration: e.duration,
-                        amplifier: e.amplifier,
-                        ..comp::MobEffectDetails::new()
-                    },
+                    details: e.details.clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -455,6 +512,28 @@ fn creative_stack(
                 custom_name: contents.custom_name.clone(),
             });
         }
+        if let Some(value) = contents.duration_scale {
+            out = out.with_component(comp::PotionDurationScale { value });
+        }
+    }
+    if let Some(effects) = stack.extra.stew_effects.as_ref().filter(|e| !e.is_empty()) {
+        use azalea_inventory::components as comp;
+        use azalea_registry::builtin::MobEffect;
+
+        let effects = effects
+            .iter()
+            .filter_map(|(id, duration)| {
+                Some(comp::SuspiciousStewEffect {
+                    effect: MobEffect::from_str(id).ok()?,
+                    duration: *duration,
+                })
+            })
+            .collect();
+        out = out.with_component(comp::SuspiciousStewEffects { effects });
+    }
+    if let Some(amplifier) = stack.extra.ominous_amplifier.filter(|a| *a != 0) {
+        out =
+            out.with_component(azalea_inventory::components::OminousBottleAmplifier { amplifier });
     }
     out
 }
@@ -474,7 +553,176 @@ pub(crate) fn set_creative_slot(bot: &Client, slot: u16, stack: ItemStack) {
     }
 }
 
-pub(crate) fn apply_inv_actions(bot: &Client, actions: Vec<InvAction>, horse: Option<HorseMenu>) {
+#[derive(Default)]
+pub(crate) struct AppliedInv {
+    pub creative_cursor: Option<CreativeAnswer>,
+    pub horse_selected: Vec<(usize, i32)>,
+}
+
+fn next_selection(selected: i32, size: usize, step: i8) -> Option<i32> {
+    use azalea_inventory::bundle::{NO_SELECTED_ITEM, number_of_items_to_show};
+
+    if step == 0 {
+        return Some(NO_SELECTED_ITEM);
+    }
+    let shown = number_of_items_to_show(size) as i32;
+    if shown == 0 {
+        return None;
+    }
+    let next = crate::renderer::input::next_scroll_selection(f64::from(step), selected, shown);
+    (next != selected).then_some(next)
+}
+
+fn select_in_menu(bot: &Client, slot: usize, step: i8) -> Option<i32> {
+    use azalea_inventory::bundle::{is_bundle, toggle_selected_item};
+    use azalea_inventory::components::BundleContents;
+
+    let mut ecs = bot.ecs.write();
+    let mut inventory = ecs.get_mut::<azalea::entity::inventory::Inventory>(bot.entity)?;
+    let stack = inventory.menu_mut().slot_mut(slot)?;
+    let item = stack.as_present().filter(|item| is_bundle(item.kind))?;
+    let contents = item.get_unless_removed::<BundleContents>();
+    let (selected, size) = contents.map_or((-1, 0), |c| (c.selected_item, c.items.len()));
+    let next = next_selection(selected, size, step)?;
+    toggle_selected_item(stack, next);
+    Some(next)
+}
+
+fn select_in_horse(
+    horse: &mut HorseMenu,
+    slot: usize,
+    step: i8,
+    applied: &mut AppliedInv,
+) -> Option<i32> {
+    let bundle = horse.slots.get_mut(slot)?.bundle.as_mut()?;
+    let next = next_selection(bundle.selected, bundle.items.len(), step)?;
+    let selected = azalea_inventory::bundle::toggled(bundle.selected, next, bundle.items.len());
+    std::sync::Arc::make_mut(bundle).selected = selected;
+    applied.horse_selected.push((slot, selected));
+    Some(next)
+}
+
+fn creative_bundle_click(bot: &Client, slot: u16, right: bool, cursor: ItemStack) -> ItemStack {
+    use azalea_inventory::operations::PickupClick;
+    use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+
+    let operation = if right {
+        PickupClick::Right { slot: Some(slot) }
+    } else {
+        PickupClick::Left { slot: Some(slot) }
+    }
+    .into();
+    let (changed, cursor) = {
+        let mut ecs = bot.ecs.write();
+        let Some(mut inventory) = ecs.get_mut::<azalea::entity::inventory::Inventory>(bot.entity)
+        else {
+            return cursor;
+        };
+        let old = inventory.inventory_menu.slots();
+        let held = std::mem::replace(&mut inventory.carried, cursor);
+        inventory.simulate_click(&operation, &azalea::entity::PlayerAbilities::default());
+        let new = inventory.inventory_menu.slots();
+        let changed: Vec<(usize, ItemStack)> = new
+            .into_iter()
+            .enumerate()
+            .filter(|(i, stack)| old[*i] != *stack)
+            .collect();
+        (changed, std::mem::replace(&mut inventory.carried, held))
+    };
+    for (i, stack) in changed.into_iter().filter(|(i, _)| *i > 0) {
+        bot.write_packet(ServerboundSetCreativeModeSlot {
+            slot_num: i as u16,
+            item_stack: stack.into(),
+        });
+    }
+    #[cfg(feature = "audio")]
+    play_bundle_sound(bot);
+    cursor
+}
+
+#[cfg(feature = "audio")]
+fn play_bundle_sound(bot: &Client) {
+    let sound = bot
+        .component::<azalea::entity::inventory::Inventory>()
+        .ok()
+        .and_then(|i| i.bundle_sound);
+    if let Some(sound) = sound {
+        crate::play::player_sounds::bundle_click(bot, sound);
+    }
+}
+
+#[cfg(feature = "audio")]
+fn horse_bundle_sound(
+    bot: &Client,
+    horse: &HorseMenu,
+    operation: &azalea_inventory::operations::ClickOperation,
+    registries: Option<&azalea_core::registry_holder::RegistryHolder>,
+) {
+    use azalea::entity::inventory::Inventory;
+    use azalea_inventory::operations::{ClickOperation, PickupClick};
+
+    const STORAGE: u16 = 9;
+    const REFUSES: u16 = 0;
+    let (slot, right) = match operation {
+        ClickOperation::Pickup(PickupClick::Left { slot: Some(slot) }) => (*slot, false),
+        ClickOperation::Pickup(PickupClick::Right { slot: Some(slot) }) => (*slot, true),
+        _ => return,
+    };
+    let Some(clicked) = horse.slots.get(usize::from(slot)) else {
+        return;
+    };
+    let carried = bot
+        .component::<Inventory>()
+        .map(|i| i.carried.clone())
+        .unwrap_or_default();
+    let gear = slot < 2;
+    let target = if gear && !gear_takes_next_out(&carried, slot) {
+        REFUSES
+    } else {
+        STORAGE
+    };
+    let mut scratch = Inventory {
+        carried,
+        ..Inventory::default()
+    };
+    if let Some(stack) = scratch.inventory_menu.slot_mut(usize::from(target)) {
+        *stack = creative_stack(clicked, registries);
+    }
+    let click = if right {
+        PickupClick::Right { slot: Some(target) }
+    } else {
+        PickupClick::Left { slot: Some(target) }
+    };
+    scratch.simulate_click(&click.into(), &azalea::entity::PlayerAbilities::default());
+    if let Some(sound) = scratch.bundle_sound {
+        crate::play::player_sounds::bundle_click(bot, sound);
+    }
+}
+
+#[cfg(feature = "audio")]
+fn gear_takes_next_out(carried: &ItemStack, slot: u16) -> bool {
+    use azalea_inventory::components::{BundleContents, EquipmentSlot, Equippable};
+
+    let gear = if slot == 0 {
+        EquipmentSlot::Saddle
+    } else {
+        EquipmentSlot::Body
+    };
+    let Some(contents) = carried.get_component::<BundleContents>() else {
+        return false;
+    };
+    let next = usize::try_from(contents.selected_item).unwrap_or(0);
+    let item = contents.items.get(next).and_then(ItemStack::as_present);
+    item.and_then(|item| item.get_unless_removed::<Equippable>())
+        .is_some_and(|e| e.slot == gear)
+}
+
+pub(crate) fn apply_inv_actions(
+    bot: &Client,
+    actions: Vec<InvAction>,
+    mut horse: Option<HorseMenu>,
+) -> AppliedInv {
+    use azalea_protocol::packets::game::s_bundle_item_selected::ServerboundBundleItemSelected;
     use azalea_protocol::packets::game::s_container_button_click::ServerboundContainerButtonClick;
     use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
     use azalea_protocol::packets::game::s_container_slot_state_changed::ServerboundContainerSlotStateChanged;
@@ -486,11 +734,14 @@ pub(crate) fn apply_inv_actions(bot: &Client, actions: Vec<InvAction>, horse: Op
     let world = bot.world().ok();
     let world_guard = world.as_ref().map(|w| w.read());
     let registries = world_guard.as_ref().map(|g| &g.registries);
+    let mut applied = AppliedInv::default();
 
     for action in actions {
         match action {
             InvAction::Click(operation) => {
                 if let Some(horse) = horse.as_ref() {
+                    #[cfg(feature = "audio")]
+                    horse_bundle_sound(bot, horse, &operation, registries);
                     send_horse_click(bot, horse, &operation, registries);
                     continue;
                 }
@@ -503,6 +754,44 @@ pub(crate) fn apply_inv_actions(bot: &Client, actions: Vec<InvAction>, horse: Op
                     window_id,
                     operation,
                 });
+                #[cfg(feature = "audio")]
+                play_bundle_sound(bot);
+            }
+            InvAction::CreativeBundleClick {
+                slot,
+                right,
+                cursor,
+            } => {
+                let cursor = creative_stack(&cursor, registries);
+                let cursor = creative_bundle_click(bot, slot, right, cursor);
+                let slots = bot
+                    .component::<azalea::entity::inventory::Inventory>()
+                    .map(|i| i.inventory_menu.slots())
+                    .unwrap_or_default();
+                applied.creative_cursor = Some(CreativeAnswer {
+                    cursor: slot_stack(&cursor, registries, false),
+                    slots: slots
+                        .iter()
+                        .map(|s| slot_stack(s, registries, false))
+                        .collect(),
+                });
+            }
+            InvAction::BundleSelect {
+                slot,
+                wire_slot,
+                step,
+            } => {
+                let slot = usize::from(slot);
+                let next = match horse.as_mut() {
+                    Some(horse) => select_in_horse(horse, slot, step, &mut applied),
+                    None => select_in_menu(bot, slot, step),
+                };
+                if let Some(next) = next {
+                    bot.write_packet(ServerboundBundleItemSelected {
+                        slot_id: wire_slot,
+                        selected_item_index: next as u32,
+                    });
+                }
             }
             InvAction::CreativeSet { slot, stack } => {
                 set_creative_slot(bot, slot, creative_stack(&stack, registries));
@@ -574,6 +863,7 @@ pub(crate) fn apply_inv_actions(bot: &Client, actions: Vec<InvAction>, horse: Op
             }
         }
     }
+    applied
 }
 
 fn send_horse_click(
@@ -653,12 +943,9 @@ mod tests {
                     potion: Some(potions::PotionContents {
                         potion: Some("strong_healing".into()),
                         custom_color: Some(0x123456),
-                        custom_effects: vec![potions::PotionEffectInstance {
-                            effect: "poison".into(),
-                            duration: 200,
-                            amplifier: 1,
-                        }],
+                        custom_effects: vec![potions::PotionEffectInstance::new("poison", 200, 1)],
                         custom_name: None,
+                        duration_scale: None,
                     }),
                     ..Default::default()
                 }
@@ -678,6 +965,17 @@ mod tests {
                 UntrustedItemStack::azalea_read(&mut std::io::Cursor::new(&bytes[..])).unwrap();
             assert_eq!(read, built, "{}", stack.item);
         }
+    }
+
+    #[test]
+    fn the_next_selection_wraps_over_the_shown_items() {
+        assert_eq!(next_selection(-1, 3, 1), Some(2));
+        assert_eq!(next_selection(-1, 3, -1), Some(0));
+        assert_eq!(next_selection(0, 3, 1), Some(2));
+        assert_eq!(next_selection(2, 3, -1), Some(0));
+        assert_eq!(next_selection(-1, 0, 1), None);
+        assert_eq!(next_selection(-1, 0, 0), Some(-1));
+        assert_eq!(next_selection(0, 1, 1), None);
     }
 
     #[test]

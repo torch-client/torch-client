@@ -338,6 +338,53 @@ impl<'w> ColumnProbe<'w> {
     }
 }
 
+fn rain_reaches(
+    rain: f32,
+    can_have_weather: bool,
+    sky_light: u8,
+    height: i32,
+    y: i32,
+    precipitation: Precipitation,
+) -> bool {
+    rain > 0.2
+        && can_have_weather
+        && sky_light >= 15
+        && height <= y
+        && precipitation == Precipitation::Rain
+}
+
+#[test]
+fn rain_needs_every_input() {
+    use Precipitation::{Rain, Snow};
+    assert!(rain_reaches(0.21, true, 15, 64, 64, Rain));
+    assert!(!rain_reaches(0.2, true, 15, 64, 64, Rain));
+    assert!(!rain_reaches(1.0, false, 15, 64, 64, Rain));
+    assert!(!rain_reaches(1.0, true, 14, 64, 64, Rain));
+    assert!(!rain_reaches(1.0, true, 15, 65, 64, Rain));
+    assert!(!rain_reaches(1.0, true, 15, 64, 64, Snow));
+}
+
+pub(crate) fn raining_at(world: &azalea_world::World, cells: &[[i32; 3]]) -> bool {
+    let rain = super::environment::rain_level();
+    let can_have_weather = super::dimension::current().can_have_weather();
+    if rain <= 0.2 || !can_have_weather {
+        return false;
+    }
+    let light = crate::client::tracking::read_lock(
+        crate::client::worldsync::light_map(),
+        "light:raining_at",
+    );
+    let mut probe = ColumnProbe::new(world);
+    cells.iter().any(|&[x, y, z]| {
+        probe
+            .column(x, y, z)
+            .is_some_and(|(height, precipitation)| {
+                let sky = super::lightmap::levels_in(&light, [x, y, z]).1;
+                rain_reaches(rain, can_have_weather, sky, height, y, precipitation)
+            })
+    })
+}
+
 fn scan(camera: IVec3) -> Vec<Column> {
     let Some(world) = crate::client::tracking::current_world()
         .lock()
@@ -346,8 +393,11 @@ fn scan(camera: IVec3) -> Vec<Column> {
     else {
         return Vec::new();
     };
-    let world = world.read();
-    let light = crate::client::worldsync::light_map().read();
+    let world = crate::client::tracking::read_lock(&world, "weather_scan");
+    let light = crate::client::tracking::read_lock(
+        crate::client::worldsync::light_map(),
+        "light:weather_scan",
+    );
     let mut probe = ColumnProbe::new(&world);
     let mut columns = Vec::with_capacity(((2 * RADIUS + 1) * (2 * RADIUS + 1)) as usize);
     for z in camera.z - RADIUS..=camera.z + RADIUS {

@@ -11,6 +11,15 @@ use crate::{
 use azalea::prelude::*;
 use azalea_registry::builtin::Attribute as Attr;
 
+#[inline]
+pub(crate) fn read_lock<'a, T>(
+    lock: &'a parking_lot::RwLock<T>,
+    site: &'static str,
+) -> parking_lot::RwLockReadGuard<'a, T> {
+    let _ = site;
+    lock.read()
+}
+
 global! {
 pub(crate) fn meshed_chunks() -> SideMutex<HashSet<(i32, i32)>>
 }
@@ -48,7 +57,12 @@ pub(crate) fn on_living_anim(
     on_player: impl FnOnce(&mut HumanoidAnim),
     on_entity: impl FnOnce(&mut entities::feed::EntityAnim),
 ) {
-    if let Some(anim) = anim_states().lock().unwrap().get_mut(&id) {
+    let player = if id == local_entity_id() {
+        LOCAL_ANIM_ID
+    } else {
+        id
+    };
+    if let Some(anim) = anim_states().lock().unwrap().get_mut(&player) {
         on_player(anim);
     }
     if let Some(anim) = entity_anims().lock().unwrap().get_mut(&id) {

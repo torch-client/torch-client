@@ -114,7 +114,7 @@ pub struct SharedMutex(parking_lot::Mutex<SharedState>);
 const TOAST_QUEUE_MAX: usize = 32;
 
 pub fn queue_toasts(
-    shared: &std::sync::Arc<SharedMutex>,
+    shared: &SharedMutex,
     events: impl IntoIterator<Item = crate::gui::toast::ToastEvent>,
 ) {
     push_toasts(&mut shared.lock().unwrap().session, events);

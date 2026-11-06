@@ -509,7 +509,7 @@ impl Default for Scratch {
 fn run_job(
     job: Job,
     queue: &JobQueue,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     scratch: &mut Scratch,
     deadline: Option<Instant>,
 ) {
@@ -586,7 +586,7 @@ fn mesh_budget() -> Duration {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn drain_all(queue: &JobQueue, shared: &Arc<SharedMutex>, scratch: &mut Scratch, cap: usize) {
+pub fn drain_all(queue: &JobQueue, shared: &SharedMutex, scratch: &mut Scratch, cap: usize) {
     while let Some(job) = queue.try_pop() {
         run_job(job, queue, shared, scratch, None);
         let s = shared.lock().unwrap();
@@ -598,7 +598,7 @@ pub fn drain_all(queue: &JobQueue, shared: &Arc<SharedMutex>, scratch: &mut Scra
 
 pub fn drain_for(
     queue: &JobQueue,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     scratch: &mut Scratch,
     budget: Duration,
 ) -> usize {
@@ -616,7 +616,7 @@ pub fn drain_for(
 fn process_job(
     job: Job,
     queue: &JobQueue,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     cache: &mut BlockCache,
     occ: &mut Occupancy,
     states: &mut Vec<BlockState>,
@@ -895,6 +895,8 @@ static BIOME_TABLE: RwLock<Option<Arc<Vec<u8>>>> = RwLock::new(None);
 
 pub(crate) fn reset_biome_table() {
     *BIOME_TABLE.write() = None;
+    #[cfg(feature = "audio")]
+    crate::audio::clear_synced();
 }
 
 #[cfg(target_arch = "wasm32")]

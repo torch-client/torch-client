@@ -21,7 +21,12 @@ where
 
 #[cfg(all(
     not(target_arch = "wasm32"),
-    any(feature = "asset_download", feature = "update_checker", resource_packs)
+    any(
+        feature = "asset_download",
+        feature = "update_checker",
+        resource_packs,
+        lua_mods
+    )
 ))]
 pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     use std::task::{Context, Poll};

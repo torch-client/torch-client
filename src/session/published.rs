@@ -66,7 +66,16 @@ pub enum ParticleEmit {
     Event(LevelEventEmit),
     Explosion(ExplosionEmit),
     Tracking(TrackingEmit),
+    Cloud(CloudEmit),
     ItemUse(ItemUseEmit),
+}
+
+#[derive(Clone)]
+pub struct CloudEmit {
+    pub particle: azalea::entity::particle::Particle,
+    pub pos: [f64; 3],
+    pub radius: f32,
+    pub waiting: bool,
 }
 
 #[derive(Clone)]
@@ -147,6 +156,24 @@ pub struct LevelParticle {
     pub always_show: bool,
 }
 
+impl LevelParticle {
+    pub fn add(
+        particle: azalea::entity::particle::Particle,
+        pos: [f64; 3],
+        velocity: [f32; 3],
+    ) -> LevelParticle {
+        LevelParticle {
+            particle,
+            pos,
+            dist: velocity,
+            max_speed: 1.0,
+            count: 0,
+            override_limiter: false,
+            always_show: false,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MapUpdate {
     pub id: i32,
@@ -183,6 +210,7 @@ pub struct SlotStack {
     pub map_id: Option<i32>,
     pub component_count: u16,
     pub nbt_bytes: usize,
+    pub bundle: Option<std::sync::Arc<BundleView>>,
     pub raw: Option<std::sync::Arc<azalea_inventory::ItemStack>>,
 }
 
@@ -192,9 +220,40 @@ pub struct StackExtra {
     pub lore: Vec<Vec<crate::text::Span>>,
     pub enchantments: Vec<(String, i32)>,
     pub potion: Option<crate::items::potions::PotionContents>,
+    pub stew_effects: Option<Vec<(String, i32)>>,
+    pub ominous_amplifier: Option<i32>,
     pub banner_patterns: Option<Box<[Box<str>]>>,
     pub book: Option<Box<Book>>,
     pub banner_layers: Option<Box<[crate::blockentities::banner::BannerLayer]>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BundleView {
+    pub items: Vec<SlotStack>,
+    pub selected: i32,
+    pub weight: Option<azalea_inventory::bundle::Fraction>,
+    pub shows: bool,
+}
+
+impl BundleView {
+    pub fn empty() -> std::sync::Arc<BundleView> {
+        static EMPTY: std::sync::LazyLock<std::sync::Arc<BundleView>> =
+            std::sync::LazyLock::new(|| {
+                std::sync::Arc::new(BundleView {
+                    items: Vec::new(),
+                    selected: azalea_inventory::bundle::NO_SELECTED_ITEM,
+                    weight: Some(azalea_inventory::bundle::Fraction::ZERO),
+                    shows: true,
+                })
+            });
+        EMPTY.clone()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CreativeAnswer {
+    pub cursor: SlotStack,
+    pub slots: std::sync::Arc<[SlotStack]>,
 }
 
 static NO_EXTRA: StackExtra = StackExtra {
@@ -202,6 +261,8 @@ static NO_EXTRA: StackExtra = StackExtra {
     lore: Vec::new(),
     enchantments: Vec::new(),
     potion: None,
+    stew_effects: None,
+    ominous_amplifier: None,
     banner_patterns: None,
     book: None,
     banner_layers: None,

@@ -17,6 +17,7 @@ pub struct SessionState {
     pub fov: FovState,
     pub camera_eye: CameraEye,
     pub portal_effect: PortalEffect,
+    pub spinning_effect: SpinningEffect,
     pub other_players: Vec<OtherPlayerInfo>,
     pub menu_slots: std::sync::Arc<[SlotStack]>,
     pub hotbar: std::sync::Arc<[SlotStack]>,
@@ -24,6 +25,7 @@ pub struct SessionState {
     pub armor_stacks: std::sync::Arc<[SlotStack]>,
     pub head: crate::renderer::HeldItem,
     pub carried: SlotStack,
+    pub creative_cursor: Option<CreativeAnswer>,
     pub container_id: i32,
     pub container_kind: ContainerKind,
     pub container_title: std::sync::Arc<[crate::text::Span]>,
@@ -41,6 +43,8 @@ pub struct SessionState {
     pub health: f32,
     pub health_display: HealthDisplay,
     pub health_epoch: u32,
+    pub last_set_health: Option<f32>,
+    pub health_known: bool,
     pub dead: bool,
     pub death_cause: Option<Vec<crate::text::Span>>,
     pub spawn_pos: Option<azalea_core::position::GlobalPos>,
@@ -56,6 +60,7 @@ pub struct SessionState {
     pub saturation: f32,
     pub air_supply: i32,
     pub active_effects: Vec<crate::play::mob_effects::MobEffectInstance>,
+    pub tick_rate: TickRate,
     pub gamemode: Gamemode,
     pub previous_gamemode: Option<Gamemode>,
     pub gamemode_request: Option<Gamemode>,
@@ -79,6 +84,10 @@ pub struct SessionState {
     pub command_block_pos: Option<azalea_core::position::BlockPos>,
     pub command_block_data: Option<CommandBlockData>,
     pub command_block_update: Option<CommandBlockUpdate>,
+    pub game_master_open: Option<GameMasterOpen>,
+    pub game_master_send: Vec<GameMasterPacket>,
+    pub test_instance_pos: Option<azalea_core::position::BlockPos>,
+    pub test_instance_status: Vec<TestInstanceStatus>,
     pub op_level: u8,
     pub sign_editor_open: Option<SignEditRequest>,
     pub sign_update: Option<SignUpdateRequest>,
@@ -162,7 +171,7 @@ pub struct SessionState {
     pub xp_seen: bool,
     pub xp_display_tick: i64,
     pub waypoints: std::sync::Arc<Vec<WaypointInfo>>,
-    pub action_bar: Option<Vec<crate::text::Span>>,
+    pub action_bar: Option<(Vec<crate::text::Span>, bool)>,
     pub title_text: Option<Vec<crate::text::Span>>,
     pub subtitle_text: Option<Vec<crate::text::Span>>,
     pub title_times: Option<(Option<u32>, Option<u32>, Option<u32>)>,
@@ -178,7 +187,11 @@ impl SessionState {
     }
 
     pub fn set_action_bar(&mut self, spans: Vec<crate::text::Span>) {
-        self.action_bar = Some(spans);
+        self.action_bar = Some((spans, false));
+    }
+
+    pub fn set_now_playing(&mut self, spans: Vec<crate::text::Span>) {
+        self.action_bar = Some((spans, true));
     }
 
     pub fn set_title(&mut self, spans: Vec<crate::text::Span>) {
@@ -219,6 +232,15 @@ pub struct FovState {
     pub cur: f32,
     pub effects: f32,
     pub first_person: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TickRate(pub f32);
+
+impl Default for TickRate {
+    fn default() -> Self {
+        TickRate(20.0)
+    }
 }
 
 impl Default for FovState {
@@ -285,7 +307,28 @@ impl PortalEffect {
     }
 
     pub fn sample(&self, partial: f32) -> f32 {
-        self.prev + (self.cur - self.prev) * partial
+        crate::util::mth::lerp(partial, self.prev, self.cur)
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct SpinningEffect {
+    pub time: f32,
+    pub speed: f32,
+}
+
+impl SpinningEffect {
+    pub fn tick(&mut self, portal: f32, nausea: f32) {
+        if portal > 0.0 || nausea > 0.0 {
+            self.speed = (portal * 20.0 + nausea * 7.0) / (portal + nausea);
+            self.time += self.speed;
+        } else {
+            self.speed = 0.0;
+        }
+    }
+
+    pub fn sample(&self, partial: f32) -> f32 {
+        self.time + partial * self.speed
     }
 }
 

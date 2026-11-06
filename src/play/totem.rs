@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::renderer::HeldItem;
@@ -22,7 +21,7 @@ fn pick_totem(held: [&HeldItem; 2]) -> HeldItem {
         })
 }
 
-pub(crate) fn protected_from_death(shared: &Arc<SharedMutex>, entity: i32) {
+pub(crate) fn protected_from_death(shared: &SharedMutex, entity: i32) {
     crate::play::tracking_emitter::start(
         entity,
         azalea::entity::particle::Particle::TotemOfUndying,

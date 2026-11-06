@@ -1,7 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::client::assets::{Stage, download};
+use crate::client::assets::{Download, Stage, download, offers_assets, offers_sounds};
 use crate::gui::painter::Painter;
+use crate::gui::tooltip::label;
 use crate::gui::{GuiState, Screen, ScreenCtx};
 use crate::util::bytes::Bytes;
 
@@ -10,20 +11,47 @@ const TOP_UP_PROMPT: &str = "Some Mojang assets are missing";
 
 static TOP_UP: AtomicBool = AtomicBool::new(false);
 
+static INSTALL_AUDIO: AtomicBool = AtomicBool::new(true);
+
 pub(crate) fn check_missing(state: &mut GuiState) -> bool {
+    let list_missing = crate::client::language::request_list();
     if !crate::client::assets::check_missing() {
-        return false;
+        return list_missing;
     }
     TOP_UP.store(true, Ordering::Relaxed);
+    INSTALL_AUDIO.store(true, Ordering::Relaxed);
     state.nav = Some(Screen::AssetDownload);
     true
 }
 
+fn begin(dl: &'static Download) {
+    dl.start(
+        crate::ASSET_VERSION.to_string(),
+        INSTALL_AUDIO.load(Ordering::Relaxed),
+    );
+}
+
 fn leave_label() -> &'static str {
     if TOP_UP.load(Ordering::Relaxed) {
-        "Back"
+        label!("gui.back")
     } else {
         "Exit"
+    }
+}
+
+fn continue_label() -> &'static str {
+    if TOP_UP.load(Ordering::Relaxed) {
+        label!("gui.continue")
+    } else {
+        "Continue"
+    }
+}
+
+fn cancel_label() -> &'static str {
+    if TOP_UP.load(Ordering::Relaxed) {
+        label!("gui.cancel")
+    } else {
+        "Cancel"
     }
 }
 
@@ -44,6 +72,30 @@ const BAR_H: f32 = 10.0;
 
 const LINE: f32 = 12.0;
 
+const BOX_W: f32 = BUTTON_W * 2.0 + BUTTON_GAP;
+const BOX_H: f32 = 26.0;
+const BOX_GAP: f32 = 4.0;
+const BOXES_TOP: f32 = -24.0;
+const BOX_PAD: f32 = 6.0;
+const BOX_TEXT_TOP: f32 = 3.0;
+const PERCENT_INSET: f32 = 18.0;
+
+const ASSETS_SIZE: &str = "43.7 MiB";
+const AUDIO_SIZE: &str = "330 MiB";
+const CONTACTING: &str = "Contacting Mojang";
+const ASSETS_NAME: &str = "Built in";
+const AUDIO_NAME: &str = "Install audio";
+
+const CHECK_SIZE: f32 = 14.0;
+const CHECK_INSET: f32 = 3.0;
+
+const FACE: u32 = 0xFF22_2229;
+const EDGE: u32 = 0xFF6E_6E7A;
+const FACE_HOVERED: u32 = 0xFF39_3944;
+const EDGE_HOVERED: u32 = 0xFFFF_FFFF;
+const GREEN: u32 = 0xFF4C_C46A;
+const DETAIL: u32 = 0xA0A0A8;
+
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     p.gradient_v(0.0, 0.0, ctx.vw, ctx.vh, 0xFF1B1B21, 0xFF0C0C10);
 
@@ -61,11 +113,11 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             if stage == Stage::Cancelled {
                 p.text_centered("Download cancelled", cx, mid - 46.0 + LINE, 0xFFAA55, false);
             }
-            let row = mid + 6.0;
+            let row = prompt_boxes(p, ctx, mid + BOXES_TOP);
             let left = (cx - BUTTON_W - BUTTON_GAP * 0.5).floor();
             let right = (cx + BUTTON_GAP * 0.5).floor();
-            if button(p, ctx, left, row, "Continue") {
-                dl.start(crate::ASSET_VERSION.to_string());
+            if button(p, ctx, left, row, continue_label()) {
+                begin(dl);
             }
             if button(p, ctx, right, row, leave_label()) {
                 leave(state);
@@ -77,47 +129,17 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         | Stage::Extracting
         | Stage::Fetching
         | Stage::Sounds => {
-            let (done, total) = if stage == Stage::Sounds {
-                dl.sound_progress()
-            } else {
-                dl.progress()
-            };
-            let frac = if total > 0 {
-                (done as f32 / total as f32).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            bar(p, ctx, mid - 14.0, frac);
-
-            let percent = format!("{}%", (frac * 100.0) as u32);
-            p.text_centered(&percent, cx, mid + 2.0, 0xFFFFFF, false);
-
-            let detail = match stage {
-                Stage::Asking => "Contacting Mojang".to_string(),
-                Stage::Downloading | Stage::Fetching => of_total(done, total),
-                Stage::Sounds => format!("Sounds {}", of_total(done, total)),
-                _ => "Unpacking the assets".to_string(),
-            };
-            p.text_centered(&detail, cx, mid + 2.0 + LINE, 0xA0A0A8, false);
-
-            let sounds = dl.sounds_running();
-            if sounds && stage != Stage::Sounds {
-                let (done, total) = dl.sound_progress();
-                let line = format!("Sounds {}", of_total(done, total));
-                p.text_centered(&line, cx, mid + 2.0 + LINE * 2.0, 0x70707A, false);
-            }
-
-            let row = mid + 40.0;
-            if sounds {
+            let row = progress_boxes(p, ctx, mid + BOXES_TOP, dl, stage);
+            if dl.sounds_running() {
                 let left = (cx - BUTTON_W - BUTTON_GAP * 0.5).floor();
                 let right = (cx + BUTTON_GAP * 0.5).floor();
                 if button(p, ctx, left, row, "Skip audio") {
                     dl.skip_sounds();
                 }
-                if button(p, ctx, right, row, "Cancel") {
+                if button(p, ctx, right, row, cancel_label()) {
                     dl.cancel();
                 }
-            } else if button(p, ctx, (cx - BUTTON_W * 0.5).floor(), row, "Cancel") {
+            } else if button(p, ctx, (cx - BUTTON_W * 0.5).floor(), row, cancel_label()) {
                 dl.cancel();
             }
         }
@@ -171,7 +193,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             let left = (cx - BUTTON_W - BUTTON_GAP * 0.5).floor();
             let right = (cx + BUTTON_GAP * 0.5).floor();
             if button(p, ctx, left, row, "Try again") {
-                dl.start(crate::ASSET_VERSION.to_string());
+                begin(dl);
             }
             if button(p, ctx, right, row, leave_label()) {
                 leave(state);
@@ -180,19 +202,130 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 }
 
-fn of_total(done: u64, total: u64) -> String {
+pub(super) fn of_total(done: u64, total: u64) -> String {
     format!("{} of {}", Bytes(done), Bytes(total))
+}
+
+fn box_span(ctx: &ScreenCtx) -> (f32, f32) {
+    let w = fitted(BOX_W, ctx);
+    (((ctx.vw - w) * 0.5).floor(), w)
+}
+
+fn prompt_boxes(p: &mut Painter, ctx: &ScreenCtx, mut y: f32) -> f32 {
+    let (x, w) = box_span(ctx);
+
+    if offers_assets() {
+        chrome(p, x, y, w, BOX_H, false);
+        box_text(p, x + BOX_PAD, y, ASSETS_NAME, ASSETS_SIZE, DETAIL);
+        y += BOX_H + BOX_GAP;
+    }
+    if offers_sounds() {
+        let hovered = ctx.hovering(x, y, w, BOX_H);
+        if hovered && ctx.input.left_click {
+            INSTALL_AUDIO.fetch_xor(true, Ordering::Relaxed);
+        }
+        chrome(p, x, y, w, BOX_H, hovered);
+        let check_x = x + w - BOX_PAD - CHECK_SIZE;
+        let check_y = y + ((BOX_H - CHECK_SIZE) * 0.5).floor();
+        p.fill(check_x, check_y, CHECK_SIZE, CHECK_SIZE, 0xFF0A0A0C);
+        if INSTALL_AUDIO.load(Ordering::Relaxed) {
+            let inner = CHECK_SIZE - CHECK_INSET * 2.0;
+            p.fill(
+                check_x + CHECK_INSET,
+                check_y + CHECK_INSET,
+                inner,
+                inner,
+                GREEN,
+            );
+        }
+        p.outline(check_x, check_y, CHECK_SIZE, CHECK_SIZE, EDGE);
+        box_text(p, x + BOX_PAD, y, AUDIO_NAME, AUDIO_SIZE, DETAIL);
+        y += BOX_H + BOX_GAP;
+    }
+    y + BOX_GAP
+}
+
+fn progress_boxes(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    mut y: f32,
+    dl: &Download,
+    stage: Stage,
+) -> f32 {
+    let (done, total) = dl.progress();
+    if offers_assets() || total > 0 {
+        let line = match stage {
+            Stage::Extracting => "Unpacking the assets".to_string(),
+            _ if total > 0 => of_total(done, total),
+            _ => CONTACTING.to_string(),
+        };
+        running_box(p, ctx, y, ASSETS_NAME, &line, done, total);
+        y += BOX_H + BOX_GAP;
+    }
+    if offers_sounds() {
+        let (done, total) = dl.sound_progress();
+        let line = if dl.sounds_skipped() {
+            "Skipped".to_string()
+        } else if total > 0 {
+            of_total(done, total)
+        } else if stage == Stage::Asking || dl.sounds_running() {
+            CONTACTING.to_string()
+        } else {
+            "Already installed".to_string()
+        };
+        let total = if dl.sounds_skipped() { 0 } else { total };
+        running_box(p, ctx, y, AUDIO_NAME, &line, done, total);
+        y += BOX_H + BOX_GAP;
+    }
+    y + BOX_GAP
+}
+
+fn running_box(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    y: f32,
+    name: &str,
+    line: &str,
+    done: u64,
+    total: u64,
+) {
+    let (x, w) = box_span(ctx);
+    chrome(p, x, y, w, BOX_H, false);
+    if total > 0 {
+        let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
+        let filled = ((w - 2.0) * frac).floor();
+        if filled >= 1.0 {
+            p.fill(x + 1.0, y + 1.0, filled, BOX_H - 2.0, GREEN);
+        }
+        let percent = format!("{}%", (frac * 100.0) as u32);
+        let percent_y = y + ((BOX_H - 8.0) * 0.5).floor();
+        p.text_centered(&percent, x + w - PERCENT_INSET, percent_y, 0xFFFFFF, true);
+    }
+    box_text(p, x + BOX_PAD, y, name, line, 0xFFFFFF);
+}
+
+fn box_text(p: &mut Painter, x: f32, y: f32, name: &str, line: &str, line_rgb: u32) {
+    p.text_plain(name, x, y + BOX_TEXT_TOP, 0xFFFFFF, true);
+    p.text_plain(line, x, y + BOX_TEXT_TOP + LINE, line_rgb, true);
+}
+
+fn chrome(p: &mut Painter, x: f32, y: f32, w: f32, h: f32, hovered: bool) {
+    let (face, edge) = if hovered {
+        (FACE_HOVERED, EDGE_HOVERED)
+    } else {
+        (FACE, EDGE)
+    };
+    p.fill(x, y, w, h, face);
+    p.outline(x, y, w, h, edge);
+}
+
+fn fitted(ideal: f32, ctx: &ScreenCtx) -> f32 {
+    ideal.min(ctx.vw - 40.0).max(60.0).floor()
 }
 
 fn button(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, label: &str) -> bool {
     let hovered = ctx.hovering(x, y, BUTTON_W, BUTTON_H);
-    let (face, edge) = if hovered {
-        (0xFF39_3944, 0xFFFF_FFFF)
-    } else {
-        (0xFF22_2229, 0xFF6E_6E7A)
-    };
-    p.fill(x, y, BUTTON_W, BUTTON_H, face);
-    p.outline(x, y, BUTTON_W, BUTTON_H, edge);
+    chrome(p, x, y, BUTTON_W, BUTTON_H, hovered);
     p.text_centered(
         label,
         x + BUTTON_W * 0.5,
@@ -203,15 +336,15 @@ fn button(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, label: &str) -> bool
     hovered && ctx.input.left_click
 }
 
-fn bar(p: &mut Painter, ctx: &ScreenCtx, y: f32, frac: f32) {
-    let w = BAR_W.min(ctx.vw - 40.0).max(60.0).floor();
+pub(super) fn bar(p: &mut Painter, ctx: &ScreenCtx, y: f32, frac: f32) {
+    let w = fitted(BAR_W, ctx);
     let x = ((ctx.vw - w) * 0.5).floor();
     p.fill(x, y, w, BAR_H, 0xFF0A0A0C);
     let filled = ((w - 2.0) * frac).floor();
     if filled >= 1.0 {
-        p.fill(x + 1.0, y + 1.0, filled, BAR_H - 2.0, 0xFF4C_C46A);
+        p.fill(x + 1.0, y + 1.0, filled, BAR_H - 2.0, GREEN);
     }
-    p.outline(x, y, w, BAR_H, 0xFF6E_6E7A);
+    p.outline(x, y, w, BAR_H, EDGE);
 }
 
 static PREPARING: AtomicBool = AtomicBool::new(false);

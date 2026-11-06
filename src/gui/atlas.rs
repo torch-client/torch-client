@@ -826,7 +826,7 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
         };
         entries.push(Entry {
             kind: Kind::Sprite,
-            key: format!("mob_effect/{name}"),
+            key: crate::play::mob_effects::sprite(&name),
             image: img,
             scaling: Scaling::Stretch,
         });

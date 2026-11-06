@@ -686,12 +686,29 @@ pub struct ChargedProjectiles {
 }
 template_list!(ChargedProjectiles, false);
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(transparent)]
 pub struct BundleContents {
     pub items: Vec<ItemStack>,
+    #[serde(skip)]
+    pub selected_item: i32,
 }
-template_list!(BundleContents, false);
+impl PartialEq for BundleContents {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+    }
+}
+impl AzBuf for BundleContents {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        Ok(Self {
+            items: read_templates(buf, false)?,
+            selected_item: crate::bundle::NO_SELECTED_ITEM,
+        })
+    }
+    fn azalea_write(&self, buf: &mut impl io::Write) -> io::Result<()> {
+        write_templates(&self.items, buf, false)
+    }
+}
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct PotionContents {

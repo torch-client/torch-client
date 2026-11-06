@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     io::{self, Cursor, Write},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use azalea_buf::{AzBuf, BufReadError};
@@ -61,16 +62,38 @@ impl AzBuf for MobEffectFlags {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EffectGeneration {
+    pub update: u64,
+    pub instance: u64,
+}
+
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 #[cfg_attr(feature = "bevy_ecs", derive(bevy_ecs::component::Component))]
 #[derive(Clone, Debug, Default)]
-pub struct ActiveEffects(pub HashMap<MobEffect, MobEffectData>);
+pub struct ActiveEffects(
+    pub HashMap<MobEffect, MobEffectData>,
+    HashMap<MobEffect, EffectGeneration>,
+);
 impl ActiveEffects {
     pub fn insert(&mut self, effect: MobEffect, data: MobEffectData) -> Option<MobEffectData> {
+        let update = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        let generation = self.1.entry(effect).or_insert(EffectGeneration {
+            update,
+            instance: update,
+        });
+        generation.update = update;
         self.0.insert(effect, data)
     }
 
     pub fn remove(&mut self, effect: MobEffect) -> Option<MobEffectData> {
+        self.1.remove(&effect);
         self.0.remove(&effect)
+    }
+
+    pub fn generation(&self, effect: MobEffect) -> EffectGeneration {
+        self.1.get(&effect).copied().unwrap_or_default()
     }
 
     pub fn get_level(&self, effect: MobEffect) -> Option<i32> {
@@ -79,6 +102,10 @@ impl ActiveEffects {
 
     pub fn get(&self, effect: MobEffect) -> Option<&MobEffectData> {
         self.0.get(&effect)
+    }
+
+    pub fn has(&self, effect: MobEffect) -> bool {
+        self.0.contains_key(&effect)
     }
 
     pub fn get_dig_speed_amplifier(&self) -> Option<i32> {

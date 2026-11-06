@@ -60,8 +60,13 @@ pub enum Ambient {
     RedstoneOre,
     Repeater { step: [f32; 3], delay: u8 },
     Lever { offset: [f32; 3] },
-    FallingDust,
+    FallingDust { sand: bool },
     FireflyBush,
+    OpenEyeblossom,
+    PaleHangingMoss,
+    CreakingHeart,
+    DeadBush,
+    DryGrass,
 }
 
 pub const HORIZONTAL: [[f32; 3]; 4] = [
@@ -266,6 +271,15 @@ fn build(state: BlockState) -> Option<Ambient> {
             });
         }
         "firefly_bush" => return Some(Ambient::FireflyBush),
+        "open_eyeblossom" => return Some(Ambient::OpenEyeblossom),
+        "pale_hanging_moss" => return Some(Ambient::PaleHangingMoss),
+        "creaking_heart" => {
+            return (prop("creaking_heart_state") != Some("uprooted"))
+                .then_some(Ambient::CreakingHeart);
+        }
+        "dead_bush" => return Some(Ambient::DeadBush),
+        "short_dry_grass" | "tall_dry_grass" => return Some(Ambient::DryGrass),
+        "sand" | "red_sand" => return Some(Ambient::FallingDust { sand: true }),
         _ => {}
     }
 
@@ -273,7 +287,7 @@ fn build(state: BlockState) -> Option<Ambient> {
         return Some(Ambient::Leaves { leaf, chance });
     }
     if is_falling(name) {
-        return Some(Ambient::FallingDust);
+        return Some(Ambient::FallingDust { sand: false });
     }
     None
 }

@@ -64,7 +64,12 @@ pub struct LightmapState {
     flicker_rng: crate::util::javarandom::JavaRandom,
     boss_darkening: [f32; 2],
     water_vision_time: i32,
+    water_vision_epoch: u32,
+    pub water_vision: f32,
+    #[cfg(feature = "audio")]
+    eye_in_water: bool,
     pub current: super::lightmap::State,
+    texels: Vec<u8>,
 }
 
 impl Default for LightmapState {
@@ -73,8 +78,13 @@ impl Default for LightmapState {
             flicker: 0.0,
             flicker_tick: 0,
             flicker_rng: crate::util::javarandom::JavaRandom::new(0),
+            texels: Vec::new(),
             boss_darkening: [0.0; 2],
             water_vision_time: 0,
+            water_vision_epoch: 0,
+            water_vision: 0.0,
+            #[cfg(feature = "audio")]
+            eye_in_water: false,
             current: Default::default(),
         }
     }
@@ -107,7 +117,7 @@ fn update_environment(
     );
 }
 
-fn update_lightmap(
+pub(crate) fn update_lightmap(
     env: Res<super::environment::Environment>,
     view: Res<FrameView>,
     mut pixels: ResMut<super::terrain::LightmapPixels>,
@@ -122,7 +132,15 @@ fn update_lightmap(
         crate::util::block_model::eye_fluid_at(x, y, z)
             == Some(crate::util::block_model::EyeFluid::Water)
     };
+    #[cfg(feature = "audio")]
+    {
+        state.eye_in_water = eye_in_water;
+    }
     let spectator = view.gamemode == crate::session::Gamemode::Spectator;
+    if state.water_vision_epoch != view.health_epoch {
+        state.water_vision_epoch = view.health_epoch;
+        state.water_vision_time = 0;
+    }
     for _ in 0..behind {
         let rng = &mut state.flicker_rng;
         let noise = [rng.next_f32(), rng.next_f32(), rng.next_f32()];
@@ -139,16 +157,24 @@ fn update_lightmap(
     let mut lm =
         super::lightmap::State::sample(super::dimension::current(), &env.sky, state.flicker, gamma);
     let [boss_prev, boss] = state.boss_darkening;
+    state.water_vision = super::lightmap::water_vision(state.water_vision_time, eye_in_water);
     lm.apply_effects(&super::lightmap::Effects {
         night_vision: view.night_vision,
-        water_vision: super::lightmap::water_vision(state.water_vision_time, eye_in_water),
+        water_vision: state.water_vision,
         conduit_power: view.conduit_power,
         darkness: view.darkness,
-        darkness_age: (view.game_time % 80) as f32 - view.partial,
+        darkness_age: view.local.age_ticks - 2.0 * view.partial,
         boss_darkening: boss_prev + (boss - boss_prev) * view.partial,
     });
+    if state.current == lm && !pixels.data.is_empty() {
+        return;
+    }
     state.current = lm;
-    super::lightmap::write_image_data(&lm, &mut pixels.data);
+    let state = &mut *state;
+    super::lightmap::write_image_data(&lm, &mut state.texels);
+    if pixels.data != state.texels {
+        std::mem::swap(&mut pixels.data, &mut state.texels);
+    }
 }
 
 #[derive(Resource)]
@@ -721,6 +747,14 @@ fn poll_shared_state(
         view.camera_world = moved.to_world(transform.translation);
         view.camera_render = transform.translation;
         view.camera_rotation = transform.rotation;
+        view.hurt_tilt = if camera_view.free() {
+            Quat::IDENTITY
+        } else {
+            let local = &view.local;
+            let strength = gui.options.damage_tilt as f32 / 100.0;
+            super::anim::hurt_tilt(local.hurt_time, local.hurt_dir, local.death_time, strength)
+        };
+        transform.rotation *= view.hurt_tilt.inverse();
     }
 
     state.profiling.record_lock_wait(lock_wait_ms);
@@ -1281,6 +1315,8 @@ fn collect_hud_info(
                 crate::prof_span!("hud:counts");
                 crate::diag::counts()
             },
+            unknown_ids: azalea::registry::unknown::snapshot(),
+            worst_packet: azalea::registry::unknown::worst_packet(),
         }
     });
 
@@ -1437,6 +1473,8 @@ fn log_frame_rate(
     index: Res<ChunkIndex>,
     terrain_stats: Res<super::terrain_pool::TerrainStats>,
     gui: Res<crate::gui::GuiState>,
+    view: Res<FrameView>,
+    tracker: Res<super::framerate::FramerateLimitTracker>,
     device: Res<bevy::render::renderer::RenderDevice>,
     mut frames: Local<u32>,
     mut since: Local<f32>,
@@ -1478,6 +1516,7 @@ fn log_frame_rate(
         index.len(),
     );
     let c = crate::diag::counts();
+    let cap = tracker.limit(&gui, view.in_world);
     crate::log_info!(
         "render",
         "render distance {} chunks, supersampling {}, frame cap {}",
@@ -1487,10 +1526,10 @@ fn log_frame_rate(
         } else {
             "off"
         },
-        if gui.options.max_fps >= crate::gui::MAX_FPS_UNLIMITED {
+        if cap >= crate::gui::MAX_FPS_UNLIMITED {
             "unlimited".to_string()
         } else {
-            format!("{} fps", gui.options.max_fps)
+            format!("{cap} fps")
         },
     );
     crate::log_info!(
@@ -1559,7 +1598,8 @@ fn world_cursor() -> (CursorGrabMode, bool) {
 }
 
 pub(super) fn reset_menu_state(state: &mut crate::gui::GuiState, shared: &Shared) {
-    if state.screen == crate::gui::Screen::Creative
+    if !state.slots.stow_on_landing()
+        && state.screen == crate::gui::Screen::Creative
         && let Some(cursor) = state.slots.take_cursor()
     {
         let mut s = shared.0.lock().unwrap();
@@ -1569,6 +1609,12 @@ pub(super) fn reset_menu_state(state: &mut crate::gui::GuiState, shared: &Shared
             &session.menu_slots,
             &mut session.inv_actions,
         );
+    }
+    {
+        let mut s = shared.0.lock().unwrap();
+        let session = &mut s.session;
+        let unselect = state.slots.stop_hovering(&session.menu_slots);
+        session.inv_actions.extend(unselect);
     }
     state.slots.reset_for_screen_change();
     state.container.reset();
@@ -1586,6 +1632,7 @@ pub(super) fn enter_screen(
     let was_open = state.screen.is_open();
     if next != state.screen {
         crate::platform::keyboard::hide();
+        crate::platform::keyboard::disarm();
         state.chat.withdraw_copy_offer();
     }
     reset_menu_state(state, shared);
@@ -1664,18 +1711,23 @@ pub(super) fn enter_screen(
     }
 }
 
-fn limit_framerate(gui: Res<crate::gui::GuiState>, mut next_frame: Local<Option<Instant>>) {
+fn limit_framerate(
+    gui: Res<crate::gui::GuiState>,
+    view: Res<FrameView>,
+    tracker: Res<super::framerate::FramerateLimitTracker>,
+    mut next_frame: Local<Option<Instant>>,
+) {
     if cfg!(target_arch = "wasm32") {
         return;
     }
-    let target = gui.options.max_fps;
+    let target = tracker.limit(&gui, view.in_world);
     let now = Instant::now();
     if target >= crate::gui::MAX_FPS_UNLIMITED {
         *next_frame = None;
         return;
     }
     let period = Duration::from_secs_f64(1.0 / target as f64);
-    match *next_frame {
+    match next_frame.map(|deadline| deadline.min(now + period)) {
         Some(deadline) if deadline > now => {
             std::thread::sleep(deadline - now);
             *next_frame = Some(deadline + period);
@@ -1972,12 +2024,41 @@ fn apply_fov(
             state.options.fov_effects as f32 / 100.0,
         )
         .to_radians();
-        if perspective.fov != fov
+        let warp = if super::terrain::pack_drawing() {
+            Mat4::IDENTITY
+        } else {
+            spinning_warp(
+                view.portal.max(view.nausea),
+                view.spin_degrees,
+                state.options.screen_effects,
+            )
+        };
+        if (perspective.fov != fov || perspective.view_warp != warp)
             && let Projection::Perspective(perspective) = &mut *projection
         {
             perspective.fov = fov;
+            perspective.view_warp = warp;
         }
     }
+}
+
+fn spinning_warp(strength: f32, degrees: f32, screen_effects: u32) -> Mat4 {
+    let scale = crate::gui::screen_effects::screen_effect_scale(screen_effects);
+    let intensity = strength * scale * scale;
+    if intensity <= 0.0 {
+        return Mat4::IDENTITY;
+    }
+    let skew = 5.0 / (intensity * intensity + 5.0) - intensity * 0.04;
+    let skew = skew * skew;
+    let axis = Vec3::new(
+        0.0,
+        std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    );
+    let angle = degrees.to_radians();
+    Mat4::from_axis_angle(axis, angle)
+        * Mat4::from_scale(Vec3::new(1.0 / skew, 1.0, 1.0))
+        * Mat4::from_axis_angle(axis, -angle)
 }
 
 fn modify_fov_for_death_or_fluid(mut fov: f32, view: &FrameView, effect_scale: f32) -> f32 {
@@ -2067,15 +2148,43 @@ fn sync_bot_options(s: &mut SharedState, state: &crate::gui::GuiState, camera: &
 fn sync_audio_listener(
     camera_q: Query<&Transform, With<WorldCamera>>,
     origin: Res<super::RenderOrigin>,
+    view: Res<FrameView>,
 ) {
     let Ok(transform) = camera_q.single() else {
         return;
     };
     crate::audio::set_listener(
         origin.to_world(transform.translation).to_array(),
-        (*transform.forward()).into(),
-        (*transform.right()).into(),
+        (view.camera_rotation * Vec3::NEG_Z).into(),
+        (view.camera_rotation * Vec3::X).into(),
     );
+}
+
+#[cfg(feature = "audio")]
+fn tick_audio(
+    time: Res<Time>,
+    view: Res<FrameView>,
+    gui: Res<crate::gui::GuiState>,
+    lightmap: Res<LightmapState>,
+    mut director: Local<crate::audio::Director>,
+    mut behind: Local<f32>,
+) {
+    const TICK: f32 = 0.05;
+    *behind += time.delta_secs();
+    if *behind < TICK {
+        return;
+    }
+    *behind = (*behind - TICK).min(TICK);
+    director.tick(&crate::audio::Scene {
+        in_world: view.in_world && !view.reconfiguring,
+        credits: gui.screen == crate::gui::Screen::WinGame,
+        creative: view.gamemode == crate::session::Gamemode::Creative,
+        spectator: view.gamemode == crate::session::Gamemode::Spectator,
+        boss_music: view.boss_music,
+        underwater: lightmap.eye_in_water,
+        feet: view.player_pos,
+        eye: view.tick_eye(),
+    });
 }
 
 fn sync_smooth_lighting(state: Res<crate::gui::GuiState>, mut last: Local<Option<bool>>) {
@@ -2505,7 +2614,13 @@ pub fn run(
         Update,
         super::screenshot::warm_up.run_if(resource_added::<AssetsReady>),
     )
-    .add_systems(First, limit_framerate.before(bevy::time::TimeSystems))
+    .init_resource::<super::framerate::FramerateLimitTracker>()
+    .add_systems(
+        First,
+        (super::framerate::track_input, limit_framerate)
+            .chain()
+            .before(bevy::time::TimeSystems),
+    )
     .add_systems(
         Update,
         mesh_on_render_thread
@@ -2524,7 +2639,10 @@ pub fn run(
         apply_fov.after(FrameViewSystems).before(collect_hud_info),
     );
     #[cfg(feature = "audio")]
-    app.add_systems(Update, sync_audio_listener.after(FrameViewSystems));
+    app.add_systems(
+        Update,
+        (sync_audio_listener, tick_audio).after(FrameViewSystems),
+    );
     #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(Update, sync_vsync);
     app.add_systems(Last, trace_reextracted_meshes)
@@ -2810,6 +2928,13 @@ mod tests {
     use super::*;
 
     const SIXTY_HZ: Duration = Duration::from_nanos(16_666_666);
+
+    #[test]
+    fn the_warp_is_the_identity_without_distortion() {
+        assert_eq!(spinning_warp(1.0, 90.0, 0), Mat4::IDENTITY);
+        assert_eq!(spinning_warp(0.0, 90.0, 100), Mat4::IDENTITY);
+        assert_ne!(spinning_warp(1.0, 90.0, 100), Mat4::IDENTITY);
+    }
 
     #[test]
     fn a_callback_a_millisecond_early_still_draws() {

@@ -40,6 +40,7 @@ tools/build_web.sh --features webgpu
 | `online_mode` | on | Microsoft account sign-in, for servers that require it. |
 | `resourcepacks` | on | Vanilla resource packs from folders and zips. Desktop only. |
 | `update_checker` | on | Checks GitHub once a day for a newer release and shows an update line on the title screen. Desktop only. |
+| `self_update` | off | Offers that release on a full screen, then downloads, verifies and installs it and restarts. Pulls in `update_checker` and `asset_download`. x86_64 Windows and Linux only. |
 | `builtin_shaders` | off | Built-in shaders: sun shadows, reflective water, waving foliage, height fog and bloom. |
 | `shader_support` | off | Loads Iris/OptiFine-style shader packs from a `shaders/` folder. |
 | `audio` | off | Sound. Desktop only; downloads about 332 MB of sounds. |

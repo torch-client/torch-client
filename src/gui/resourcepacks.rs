@@ -14,19 +14,31 @@ use crate::text::{Span, Style};
 
 use super::options::{SCROLLBAR_GAP, SCROLLBAR_W, draw_scrollbar, row_visible, scroll_masked};
 
-const TITLE: &str = "Select Resource Packs";
-pub(in crate::gui) const RESOURCE_PACKS: &str = "Resource Packs...";
-const AVAILABLE: &str = "Available";
-const SELECTED: &str = "Selected";
-const OPEN_FOLDER: &str = "Open Pack Folder";
-const DONE: &str = "Done";
-const VANILLA_NAME: &str = "Default";
-const VANILLA_DESCRIPTION: &str = "The default look and feel of Minecraft";
+mod tr {
+    use crate::gui::tooltip::label;
+
+    macro_rules! keys {
+        ($($name:ident = $key:literal),* $(,)?) => {
+            $(pub fn $name() -> &'static str { label!($key) })*
+        };
+    }
+
+    keys! {
+        title = "resourcePack.title",
+        available = "pack.available.title",
+        selected = "pack.selected.title",
+        open_folder = "pack.openFolder",
+        done = "gui.done",
+        vanilla_name = "resourcePack.vanilla.name",
+        vanilla_description = "resourcePack.vanilla.description",
+        incompatible = "pack.incompatible",
+        too_old = "pack.incompatible.old",
+        too_new = "pack.incompatible.new",
+        unknown = "pack.incompatible.unknown",
+    }
+}
+
 const VANILLA_HAYSTACK: &str = "vanilla\ndefault\nthe default look and feel of minecraft";
-const INCOMPATIBLE: &str = "Incompatible";
-const TOO_OLD: &str = "(Made for an older version of Minecraft)";
-const TOO_NEW: &str = "(Made for a newer version of Minecraft)";
-const UNKNOWN: &str = "(Broken or incompatible)";
 const SAVE: &str = "Save";
 const SAVED: &str = "Saved";
 const SAVE_TOOLTIP: &str = "Copy this pack into the resource packs folder";
@@ -174,7 +186,7 @@ impl State {
         self.cursor = [None; 2];
     }
 
-    fn refresh_server(&mut self, shared: &Arc<SharedMutex>) {
+    fn refresh_server(&mut self, shared: &SharedMutex) {
         let generation = crate::client::server_packs::generation();
         if self.server_generation == Some(generation) {
             return;
@@ -267,7 +279,7 @@ impl State {
     }
 }
 
-pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Arc<SharedMutex>) {
+pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &SharedMutex) {
     #[cfg(explore_modrinth)]
     if state.explore_packs.take_changed() {
         state.resourcepacks.rescan();
@@ -291,7 +303,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Arc
         return;
     }
 
-    packdrop::header(p, ctx, TITLE, &mut packs.search);
+    packdrop::header(p, ctx, tr::title(), &mut packs.search);
 
     let rect = LAYOUT.content_rect(ctx.vw, ctx.vh);
     let list_y = rect.1;
@@ -364,7 +376,11 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Arc
         let top = (list_y - packs.scroll[side]).floor();
         header(
             p,
-            if side == 0 { AVAILABLE } else { SELECTED },
+            if side == 0 {
+                tr::available()
+            } else {
+                tr::selected()
+            },
             left,
             top,
             list_w,
@@ -402,7 +418,14 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Arc
             let index = match entry {
                 Entry::Default => {
                     p.sprite("pack_icon", cx, cy, ICON, ICON);
-                    entry_text(p, VANILLA_NAME, &plain(VANILLA_DESCRIPTION), cx, cy, text_w);
+                    entry_text(
+                        p,
+                        tr::vanilla_name(),
+                        &plain(tr::vanilla_description()),
+                        cx,
+                        cy,
+                        text_w,
+                    );
                     continue;
                 }
                 Entry::Server(i) => {
@@ -457,11 +480,11 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Arc
             let overlay = hovered || (is_cursor && focused[side]);
             if overlay && !compatible {
                 let reason = match row.info.compat {
-                    Compat::TooOld => TOO_OLD,
-                    Compat::TooNew => TOO_NEW,
-                    _ => UNKNOWN,
+                    Compat::TooOld => tr::too_old(),
+                    Compat::TooNew => tr::too_new(),
+                    _ => tr::unknown(),
                 };
-                entry_text(p, INCOMPATIBLE, &plain(reason), cx, cy, text_w);
+                entry_text(p, tr::incompatible(), &plain(reason), cx, cy, text_w);
             } else {
                 entry_text(p, &row.name, &row.info.description, cx, cy, text_w);
             }
@@ -544,9 +567,9 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Arc
         x += footer.w + FOOTER_GAP;
     }
     let folder_hovered =
-        packdrop::open_folder(p, ctx, &footer, x, OPEN_FOLDER, &resourcepacks::dir());
+        packdrop::open_folder(p, ctx, &footer, x, tr::open_folder(), &resourcepacks::dir());
     x += footer.w + FOOTER_GAP;
-    if Button::new(x, footer.y, footer.w, WIDGET_HEIGHT, DONE).draw(p, ctx) {
+    if Button::new(x, footer.y, footer.w, WIDGET_HEIGHT, tr::done()).draw(p, ctx) {
         state.resourcepacks.apply();
         state.nav = Some(Screen::Options);
     }
@@ -603,7 +626,7 @@ fn list_keys(
     }
 }
 
-fn save_server_pack(packs: &mut State, i: usize, shared: &Arc<SharedMutex>) {
+fn save_server_pack(packs: &mut State, i: usize, shared: &SharedMutex) {
     let pack = packs.server[i].pack.clone();
     match resourcepacks::install(&pack.file_name, &pack.zip) {
         Ok(()) => {

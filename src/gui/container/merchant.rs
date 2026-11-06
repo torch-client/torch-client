@@ -34,7 +34,8 @@ pub fn draw(
     };
 
     let ui = &mut state.container;
-    let start = run_scroller(p, ctx, ui, left, top, offers.offers.len());
+    let wheel_on_bundle = state.slots.wheel_on_bundle;
+    let start = run_scroller(p, ctx, ui, left, top, offers.offers.len(), wheel_on_bundle);
     let selected = ui.selected.max(0) as usize;
     let mut hovered_stack = None;
 
@@ -134,6 +135,7 @@ fn run_scroller(
     left: f32,
     top: f32,
     count: usize,
+    wheel_on_bundle: bool,
 ) -> usize {
     let (track_x, track_y) = (left + 94.0, top + 18.0);
     let max_off = count.saturating_sub(VISIBLE_ROWS);
@@ -150,7 +152,7 @@ fn run_scroller(
         return 0;
     }
 
-    if ctx.input.scroll != 0.0 {
+    if ctx.input.scroll != 0.0 && !wheel_on_bundle {
         let off = (ui.merchant_scroll as f64 - ctx.input.scroll as f64) as i64;
         ui.merchant_scroll = off.clamp(0, max_off as i64) as usize;
     }

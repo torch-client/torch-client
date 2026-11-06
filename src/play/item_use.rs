@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use azalea::ecs::query::{Has, QueryState};
 use azalea::ecs::world::WorldId;
@@ -13,12 +12,11 @@ use azalea_world::WorldName;
 
 use crate::client::tracking::{EntityAttributes, attributes, equipment};
 use crate::items::consume::Consumption;
+use crate::play::emit::{self, Viewer};
 use crate::session::{ItemUseEmit, ParticleEmit, SharedMutex, SideMutex};
 
 pub(crate) const USE_TICK_PARTICLES: u32 = 5;
 pub(crate) const FINISH_PARTICLES: u32 = 16;
-
-const EMIT_RANGE: f64 = 36.0;
 
 type UserQuery = QueryState<(
     &'static WorldName,
@@ -57,7 +55,7 @@ pub(crate) fn reset() {
 
 pub(crate) fn emit_local(
     bot: &Client,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     kind: ItemKind,
     consume: &Consumption,
     count: u32,
@@ -91,25 +89,19 @@ pub(crate) fn emit_local(
 fn play_sound(consume: &Consumption, at: [f64; 3]) {
     use crate::audio::{SoundCategory, random_f32};
 
-    let Some(event) = crate::client::server_sounds::event_name(&consume.sound) else {
-        return;
-    };
+    let event = crate::client::server_sounds::event_name(&consume.sound);
     let (volume, pitch) = if consume.drink {
         (0.5, 0.9 + random_f32() * 0.1)
     } else {
         let volume = if random_f32() < 0.5 { 0.5 } else { 1.0 };
         (volume, 1.0 + 0.2 * (random_f32() - random_f32()))
     };
-    crate::audio::play_at(event, SoundCategory::Players, at, volume, pitch);
+    crate::audio::play_at(&event, SoundCategory::Players, at, volume, pitch);
 }
 
-pub(crate) fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
-    let Ok(origin) = bot.position() else { return };
-    let world_name = {
-        let Ok(name) = bot.component::<WorldName>() else {
-            return;
-        };
-        name.clone()
+pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
+    let Some(viewer) = Viewer::of(bot) else {
+        return;
     };
 
     let mut state = STATE.lock().unwrap();
@@ -123,7 +115,7 @@ pub(crate) fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
     let ecs = bot.ecs.read();
     let mut emits = Vec::new();
     for (name, pos, dims, look, id, using, off_hand, local) in query.iter(&ecs) {
-        if local || !using.0 || *name != world_name {
+        if local || !using.0 || !viewer.in_world(name) {
             continue;
         }
         let worn = equipment.get(&id.0);
@@ -149,7 +141,7 @@ pub(crate) fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
         if let Some(consume) = consume
             && consume.particles
             && consume.should_emit(usage.remaining)
-            && pos.distance_squared_to(origin) <= EMIT_RANGE * EMIT_RANGE
+            && viewer.near(**pos)
         {
             let scale = EntityAttributes::of(&attributes, id.0).scale();
             emits.push(ItemUseEmit {
@@ -170,12 +162,5 @@ pub(crate) fn tick(bot: &Client, shared: &Arc<SharedMutex>) {
     uses.retain(|_, usage| usage.seen == tick);
     drop(state);
 
-    if emits.is_empty() {
-        return;
-    }
-    let mut s = shared.lock().unwrap();
-    crate::session::push_particle_emits(
-        &mut s.session.particle_emits,
-        emits.into_iter().map(ParticleEmit::ItemUse),
-    );
+    emit::queue(shared, emits, ParticleEmit::ItemUse);
 }

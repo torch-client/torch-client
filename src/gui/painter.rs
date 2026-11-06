@@ -489,11 +489,25 @@ impl<'a> Painter<'a> {
     }
 
     pub fn sprite_part(&mut self, name: &str, sx: f32, sy: f32, w: f32, h: f32, x: f32, y: f32) {
+        self.sprite_part_tinted(name, sx, sy, w, h, x, y, 0xFFFF_FFFF);
+    }
+
+    pub fn sprite_part_tinted(
+        &mut self,
+        name: &str,
+        sx: f32,
+        sy: f32,
+        w: f32,
+        h: f32,
+        x: f32,
+        y: f32,
+        argb: u32,
+    ) {
         let Some(sp) = self.atlas.sprite(name).copied() else {
             self.fill(x, y, w, h, 0xFFFF_00FF);
             return;
         };
-        self.region_part(sp.region, sx, sy, w, h, x, y, w, h, [1.0; 4]);
+        self.region_part(sp.region, sx, sy, w, h, x, y, w, h, unpack(argb));
     }
 
     pub fn sprite(&mut self, name: &str, x: f32, y: f32, w: f32, h: f32) {
@@ -952,6 +966,11 @@ impl<'a> Painter<'a> {
         self.item_decorations_colored(x, y, count, damage, max_damage, 0xFFFFFF);
     }
 
+    pub fn item_bar(&mut self, x: f32, y: f32, width: f32, rgb: u32) {
+        self.fill(x + 2.0, y + 13.0, 13.0, 2.0, 0xFF00_0000);
+        self.fill(x + 2.0, y + 13.0, width, 1.0, 0xFF00_0000 | rgb);
+    }
+
     pub fn item_decorations_colored(
         &mut self,
         x: f32,
@@ -964,14 +983,7 @@ impl<'a> Painter<'a> {
         if max_damage > 0 && damage > 0 {
             let frac = 1.0 - (damage as f32 / max_damage as f32).clamp(0.0, 1.0);
             let bar = (frac * 13.0).round().max(0.0);
-            self.fill(x + 2.0, y + 13.0, 13.0, 2.0, 0xFF00_0000);
-            self.fill(
-                x + 2.0,
-                y + 13.0,
-                bar,
-                1.0,
-                0xFF00_0000 | bar_color(damage, max_damage),
-            );
+            self.item_bar(x, y, bar, bar_color(damage, max_damage));
         }
         if count > 1 {
             let digits = Digits::new(count as u32);
@@ -1185,6 +1197,10 @@ pub fn argb(alpha: f32, rgb: u32) -> u32 {
     (a << 24) | (rgb & 0x00FF_FFFF)
 }
 
+pub fn white(alpha: f32) -> u32 {
+    (crate::util::mth::as_8bit_channel(alpha) << 24) | 0x00FF_FFFF
+}
+
 pub fn unpack(argb: u32) -> [f32; 4] {
     [
         srgb_to_linear(((argb >> 16) & 0xFF) as f32 / 255.0),
@@ -1199,7 +1215,7 @@ pub fn bar_color(damage: u16, max_damage: u16) -> u32 {
     hsv_to_rgb(frac / 3.0, 1.0, 1.0)
 }
 
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> u32 {
+pub(in crate::gui) fn hsv_to_rgb(h: f32, s: f32, v: f32) -> u32 {
     let i = (h * 6.0).floor();
     let f = h * 6.0 - i;
     let p = v * (1.0 - s);

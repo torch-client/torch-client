@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::gui::toast::{ToastEvent, TutorialSlot};
 use crate::session::{Gamemode, SharedMutex};
 
@@ -254,7 +252,7 @@ pub fn stop(tutorial: &mut Tutorial, out: &mut Vec<ToastEvent>) {
     tutorial.clear(out);
 }
 
-pub fn publish(shared: &Arc<SharedMutex>, events: Vec<ToastEvent>) {
+pub fn publish(shared: &SharedMutex, events: Vec<ToastEvent>) {
     if events.is_empty() {
         return;
     }

@@ -1,6 +1,7 @@
 use simdnbt::owned::Nbt;
 
 use super::TickCtx;
+use crate::blockentities::feed::BlockEntityData;
 use crate::renderer::anim::HeldItem;
 use crate::util::mth;
 
@@ -28,8 +29,13 @@ pub struct Vault {
 impl Vault {
     const ROTATION_SPEED: f32 = 10.0;
 
-    pub fn tick(&mut self, _ctx: &TickCtx) {
+    pub fn tick(&mut self, ctx: &TickCtx) {
         self.update_display_item_spin();
+        if let BlockEntityData::Vault(data) = ctx.data
+            && !data.display_item.is_empty()
+        {
+            super::idle_sound(ctx, "block.vault.ambient");
+        }
     }
 
     fn update_display_item_spin(&mut self) {

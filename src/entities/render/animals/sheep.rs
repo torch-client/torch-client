@@ -41,7 +41,8 @@ pub fn register(registry: &mut Registry) {
             sheep::setup_anim,
         )
         .with_visible(|st| !st.extras.sheared && !st.extras.is_baby)
-        .with_tint(dye::sheep_wool_tint),
+        .with_tint(dye::sheep_wool_tint)
+        .outlined_while_invisible(),
     );
     registry.add(
         EntityKind::Sheep,
@@ -52,7 +53,8 @@ pub fn register(registry: &mut Registry) {
             sheep::setup_anim,
         )
         .with_visible(|st| !st.extras.sheared && st.extras.is_baby)
-        .with_tint(dye::sheep_wool_tint),
+        .with_tint(dye::sheep_wool_tint)
+        .outlined_while_invisible(),
     );
 }
 

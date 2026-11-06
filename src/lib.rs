@@ -194,7 +194,7 @@ pub fn start_mesh_worker(assets: Vec<u8>) {
 pub(crate) fn bake_block_lookups() {
     let textures_dir = textures_dir().to_string_lossy().into_owned();
     let textures = renderer::Textures::blocks(&textures_dir);
-    let atlas = renderer::build_block_atlas(&textures, &textures_dir);
+    let atlas = renderer::build_block_atlas(&textures, &textures_dir, false);
     atlas.tables.publish();
     blocks::install(blocks::Blocks::load(atlas.sprites));
 }
@@ -387,8 +387,6 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
     diag::panic_report::install_panic_hook();
     client::bot::install_exit_signal_handlers();
     install_crypto_provider();
-    #[cfg(all(feature = "update_checker", not(target_arch = "wasm32")))]
-    client::update_checker::spawn();
     let cli_account = authenticate(&args);
     let online = cli_account.is_some();
     let account = cli_account
@@ -412,9 +410,6 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
 
     #[cfg(not(target_arch = "wasm32"))]
     create_drop_folders();
-
-    #[cfg(lua_mods)]
-    modules::script::init();
 
     {
         let threads = std::env::var("MC_POOL_THREADS")
@@ -451,9 +446,19 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
     log_info!("assets", "textures {textures_dir}");
 
     let have_assets = assets_present();
+    #[cfg(all(feature = "update_checker", not(target_arch = "wasm32")))]
+    if have_assets {
+        client::update_checker::spawn();
+    }
     #[cfg(resource_packs)]
     if have_assets {
         resourcepacks::mount();
+        #[cfg(feature = "audio")]
+        audio::packs_changed();
+    }
+    #[cfg(lua_mods)]
+    if have_assets {
+        modules::script::init();
     }
     let (atlas_image, gui_atlas) = if have_assets {
         step("building the atlases");

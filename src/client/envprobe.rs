@@ -32,15 +32,28 @@ fn probe() -> &'static Mutex<Probe> {
 
 static CAMERA_BIOME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNRESOLVED);
 
+#[cfg(feature = "audio")]
+static CAMERA_BIOME_ID: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(UNRESOLVED_ID);
+
+#[cfg(feature = "audio")]
+const UNRESOLVED_ID: u32 = u32::MAX;
+
 pub(crate) fn camera_has_precipitation() -> bool {
     let row = CAMERA_BIOME.load(std::sync::atomic::Ordering::Relaxed);
     crate::util::biome_color::env(row).has_precipitation
 }
 
-#[cfg(feature = "shader_support")]
+#[cfg(any(feature = "audio", feature = "shader_support"))]
 pub(crate) fn camera_biome() -> Option<u8> {
     let row = CAMERA_BIOME.load(std::sync::atomic::Ordering::Relaxed);
     (row != UNRESOLVED).then_some(row)
+}
+
+#[cfg(feature = "audio")]
+pub(crate) fn camera_biome_id() -> Option<u32> {
+    let id = CAMERA_BIOME_ID.load(std::sync::atomic::Ordering::Relaxed);
+    (id != UNRESOLVED_ID).then_some(id)
 }
 
 pub(crate) fn reset() {
@@ -48,6 +61,8 @@ pub(crate) fn reset() {
         probe.key = None;
     }
     CAMERA_BIOME.store(UNRESOLVED, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "audio")]
+    CAMERA_BIOME_ID.store(UNRESOLVED_ID, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub(crate) fn sample(bot: &Client, eye: [f64; 3]) -> Option<BiomeLayer> {
@@ -106,23 +121,21 @@ pub(crate) fn quart_biome(
     biomes: &[u8],
     q: [i32; 3],
 ) -> u8 {
+    quart_biome_id(chunk, min_y, q)
+        .and_then(|id| biomes.get(id as usize).copied())
+        .unwrap_or(UNRESOLVED)
+}
+
+fn quart_biome_id(chunk: &azalea_world::Chunk, min_y: i32, q: [i32; 3]) -> Option<u32> {
     use azalea_registry::DataRegistry;
 
-    let section = ((q[1] * 4 - min_y) >> 4) as usize;
-    match chunk.sections.get(section) {
-        Some(section) => {
-            let biome = section.get_biome(ChunkSectionBiomePos {
-                x: (q[0] & 3) as u8,
-                y: (q[1] & 3) as u8,
-                z: (q[2] & 3) as u8,
-            });
-            biomes
-                .get(biome.protocol_id() as usize)
-                .copied()
-                .unwrap_or(UNRESOLVED)
-        }
-        None => UNRESOLVED,
-    }
+    let section = chunk.sections.get(((q[1] * 4 - min_y) >> 4) as usize)?;
+    let biome = section.get_biome(ChunkSectionBiomePos {
+        x: (q[0] & 3) as u8,
+        y: (q[1] & 3) as u8,
+        z: (q[2] & 3) as u8,
+    });
+    Some(biome.protocol_id())
 }
 
 fn resample(bot: &Client, probe: &mut Probe, integral: [i32; 3]) -> Option<()> {
@@ -163,6 +176,14 @@ fn resample(bot: &Client, probe: &mut Probe, integral: [i32; 3]) -> Option<()> {
                 };
                 if x as i32 == RADIUS && y as i32 == RADIUS && z as i32 == RADIUS {
                     CAMERA_BIOME.store(row, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "audio")]
+                    CAMERA_BIOME_ID.store(
+                        chunk
+                            .as_ref()
+                            .and_then(|chunk| quart_biome_id(chunk, min_y, [qx, qy, qz]))
+                            .unwrap_or(UNRESOLVED_ID),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
                 probe.cells[sample_index(x, y, z)] = probe.blend.bucket_for(row) as u8;
             }

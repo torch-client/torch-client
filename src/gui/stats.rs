@@ -408,7 +408,7 @@ pub fn draw(
                 count: 1,
                 ..SlotStack::default()
             };
-            tooltip::draw(p, &stack, x, y, ctx.vw, ctx.vh, advanced_tooltips);
+            tooltip::draw(p, &stack, x, y, ctx.vw, ctx.vh, advanced_tooltips, false);
         }
         None => {}
     }

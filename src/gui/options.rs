@@ -65,12 +65,16 @@ mod tr {
         render_distance = "options.renderDistance",
         fov_effects = "options.fovEffectScale",
         screen_effects = "options.screenEffectScale",
+        damage_tilt = "options.damageTiltStrength",
+        inactivity_fps_limit = "options.inactivityFpsLimit",
+        inactivity_afk = "options.inactivityFpsLimit.afk",
+        inactivity_minimized = "options.inactivityFpsLimit.minimized",
         reset = "controls.reset",
         reset_all_keys = "controls.resetAll",
     }
 }
 
-fn generic_value(caption: &str, value: &str) -> String {
+pub(in crate::gui) fn generic_value(caption: &str, value: &str) -> String {
     crate::gui::tooltip::translate(
         "options.generic_value",
         &[caption.to_owned(), value.to_owned()],
@@ -154,6 +158,8 @@ const OPEN_CLIENT_FOLDER: &str = "Open torch-client Folder";
 const CHECK_ASSETS: &str = "Install missing assets";
 #[cfg(feature = "asset_download")]
 const NOTHING_MISSING: &str = "Nothing is missing";
+#[cfg(self_update)]
+const ENABLE_SELF_UPDATE: &str = "Enable self update";
 
 const SPRINT_MODE: &str = "Sprint Mode";
 
@@ -190,6 +196,8 @@ const FOV_MAX: i32 = 110;
 const FOV_EFFECTS_MAX: i32 = 100;
 
 const SCREEN_EFFECTS_MAX: i32 = 100;
+
+const DAMAGE_TILT_MAX: i32 = 100;
 
 pub(crate) const RENDER_DISTANCE_MIN: i32 = 2;
 pub(crate) const RENDER_DISTANCE_MAX: i32 = 32;
@@ -246,8 +254,9 @@ const Y_DISPLAY_ROW_0: f32 = Y_DISPLAY_HEADER + HEADER_H;
 const Y_DISPLAY_ROW_1: f32 = Y_DISPLAY_ROW_0 + ROW_H;
 const Y_DISPLAY_ROW_2: f32 = Y_DISPLAY_ROW_1 + ROW_H;
 const Y_DISPLAY_ROW_3: f32 = Y_DISPLAY_ROW_2 + ROW_H;
+const Y_DISPLAY_ROW_4: f32 = Y_DISPLAY_ROW_3 + ROW_H;
 #[cfg(feature = "render_lod")]
-const Y_LOD_HEADER: f32 = Y_DISPLAY_ROW_3 + ROW_H;
+const Y_LOD_HEADER: f32 = Y_DISPLAY_ROW_4 + ROW_H;
 #[cfg(feature = "render_lod")]
 const Y_LOD_HINT: f32 = Y_LOD_HEADER + HEADER_PAD_TOP + HEADER_H;
 #[cfg(feature = "render_lod")]
@@ -261,7 +270,7 @@ const Y_LOD_ROW_2: f32 = Y_LOD_ROW_1 + ROW_H;
 #[cfg(feature = "render_lod")]
 const Y_QUALITY_HEADER: f32 = Y_LOD_ROW_2 + ROW_H;
 #[cfg(not(feature = "render_lod"))]
-const Y_QUALITY_HEADER: f32 = Y_DISPLAY_ROW_3 + ROW_H;
+const Y_QUALITY_HEADER: f32 = Y_DISPLAY_ROW_4 + ROW_H;
 const Y_QUALITY_ROW_0: f32 = Y_QUALITY_HEADER + HEADER_PAD_TOP + HEADER_H;
 const Y_QUALITY_ROW_1: f32 = Y_QUALITY_ROW_0 + ROW_H;
 const Y_QUALITY_ROW_2: f32 = Y_QUALITY_ROW_1 + ROW_H;
@@ -584,7 +593,17 @@ const Y_AUDIO_ROW_3: f32 = Y_AUDIO_ROW_2 + ROW_H;
 const Y_AUDIO_ROW_4: f32 = Y_AUDIO_ROW_3 + ROW_H;
 
 #[cfg(feature = "audio")]
-const AUDIO_CONTENT_H: f32 = Y_AUDIO_ROW_4 + ROW_H;
+const Y_AUDIO_DEVICE: f32 = Y_AUDIO_ROW_4 + ROW_H;
+#[cfg(feature = "audio")]
+const Y_AUDIO_SUBTITLES: f32 = Y_AUDIO_DEVICE + ROW_H;
+#[cfg(feature = "audio")]
+const Y_AUDIO_MUSIC: f32 = Y_AUDIO_SUBTITLES + ROW_H;
+
+#[cfg(feature = "audio")]
+const AUDIO_CONTENT_H: f32 = Y_AUDIO_MUSIC + ROW_H;
+
+#[cfg(feature = "audio")]
+const AUDIO_LIST_H: f32 = AUDIO_CONTENT_H + LIST_PAD_BOTTOM;
 
 fn fov_label(value: i32) -> String {
     match value {
@@ -632,6 +651,8 @@ const LOD_DISTANCE_SLIDER_ID: u32 = 32;
 
 #[cfg(feature = "render_lod")]
 const LOD_QUALITY_SLIDER_ID: u32 = 33;
+
+const DAMAGE_TILT_SLIDER_ID: u32 = 34;
 
 #[cfg(feature = "render_lod")]
 const LOD_DISTANCE_STOPS: [u32; 44] = [
@@ -774,6 +795,33 @@ fn toggle(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, label: &str, value: 
     true
 }
 
+macro_rules! opt_toggle {
+    ($p:ident, $ctx:ident, $state:ident; $x:expr, $y:expr, $label:expr, $field:ident) => {
+        if toggle($p, $ctx, $x, $y, $label, &mut $state.options.$field) {
+            crate::gui::save_options(&$state.options);
+        }
+    };
+}
+
+macro_rules! opt_slider {
+    ($p:ident, $ctx:ident, $state:ident; $x:expr, $y:expr, $id:expr, $field:ident, $min:expr, $max:expr, $label:expr) => {
+        let slider = Slider {
+            id: $id,
+            x: $x,
+            y: $y,
+            w: COLUMN_W,
+            h: WIDGET_HEIGHT,
+            min: $min,
+            max: $max,
+            value: $state.options.$field as i32,
+            label: $label,
+        };
+        if slider.draw_into($p, $ctx, &mut $state.options.$field) {
+            crate::gui::save_options(&$state.options);
+        }
+    };
+}
+
 pub(in crate::gui) fn draw_title(p: &mut Painter, ctx: &ScreenCtx, title: &str) {
     p.text_centered(title, ctx.vw / 2.0, LAYOUT.title_y(), 0xFFFFFF, true);
 }
@@ -794,6 +842,7 @@ const VIDEO_KEYS: &[&str] = &[
     "fov",
     "fovEffectScale",
     "screenEffectScale",
+    "damageTiltStrength",
     "renderClouds",
     "particles",
     "renderDistance",
@@ -803,6 +852,7 @@ const VIDEO_KEYS: &[&str] = &[
     "lightingEnabled",
     "maxFps",
     "vsync",
+    "inactivityFpsLimit",
     "fpsCounter",
     "shaders",
     "shaderQuality",
@@ -838,7 +888,50 @@ fn reset_game_options(o: &mut crate::gui::GuiOptions) {
 
 #[cfg(feature = "audio")]
 fn reset_audio_options(o: &mut crate::gui::GuiOptions) {
-    crate::gui::reset_options(o, |key| key.starts_with("soundCategory_"));
+    crate::gui::reset_options(o, |key| {
+        key.starts_with("soundCategory_")
+            || matches!(
+                key,
+                "showSubtitles" | "musicFrequency" | "musicToast" | "soundDevice"
+            )
+    });
+}
+
+#[cfg(feature = "audio")]
+const DEVICE_UNAVAILABLE: &str = " (unavailable)";
+
+#[cfg(feature = "audio")]
+fn device_caption(device: Option<&'static str>) -> String {
+    use crate::audio::devices;
+    match device {
+        None => crate::gui::tooltip::label!("options.audioDevice.default").to_owned(),
+        Some(name) if devices::fell_back() => {
+            format!("{}{DEVICE_UNAVAILABLE}", devices::label(name))
+        }
+        Some(name) => devices::label(name).to_owned(),
+    }
+}
+
+#[cfg(feature = "audio")]
+fn music_frequency_caption(frequency: crate::audio::MusicFrequency) -> &'static str {
+    use crate::audio::MusicFrequency;
+    use crate::gui::tooltip::label;
+    match frequency {
+        MusicFrequency::Default => label!("options.music_frequency.default"),
+        MusicFrequency::Frequent => label!("options.music_frequency.frequent"),
+        MusicFrequency::Constant => label!("options.music_frequency.constant"),
+    }
+}
+
+#[cfg(feature = "audio")]
+fn music_toast_caption(state: crate::gui::now_playing::MusicToast) -> &'static str {
+    use crate::gui::now_playing::MusicToast;
+    use crate::gui::tooltip::label;
+    match state {
+        MusicToast::Never => label!("options.musicToast.never"),
+        MusicToast::Pause => label!("options.musicToast.pauseMenu"),
+        MusicToast::PauseAndToast => label!("options.musicToast.pauseMenuAndToast"),
+    }
 }
 
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
@@ -860,7 +953,10 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     #[cfg(feature = "audio")]
     entries.push((tr::audio(), Entry::Screen(Screen::AudioSettings)));
     #[cfg(resource_packs)]
-    entries.push((crate::gui::resourcepacks::RESOURCE_PACKS, Entry::Packs));
+    entries.push((
+        crate::gui::tooltip::label!("options.resourcepack"),
+        Entry::Packs,
+    ));
     #[cfg(feature = "hud_editor")]
     entries.push(("Edit HUD...", Entry::Hud));
     entries.push((MANAGE_STORAGE, Entry::Screen(Screen::ManageStorage)));
@@ -871,7 +967,12 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     for (i, (label, entry)) in entries.iter().enumerate() {
         let x = left + (i % 2) as f32 * COLUMN_STEP;
-        let button = Button::new(x, row(i / 2), COLUMN_W, WIDGET_HEIGHT, label);
+        #[cfg_attr(not(feature = "audio"), allow(unused_mut))]
+        let mut button = Button::new(x, row(i / 2), COLUMN_W, WIDGET_HEIGHT, label);
+        #[cfg(feature = "audio")]
+        if matches!(entry, Entry::Screen(Screen::AudioSettings)) {
+            button.active = crate::audio::installed();
+        }
         #[cfg(feature = "tutorial")]
         {
             let r = crate::gui::hud_layout::Rect::new(x, row(i / 2), COLUMN_W, WIDGET_HEIGHT);
@@ -901,6 +1002,10 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                 state.controls_scroll = 0.0;
                 state.controls_scroll_drag = None;
                 state.keybinds.capturing = None;
+                #[cfg(feature = "audio")]
+                if *screen == Screen::AudioSettings {
+                    crate::audio::devices::scan();
+                }
                 state.nav = Some(*screen);
             }
             #[cfg(resource_packs)]
@@ -944,6 +1049,9 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
     if cfg!(feature = "tutorial") {
         count += 1;
     }
+    if cfg!(self_update) {
+        count += 1;
+    }
     let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
     let top = LAYOUT.content_y(ctx.vh, menu_content_h(count));
     #[allow(unused)]
@@ -963,6 +1071,9 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         {
             reset_audio_options(&mut state.options);
             crate::audio::set_volumes(&state.options.volumes);
+            crate::audio::set_subtitles(state.options.show_subtitles);
+            crate::audio::set_minutes_between_songs(state.options.music_frequency);
+            crate::audio::devices::set_device(state.options.sound_device);
         }
         state.keybinds.reset_all();
         crate::gui::save_options(&state.options);
@@ -1010,6 +1121,19 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         next += 1;
         if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, CLEAR_ASSETS).draw(p, ctx) {
             state.confirm_clear_assets = true;
+        }
+    }
+
+    #[cfg(self_update)]
+    {
+        let (x, y) = cell(next);
+        next += 1;
+        let enable = Button {
+            active: crate::client::self_update::skipping(),
+            ..Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, ENABLE_SELF_UPDATE)
+        };
+        if enable.draw(p, ctx) {
+            crate::client::self_update::enable();
         }
     }
 
@@ -1113,41 +1237,13 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     let (x, y) = cell(0.0, Y_DISPLAY_ROW_1);
-    let brightness = Slider {
-        id: BRIGHTNESS_SLIDER_ID,
-        x,
-        y,
-        w: COLUMN_W,
-        h: WIDGET_HEIGHT,
-        min: 0,
-        max: GAMMA_MAX as i32,
-        value: state.options.gamma as i32,
-        label: brightness_label,
-    };
-    if brightness.draw_into(p, ctx, &mut state.options.gamma) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_slider!(p, ctx, state; x, y, BRIGHTNESS_SLIDER_ID, gamma, 0, GAMMA_MAX as i32, brightness_label);
 
     let (x, y) = cell(1.0, Y_DISPLAY_ROW_1);
-    let fov = Slider {
-        id: FOV_SLIDER_ID,
-        x,
-        y,
-        w: COLUMN_W,
-        h: WIDGET_HEIGHT,
-        min: FOV_MIN,
-        max: FOV_MAX,
-        value: state.options.fov as i32,
-        label: fov_label,
-    };
-    if fov.draw_into(p, ctx, &mut state.options.fov) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_slider!(p, ctx, state; x, y, FOV_SLIDER_ID, fov, FOV_MIN, FOV_MAX, fov_label);
 
     let (x, y) = cell(0.0, Y_DISPLAY_ROW_2);
-    if toggle(p, ctx, x, y, FPS_COUNTER, &mut state.options.fps_counter) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_toggle!(p, ctx, state; x, y, FPS_COUNTER, fps_counter);
 
     #[cfg(not(target_arch = "wasm32"))]
     let vsync_cell = Some(cell(1.0, Y_DISPLAY_ROW_2));
@@ -1160,35 +1256,30 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     let (x, y) = cell(0.0, Y_DISPLAY_ROW_3);
-    let fov_effects = Slider {
-        id: FOV_EFFECTS_SLIDER_ID,
-        x,
-        y,
-        w: COLUMN_W,
-        h: WIDGET_HEIGHT,
-        min: 0,
-        max: FOV_EFFECTS_MAX,
-        value: state.options.fov_effects as i32,
-        label: |v| percent_or_off(tr::fov_effects(), v),
-    };
-    if fov_effects.draw_into(p, ctx, &mut state.options.fov_effects) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_slider!(p, ctx, state; x, y, FOV_EFFECTS_SLIDER_ID, fov_effects, 0, FOV_EFFECTS_MAX,
+        |v| percent_or_off(tr::fov_effects(), v));
 
     let (x, y) = cell(1.0, Y_DISPLAY_ROW_3);
-    let screen_effects = Slider {
-        id: SCREEN_EFFECTS_SLIDER_ID,
-        x,
-        y,
-        w: COLUMN_W,
-        h: WIDGET_HEIGHT,
-        min: 0,
-        max: SCREEN_EFFECTS_MAX,
-        value: state.options.screen_effects as i32,
-        label: |v| percent_or_off(tr::screen_effects(), v),
-    };
-    if screen_effects.draw_into(p, ctx, &mut state.options.screen_effects) {
-        crate::gui::save_options(&state.options);
+    opt_slider!(p, ctx, state; x, y, SCREEN_EFFECTS_SLIDER_ID, screen_effects, 0, SCREEN_EFFECTS_MAX,
+        |v| percent_or_off(tr::screen_effects(), v));
+
+    let (x, y) = cell(0.0, Y_DISPLAY_ROW_4);
+    opt_slider!(p, ctx, state; x, y, DAMAGE_TILT_SLIDER_ID, damage_tilt, 0, DAMAGE_TILT_MAX,
+        |v| percent_or_off(tr::damage_tilt(), v));
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use crate::gui::InactivityFpsLimit::{Afk, Minimized};
+        let (value, next) = match state.options.inactivity_fps_limit {
+            Afk => (tr::inactivity_afk(), Minimized),
+            Minimized => (tr::inactivity_minimized(), Afk),
+        };
+        let label = generic_value(tr::inactivity_fps_limit(), value);
+        let (x, y) = cell(1.0, Y_DISPLAY_ROW_4);
+        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &label).draw(p, ctx) {
+            state.options.inactivity_fps_limit = next;
+            crate::gui::save_options(&state.options);
+        }
     }
 
     header(p, Y_QUALITY_HEADER, HEADER_PAD_TOP, tr::quality_header());
@@ -1242,9 +1333,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     let (x, y) = cell(1.0, Y_QUALITY_ROW_1);
-    if toggle(p, ctx, x, y, ANTIALIASING, &mut state.options.antialiasing) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_toggle!(p, ctx, state; x, y, ANTIALIASING, antialiasing);
 
     let (x, y) = cell(0.0, Y_QUALITY_ROW_2);
     if toggle(
@@ -1267,23 +1356,12 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     let (x, y) = cell(1.0, Y_QUALITY_ROW_3);
-    if toggle(
-        p,
-        ctx,
-        x,
-        y,
-        tr::entity_shadows(),
-        &mut state.options.entity_shadows,
-    ) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_toggle!(p, ctx, state; x, y, tr::entity_shadows(), entity_shadows);
 
     #[cfg(feature = "builtin_shaders")]
     {
         let (x, y) = cell(1.0, Y_QUALITY_ROW_2);
-        if toggle(p, ctx, x, y, SHADERS, &mut state.options.shaders_enabled) {
-            crate::gui::save_options(&state.options);
-        }
+        opt_toggle!(p, ctx, state; x, y, SHADERS, shaders_enabled);
 
         let enabled = state.options.shaders_enabled;
 
@@ -1510,7 +1588,7 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                     w: RESET_W,
                     h: BIND_ROW_H,
                     label: tr::reset(),
-                    active: !state.keybinds.is_default(*bind),
+                    active: !state.keybinds.is_default(*bind) || !collisions.is_empty(),
                 };
                 if reset.draw(p, list_ctx) {
                     state.keybinds.reset(*bind);
@@ -1649,9 +1727,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let cell = |column: f32, row_y: f32| (left + column * COLUMN_STEP, top + row_y + ROW_INSET);
 
     let (x, y) = cell(0.0, Y_GAME_ROW_0);
-    if toggle(p, ctx, x, y, tr::auto_jump(), &mut state.options.auto_jump) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_toggle!(p, ctx, state; x, y, tr::auto_jump(), auto_jump);
 
     let (x, y) = cell(1.0, Y_GAME_ROW_0);
     let caption = generic_value(
@@ -1727,40 +1803,15 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     );
 
     let (x, y) = cell(0.0, Y_TOAST_ROW_0);
-    if toggle(
-        p,
-        ctx,
-        x,
-        y,
-        tr::toast_advancement(),
-        &mut state.options.toast_advancement,
-    ) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_toggle!(p, ctx, state; x, y, tr::toast_advancement(), toast_advancement);
     let (x, y) = cell(1.0, Y_TOAST_ROW_0);
-    if toggle(p, ctx, x, y, TOAST_RECIPE, &mut state.options.toast_recipe) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_toggle!(p, ctx, state; x, y, TOAST_RECIPE, toast_recipe);
     let (x, y) = cell(0.0, Y_TOAST_ROW_1);
-    if toggle(p, ctx, x, y, TOAST_SYSTEM, &mut state.options.toast_system) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_toggle!(p, ctx, state; x, y, TOAST_SYSTEM, toast_system);
 
     let (x, y) = cell(1.0, Y_TOAST_ROW_1);
-    let toast_time = Slider {
-        id: TOAST_TIME_SLIDER_ID,
-        x,
-        y,
-        w: COLUMN_W,
-        h: WIDGET_HEIGHT,
-        min: crate::gui::TOAST_TIME_MIN,
-        max: crate::gui::TOAST_TIME_MAX,
-        value: state.options.toast_time as i32,
-        label: toast_time_label,
-    };
-    if toast_time.draw_into(p, ctx, &mut state.options.toast_time) {
-        crate::gui::save_options(&state.options);
-    }
+    opt_slider!(p, ctx, state; x, y, TOAST_TIME_SLIDER_ID, toast_time,
+        crate::gui::TOAST_TIME_MIN, crate::gui::TOAST_TIME_MAX, toast_time_label);
 
     #[cfg(feature = "skins")]
     {
@@ -1830,7 +1881,26 @@ pub fn draw_audio(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     draw_title(p, ctx, AUDIO_TITLE);
 
     let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
-    let top = LAYOUT.content_y(ctx.vh, AUDIO_CONTENT_H);
+    let (list_x, list_y, list_w, list_h) = LAYOUT.content_rect(ctx.vw, ctx.vh);
+    scroll_input(
+        &mut state.video_scroll,
+        &mut state.video_scroll_drag,
+        ctx,
+        left,
+        BIG_W,
+        list_y,
+        list_h,
+        AUDIO_LIST_H,
+    );
+    let top = (list_y - state.video_scroll).floor();
+    let list_input = masked_input(
+        ctx,
+        (list_x, list_y, list_w, list_h),
+        state.video_scroll_drag.is_some(),
+    );
+    let screen_ctx = ctx;
+    let ctx = &ctx.with_input(&list_input);
+    let clip = p.push_clip(list_x, list_y, list_w, list_h);
     let cell = |column: f32, row_y: f32| (left + column * COLUMN_STEP, top + row_y + ROW_INSET);
 
     let master = SoundCategory::Master;
@@ -1851,6 +1921,7 @@ pub fn draw_audio(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         state.options.volumes[master.index()] = new_master;
         crate::gui::save_options(&state.options);
         crate::audio::set_volumes(&state.options.volumes);
+        crate::audio::preview(master, new_master);
     }
 
     let rows = [
@@ -1884,10 +1955,64 @@ pub fn draw_audio(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             state.options.volumes[category.index()] = new_value;
             crate::gui::save_options(&state.options);
             crate::audio::set_volumes(&state.options.volumes);
+            crate::audio::preview(category, new_value);
         }
     }
 
-    if draw_done(p, ctx) {
+    let (x, y) = cell(0.0, Y_AUDIO_SUBTITLES);
+    let subtitles = crate::gui::tooltip::label!("options.showSubtitles");
+    if toggle(p, ctx, x, y, subtitles, &mut state.options.show_subtitles) {
+        crate::gui::save_options(&state.options);
+        crate::audio::set_subtitles(state.options.show_subtitles);
+    }
+
+    let (x, y) = cell(0.0, Y_AUDIO_DEVICE);
+    let device = generic_value(
+        crate::gui::tooltip::label!("options.audioDevice"),
+        &device_caption(state.options.sound_device),
+    );
+    if Button::new(x, y, BIG_W, WIDGET_HEIGHT, &device).draw(p, ctx) {
+        let next = crate::audio::devices::next(state.options.sound_device);
+        if next != state.options.sound_device {
+            state.options.sound_device = next;
+            crate::gui::save_options(&state.options);
+            crate::audio::devices::set_device(next);
+            crate::gui::widgets::play_click();
+        }
+    }
+
+    let (x, y) = cell(0.0, Y_AUDIO_MUSIC);
+    let frequency = generic_value(
+        crate::gui::tooltip::label!("options.music_frequency"),
+        music_frequency_caption(state.options.music_frequency),
+    );
+    if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &frequency).draw(p, ctx) {
+        state.options.music_frequency = state.options.music_frequency.next();
+        crate::gui::save_options(&state.options);
+        crate::audio::set_minutes_between_songs(state.options.music_frequency);
+    }
+    let (x, y) = cell(1.0, Y_AUDIO_MUSIC);
+    let music_toast = generic_value(
+        crate::gui::tooltip::label!("options.musicToast"),
+        music_toast_caption(state.options.music_toast),
+    );
+    if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &music_toast).draw(p, ctx) {
+        state.options.music_toast = state.options.music_toast.next();
+        crate::gui::save_options(&state.options);
+    }
+
+    p.pop_clip(clip);
+    draw_scrollbar(
+        p,
+        state.video_scroll,
+        left,
+        BIG_W,
+        list_y,
+        list_h,
+        AUDIO_LIST_H,
+    );
+
+    if draw_done(p, screen_ctx) {
         state.nav = Some(Screen::Options);
     }
 }
@@ -2001,6 +2126,7 @@ mod tests {
         assert_eq!(Y_DISPLAY_ROW_1, 38.0);
         assert_eq!(Y_DISPLAY_ROW_2, 63.0);
         assert_eq!(Y_DISPLAY_ROW_3, 88.0);
+        assert_eq!(Y_DISPLAY_ROW_4, 113.0);
         const LOD_GROUP: f32 = if cfg!(feature = "render_lod") {
             31.0 + 23.0 + 3.0 * ROW_H
         } else {
@@ -2008,17 +2134,17 @@ mod tests {
         };
         #[cfg(feature = "render_lod")]
         {
-            assert_eq!(Y_LOD_HEADER, 113.0);
-            assert_eq!(Y_LOD_HINT, 144.0);
-            assert_eq!(Y_LOD_ROW_0, 167.0);
-            assert_eq!(Y_LOD_ROW_1, 192.0);
-            assert_eq!(Y_LOD_ROW_2, 217.0);
+            assert_eq!(Y_LOD_HEADER, 138.0);
+            assert_eq!(Y_LOD_HINT, 169.0);
+            assert_eq!(Y_LOD_ROW_0, 192.0);
+            assert_eq!(Y_LOD_ROW_1, 217.0);
+            assert_eq!(Y_LOD_ROW_2, 242.0);
         }
-        assert_eq!(Y_QUALITY_HEADER, 113.0 + LOD_GROUP);
-        assert_eq!(Y_QUALITY_ROW_0, 144.0 + LOD_GROUP);
+        assert_eq!(Y_QUALITY_HEADER, 138.0 + LOD_GROUP);
+        assert_eq!(Y_QUALITY_ROW_0, 169.0 + LOD_GROUP);
         const EXTRA_ROWS: f32 = cfg!(feature = "builtin_shaders") as u32 as f32
             + cfg!(feature = "shader_support") as u32 as f32;
-        assert_eq!(Y_RESET_ROW, 244.0 + EXTRA_ROWS * ROW_H + LOD_GROUP);
+        assert_eq!(Y_RESET_ROW, 269.0 + EXTRA_ROWS * ROW_H + LOD_GROUP);
         assert_eq!(VIDEO_CONTENT_H, Y_RESET_ROW + ROW_H);
     }
 

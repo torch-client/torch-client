@@ -110,7 +110,7 @@ fn reset_session_gui(
     state.chat.reset_for_session();
     state.hud = Default::default();
     state.hud_overlays = Default::default();
-    state.toasts = Default::default();
+    state.toasts.clear();
     state.advancements = Default::default();
     #[cfg(feature = "skins")]
     faces.reset();
@@ -126,6 +126,7 @@ struct NavPoll {
     book_open: Option<crate::session::InteractionHand>,
     book_edit_open: Option<crate::session::BookEditRequest>,
     command_block_open: Option<crate::session::CommandBlockOpen>,
+    game_master_open: Option<crate::session::GameMasterOpen>,
     dialog_show: Option<std::sync::Arc<crate::play::dialog::Dialog>>,
     dialog_clear: bool,
     win_game: bool,
@@ -189,6 +190,7 @@ pub(super) fn apply_gui_nav(
             book_open: s.session.book_open.take(),
             book_edit_open: s.session.book_edit_open.take(),
             command_block_open: s.session.command_block_open.take(),
+            game_master_open: s.session.game_master_open.take(),
             dialog_show: s.session.dialog_show.take(),
             dialog_clear: std::mem::take(&mut s.session.dialog_clear),
             win_game: std::mem::take(&mut s.session.win_game),
@@ -242,6 +244,9 @@ pub(super) fn apply_gui_nav(
     if let Some(req) = command_block_open {
         state.command_block.open(req.pos, req.mode, req.conditional);
         state.nav = Some(Screen::CommandBlock);
+    }
+    if let Some(req) = poll.game_master_open {
+        state.nav = Some(state.op_blocks.open(req, &shared.0));
     }
     if let Some(req) = sign_editor_open {
         let pos = req.pos;
@@ -373,6 +378,11 @@ pub(super) fn apply_gui_nav(
         let mut s = shared.0.lock().unwrap();
         s.session.command_block_pos = None;
         s.session.command_block_data = None;
+    }
+    if state.screen == Screen::TestInstanceBlock && next != Screen::TestInstanceBlock {
+        let mut s = shared.0.lock().unwrap();
+        s.session.test_instance_pos = None;
+        s.session.test_instance_status.clear();
     }
     if state.screen == Screen::SignEdit && next != Screen::SignEdit {
         let mut s = shared.0.lock().unwrap();
@@ -539,10 +549,11 @@ pub(crate) fn bot_movement_input(
     let shift = down(Action::Sneak);
     let sprint_key = down(Action::Sprint);
 
-    let flying = {
+    let (flying, blind) = {
         let mut s = shared.0.lock().unwrap();
         s.session.auto_jump = state.options.auto_jump;
-        s.session.flying
+        let blind = crate::play::mob_effects::has(&s.session.active_effects, "blindness");
+        (s.session.flying, blind)
     };
     let now = time.elapsed_secs();
     if binds.just(Action::Forward, &keys, &buttons) {
@@ -559,7 +570,7 @@ pub(crate) fn bot_movement_input(
         }
         *sprint_latch && !shift
     } else {
-        if !fwd || shift {
+        if !fwd || shift || blind {
             *sprint_latch = false;
         }
         sprint_key || *sprint_latch
@@ -1045,7 +1056,7 @@ pub(crate) fn accumulate_scroll(acc: &mut (f64, f64), dx: f64, dy: f64) -> (i32,
     (wx, wy)
 }
 
-pub(super) fn next_scroll_selection(wheel: f64, current: i32, limit: i32) -> i32 {
+pub(crate) fn next_scroll_selection(wheel: f64, current: i32, limit: i32) -> i32 {
     let step = if wheel > 0.0 {
         1
     } else if wheel < 0.0 {
@@ -1219,6 +1230,7 @@ pub(super) fn toggle_screen(
         && !state.screen.chat_open()
         && state.screen != Screen::SignEdit
         && state.screen != Screen::CommandBlock
+        && !state.screen.is_op_block_editor()
         && !matches!(
             state.screen,
             Screen::BookView | Screen::BookEdit | Screen::BookSign

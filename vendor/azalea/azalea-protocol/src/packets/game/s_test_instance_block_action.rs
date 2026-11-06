@@ -2,7 +2,7 @@ use azalea_buf::AzBuf;
 use azalea_chat::FormattedText;
 use azalea_core::position::{BlockPos, Vec3i};
 use azalea_protocol_macros::ServerboundGamePacket;
-use azalea_registry::builtin::TestInstanceKind;
+use azalea_registry::identifier::Identifier;
 
 use super::s_set_structure_block::Rotation;
 
@@ -27,7 +27,7 @@ pub enum Action {
 
 #[derive(AzBuf, Clone, Debug, Default, PartialEq)]
 pub struct TestInstanceBlockEntityData {
-    pub test: Option<TestInstanceKind>,
+    pub test: Option<Identifier>,
     pub size: Vec3i,
     pub rotation: Rotation,
     pub ignore_entities: bool,

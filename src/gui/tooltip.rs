@@ -1,13 +1,17 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
+
+use azalea_inventory::bundle::{
+    Fraction, MAX_SHOWN_GRID_ITEMS, MAX_SHOWN_GRID_ITEMS_X, number_of_items_to_show,
+};
 
 use crate::generated_items::item;
 use crate::gui::painter::Painter;
 use crate::items::potions;
 use crate::play::mob_effects;
-use crate::session::SlotStack;
-use crate::text::Span;
+use crate::session::{BundleView, SlotStack};
+use crate::text::{Font, Span};
 use crate::util::reload::Reloadable;
 
 const MOUSE_OFFSET: f32 = 12.0;
@@ -233,9 +237,12 @@ fn potion_name(stack: &SlotStack) -> Option<String> {
     Some(translate(&contents.name_key(stack.item), &[]))
 }
 
-fn potion_lines(contents: &potions::PotionContents) -> Vec<Vec<Span>> {
+fn potion_lines(
+    effects: &[potions::PotionEffectInstance],
+    scale: f32,
+    tick_rate: f32,
+) -> Vec<Vec<Span>> {
     let mut out: Vec<Vec<Span>> = Vec::new();
-    let effects = contents.all_effects();
 
     if effects.is_empty() {
         out.push(plain(translate("effect.none", &[]), GRAY));
@@ -243,26 +250,27 @@ fn potion_lines(contents: &potions::PotionContents) -> Vec<Vec<Span>> {
     }
 
     let mut modifiers: Vec<(String, f64, u8)> = Vec::new();
-    for effect in &effects {
-        if let Some(m) = mob_effects::attribute_modifier(&effect.effect, effect.amplifier) {
+    for effect in effects {
+        let (duration, amplifier) = (effect.details.duration, effect.details.amplifier);
+        if let Some(m) = mob_effects::attribute_modifier(&effect.effect, amplifier) {
             modifiers.push(m);
         }
-        let name = translate(&format!("effect.minecraft.{}", effect.effect), &[]);
-        let mut text = if effect.amplifier > 0 {
+        let name = mob_effects::display_name(&effect.effect, 0);
+        let mut text = if amplifier > 0 {
             translate(
                 "potion.withAmplifier",
-                &[
-                    name,
-                    translate(&format!("potion.potency.{}", effect.amplifier), &[]),
-                ],
+                &[name, translate(&format!("potion.potency.{amplifier}"), &[])],
             )
         } else {
             name
         };
-        if effect.duration < 0 || effect.duration > 20 {
+        if !mob_effects::ends_within(duration, 20) {
             text = translate(
                 "potion.withDuration",
-                &[text, mob_effects::format_duration(effect.duration)],
+                &[
+                    text,
+                    mob_effects::format_duration(duration, scale, tick_rate),
+                ],
             );
         }
         let color = match mob_effects::category(&effect.effect) {
@@ -335,8 +343,9 @@ fn book_title(stack: &SlotStack) -> Option<String> {
     (book.signed && !book.title.trim().is_empty()).then(|| book.title.clone())
 }
 
-fn build_lines(stack: &SlotStack, advanced: bool) -> Vec<Vec<Span>> {
+fn build_lines(stack: &SlotStack, advanced: bool, creative: bool) -> Vec<Vec<Span>> {
     let mut out: Vec<Vec<Span>> = Vec::new();
+    let tick_rate = tick_rate();
 
     out.push(styled_hover_name(stack));
 
@@ -349,7 +358,10 @@ fn build_lines(stack: &SlotStack, advanced: bool) -> Vec<Vec<Span>> {
     if let Some(contents) = &stack.extra.potion
         && potions::is_potion_item(stack.item)
     {
-        out.extend(potion_lines(contents));
+        let scale = contents
+            .duration_scale
+            .unwrap_or_else(|| potions::default_duration_scale(stack.item));
+        out.extend(potion_lines(&contents.all_effects(), scale, tick_rate));
     }
 
     for (id, level) in ordered_enchantments(&stack.extra.enchantments) {
@@ -362,6 +374,19 @@ fn build_lines(stack: &SlotStack, advanced: bool) -> Vec<Vec<Span>> {
 
     if stack.unbreakable {
         out.push(plain(translate("item.unbreakable", &[]), BLUE));
+    }
+
+    if let Some(amplifier) = stack.extra.ominous_amplifier {
+        let effect = potions::PotionEffectInstance::new("bad_omen", 120000, amplifier);
+        out.extend(potion_lines(&[effect], 1.0, tick_rate));
+    }
+
+    if creative && let Some(stew) = &stack.extra.stew_effects {
+        let effects: Vec<_> = stew
+            .iter()
+            .map(|(id, duration)| potions::PotionEffectInstance::new(id.as_str(), *duration, 0))
+            .collect();
+        out.extend(potion_lines(&effects, 1.0, tick_rate));
     }
 
     if advanced {
@@ -442,14 +467,216 @@ pub(in crate::gui) fn position_flat(mx: f32, my: f32, vw: f32, w: f32) -> (f32, 
 struct LineCache {
     stack: SlotStack,
     advanced: bool,
+    creative: bool,
+    tick_rate: f32,
     lang_epoch: u32,
     lines: Vec<Vec<Span>>,
+    bundle: BundleText,
+}
+
+const BUNDLE_WIDTH: f32 = 96.0;
+const BUNDLE_SLOT: f32 = 24.0;
+const BUNDLE_SLOT_MARGIN: f32 = 4.0;
+const BUNDLE_BAR_HEIGHT: f32 = 13.0;
+const BUNDLE_BAR_MARGIN: f32 = 4.0;
+const BUNDLE_BAR_FILL_MAX: i32 = 94;
+const LINE_HEIGHT: f32 = 9.0;
+
+#[derive(Default)]
+struct BundleText {
+    empty_description: Vec<Vec<Span>>,
+    selected_name: Vec<Vec<Span>>,
+    hidden: String,
+}
+
+impl BundleText {
+    fn new(stack: &SlotStack, font: &Font) -> BundleText {
+        let Some(view) = stack.bundle.as_deref().filter(|view| view.shows) else {
+            return BundleText::default();
+        };
+        let description = translate("item.minecraft.bundle.empty.description", &[]);
+        let shown = number_of_items_to_show(view.items.len());
+        let hidden: u32 = view
+            .items
+            .iter()
+            .skip(shown)
+            .map(|item| u32::from(item.count))
+            .sum();
+        BundleText {
+            empty_description: if view.items.is_empty() {
+                font.wrap(&plain(description, GRAY), BUNDLE_WIDTH)
+            } else {
+                Vec::new()
+            },
+            selected_name: usize::try_from(view.selected)
+                .ok()
+                .and_then(|i| view.items.get(i))
+                .map(styled_hover_name)
+                .into_iter()
+                .collect(),
+            hidden: format!("+{hidden}"),
+        }
+    }
+}
+
+struct BundleImage<'a> {
+    view: &'a BundleView,
+    text: &'a BundleText,
+    screen: (f32, f32),
+}
+
+impl<'a> BundleImage<'a> {
+    fn of(stack: &'a SlotStack, text: &'a BundleText, vw: f32, vh: f32) -> Option<Self> {
+        let view = stack.bundle.as_deref().filter(|view| view.shows)?;
+        Some(BundleImage {
+            view,
+            text,
+            screen: (vw, vh),
+        })
+    }
+
+    fn grid_rows(&self) -> usize {
+        self.view
+            .items
+            .len()
+            .min(MAX_SHOWN_GRID_ITEMS)
+            .div_ceil(MAX_SHOWN_GRID_ITEMS_X)
+    }
+
+    fn description_height(&self) -> f32 {
+        self.text.empty_description.len() as f32 * LINE_HEIGHT
+    }
+
+    fn height(&self) -> f32 {
+        let content = if self.view.items.is_empty() {
+            self.description_height()
+        } else {
+            self.grid_rows() as f32 * BUNDLE_SLOT
+        };
+        content + BUNDLE_BAR_HEIGHT + 2.0 * BUNDLE_BAR_MARGIN
+    }
+
+    fn draw(&self, p: &mut Painter, x: f32, y: f32, w: f32) {
+        let Some(weight) = self.view.weight else {
+            return;
+        };
+        let left = x + ((w - BUNDLE_WIDTH) / 2.0).floor();
+        if self.view.items.is_empty() {
+            for (i, line) in self.text.empty_description.iter().enumerate() {
+                p.text(line, left, y + i as f32 * LINE_HEIGHT, true);
+            }
+            let bar_y = y + self.description_height() + BUNDLE_BAR_MARGIN;
+            Self::progress_bar(p, left, bar_y, weight);
+            return;
+        }
+        self.draw_grid(p, left, y);
+        self.draw_selected_name(p, x, y, w);
+        let bar_y = y + self.grid_rows() as f32 * BUNDLE_SLOT + BUNDLE_BAR_MARGIN;
+        Self::progress_bar(p, left, bar_y, weight);
+    }
+
+    fn draw_grid(&self, p: &mut Painter, left: f32, y: f32) {
+        let items = &self.view.items;
+        let overflowing = items.len() > MAX_SHOWN_GRID_ITEMS;
+        let shown = &items[..number_of_items_to_show(items.len()).min(items.len())];
+        let rows = self.grid_rows();
+        let (x_start, y_start) = (left + BUNDLE_WIDTH, y + rows as f32 * BUNDLE_SLOT);
+        let mut slot_number = 1;
+        for row in 1..=rows {
+            for column in 1..=MAX_SHOWN_GRID_ITEMS_X {
+                let draw_x = x_start - column as f32 * BUNDLE_SLOT;
+                let draw_y = y_start - row as f32 * BUNDLE_SLOT;
+                if overflowing && column * row == 1 {
+                    let half = (p.atlas.font.width_str(&self.text.hidden) / 2.0).floor();
+                    let x = draw_x + BUNDLE_SLOT / 2.0 - half;
+                    p.text_plain(&self.text.hidden, x, draw_y + 10.0, WHITE, true);
+                } else if shown.len() >= slot_number {
+                    self.draw_slot(p, shown, shown.len() - slot_number, draw_x, draw_y);
+                    slot_number += 1;
+                }
+            }
+        }
+    }
+
+    fn draw_slot(&self, p: &mut Painter, shown: &[SlotStack], index: usize, x: f32, y: f32) {
+        let selected = i32::try_from(index).is_ok_and(|index| index == self.view.selected);
+        let back = if selected {
+            "container/bundle/slot_highlight_back"
+        } else {
+            "container/bundle/slot_background"
+        };
+        p.sprite(back, x, y, BUNDLE_SLOT, BUNDLE_SLOT);
+        crate::gui::slots::draw_stack(
+            p,
+            &shown[index],
+            x + BUNDLE_SLOT_MARGIN,
+            y + BUNDLE_SLOT_MARGIN,
+        );
+        if selected {
+            p.sprite(
+                "container/bundle/slot_highlight_front",
+                x,
+                y,
+                BUNDLE_SLOT,
+                BUNDLE_SLOT,
+            );
+        }
+    }
+
+    fn draw_selected_name(&self, p: &mut Painter, x: f32, y: f32, w: f32) {
+        let Some(name) = self.text.selected_name.first() else {
+            return;
+        };
+        let center = x + (w / 2.0).floor() - 12.0;
+        let mx = center - (p.atlas.font.width(name).ceil() / 2.0).floor();
+        let (vw, vh) = self.screen;
+        place_lines(p, &self.text.selected_name, None, |bw, bh| {
+            position(mx, y - 15.0, vw, vh, bw, bh)
+        });
+    }
+
+    fn progress_bar(p: &mut Painter, x: f32, y: f32, weight: Fraction) {
+        let fill = weight
+            .mul_and_truncate(BUNDLE_BAR_FILL_MAX)
+            .clamp(0, BUNDLE_BAR_FILL_MAX);
+        let sprite = if weight.is_full() {
+            "container/bundle/bundle_progressbar_full"
+        } else {
+            "container/bundle/bundle_progressbar_fill"
+        };
+        if fill > 0 {
+            p.sprite(sprite, x + 1.0, y, fill as f32, BUNDLE_BAR_HEIGHT);
+        }
+        let border = "container/bundle/bundle_progressbar_border";
+        p.sprite(border, x, y, BUNDLE_WIDTH, BUNDLE_BAR_HEIGHT);
+        let text = if weight.is_zero() {
+            Some(label!("item.minecraft.bundle.empty"))
+        } else if weight.is_full() {
+            Some(label!("item.minecraft.bundle.full"))
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            let half = (p.atlas.font.width_str(text) / 2.0).floor();
+            p.text_plain(text, x + BUNDLE_WIDTH / 2.0 - half, y + 3.0, WHITE, true);
+        }
+    }
 }
 
 thread_local! {
     static LINES: RefCell<Option<LineCache>> = const { RefCell::new(None) };
+    static TICK_RATE: Cell<f32> = const { Cell::new(20.0) };
 }
 
+pub(crate) fn set_tick_rate(rate: f32) {
+    TICK_RATE.set(rate);
+}
+
+fn tick_rate() -> f32 {
+    TICK_RATE.get()
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     p: &mut Painter,
     stack: &SlotStack,
@@ -458,9 +685,12 @@ pub fn draw(
     vw: f32,
     vh: f32,
     advanced: bool,
+    creative: bool,
 ) {
-    with_lines(stack, advanced, |lines| {
-        draw_lines(p, lines, mx, my, vw, vh)
+    let atlas = p.atlas;
+    with_lines(stack, advanced, creative, &atlas.font, |lines, bundle| {
+        let image = BundleImage::of(stack, bundle, vw, vh);
+        place_lines(p, lines, image, |w, h| position(mx, my, vw, vh, w, h));
     });
 }
 
@@ -475,7 +705,8 @@ pub(crate) fn draw_with_line(
     vh: f32,
     advanced: bool,
 ) {
-    with_lines(stack, advanced, |lines| {
+    let atlas = p.atlas;
+    with_lines(stack, advanced, false, &atlas.font, |lines, _| {
         let mut all = lines.to_vec();
         all.extend(extra.map(|text| plain(text, WHITE)));
         draw_lines(p, &all, mx, my, vw, vh);
@@ -489,51 +720,81 @@ pub fn draw_over_slot(
     vw: f32,
     vh: f32,
     advanced: bool,
+    creative: bool,
 ) {
-    with_lines(stack, advanced, |lines| {
-        place_lines(p, lines, |w, h| {
+    let atlas = p.atlas;
+    with_lines(stack, advanced, creative, &atlas.font, |lines, bundle| {
+        let image = BundleImage::of(stack, bundle, vw, vh);
+        place_lines(p, lines, image, |w, h| {
             position_over_slot(slot.0, slot.1, vw, vh, w, h)
         })
     });
 }
 
-fn with_lines(stack: &SlotStack, advanced: bool, draw: impl FnOnce(&[Vec<Span>])) {
+fn with_lines(
+    stack: &SlotStack,
+    advanced: bool,
+    creative: bool,
+    font: &Font,
+    draw: impl FnOnce(&[Vec<Span>], &BundleText),
+) {
     if stack.is_empty() {
         return;
     }
     let lang_epoch = LANG.epoch();
+    let tick_rate = tick_rate();
     LINES.with_borrow_mut(|cache| {
         let hit = cache.as_ref().is_some_and(|c| {
-            c.advanced == advanced && c.lang_epoch == lang_epoch && c.stack == *stack
+            c.advanced == advanced
+                && c.creative == creative
+                && c.tick_rate == tick_rate
+                && c.lang_epoch == lang_epoch
+                && c.stack == *stack
         });
         if !hit {
             *cache = Some(LineCache {
                 stack: stack.clone(),
                 advanced,
+                creative,
+                tick_rate,
                 lang_epoch,
-                lines: build_lines(stack, advanced),
+                lines: build_lines(stack, advanced, creative),
+                bundle: BundleText::new(stack, font),
             });
         }
         if let Some(c) = cache.as_ref() {
-            draw(&c.lines);
+            draw(&c.lines, &c.bundle);
         }
     });
 }
 
 pub(crate) fn draw_lines(p: &mut Painter, lines: &[Vec<Span>], mx: f32, my: f32, vw: f32, vh: f32) {
-    place_lines(p, lines, |w, h| position(mx, my, vw, vh, w, h));
+    place_lines(p, lines, None, |w, h| position(mx, my, vw, vh, w, h));
 }
 
-fn place_lines(p: &mut Painter, lines: &[Vec<Span>], place: impl FnOnce(f32, f32) -> (f32, f32)) {
+fn place_lines(
+    p: &mut Painter,
+    lines: &[Vec<Span>],
+    image: Option<BundleImage<'_>>,
+    place: impl FnOnce(f32, f32) -> (f32, f32),
+) {
     if lines.is_empty() {
         return;
     }
 
-    let w = lines
-        .iter()
-        .map(|l| p.atlas.font.width(l).ceil())
-        .fold(0.0f32, f32::max);
-    let h = box_height(lines.len());
+    let w = lines.iter().map(|l| p.atlas.font.width(l).ceil()).fold(
+        if image.is_some() {
+            BUNDLE_WIDTH
+        } else {
+            0.0f32
+        },
+        f32::max,
+    );
+    let image_height = image.as_ref().map(BundleImage::height);
+    let h = match image_height {
+        Some(height) => ROW_HEIGHT * lines.len() as f32 + height,
+        None => box_height(lines.len()),
+    };
     let (x, y) = place(w, h);
 
     let (bx, by) = (x - PADDING - MARGIN, y - PADDING - MARGIN);
@@ -545,6 +806,12 @@ fn place_lines(p: &mut Painter, lines: &[Vec<Span>], place: impl FnOnce(f32, f32
     for (i, line) in lines.iter().enumerate() {
         p.text(line, x, row_y, true);
         row_y += ROW_HEIGHT + if i == 0 { TITLE_GAP } else { 0.0 };
+        if i == 0 {
+            row_y += image_height.unwrap_or(0.0);
+        }
+    }
+    if let Some(image) = image {
+        image.draw(p, x, y + ROW_HEIGHT + TITLE_GAP, w);
     }
 }
 
@@ -559,7 +826,7 @@ mod tests {
     }
 
     fn lines_text(stack: &SlotStack, advanced: bool) -> Vec<String> {
-        build_lines(stack, advanced)
+        build_lines(stack, advanced, false)
             .iter()
             .map(|l| text_of(l))
             .collect()
@@ -643,7 +910,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(lines_text(&stack, false), vec!["Stone".to_string()]);
-        assert_eq!(build_lines(&stack, false)[0][0].style.color, WHITE);
+        assert_eq!(build_lines(&stack, false, false)[0][0].style.color, WHITE);
     }
 
     #[test]
@@ -790,11 +1057,7 @@ mod tests {
         let contents = potions::PotionContents {
             potion: Some("swiftness".into()),
             custom_name: Some("luck".into()),
-            custom_effects: vec![potions::PotionEffectInstance {
-                effect: "poison".into(),
-                duration: 200,
-                amplifier: 1,
-            }],
+            custom_effects: vec![potions::PotionEffectInstance::new("poison", 200, 1)],
             ..Default::default()
         };
         let lines = lines_text(&contents_stack("potion", contents), false);
@@ -812,15 +1075,57 @@ mod tests {
     #[test]
     fn infinite_effect_prints_as_infinite() {
         let contents = potions::PotionContents {
-            custom_effects: vec![potions::PotionEffectInstance {
-                effect: "night_vision".into(),
-                duration: -1,
-                amplifier: 0,
-            }],
+            custom_effects: vec![potions::PotionEffectInstance::new("night_vision", -1, 0)],
             ..Default::default()
         };
         let lines = lines_text(&contents_stack("potion", contents), false);
         assert_eq!(lines[1], "Night Vision (\u{221e})");
+    }
+
+    #[test]
+    fn duration_scale_shortens_the_printed_time() {
+        let contents = |duration_scale| potions::PotionContents {
+            custom_effects: vec![potions::PotionEffectInstance::new("poison", 800, 0)],
+            duration_scale,
+            ..Default::default()
+        };
+        let line =
+            |item, scale| lines_text(&contents_stack(item, contents(scale)), false)[1].clone();
+        assert_eq!(line("potion", None), "Poison (00:40)");
+        assert_eq!(line("lingering_potion", None), "Poison (00:10)");
+        assert_eq!(line("tipped_arrow", None), "Poison (00:05)");
+        assert_eq!(line("potion", Some(0.5)), "Poison (00:20)");
+    }
+
+    #[test]
+    fn ominous_bottle_and_stew_lines() {
+        let bottle = SlotStack {
+            item: "ominous_bottle",
+            count: 1,
+            extra: StackExtra {
+                ominous_amplifier: Some(1),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        assert_eq!(lines_text(&bottle, false)[1], "Bad Omen II (01:40:00)");
+
+        let stew = SlotStack {
+            item: "suspicious_stew",
+            count: 1,
+            extra: StackExtra {
+                stew_effects: Some(vec![("night_vision".into(), 100)]),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        assert_eq!(build_lines(&stew, false, false).len(), 1);
+        assert_eq!(
+            text_of(&build_lines(&stew, false, true)[1]),
+            "Night Vision (00:05)"
+        );
     }
 
     #[test]
@@ -859,7 +1164,7 @@ mod tests {
                 "Unbreakable".to_string(),
             ]
         );
-        let lines = build_lines(&stack, false);
+        let lines = build_lines(&stack, false, false);
         assert_eq!(lines[1][0].style.color, GRAY);
         let lore_style = lines[3][0].style;
         assert_eq!(lore_style.color, DARK_PURPLE);
@@ -886,7 +1191,7 @@ mod tests {
             .into(),
             ..Default::default()
         };
-        let title = &build_lines(&stack, false)[0][0];
+        let title = &build_lines(&stack, false, false)[0][0];
         assert_eq!(title.text, "Snack");
         assert!(title.style.italic);
         assert_eq!(

@@ -567,6 +567,20 @@ impl Plugin for TerrainMaterialPlugin {
                 bevy::render::Render,
                 upload_lightmap.in_set(bevy::render::RenderSystems::PrepareResources),
             );
+            #[cfg(feature = "animated_textures")]
+            render_app
+                .init_resource::<super::atlas_anim::AtlasClock>()
+                .init_resource::<super::atlas_anim::AtlasAnimator>()
+                .init_resource::<super::atlas_anim::AtlasFrameCopies>()
+                .add_systems(
+                    bevy::render::ExtractSchedule,
+                    super::atlas_anim::extract_atlas_clock,
+                )
+                .add_systems(
+                    bevy::render::Render,
+                    super::atlas_anim::upload_atlas_frames
+                        .in_set(bevy::render::RenderSystems::PrepareResources),
+                );
             #[cfg(all(
                 feature = "shader_support",
                 target_arch = "wasm32",
@@ -594,6 +608,7 @@ fn upload_lightmap(
     pixels: Option<Res<LightmapPixels>>,
     images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
     queue: Res<bevy::render::renderer::RenderQueue>,
+    mut uploaded: Local<Option<bevy::render::render_resource::TextureViewId>>,
 ) {
     use bevy::render::render_resource::{
         Extent3d, Origin3d, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
@@ -605,6 +620,11 @@ fn upload_lightmap(
     let Some(gpu) = images.get(&pixels.image) else {
         return;
     };
+    let view = gpu.texture_view.id();
+    if !pixels.is_changed() && *uploaded == Some(view) {
+        return;
+    }
+    *uploaded = Some(view);
     queue.write_texture(
         TexelCopyTextureInfo {
             texture: &gpu.texture,

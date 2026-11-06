@@ -300,10 +300,7 @@ impl Menu {
                     self.quick_move_to_player_reversed(slot_index);
                 }
                 Generic9x1MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X1_CONTENTS_SLOTS,
-                    );
+                    self.try_move_item_to_slots(slot_index, Menu::GENERIC9X1_CONTENTS_SLOTS);
                 }
             },
             MenuLocation::Generic9x2(l) => match l {
@@ -311,10 +308,7 @@ impl Menu {
                     self.quick_move_to_player_reversed(slot_index);
                 }
                 Generic9x2MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X2_CONTENTS_SLOTS,
-                    );
+                    self.try_move_item_to_slots(slot_index, Menu::GENERIC9X2_CONTENTS_SLOTS);
                 }
             },
             MenuLocation::Generic9x3(l) => match l {
@@ -322,10 +316,7 @@ impl Menu {
                     self.quick_move_to_player_reversed(slot_index);
                 }
                 Generic9x3MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X3_CONTENTS_SLOTS,
-                    );
+                    self.try_move_item_to_slots(slot_index, Menu::GENERIC9X3_CONTENTS_SLOTS);
                 }
             },
             MenuLocation::Generic9x4(l) => match l {
@@ -333,10 +324,7 @@ impl Menu {
                     self.quick_move_to_player_reversed(slot_index);
                 }
                 Generic9x4MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X4_CONTENTS_SLOTS,
-                    );
+                    self.try_move_item_to_slots(slot_index, Menu::GENERIC9X4_CONTENTS_SLOTS);
                 }
             },
             MenuLocation::Generic9x5(l) => match l {
@@ -344,10 +332,7 @@ impl Menu {
                     self.quick_move_to_player_reversed(slot_index);
                 }
                 Generic9x5MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X5_CONTENTS_SLOTS,
-                    );
+                    self.try_move_item_to_slots(slot_index, Menu::GENERIC9X5_CONTENTS_SLOTS);
                 }
             },
             MenuLocation::Generic9x6(l) => match l {
@@ -355,10 +340,7 @@ impl Menu {
                     self.quick_move_to_player_reversed(slot_index);
                 }
                 Generic9x6MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X6_CONTENTS_SLOTS,
-                    );
+                    self.try_move_item_to_slots(slot_index, Menu::GENERIC9X6_CONTENTS_SLOTS);
                 }
             },
             MenuLocation::Generic3x3(l) => match l {
@@ -609,13 +591,80 @@ impl Menu {
     }
 
     pub fn may_place(&self, target_slot_index: usize, item: &ItemStackData) -> bool {
+        use azalea_registry::tags::items as tags;
+
+        use crate::components::{
+            Enchantments, EquipmentSlot, Equippable, MapId, ProvidesBannerPatterns,
+            StoredEnchantments,
+        };
+
         match self.location_for_slot(target_slot_index) {
             Some(
-                MenuLocation::Merchant(MerchantMenuLocation::Result)
+                MenuLocation::Player(PlayerMenuLocation::CraftResult)
+                | MenuLocation::Crafting(CraftingMenuLocation::Result)
+                | MenuLocation::Furnace(FurnaceMenuLocation::Result)
+                | MenuLocation::BlastFurnace(BlastFurnaceMenuLocation::Result)
+                | MenuLocation::Smoker(SmokerMenuLocation::Result)
+                | MenuLocation::Anvil(AnvilMenuLocation::Result)
+                | MenuLocation::Grindstone(GrindstoneMenuLocation::Result)
+                | MenuLocation::Loom(LoomMenuLocation::Result)
+                | MenuLocation::Smithing(SmithingMenuLocation::Result)
+                | MenuLocation::CartographyTable(CartographyTableMenuLocation::Result)
+                | MenuLocation::Stonecutter(StonecutterMenuLocation::Result)
+                | MenuLocation::Merchant(MerchantMenuLocation::Result)
                 | MenuLocation::Crafter3x3(Crafter3x3MenuLocation::Result),
             ) => false,
             Some(MenuLocation::ShulkerBox(ShulkerBoxMenuLocation::Contents)) => {
-                !item.kind.to_str().ends_with("shulker_box")
+                !tags::SHULKER_BOXES.contains(&item.kind)
+            }
+            Some(MenuLocation::Player(PlayerMenuLocation::Armor)) => {
+                let slot = match target_slot_index {
+                    5 => EquipmentSlot::Head,
+                    6 => EquipmentSlot::Chest,
+                    7 => EquipmentSlot::Legs,
+                    _ => EquipmentSlot::Feet,
+                };
+                item.get_unless_removed::<Equippable>().is_some_and(|e| e.slot == slot)
+            }
+            Some(MenuLocation::Enchantment(EnchantmentMenuLocation::Lapis)) => {
+                item.kind == ItemKind::LapisLazuli
+            }
+            Some(MenuLocation::Beacon(BeaconMenuLocation::Payment)) => {
+                tags::BEACON_PAYMENT_ITEMS.contains(&item.kind)
+            }
+            Some(MenuLocation::BrewingStand(BrewingStandMenuLocation::Bottles)) => matches!(
+                item.kind,
+                ItemKind::Potion
+                    | ItemKind::SplashPotion
+                    | ItemKind::LingeringPotion
+                    | ItemKind::GlassBottle
+            ),
+            Some(MenuLocation::BrewingStand(BrewingStandMenuLocation::Fuel)) => {
+                tags::BREWING_FUEL.contains(&item.kind)
+            }
+            Some(MenuLocation::Grindstone(
+                GrindstoneMenuLocation::Input | GrindstoneMenuLocation::Additional,
+            )) => {
+                crate::bundle::is_damageable(item)
+                    || item.get_unless_removed::<Enchantments>().is_some_and(|e| !e.levels.is_empty())
+                    || item
+                        .get_unless_removed::<StoredEnchantments>()
+                        .is_some_and(|e| !e.enchantments.is_empty())
+            }
+            Some(MenuLocation::Loom(LoomMenuLocation::Banner)) => tags::BANNERS.contains(&item.kind),
+            Some(MenuLocation::Loom(LoomMenuLocation::Dye)) => {
+                tags::LOOM_DYES.contains(&item.kind)
+                    && item.get_unless_removed::<crate::components::Dye>().is_some()
+            }
+            Some(MenuLocation::Loom(LoomMenuLocation::Pattern)) => {
+                tags::LOOM_PATTERNS.contains(&item.kind)
+                    && item.get_unless_removed::<ProvidesBannerPatterns>().is_some()
+            }
+            Some(MenuLocation::CartographyTable(CartographyTableMenuLocation::Map)) => {
+                item.get_unless_removed::<MapId>().is_some()
+            }
+            Some(MenuLocation::CartographyTable(CartographyTableMenuLocation::Additional)) => {
+                matches!(item.kind, ItemKind::Paper | ItemKind::Map | ItemKind::GlassPane)
             }
             _ => true,
         }
@@ -651,8 +700,32 @@ impl Menu {
             .is_some_and(|item| self.may_place(target_slot_index, item))
     }
 
-    pub fn max_stack_size(&self, _target_slot_index: usize) -> i32 {
-        64
+    pub fn result_takes_whole_stack(&self, slot_index: usize) -> bool {
+        matches!(
+            self.location_for_slot(slot_index),
+            Some(
+                MenuLocation::Player(PlayerMenuLocation::CraftResult)
+                    | MenuLocation::Crafting(CraftingMenuLocation::Result)
+                    | MenuLocation::Anvil(AnvilMenuLocation::Result)
+                    | MenuLocation::Smithing(SmithingMenuLocation::Result)
+                    | MenuLocation::Grindstone(GrindstoneMenuLocation::Result)
+                    | MenuLocation::Stonecutter(StonecutterMenuLocation::Result)
+                    | MenuLocation::CartographyTable(CartographyTableMenuLocation::Result)
+                    | MenuLocation::Merchant(MerchantMenuLocation::Result)
+            )
+        )
+    }
+
+    pub fn max_stack_size(&self, target_slot_index: usize) -> i32 {
+        match self.location_for_slot(target_slot_index) {
+            Some(
+                MenuLocation::Player(PlayerMenuLocation::Armor)
+                | MenuLocation::Enchantment(EnchantmentMenuLocation::Item)
+                | MenuLocation::Beacon(BeaconMenuLocation::Payment)
+                | MenuLocation::BrewingStand(BrewingStandMenuLocation::Bottles),
+            ) => 1,
+            _ => 99,
+        }
     }
 
     fn try_move_item_to_slots(
@@ -677,6 +750,7 @@ impl Menu {
         target_slots: impl Iterator<Item = usize> + Clone,
     ) -> bool {
         let mut item_slot = self.slot(item_slot_index).unwrap().clone();
+        let held = item_slot.count();
 
         if item_slot.kind().stackable() {
             for target_slot_index in target_slots.clone() {
@@ -696,10 +770,10 @@ impl Menu {
             }
         }
 
-        let is_source_slot_now_empty = item_slot.is_empty();
+        let moved = item_slot.count() != held;
 
         *self.slot_mut(item_slot_index).unwrap() = item_slot;
-        is_source_slot_now_empty
+        moved
     }
 
     fn move_item_to_slot_if_stackable(
@@ -717,7 +791,7 @@ impl Menu {
             {
                 let limit = i32::min(
                     self.max_stack_size(target_slot_index),
-                    item.kind.max_stack_size(),
+                    crate::bundle::max_stack_size(item),
                 );
                 let room = limit - target_item.count;
                 if room <= 0 {
@@ -746,7 +820,7 @@ impl Menu {
         if target_slot.is_empty() && self.may_place(target_slot_index, source_item_data) {
             let slot_item_limit = i32::min(
                 self.max_stack_size(target_slot_index),
-                source_item_data.kind.max_stack_size(),
+                crate::bundle::max_stack_size(source_item_data),
             );
             let new_target_slot_data =
                 source_item_data.split(i32::min(slot_item_limit, source_item_data.count) as u32);

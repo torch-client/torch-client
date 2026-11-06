@@ -21,6 +21,14 @@ fn main() {
         println!("cargo::rustc-cfg=lua_mods");
     }
 
+    println!("cargo::rustc-check-cfg=cfg(self_update)");
+    if std::env::var_os("CARGO_FEATURE_SELF_UPDATE").is_some()
+        && (os == "linux" || os == "windows")
+        && arch == "x86_64"
+    {
+        println!("cargo::rustc-cfg=self_update");
+    }
+
     println!("cargo::rustc-check-cfg=cfg(eagler_skins)");
     if std::env::var_os("CARGO_FEATURE_SKINS").is_some()
         && (std::env::var_os("CARGO_FEATURE_EAGLER").is_some() || arch == "wasm32")

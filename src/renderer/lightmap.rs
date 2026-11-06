@@ -2,7 +2,7 @@ use super::dimension::Dimension;
 use super::timeline::Argb;
 use crate::lighting::level::LightMap;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub struct State {
     pub sky_factor: f32,
     pub block_factor: f32,

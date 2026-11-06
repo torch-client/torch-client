@@ -6,7 +6,7 @@ use azalea_inventory::operations::{
 use crate::gui::painter::{ITEM_SIZE, Painter};
 use crate::gui::render::GuiInput;
 use crate::gui::{ScreenCtx, Snapshot};
-use crate::session::{Gamemode, InvAction, SlotStack};
+use crate::session::{CreativeAnswer, Gamemode, InvAction, SlotStack};
 
 pub const INV_W: f32 = 176.0;
 pub const INV_H: f32 = 166.0;
@@ -518,6 +518,10 @@ pub struct SlotState {
     cursor_base: SlotStack,
     cursor_age: u8,
     pub menu_preview: MenuPreview,
+    bundle_hover: Option<(usize, i32)>,
+    pub wheel_on_bundle: bool,
+    bundle_click_pending: bool,
+    stow_bundle_answer: bool,
     pub rest: Option<(f32, f32)>,
     #[cfg(feature = "mobile_ui")]
     pub touch_slots: Vec<[f32; 4]>,
@@ -534,7 +538,55 @@ impl SlotState {
         self.cursor = None;
         self.cursor_age = 0;
         self.menu_preview = MenuPreview::default();
+        self.bundle_hover = None;
+        self.wheel_on_bundle = false;
+        self.bundle_click_pending = false;
         self.rest = None;
+    }
+
+    pub fn stop_hovering(&mut self, slots: &[SlotStack]) -> Option<InvAction> {
+        let (slot, wire_slot) = self.bundle_hover.take()?;
+        slots.get(slot)?.bundle.as_ref()?;
+        Some(InvAction::BundleSelect {
+            slot: slot as u16,
+            wire_slot,
+            step: 0,
+        })
+    }
+
+    pub fn land_bundle_click(
+        &mut self,
+        answer: CreativeAnswer,
+        snap: &Snapshot,
+        out: &mut Vec<InvAction>,
+    ) {
+        let pending = std::mem::take(&mut self.bundle_click_pending);
+        if std::mem::take(&mut self.stow_bundle_answer) {
+            if !answer.cursor.is_empty() {
+                stow_creative_cursor(answer.cursor, &answer.slots, out);
+            }
+        } else if pending {
+            self.set_cursor(answer.cursor, snap);
+        }
+    }
+
+    pub fn stow_on_landing(&mut self) -> bool {
+        self.stow_bundle_answer |= self.bundle_click_pending;
+        self.bundle_click_pending
+    }
+
+    pub(crate) fn clicks_held(&self) -> bool {
+        self.bundle_click_pending
+    }
+
+    pub(crate) fn note_bundle_click(&mut self, out: &[InvAction]) {
+        if out
+            .iter()
+            .any(|a| matches!(a, InvAction::CreativeBundleClick { .. }))
+        {
+            self.bundle_click_pending = true;
+            self.stow_bundle_answer = false;
+        }
     }
 
     #[cfg(feature = "mobile_ui")]
@@ -939,6 +991,7 @@ pub struct MenuModel {
     pub slots: Vec<SlotStack>,
     pub cursor: SlotStack,
     layout: Layout,
+    pub picker: bool,
 }
 
 impl MenuModel {
@@ -953,6 +1006,32 @@ impl MenuModel {
                 .collect(),
             cursor,
             layout,
+            picker: false,
+        }
+    }
+
+    fn is_bundle_click(&self, click: SlotClick, slot: usize) -> bool {
+        let SlotClick::Pickup { right } = click else {
+            return false;
+        };
+        self.cursor.bundle.is_some()
+            || (self.slots[slot].bundle.is_some() && (right || !self.cursor.is_empty()))
+    }
+
+    pub(crate) fn unselect_bundle(&self, click: SlotClick, slot: usize, out: &mut Vec<InvAction>) {
+        if matches!(click, SlotClick::QuickMove { .. } | SlotClick::Swap { .. })
+            && self.slots[slot].bundle.is_some()
+        {
+            let offset = if self.picker && HOTBAR_SLOTS.contains(&slot) {
+                9
+            } else {
+                0
+            };
+            out.push(InvAction::BundleSelect {
+                slot: slot as u16,
+                wire_slot: (slot + offset) as i32,
+                step: 0,
+            });
         }
     }
 
@@ -1299,8 +1378,11 @@ fn crafter_toggle(
     menu.layout = Layout::Crafter(if enabled { mask & !bit } else { mask | bit });
 }
 
-fn predicts(mode: Mode, layout: Layout, click: SlotClick) -> bool {
-    mode == Mode::Local || layout == Layout::PlayerMenu || matches!(click, SlotClick::Pickup { .. })
+fn predicts(mode: Mode, layout: Layout, click: SlotClick, menu: &MenuModel, slot: usize) -> bool {
+    !menu.is_bundle_click(click, slot)
+        && (mode == Mode::Local
+            || layout == Layout::PlayerMenu
+            || matches!(click, SlotClick::Pickup { .. }))
 }
 
 pub fn apply_click(
@@ -1311,10 +1393,19 @@ pub fn apply_click(
     menu: &mut MenuModel,
     out: &mut Vec<InvAction>,
 ) {
+    menu.unselect_bundle(click, slot, out);
     if mode == Mode::Protocol {
         out.push(InvAction::Click(click_operation(click, slot)));
+    } else if let SlotClick::Pickup { right } = click
+        && menu.is_bundle_click(click, slot)
+    {
+        out.push(InvAction::CreativeBundleClick {
+            slot: slot as u16,
+            right,
+            cursor: menu.cursor.clone().into(),
+        });
     }
-    if !predicts(mode, layout, click) {
+    if !predicts(mode, layout, click, menu, slot) {
         return;
     }
     match click {
@@ -1352,8 +1443,10 @@ pub fn slot_clicks(
     if clicks.is_empty() {
         return (cursor.clone(), None);
     }
-    let predicted = clicks.iter().all(|c| predicts(mode, layout, *c));
     let mut menu = MenuModel::for_layout(layout, snap, cursor.clone());
+    let predicted = clicks
+        .iter()
+        .all(|c| predicts(mode, layout, *c, &menu, slot));
     for click in clicks {
         crafter_toggle(click, slot, snap, &mut menu, out);
         apply_click(mode, layout, click, slot, &mut menu, out);
@@ -1400,6 +1493,13 @@ pub fn panel(
             state.tooltip_anchor = state.rest;
         }
     }
+    bundle_mouse(
+        ctx.input,
+        snap,
+        hovered_index.map(|i| (i, i as i32)),
+        state,
+        out,
+    );
 
     retire_committed_drag(&mut state.drag, snap);
     retire_menu_preview(&mut state.menu_preview, snap, count);
@@ -1409,7 +1509,8 @@ pub fn panel(
 
     let mut cursor = state.cursor(snap);
 
-    let drag_consumed_click = drag_step(ctx, snap, layout, hovered_index, state, &mut cursor, out);
+    let click_slot = hovered_index.filter(|_| !state.clicks_held());
+    let drag_consumed_click = drag_step(ctx, snap, layout, click_slot, state, &mut cursor, out);
 
     if let Some(i) = hovered_index
         && layout.may_pickup(i)
@@ -1445,7 +1546,7 @@ pub fn panel(
         if !stack.is_empty() {
             hovered = Some(stack.clone());
         }
-        if !drag_consumed_click {
+        if !drag_consumed_click && click_slot.is_some() {
             let (new_cursor, preview) = slot_clicks(ctx.input, mode, layout, i, snap, &cursor, out);
             cursor = new_cursor;
             if let Some(slots) = preview {
@@ -1461,7 +1562,7 @@ pub fn panel(
         w + 2.0 * THROW_MARGIN,
         h + 2.0 * THROW_MARGIN,
     );
-    if outside && !drag_consumed_click {
+    if outside && !drag_consumed_click && !state.clicks_held() {
         for right in [false, true] {
             let released = if right {
                 ctx.input.right_release
@@ -1500,8 +1601,41 @@ pub fn panel(
         draw_drop_feedback(p, ctx, target, &cursor);
     }
 
+    state.note_bundle_click(out);
     state.set_cursor(cursor, snap);
     hovered
+}
+
+pub(crate) fn bundle_mouse(
+    input: &GuiInput,
+    snap: &Snapshot,
+    hovered: Option<(usize, i32)>,
+    state: &mut SlotState,
+    out: &mut Vec<InvAction>,
+) {
+    use azalea_inventory::bundle::number_of_items_to_show;
+
+    if state.bundle_hover != hovered {
+        out.extend(state.stop_hovering(&snap.menu_slots));
+        state.bundle_hover = hovered;
+    }
+    let bundle = hovered.and_then(|(slot, _)| snap.slot(slot).bundle.as_ref());
+    state.wheel_on_bundle = bundle.is_some_and(|b| number_of_items_to_show(b.items.len()) > 0);
+    let wheel = if input.scroll != 0.0 {
+        input.scroll
+    } else {
+        -input.scroll_x
+    };
+    if state.wheel_on_bundle
+        && wheel != 0.0
+        && let Some((slot, wire_slot)) = hovered
+    {
+        out.push(InvAction::BundleSelect {
+            slot: slot as u16,
+            wire_slot,
+            step: wheel.signum() as i8,
+        });
+    }
 }
 
 #[cfg(feature = "mobile_ui")]
@@ -1703,13 +1837,14 @@ fn apply_one(
 ) -> SlotStack {
     let mut menu = MenuModel::for_layout(layout, snap, cursor.clone());
     crafter_toggle(click, slot, snap, &mut menu, out);
+    let predicted = predicts(mode, layout, click, &menu, slot);
     apply_click(mode, layout, click, slot, &mut menu, out);
     match mode {
         Mode::Local => {
             menu.emit_creative_sets(snap, out);
             menu.cursor
         }
-        Mode::Protocol if predicts(mode, layout, click) => {
+        Mode::Protocol if predicted => {
             state.drag.clear();
             state.menu_preview.set(menu.slots, snap);
             menu.cursor
@@ -1739,7 +1874,8 @@ pub(crate) fn touch_release_place(
     out: &mut Vec<InvAction>,
 ) -> bool {
     let released = ctx.input.left_release || ctx.input.right_release;
-    if drag_consumed || !released || cursor.is_empty() || state.drag.active() {
+    if drag_consumed || !released || cursor.is_empty() || state.drag.active() || state.clicks_held()
+    {
         return false;
     }
     let origin = state.last_click_slot;
@@ -1865,6 +2001,12 @@ pub fn draw_stack_held(p: &mut Painter, stack: &SlotStack, x: f32, y: f32, use_t
         ..stack.item_use()
     };
     p.stack_icon_as(stack, x, y, use_);
+    if let Some(bundle) = &stack.bundle
+        && let Some((width, color)) =
+            azalea_inventory::bundle::bar(azalea_inventory::bundle::weight_safe(bundle.weight))
+    {
+        p.item_bar(x, y, f32::from(width), color);
+    }
     p.item_decorations(x, y, stack.count, stack.damage, stack.max_damage);
     p.item_cooldown(x, y, stack.cooldown);
 }
@@ -1948,6 +2090,23 @@ mod tests {
             InvAction::Close => "close".into(),
             InvAction::SlotStateChanged { slot, enabled } => {
                 format!("slot_state({slot},{enabled})")
+            }
+            InvAction::CreativeBundleClick {
+                slot,
+                right,
+                cursor,
+            } => {
+                format!(
+                    "creative_bundle_click({slot},{right},{}x{})",
+                    cursor.item, cursor.count
+                )
+            }
+            InvAction::BundleSelect {
+                slot,
+                wire_slot,
+                step,
+            } => {
+                format!("bundle_select({slot},{wire_slot},{step})")
             }
             InvAction::ButtonClick(_)
             | InvAction::SelectTrade(_)
@@ -3502,5 +3661,176 @@ mod tests {
             !drag.committed,
             "the preview gives up after {COMMIT_MAX_FRAMES} frames"
         );
+    }
+
+    fn bundle(items: Vec<SlotStack>) -> SlotStack {
+        SlotStack {
+            item: "bundle",
+            count: 1,
+            bundle: Some(std::sync::Arc::new(crate::session::BundleView {
+                items,
+                selected: -1,
+                weight: Some(azalea_inventory::bundle::Fraction::ZERO),
+                shows: true,
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn wheel(
+        state: &mut SlotState,
+        snap: &Snapshot,
+        slot: Option<usize>,
+        scroll: f32,
+    ) -> Vec<String> {
+        let input = GuiInput {
+            scroll,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        bundle_mouse(&input, snap, slot.map(|i| (i, i as i32)), state, &mut out);
+        out.iter().map(describe).collect()
+    }
+
+    #[test]
+    fn the_wheel_selects_only_in_a_bundle_with_items() {
+        let filled = [
+            (9, bundle(vec![stack("stone", 1)])),
+            (10, bundle(Vec::new())),
+        ];
+        let snap = snap(Gamemode::Survival, &filled);
+        let mut state = SlotState::default();
+        assert_eq!(
+            wheel(&mut state, &snap, Some(9), 1.0),
+            ["bundle_select(9,9,1)"]
+        );
+        assert!(state.wheel_on_bundle);
+
+        let mut state = SlotState::default();
+        assert!(wheel(&mut state, &snap, Some(10), 1.0).is_empty());
+        assert!(!state.wheel_on_bundle);
+    }
+
+    #[test]
+    fn leaving_a_bundle_slot_unselects_it() {
+        let snap = snap(
+            Gamemode::Survival,
+            &[(9, bundle(Vec::new())), (10, stack("stone", 1))],
+        );
+        let mut state = SlotState::default();
+        assert!(wheel(&mut state, &snap, Some(9), 0.0).is_empty());
+        assert!(wheel(&mut state, &snap, Some(9), 0.0).is_empty());
+        assert_eq!(
+            wheel(&mut state, &snap, Some(10), 0.0),
+            ["bundle_select(9,9,0)"]
+        );
+        assert!(wheel(&mut state, &snap, None, 0.0).is_empty());
+    }
+
+    #[test]
+    fn a_quick_move_unselects_before_it_clicks() {
+        let shift = GuiInput {
+            left_click: true,
+            shift: true,
+            ..Default::default()
+        };
+        let (acts, _) = run(
+            Gamemode::Survival,
+            &[(9, bundle(Vec::new()))],
+            SlotStack::default(),
+            9,
+            shift,
+        );
+        assert_eq!(acts[0], "bundle_select(9,9,0)");
+        assert_eq!(acts.len(), 2);
+    }
+
+    #[test]
+    fn a_protocol_bundle_click_is_not_predicted() {
+        let filled = [(9, bundle(Vec::new()))];
+        let snapshot = snap(Gamemode::Survival, &filled);
+        let mut out = Vec::new();
+        let cursor = stack("stone", 4);
+        let mut menu = MenuModel::for_layout(Layout::PlayerMenu, &snapshot, cursor.clone());
+        let click = SlotClick::Pickup { right: false };
+        apply_click(
+            Mode::Protocol,
+            Layout::PlayerMenu,
+            click,
+            9,
+            &mut menu,
+            &mut out,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(menu.cursor, cursor);
+    }
+
+    #[test]
+    fn a_creative_bundle_click_carries_the_cursor_to_the_bot_thread() {
+        let filled = [(9, bundle(Vec::new()))];
+        let (acts, after) = run(
+            Gamemode::Creative,
+            &filled,
+            SlotStack::default(),
+            9,
+            right(),
+        );
+        assert_eq!(acts, ["creative_bundle_click(9,true,x0)"]);
+        assert!(after.is_empty());
+    }
+
+    fn answer(cursor: SlotStack) -> CreativeAnswer {
+        CreativeAnswer {
+            cursor,
+            slots: vec![SlotStack::default(); MENU_SLOTS].into(),
+        }
+    }
+
+    fn pending_click() -> SlotState {
+        let mut state = SlotState::default();
+        state.note_bundle_click(&[InvAction::CreativeBundleClick {
+            slot: 9,
+            right: true,
+            cursor: Box::default(),
+        }]);
+        state
+    }
+
+    #[test]
+    fn a_landed_creative_click_is_the_cursor() {
+        let snapshot = snap(Gamemode::Creative, &[]);
+        let mut state = pending_click();
+        assert!(state.clicks_held());
+        let mut out = Vec::new();
+        state.land_bundle_click(answer(stack("stone", 2)), &snapshot, &mut out);
+        assert!(!state.clicks_held());
+        assert!(out.is_empty());
+        assert_eq!(state.cursor(&snapshot).count, 2);
+    }
+
+    #[test]
+    fn a_screen_closed_on_a_creative_click_stows_the_answer() {
+        let snapshot = snap(Gamemode::Creative, &[]);
+        let mut state = pending_click();
+        assert!(state.stow_on_landing());
+        state.reset_for_screen_change();
+
+        let mut out = Vec::new();
+        state.land_bundle_click(answer(stack("stone", 3)), &snapshot, &mut out);
+        let acts: Vec<_> = out.iter().map(describe).collect();
+        assert_eq!(acts.len(), 1);
+        assert!(acts[0].contains("stone"), "{acts:?}");
+        assert!(state.cursor(&snapshot).is_empty());
+
+        let mut state = pending_click();
+        assert!(state.stow_on_landing());
+        let mut out = Vec::new();
+        state.land_bundle_click(answer(SlotStack::default()), &snapshot, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn an_idle_screen_stows_its_own_cursor() {
+        assert!(!SlotState::default().stow_on_landing());
     }
 }

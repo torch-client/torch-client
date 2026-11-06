@@ -22,7 +22,8 @@ pub fn register(registry: &mut Registry) {
             slime::setup_anim,
         )
         .with_root(slime_root)
-        .with_blend(Blend::Translucent),
+        .with_blend(Blend::Translucent)
+        .outlined_while_invisible(),
     );
     registry.add(
         EntityKind::MagmaCube,

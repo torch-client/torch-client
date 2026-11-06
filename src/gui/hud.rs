@@ -4,7 +4,7 @@ use crate::blocks::direction::Direction;
 use crate::diag::Stat;
 use crate::gui::ScreenCtx;
 use crate::gui::hud_layout::{ElementId, Hud, Rect};
-use crate::gui::painter::{Painter, argb};
+use crate::gui::painter::{Painter, white};
 use crate::gui::tooltip::label;
 use crate::session::{ChunkProfiling, Gamemode};
 use crate::text::LINE_HEIGHT;
@@ -109,6 +109,8 @@ pub struct DebugInfo {
     pub memory: MemoryUse,
     pub profiling: ChunkProfiling,
     pub pipeline: crate::diag::Counts,
+    pub unknown_ids: azalea::registry::unknown::Snapshot,
+    pub worst_packet: Option<(String, u64)>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -598,8 +600,36 @@ pub fn draw_debug(p: &mut Painter, ctx: &ScreenCtx, info: &HudInfo, d: &DebugInf
         y = draw_section(p, title, &items, right_x, y);
     }
     if d.page != DebugPage::Help {
+        if !d.unknown_ids.is_empty() {
+            y = draw_section(p, "UNKNOWN IDS", &unknown_id_items(d), right_x, y);
+        }
         draw_footnote(p, "F3+0 for shortcuts", right_x, y);
     }
+}
+
+fn unknown_id_items(d: &DebugInfo) -> Vec<Item<'static>> {
+    let lost = &d.unknown_ids;
+    let mut items: Vec<Item<'static>> = [
+        ("Block reads", lost.blocks),
+        ("Entities", lost.entities),
+        ("Block entities", lost.block_entities),
+        ("Attributes", lost.attributes),
+        ("Items", lost.items),
+    ]
+    .into_iter()
+    .filter(|(_, count)| *count != 0)
+    .map(|(label, count)| row(label, count.to_string()).into())
+    .collect();
+    if let Some((name, count)) = &d.worst_packet {
+        items.push(
+            row(
+                "Failed packets",
+                format!("{} ({name} {count})", lost.packets),
+            )
+            .into(),
+        );
+    }
+    items
 }
 
 fn draw_footnote(p: &mut Painter, text: &str, right_x: f32, top_y: f32) {
@@ -839,6 +869,19 @@ fn memory_items(info: &HudInfo, d: &DebugInfo) -> Vec<Item<'static>> {
                         "{} pools, {} allocated",
                         s.pools.load(std::sync::atomic::Ordering::Relaxed),
                         Bytes(s.capacity_bytes.load(std::sync::atomic::Ordering::Relaxed))
+                    )
+                }),
+        ),
+        na_row(
+            "Atlas frames",
+            cfg!(feature = "animated_textures"),
+            crate::renderer::terrain_pool::stats()
+                .map(|s| &s.0)
+                .map_or(String::new(), |s| {
+                    format!(
+                        "{} copies last step, {} steps",
+                        s.atlas_copies.load(std::sync::atomic::Ordering::Relaxed),
+                        s.atlas_steps.load(std::sync::atomic::Ordering::Relaxed)
                     )
                 }),
         ),
@@ -1149,11 +1192,11 @@ fn health_color(ratio: f32) -> u32 {
 }
 
 fn effect_icon_alpha(duration: i32) -> f32 {
-    if duration < 0 || duration > 200 {
+    if !crate::play::mob_effects::ends_within(duration, 200) {
         return 1.0;
     }
     let remaining = duration as f32;
-    let used_seconds = 10.0 - remaining / 20.0;
+    let used_seconds = (10 - duration / 20) as f32;
     let alpha = (remaining / 10.0 / 5.0 * 0.5).clamp(0.0, 0.5)
         + (remaining * std::f32::consts::PI / 5.0).cos()
             * (used_seconds / 10.0 * 0.25).clamp(0.0, 0.25);
@@ -1165,12 +1208,9 @@ pub fn draw_effects(
     ctx: &ScreenCtx,
     effects: &[crate::play::mob_effects::MobEffectInstance],
 ) {
-    let mut sorted: Vec<&crate::play::mob_effects::MobEffectInstance> = effects.iter().collect();
-    sorted.sort_by(|a, b| crate::play::mob_effects::compare(a, b));
-
     let mut beneficial_count = 0u32;
     let mut harmful_count = 0u32;
-    for effect in sorted.iter().rev() {
+    for effect in crate::play::mob_effects::sorted(effects).into_iter().rev() {
         if !effect.show_icon {
             continue;
         }
@@ -1192,8 +1232,8 @@ pub fn draw_effects(
         };
         p.sprite(bg, x.floor(), y.floor(), 24.0, 24.0);
 
-        let icon = format!("mob_effect/{}", effect.id);
-        let tint = argb(alpha, 0x00FF_FFFF);
+        let icon = crate::play::mob_effects::sprite(&effect.id);
+        let tint = white(alpha);
         p.sprite_tinted(
             &icon,
             (x + 3.0).floor(),
@@ -1221,6 +1261,7 @@ pub struct HudOverlays {
     title_ends: f32,
     action_bar: Vec<crate::text::Span>,
     action_bar_ends: f32,
+    action_bar_animated: bool,
     held: Vec<crate::text::Span>,
     held_ends: f32,
     held_item: &'static str,
@@ -1239,6 +1280,7 @@ impl Default for HudOverlays {
             title_ends: 0.0,
             action_bar: Vec::new(),
             action_bar_ends: 0.0,
+            action_bar_animated: false,
             held: Vec::new(),
             held_ends: 0.0,
             held_item: "",
@@ -1290,9 +1332,17 @@ impl HudOverlays {
             self.title = None;
             self.subtitle.clear();
         }
-        if let Some(text) = snap.action_bar.take() {
+        if let Some((text, animated)) = snap.action_bar.take() {
             self.action_bar = text;
             self.action_bar_ends = now + ACTION_BAR_TICKS;
+            self.action_bar_animated = animated;
+        }
+        let left = self.action_bar_ends - now;
+        if self.action_bar_animated && left > 0.0 {
+            let color = crate::gui::painter::hsv_to_rgb(left / 50.0, 0.7, 0.6);
+            for span in &mut self.action_bar {
+                span.style.color = color;
+            }
         }
         self.update_held(snap.hotbar(snap.selected as usize), now);
     }
@@ -1754,6 +1804,7 @@ mod tests {
             color: 0,
             overlay: 0,
             darken: false,
+            music: false,
             fog: false,
         }
     }

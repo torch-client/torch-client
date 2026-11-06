@@ -5,7 +5,7 @@ use azalea_core::{
     tick::GameTick,
 };
 use azalea_entity::{
-    Attributes, Crouching, HasClientLoaded, Jumping, LastSentPosition, LocalEntity, LookDirection,
+    ActiveEffects, Attributes, Crouching, HasClientLoaded, Jumping, LastSentPosition, LocalEntity, LookDirection,
     Physics, PlayerAbilities, Pose, Position,
     dimensions::calculate_dimensions,
     metadata::{self, Sprinting},
@@ -36,7 +36,7 @@ use azalea_protocol::{
         },
     },
 };
-use azalea_registry::builtin::EntityKind;
+use azalea_registry::builtin::{EntityKind, MobEffect};
 use azalea_world::World;
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
@@ -294,7 +294,12 @@ pub fn local_player_ai_step(
             Option<&Hunger>,
             Option<&LastSentInput>,
             Option<&ItemInUse>,
-            (Option<&metadata::FallFlying>, Option<&azalea_world::WorldBorder>, Option<&Pose>),
+            (
+                Option<&metadata::FallFlying>,
+                Option<&azalea_world::WorldBorder>,
+                Option<&Pose>,
+                Option<&ActiveEffects>,
+            ),
             &mut Physics,
             &mut Sprinting,
             &mut Crouching,
@@ -316,7 +321,7 @@ pub fn local_player_ai_step(
         hunger,
         last_sent_input,
         item_in_use,
-        (fall_flying, border, pose),
+        (fall_flying, border, pose, active_effects),
         mut physics,
         mut sprinting,
         mut crouching,
@@ -366,7 +371,7 @@ pub fn local_player_ai_step(
         let is_passenger = false;
         let vehicle_can_sprint = false;
         let slow_due_to_using_item = item_in_use.is_some_and(|u| !u.can_sprint);
-        let has_blindness = false;
+        let has_blindness = active_effects.is_some_and(|e| e.has(MobEffect::Blindness));
 
         let has_forward_impulse = has_forward_impulse(physics_state);
 
@@ -585,6 +590,7 @@ pub fn update_pose(
         &Position,
         &metadata::Swimming,
         Option<&metadata::FallFlying>,
+        Option<&metadata::AutoSpinAttack>,
     )>,
     aabb_query: AabbQuery,
     collidable_entity_query: CollidableEntityQuery,
@@ -599,6 +605,7 @@ pub fn update_pose(
         position,
         swimming,
         fall_flying,
+        auto_spin_attack,
     ) in query.iter_mut()
     {
         let world = world_holder.shared.read();
@@ -620,6 +627,8 @@ pub fn update_pose(
             Pose::Swimming
         } else if fall_flying.is_some_and(|f| **f) {
             Pose::FallFlying
+        } else if auto_spin_attack.is_some_and(|f| **f) {
+            Pose::SpinAttack
         } else if physics_state.trying_to_crouch {
             Pose::Crouching
         } else {

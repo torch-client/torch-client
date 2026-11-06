@@ -22,7 +22,7 @@ impl StatsCounter {
     }
 }
 
-pub(crate) fn packet(shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) {
+pub(crate) fn packet(shared: &SharedMutex, packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::AwardStats(p) => {
             let mut s = shared.lock().unwrap();

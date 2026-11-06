@@ -33,6 +33,11 @@ pub trait PalletedContainerKind:
     fn bits_per_entry_to_palette_kind(bits_per_entry: u8) -> PaletteKind;
 
     fn storage_bits(bits_per_entry: u8) -> u8;
+
+    #[inline]
+    fn from_network(id: u32) -> Self {
+        Self::try_from(id).unwrap_or_default()
+    }
 }
 impl PalletedContainerKind for BlockState {
     type SectionPos = ChunkSectionBlockPos;
@@ -46,8 +51,14 @@ impl PalletedContainerKind for BlockState {
             0 => 0,
             1..=4 => 4,
             5..=8 => bits_per_entry,
-            _ => (u32::BITS - u32::from(BlockState::MAX_STATE).leading_zeros()) as u8,
+            _ => bits_per_entry
+                .max((u32::BITS - u32::from(BlockState::MAX_STATE).leading_zeros()) as u8),
         }
+    }
+
+    #[inline]
+    fn from_network(id: u32) -> Self {
+        BlockState::from_network(id)
     }
 
     fn bits_per_entry_to_palette_kind(bits_per_entry: u8) -> PaletteKind {
@@ -195,7 +206,7 @@ impl<S: PalletedContainerKind> PalettedContainer<S> {
                 .for_each(|i, id| out[i] = values.get(id as usize).copied().unwrap_or_default()),
             Palette::Global => self
                 .storage
-                .for_each(|i, id| out[i] = S::try_from(id as u32).unwrap_or_default()),
+                .for_each(|i, id| out[i] = S::from_network(id as u32)),
         }
     }
 
@@ -222,6 +233,7 @@ impl<S: PalletedContainerKind> PalettedContainer<S> {
 
     fn create_or_reuse_data(&self, bits_per_entry: u8) -> PalettedContainer<S> {
         let new_palette_type = S::bits_per_entry_to_palette_kind(bits_per_entry);
+        let bits_per_entry = S::storage_bits(bits_per_entry);
 
         let old_palette_type = (&self.palette).into();
         if bits_per_entry == self.bits_per_entry && new_palette_type == old_palette_type {

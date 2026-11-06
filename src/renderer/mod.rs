@@ -26,12 +26,18 @@ pub(crate) use material_no_prepass_no_shadows;
 
 pub mod anim;
 mod atlas;
+#[cfg(feature = "animated_textures")]
+pub(crate) mod atlas_anim;
+mod atlas_meta;
 pub mod clouds;
 pub mod dimension;
+#[cfg(any(feature = "audio", feature = "shader_support"))]
+pub(crate) mod endflash;
 pub mod entity_material;
 pub mod environment;
 pub mod esp_material;
 pub mod frame_view;
+pub mod framerate;
 #[cfg(lua_mods)]
 mod ghosts;
 pub(crate) mod glint;
@@ -90,6 +96,8 @@ pub use occupancy::Occupancy;
 pub use origin::RenderOrigin;
 pub use systems::{Shared, run};
 
+use bevy::render::render_resource::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+
 #[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CameraPinnedMeshes;
 
@@ -103,6 +111,25 @@ pub fn embedded_path(path: &str) -> String {
 
 pub fn embedded_shader(path: &str) -> bevy::shader::ShaderRef {
     bevy::shader::ShaderRef::Path(embedded_path(path).into())
+}
+
+pub(crate) const fn blend(
+    src_color: BlendFactor,
+    dst_color: BlendFactor,
+    src_alpha: BlendFactor,
+    dst_alpha: BlendFactor,
+) -> BlendState {
+    const fn add(src_factor: BlendFactor, dst_factor: BlendFactor) -> BlendComponent {
+        BlendComponent {
+            src_factor,
+            dst_factor,
+            operation: BlendOperation::Add,
+        }
+    }
+    BlendState {
+        color: add(src_color, dst_color),
+        alpha: add(src_alpha, dst_alpha),
+    }
 }
 
 pub fn atlas_rows(atlas: &bevy::image::Image) -> u32 {

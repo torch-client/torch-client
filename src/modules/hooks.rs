@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use azalea::Client;
 
 use super::{aim_assist, auto_mace, auto_mine, scaffold, sneak};
@@ -55,7 +53,7 @@ pub fn script_flags(base: u8) -> u8 {
 
 pub fn sent_look(
     bot: &Client,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     yaw: f32,
     pitch: f32,
     flags: u8,

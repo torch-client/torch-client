@@ -46,6 +46,19 @@ pub(crate) struct Pack {
     cache: HashMap<String, Arc<[u8]>>,
 }
 
+#[cfg(resource_packs)]
+fn from_layers(key: &str) -> Option<Arc<[u8]>> {
+    use crate::platform::assets::archive;
+    archive::packs_active()
+        .then(|| archive::pack_get(&super::defs::layer_key(key)))?
+        .map(Into::into)
+}
+
+#[cfg(not(resource_packs))]
+fn from_layers(_key: &str) -> Option<Arc<[u8]>> {
+    None
+}
+
 const MAX_CACHED: usize = 512;
 
 impl Pack {
@@ -72,22 +85,40 @@ impl Pack {
         })
     }
 
-    pub(crate) fn read(&mut self, key: &str) -> Option<Arc<[u8]>> {
+    pub(crate) fn read(&mut self, key: &str, stream: bool) -> Option<Arc<[u8]>> {
         if let Some(hit) = self.cache.get(key) {
             return Some(hit.clone());
         }
-        let span = *self.table.get(key)?;
-        let bytes: Arc<[u8]> = {
-            self.file.seek(SeekFrom::Start(span.offset)).ok()?;
-            let mut buf = vec![0u8; span.length as usize];
-            self.file.read_exact(&mut buf).ok()?;
-            buf.into()
+        let bytes = match from_layers(key) {
+            Some(bytes) => bytes,
+            None => self.from_file(key)?,
         };
+        if stream {
+            return Some(bytes);
+        }
         if self.cache.len() >= MAX_CACHED {
             self.cache.clear();
         }
         self.cache.insert(key.to_owned(), bytes.clone());
         Some(bytes)
+    }
+
+    fn from_file(&mut self, key: &str) -> Option<Arc<[u8]>> {
+        let span = *self.table.get(key)?;
+        self.file.seek(SeekFrom::Start(span.offset)).ok()?;
+        let mut buf = vec![0u8; span.length as usize];
+        self.file.read_exact(&mut buf).ok()?;
+        Some(buf.into())
+    }
+
+    #[cfg(resource_packs)]
+    pub(crate) fn has(&self, key: &str) -> bool {
+        self.table.contains_key(key)
+            || crate::platform::assets::archive::pack_has(&super::defs::layer_key(key))
+    }
+
+    pub(crate) fn clear_cache(&mut self) {
+        self.cache.clear();
     }
 
     pub(crate) fn len(&self) -> usize {

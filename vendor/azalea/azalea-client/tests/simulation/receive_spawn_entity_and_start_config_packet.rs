@@ -22,6 +22,7 @@ fn test_receive_spawn_entity_and_start_config_packet() {
         id: 123.into(),
         uuid: Uuid::new_v4(),
         entity_type: EntityKind::ArmorStand,
+        modded_type: None,
         position: Vec3::ZERO,
         x_rot: 0,
         y_rot: 0,

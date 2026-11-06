@@ -928,6 +928,9 @@ pub struct HandCamera;
 pub struct HandRoot;
 
 #[derive(Component)]
+struct HandTilt;
+
+#[derive(Component)]
 struct HandNode;
 
 type NodeQuery<'w, 's> =
@@ -1046,7 +1049,7 @@ impl Plugin for HandPlugin {
         )
         .add_systems(
             Update,
-            sync_hands
+            (sync_hands, tilt_hands)
                 .after(crate::renderer::frame_view::FrameViewSystems)
                 .run_if(in_state(AppState::InGame)),
         );
@@ -1141,6 +1144,17 @@ fn bind_hand_arms(
     }
 }
 
+fn tilt_hands(
+    view: Res<crate::renderer::frame_view::FrameView>,
+    mut tilt: Query<&mut Transform, With<HandTilt>>,
+) {
+    if let Ok(mut transform) = tilt.single_mut()
+        && transform.rotation != view.hurt_tilt
+    {
+        transform.rotation = view.hurt_tilt;
+    }
+}
+
 fn setup_hand(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -1191,6 +1205,15 @@ fn setup_hand(
             Visibility::Inherited,
             HandRoot,
             Name::new("hand_root"),
+        ))
+        .id();
+    let tilt = commands
+        .spawn((
+            Transform::IDENTITY,
+            Visibility::Inherited,
+            HandTilt,
+            ChildOf(root),
+            Name::new("hand_tilt"),
         ))
         .id();
 
@@ -1318,7 +1341,7 @@ fn setup_hand(
             "decorations",
         );
         commands.entity(pose).add_child(map);
-        commands.entity(root).add_children(&[pose, arm]);
+        commands.entity(tilt).add_children(&[pose, arm]);
 
         HandEntities {
             pose,

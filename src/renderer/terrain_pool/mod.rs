@@ -157,6 +157,8 @@ pub struct TerrainStatsInner {
     pub draws: AtomicUsize,
     draws_pending: AtomicUsize,
     pub indirect: AtomicUsize,
+    pub atlas_copies: AtomicUsize,
+    pub atlas_steps: AtomicUsize,
 }
 
 static STATS: OnceLock<TerrainStats> = OnceLock::new();

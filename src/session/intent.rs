@@ -9,6 +9,16 @@ pub enum InvAction {
     CreativeDrop {
         stack: Box<SlotStack>,
     },
+    CreativeBundleClick {
+        slot: u16,
+        right: bool,
+        cursor: Box<SlotStack>,
+    },
+    BundleSelect {
+        slot: u16,
+        wire_slot: i32,
+        step: i8,
+    },
     ButtonClick(u8),
     SelectTrade(u32),
     SetBeacon {
@@ -53,6 +63,43 @@ pub struct CommandBlockUpdate {
     pub track_output: bool,
     pub conditional: bool,
     pub automatic: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum GameMasterOpen {
+    Structure(
+        azalea_core::position::BlockPos,
+        crate::blockentities::game_master::StructureEdit,
+    ),
+    Jigsaw(
+        azalea_core::position::BlockPos,
+        crate::blockentities::game_master::JigsawEdit,
+    ),
+    Test(
+        azalea_core::position::BlockPos,
+        crate::blockentities::game_master::TestBlockEdit,
+    ),
+    TestInstance(
+        azalea_core::position::BlockPos,
+        crate::blockentities::game_master::TestInstanceEdit,
+    ),
+}
+
+pub enum GameMasterPacket {
+    Structure(azalea_protocol::packets::game::s_set_structure_block::ServerboundSetStructureBlock),
+    Jigsaw(azalea_protocol::packets::game::s_set_jigsaw_block::ServerboundSetJigsawBlock),
+    JigsawGenerate(azalea_protocol::packets::game::s_jigsaw_generate::ServerboundJigsawGenerate),
+    Test(azalea_protocol::packets::game::s_set_test_block::ServerboundSetTestBlock),
+    TestInstance(
+        azalea_protocol::packets::game::s_test_instance_block_action::ServerboundTestInstanceBlockAction,
+    ),
+}
+
+#[derive(Clone, Debug)]
+pub struct TestInstanceStatus {
+    pub status: Vec<crate::text::Span>,
+    pub size: Option<[i32; 3]>,
+    pub error: Option<Vec<crate::text::Span>>,
 }
 
 #[derive(Clone)]

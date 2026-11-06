@@ -63,11 +63,7 @@ pub fn reset() {
     }
 }
 
-pub(crate) fn tick(
-    bot: &azalea::Client,
-    shared: &std::sync::Arc<crate::session::SharedMutex>,
-    pos: azalea::Vec3,
-) {
+pub(crate) fn tick(bot: &azalea::Client, shared: &crate::session::SharedMutex, pos: azalea::Vec3) {
     let (px, pz) = ((pos.x.floor() as i32) >> 4, (pos.z.floor() as i32) >> 4);
     PLAYER_CHUNK.store(pack(px, pz), Ordering::Relaxed);
 

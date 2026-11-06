@@ -1,17 +1,30 @@
+use bevy::prelude::*;
+#[cfg(feature = "animated_textures")]
+use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
-    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
+    Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
     TextureViewDescriptor, TextureViewId,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
 
 use super::GPU_LABEL;
+#[cfg(feature = "animated_textures")]
+use super::frame::PackRender;
 use super::frame::ProcessGpu;
 use super::targets::{display_view, extent};
+#[cfg(feature = "animated_textures")]
+use crate::renderer::atlas_anim::{AtlasAnimator, AtlasFrameCopies};
+#[cfg(feature = "animated_textures")]
+use crate::renderer::terrain_pool::TerrainTextures;
 
 pub(super) struct PackAtlas {
     source: TextureViewId,
     view: TextureView,
+    #[cfg_attr(not(feature = "animated_textures"), allow(dead_code))]
+    texture: Texture,
+    #[cfg(feature = "animated_textures")]
+    synced: Option<u64>,
 }
 
 impl ProcessGpu {
@@ -36,6 +49,9 @@ impl ProcessGpu {
             self.pack_atlas = Some(PackAtlas {
                 source: atlas.texture_view.id(),
                 view: view.clone(),
+                texture,
+                #[cfg(feature = "animated_textures")]
+                synced: None,
             });
             return view;
         }
@@ -86,9 +102,68 @@ impl ProcessGpu {
         self.pack_atlas = Some(PackAtlas {
             source: atlas.texture_view.id(),
             view: view.clone(),
+            texture,
+            #[cfg(feature = "animated_textures")]
+            synced: None,
         });
         view
     }
+}
+
+#[cfg(feature = "animated_textures")]
+pub(super) fn animate_pack_atlas(
+    render: Option<ResMut<PackRender>>,
+    textures: Option<Res<TerrainTextures>>,
+    images: Res<RenderAssets<GpuImage>>,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    animator: Res<AtlasAnimator>,
+    copies: Res<AtlasFrameCopies>,
+) {
+    crate::prof_span!("render:animate_pack_atlas");
+    let Some(mut render) = render else { return };
+    let Some(pack) = render
+        .process
+        .as_mut()
+        .and_then(|process| process.pack_atlas.as_mut())
+    else {
+        return;
+    };
+    let Some(atlas) = textures.and_then(|textures| images.get(&textures.atlas)) else {
+        return;
+    };
+    let view = atlas.texture_view.id();
+    if pack.source != view {
+        return;
+    }
+    let Some((frames, buffer)) = animator.live(view) else {
+        return;
+    };
+    let sync = pack.synced != Some(frames.generation);
+    if !sync && copies.0.is_empty() {
+        return;
+    }
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some(gpu_label!("atlas frames")),
+    });
+    if sync {
+        for (atlas_tile, pack_tile) in animator.pack_tiles() {
+            frames
+                .layout
+                .copy_tile(&mut encoder, buffer, &pack.texture, pack_tile, atlas_tile);
+        }
+        pack.synced = Some(frames.generation);
+    }
+    for copy in &copies.0 {
+        frames.layout.copy_tile(
+            &mut encoder,
+            buffer,
+            &pack.texture,
+            copy.pack_tile,
+            copy.atlas_tile,
+        );
+    }
+    queue.submit([encoder.finish()]);
 }
 
 fn write_tiles(

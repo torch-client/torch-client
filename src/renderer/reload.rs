@@ -33,7 +33,7 @@ pub(crate) fn build_atlases() -> Atlases {
         let textures_dir = crate::textures_dir().to_string_lossy().into_owned();
         let textures = crate::renderer::Textures::blocks(&textures_dir);
         let decoded = ms(t);
-        let atlas = crate::renderer::build_block_atlas(&textures, &textures_dir);
+        let atlas = crate::renderer::build_block_atlas(&textures, &textures_dir, true);
         let blocks = Blocks::load(atlas.sprites);
         crate::log_info!(
             "assets",
@@ -222,6 +222,8 @@ impl Drop for BuildGuard {
         );
         #[cfg(resource_packs)]
         crate::platform::assets::archive::set_selected(std::mem::take(&mut self.previous));
+        #[cfg(feature = "audio")]
+        crate::audio::packs_changed();
         reset_lazy_caches();
         BUILDING.store(false, Ordering::Release);
     }
@@ -353,6 +355,8 @@ fn adopt(world: &mut World) {
     }
     GENERATION.fetch_add(1, Ordering::Relaxed);
     TOUCH.store(2, Ordering::Relaxed);
+    #[cfg(feature = "audio")]
+    crate::audio::packs_changed();
     world.write_message(AssetsReloaded);
 
     #[cfg(all(resource_packs, target_arch = "wasm32"))]
@@ -379,6 +383,10 @@ fn finish_first_install(world: &mut World) {
         .0;
     world.resource_mut::<crate::gui::GuiState>().screen = next;
     crate::log_info!("assets", "the downloaded set is live");
+    #[cfg(all(feature = "update_checker", not(target_arch = "wasm32")))]
+    crate::client::update_checker::spawn();
+    #[cfg(lua_mods)]
+    crate::modules::script::init_after_install();
 }
 
 #[derive(Message)]

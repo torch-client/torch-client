@@ -5,7 +5,10 @@ use std::{
 };
 
 use azalea_buf::{AzBuf, AzBufVar, BufReadError};
-use azalea_registry::builtin::BlockKind;
+use azalea_registry::{
+    builtin::BlockKind,
+    unknown::{self, Space},
+};
 
 use crate::BlockTrait;
 
@@ -41,13 +44,25 @@ impl BlockState {
 
         self.id
     }
+
+    pub fn stand_in() -> Self {
+        crate::blocks::MagentaConcrete.into()
+    }
+
+    #[inline]
+    pub fn from_network(state_id: u32) -> Self {
+        Self::try_from(state_id).unwrap_or_else(|()| {
+            unknown::note(Space::Blocks, state_id);
+            Self::stand_in()
+        })
+    }
 }
 
 impl TryFrom<u32> for BlockState {
     type Error = ();
 
     fn try_from(state_id: u32) -> Result<Self, Self::Error> {
-        let state_id = state_id as BlockStateIntegerRepr;
+        let state_id = BlockStateIntegerRepr::try_from(state_id).map_err(|_| ())?;
         if Self::is_valid_state(state_id) {
             Ok(BlockState { id: state_id })
         } else {
@@ -82,10 +97,7 @@ impl From<BlockState> for u32 {
 
 impl AzBuf for BlockState {
     fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let state_id = u32::azalea_read_var(buf)?;
-        Self::try_from(state_id).map_err(|_| BufReadError::UnexpectedEnumVariant {
-            id: state_id as i32,
-        })
+        Ok(Self::from_network(u32::azalea_read_var(buf)?))
     }
     fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
         u32::azalea_write_var(&(self.id as u32), buf)
@@ -122,6 +134,42 @@ mod tests {
 
         assert!(BlockState::try_from(BlockState::MAX_STATE).is_ok());
         assert!(BlockState::try_from(BlockState::MAX_STATE + 1).is_err());
+    }
+
+    #[test]
+    fn test_wide_ids_do_not_alias() {
+        assert!(BlockState::try_from(65536_u32 + 5).is_err());
+        assert!(BlockState::try_from(65536_i32 + 5).is_err());
+        assert!(BlockState::try_from(-65536_i32 + 5).is_err());
+        assert!(BlockState::try_from(-1_i32).is_err());
+        assert_eq!(BlockState::from_network(65536 + 5), BlockState::stand_in());
+    }
+
+    #[test]
+    fn test_stand_in_is_magenta_concrete() {
+        let stand_in = BlockState::stand_in();
+        assert!(stand_in.id() <= BlockState::MAX_STATE);
+        assert_eq!(Box::<dyn BlockTrait>::from(stand_in).id(), "magenta_concrete");
+    }
+
+    #[test]
+    fn test_from_network_keeps_vanilla_ids() {
+        let max = u32::from(BlockState::MAX_STATE);
+        for id in (0..=max).step_by(97).chain([max]) {
+            assert_eq!(u32::from(BlockState::from_network(id)), id);
+        }
+    }
+
+    #[test]
+    fn test_unknown_state_reads_as_stand_in_and_counts() {
+        let id = u32::from(BlockState::MAX_STATE) + 1;
+        let mut bytes = Vec::new();
+        id.azalea_write_var(&mut bytes).unwrap();
+
+        let read = BlockState::azalea_read(&mut Cursor::new(&bytes[..])).unwrap();
+
+        assert_eq!(read, BlockState::stand_in());
+        assert!(unknown::snapshot().blocks >= 1);
     }
 
     #[test]

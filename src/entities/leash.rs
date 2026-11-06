@@ -27,6 +27,8 @@ pub(crate) struct Leashes {
     players: Vec<(i32, Holder)>,
     pos: Vec<[f32; 3]>,
     col: Vec<[f32; 4]>,
+    written_pos: Vec<[f32; 3]>,
+    written_col: Vec<[f32; 4]>,
 }
 
 #[derive(Clone, Copy)]
@@ -299,6 +301,8 @@ pub(crate) fn sync_leashes(
         players,
         pos,
         col,
+        written_pos,
+        written_col,
     } = &mut *leashes;
     pos.clear();
     col.clear();
@@ -405,6 +409,10 @@ pub(crate) fn sync_leashes(
         }
         return;
     }
+    if node.is_none() {
+        written_pos.clear();
+        written_col.clear();
+    }
     let (entity, handle) = node.get_or_insert_with(|| {
         let handle = meshes.add(new_mesh());
         let material = material
@@ -432,8 +440,12 @@ pub(crate) fn sync_leashes(
         spawned.insert(bevy::light::NotShadowCaster);
         (spawned.id(), handle)
     });
-    if let Some(mut mesh) = meshes.get_mut(&*handle) {
+    use crate::util::same_bits;
+    let changed = !same_bits(&pos[..], &written_pos[..]) || !same_bits(&col[..], &written_col[..]);
+    if changed && let Some(mut mesh) = meshes.get_mut(&*handle) {
         write_mesh(&mut mesh, pos, col);
+        std::mem::swap(pos, written_pos);
+        std::mem::swap(col, written_col);
     }
     if let Ok(mut vis) = nodes.get_mut(*entity) {
         vis.set_if_neq(Visibility::Inherited);

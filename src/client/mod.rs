@@ -22,6 +22,8 @@ pub(crate) mod lod;
 pub(crate) mod mesh_worker;
 pub(crate) mod packets;
 pub(crate) mod recipes;
+#[cfg(self_update)]
+pub(crate) mod self_update;
 pub(crate) mod server_packs;
 pub(crate) mod server_screens;
 #[cfg(feature = "audio")]

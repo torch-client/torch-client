@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use azalea::Client;
 use azalea_core::direction::Direction;
 use azalea_core::position::BlockPos;
@@ -35,7 +33,7 @@ pub(crate) fn held_weapon(bot: &Client) -> HeldWeapon {
     }
 }
 
-pub(crate) fn stab(bot: &Client, shared: &Arc<SharedMutex>, sound: Option<SoundEvent>) {
+pub(crate) fn stab(bot: &Client, shared: &SharedMutex, sound: Option<SoundEvent>) {
     bot.write_packet(ServerboundPlayerAction {
         action: Action::Stab,
         pos: BlockPos::new(0, 0, 0),
@@ -49,7 +47,7 @@ pub(crate) fn stab(bot: &Client, shared: &Arc<SharedMutex>, sound: Option<SoundE
 
 pub(crate) fn charge_started(
     bot: &Client,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     hand: crate::session::InteractionHand,
 ) {
     let sound = bot
@@ -100,7 +98,7 @@ pub(crate) fn kinetic_hit(entity_id: i32) {
     let _ = sound;
 }
 
-fn play_at_player(_shared: &Arc<SharedMutex>, sound: Option<SoundEvent>) {
+fn play_at_player(_shared: &SharedMutex, sound: Option<SoundEvent>) {
     #[cfg(feature = "audio")]
     if let Some(event) = sound {
         let at = _shared.lock().unwrap().session.player_pos;

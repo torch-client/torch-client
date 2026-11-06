@@ -147,11 +147,7 @@ pub fn predict_bucket(
     let ItemStack::Present(item) = held else {
         return None;
     };
-    let fluid = match item.kind {
-        ItemKind::WaterBucket => BlockKind::Water,
-        ItemKind::LavaBucket => BlockKind::Lava,
-        _ => return None,
-    };
+    let fluid = bucket_fluid(item.kind)?;
 
     let clicked_state = block_at(hit.block_pos)?;
     let container =
@@ -182,11 +178,27 @@ pub fn predict_bucket(
     Some((pos, BlockState::from(fluid)))
 }
 
+pub fn bucket_fluid(kind: ItemKind) -> Option<BlockKind> {
+    use ItemKind as I;
+    match kind {
+        I::WaterBucket
+        | I::PufferfishBucket
+        | I::SalmonBucket
+        | I::CodBucket
+        | I::TropicalFishBucket
+        | I::AxolotlBucket
+        | I::TadpoleBucket => Some(BlockKind::Water),
+        I::LavaBucket => Some(BlockKind::Lava),
+        _ => None,
+    }
+}
+
 pub fn predict_bucket_fill(
     held: &ItemStack,
     hit: &BlockHitResult,
+    creative: bool,
     block_at: impl Fn(BlockPos) -> Option<BlockState>,
-) -> Option<(BlockPos, bool)> {
+) -> Option<(BlockPos, BlockState, ItemKind)> {
     let ItemStack::Present(item) = held else {
         return None;
     };
@@ -195,16 +207,35 @@ pub fn predict_bucket_fill(
     }
 
     let clicked_state = block_at(hit.block_pos)?;
-    let is_lava = match clicked_state.as_block_kind() {
-        BlockKind::Water => false,
-        BlockKind::Lava => true,
-        _ => return None,
+    let kind = clicked_state.as_block_kind();
+    let mut block = Box::<dyn BlockTrait>::from(clicked_state);
+    let (new, filled) = match kind {
+        BlockKind::Water | BlockKind::Lava => {
+            if block.get_property("level") != Some("0") {
+                return None;
+            }
+            let lava = kind == BlockKind::Lava;
+            (
+                BlockState::AIR,
+                if lava {
+                    ItemKind::LavaBucket
+                } else {
+                    ItemKind::WaterBucket
+                },
+            )
+        }
+        BlockKind::BubbleColumn => (BlockState::AIR, ItemKind::WaterBucket),
+        BlockKind::PowderSnow => (BlockState::AIR, ItemKind::PowderSnowBucket),
+        BlockKind::Barrier if !creative => return None,
+        _ => {
+            if block.get_property("waterlogged") != Some("true") {
+                return None;
+            }
+            let _ = block.set_property("waterlogged", "false");
+            (block.as_block_state(), ItemKind::WaterBucket)
+        }
     };
-    let block = Box::<dyn BlockTrait>::from(clicked_state);
-    if block.get_property("level") != Some("0") {
-        return None;
-    }
-    Some((hit.block_pos, is_lava))
+    Some((hit.block_pos, new, filled))
 }
 
 fn fluid_replaceable(state: BlockState) -> bool {
@@ -235,11 +266,41 @@ static USE_INTERACTION: LazyLock<Box<[OnceLock<bool>]>> = LazyLock::new(|| {
         .collect()
 });
 
+fn ignores_clicks(id: &str) -> bool {
+    matches!(
+        id,
+        "redstone_lamp"
+            | "powered_rail"
+            | "activator_rail"
+            | "detector_rail"
+            | "tripwire"
+            | "tripwire_hook"
+            | "observer"
+            | "redstone_torch"
+            | "redstone_wall_torch"
+            | "conduit"
+            | "sculk_sensor"
+            | "calibrated_sculk_sensor"
+            | "sculk_shrieker"
+            | "iron_door"
+            | "iron_trapdoor"
+    ) || id.ends_with("_pressure_plate")
+        || id.ends_with("copper_bulb")
+        || id.ends_with("lightning_rod")
+}
+
 #[cold]
 fn block_has_use_interaction(state: BlockState) -> bool {
     let block = Box::<dyn BlockTrait>::from(state);
-    if BLOCK_ENTITY_IDS.contains(&format!("minecraft:{}", block.id()).as_str())
-        || MENU_BLOCK_IDS.contains(&block.id())
+    let id = block.id();
+    if ignores_clicks(id) {
+        return false;
+    }
+    if BLOCK_ENTITY_IDS.contains(&format!("minecraft:{id}").as_str())
+        || MENU_BLOCK_IDS.contains(&id)
+        || id.ends_with("shulker_box")
+        || id.ends_with("copper_chest")
+        || id == "bee_nest"
     {
         return true;
     }
@@ -1813,20 +1874,44 @@ mod tests {
 
     #[test]
     fn an_empty_bucket_picks_up_a_water_source() {
-        let (pos, is_lava) = predict_bucket_fill(
+        let (pos, new, filled) =
+            fill(BlockState::from(BlockKind::Water)).expect("a water source is picked up");
+        assert_eq!(pos, TARGET);
+        assert_eq!(new, BlockState::AIR);
+        assert_eq!(filled, ItemKind::WaterBucket);
+    }
+
+    fn fill(state: BlockState) -> Option<(BlockPos, BlockState, ItemKind)> {
+        predict_bucket_fill(
             &ItemStack::new(ItemKind::Bucket, 1),
             &hit(Direction::Up, 0.5),
+            false,
             |pos| {
                 Some(if pos == TARGET {
-                    BlockState::from(BlockKind::Water)
+                    state
                 } else {
                     BlockState::AIR
                 })
             },
         )
-        .expect("a water source is picked up");
-        assert_eq!(pos, TARGET);
-        assert!(!is_lava);
+    }
+
+    #[test]
+    fn an_empty_bucket_picks_up_powder_snow() {
+        let (_, new, filled) =
+            fill(BlockState::from(BlockKind::PowderSnow)).expect("powder snow is picked up");
+        assert_eq!(new, BlockState::AIR);
+        assert_eq!(filled, ItemKind::PowderSnowBucket);
+    }
+
+    #[test]
+    fn an_empty_bucket_drains_a_waterlogged_block() {
+        let dry = with(BlockKind::OakSlab, &[("waterlogged", "false")]);
+        let wet = with(BlockKind::OakSlab, &[("waterlogged", "true")]);
+        let (_, new, filled) = fill(wet).expect("a waterlogged slab is drained");
+        assert_eq!(new, dry);
+        assert_eq!(filled, ItemKind::WaterBucket);
+        assert!(fill(dry).is_none());
     }
 
     #[test]
@@ -1834,20 +1919,7 @@ mod tests {
         let mut flowing = Box::<dyn BlockTrait>::from(BlockState::from(BlockKind::Water));
         let _ = flowing.set_property("level", "1");
         let flowing = flowing.as_block_state();
-        assert!(
-            predict_bucket_fill(
-                &ItemStack::new(ItemKind::Bucket, 1),
-                &hit(Direction::Up, 0.5),
-                |pos| {
-                    Some(if pos == TARGET {
-                        flowing
-                    } else {
-                        BlockState::AIR
-                    })
-                }
-            )
-            .is_none()
-        );
+        assert!(fill(flowing).is_none());
     }
 
     #[test]
@@ -1856,6 +1928,7 @@ mod tests {
             predict_bucket_fill(
                 &ItemStack::new(ItemKind::WaterBucket, 1),
                 &hit(Direction::Up, 0.5),
+                false,
                 |_| Some(BlockState::from(BlockKind::Water)),
             )
             .is_none()

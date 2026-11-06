@@ -132,9 +132,14 @@ impl Serialize for ItemStack {
 pub struct ItemStackData {
     #[serde(rename = "id")]
     pub kind: ItemKind,
+    #[serde(skip_serializing_if = "is_one")]
     pub count: i32,
     #[serde(rename = "components", skip_serializing_if = "is_default")]
     pub component_patch: DataComponentPatch,
+}
+
+fn is_one(count: &i32) -> bool {
+    *count == 1
 }
 
 impl ItemStackData {
@@ -169,6 +174,20 @@ impl ItemStackData {
             get_default_component::<T>(self.kind).map(|c| Cow::Owned(c))
         }
     }
+
+    pub fn get_unless_removed<'a, T: components::DataComponentTrait>(
+        &'a self,
+    ) -> Option<Cow<'a, T>> {
+        match self.component_patch.iter().find(|(kind, _)| *kind == T::KIND) {
+            Some((_, None)) => None,
+            _ => self.get_component::<T>(),
+        }
+    }
+}
+
+fn read_item_kind(buf: &mut Cursor<&[u8]>) -> Result<ItemKind, BufReadError> {
+    use azalea_registry::unknown::{Space, read_id};
+    Ok(read_id(buf, Space::Items)?.unwrap_or(ItemKind::Air))
 }
 
 impl ItemStack {
@@ -181,7 +200,7 @@ impl ItemStack {
         if count <= 0 {
             return Ok(ItemStack::Empty);
         }
-        let kind = ItemKind::azalea_read(buf)?;
+        let kind = read_item_kind(buf)?;
         let component_patch = match DataComponentPatch::azalea_read(buf) {
             Ok(patch) => patch,
             Err(e) if strict => return Err(e),
@@ -200,7 +219,7 @@ impl ItemStack {
     }
 
     pub fn read_template(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let kind = ItemKind::azalea_read(buf)?;
+        let kind = read_item_kind(buf)?;
         let count = i32::azalea_read_var(buf)?;
         let component_patch = DataComponentPatch::azalea_read(buf)?;
         Ok(ItemStack::from(ItemStackData {
@@ -332,6 +351,12 @@ impl DataComponentPatch {
     ) {
         let existing = self.components.insert(kind, value);
         if let Some(Some(mut existing)) = existing {
+            unsafe { existing.drop_as(kind) };
+        }
+    }
+
+    pub fn clear_kind(&mut self, kind: DataComponentKind) {
+        if let Some(Some(mut existing)) = self.components.shift_remove(&kind) {
             unsafe { existing.drop_as(kind) };
         }
     }
@@ -507,7 +532,7 @@ impl AzBuf for UntrustedItemStack {
         if count <= 0 {
             return Ok(UntrustedItemStack(ItemStack::Empty));
         }
-        let kind = ItemKind::azalea_read(buf)?;
+        let kind = read_item_kind(buf)?;
         let component_patch = DataComponentPatch::azalea_read_delimited(buf)?;
         Ok(UntrustedItemStack(ItemStack::from(ItemStackData {
             count,

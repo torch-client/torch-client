@@ -72,6 +72,14 @@ pub(crate) fn install_block_change_hook() {
 global! {
 pub(crate) fn light_map() -> Arc<parking_lot::RwLock<lighting::LightMap>>
 }
+
+#[cfg(any(feature = "audio", lua_mods))]
+pub(crate) fn light_at(x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
+    let map = light_map().read();
+    map.is_lit(lighting::SectionPos::of_block(x, y, z).column())
+        .then(|| map.at(x, y, z))
+}
+
 static LIGHT_THREAD: OnceLock<lighting::LightThread> = OnceLock::new();
 
 pub(crate) fn start_light_thread() {
@@ -270,7 +278,7 @@ pub(crate) fn drop_server_light(cx: i32, cz: i32) {
     crate::client::mesh_worker::drop_chunk_packet(cx, cz);
 }
 
-pub(crate) fn reload_all_chunks(bot: &Client, shared: &Arc<SharedMutex>) {
+pub(crate) fn reload_all_chunks(bot: &Client, shared: &SharedMutex) {
     let cols: Vec<(i32, i32)> = received_chunks().lock().unwrap().iter().copied().collect();
     reset_chunk_tracking();
     if let Some(q) = CHUNK_Q.get() {
@@ -315,7 +323,7 @@ static FORGOTTEN_SINCE_COMPACT: AtomicU32 = AtomicU32::new(0);
 
 pub(crate) fn forget_chunk(
     world: &azalea::local_player::WorldHolder,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     cx: i32,
     cz: i32,
 ) {
@@ -345,7 +353,7 @@ pub(crate) fn forget_chunk(
     }
 }
 
-pub(crate) fn reset_level(shared: &Arc<SharedMutex>) {
+pub(crate) fn reset_level(shared: &SharedMutex) {
     reset_chunk_tracking();
     bump_chunk_generation();
     crate::renderer::environment::reset_weather();

@@ -55,6 +55,17 @@ pub(crate) fn read_stack(path: impl AsRef<Path>) -> Vec<Cow<'static, str>> {
     out
 }
 
+pub(crate) fn read_metadata(png: impl AsRef<Path>) -> Option<Cow<'static, [u8]>> {
+    let png = png.as_ref();
+    #[cfg(resource_packs)]
+    if let Some(key) = pack_key(png)
+        && let Some(found) = archive::pack_metadata(&key, &format!("{key}.mcmeta"))
+    {
+        return found.map(Cow::Owned);
+    }
+    read_base(&png.with_extension("png.mcmeta"))
+}
+
 pub(crate) fn read_dir(dir: impl AsRef<Path>) -> Vec<PathBuf> {
     let dir = dir.as_ref();
     #[cfg_attr(not(resource_packs), allow(unused_mut))]
@@ -339,6 +350,26 @@ pub(crate) mod archive {
             .map(<[u8]>::to_vec)
     }
 
+    #[cfg(all(resource_packs, feature = "audio"))]
+    pub(crate) fn pack_has(key: &str) -> bool {
+        MOUNTED
+            .read()
+            .layers()
+            .any(|layer| layer.files.contains_key(key))
+    }
+
+    #[cfg(all(resource_packs, feature = "audio"))]
+    pub(crate) fn pack_sound_namespaces() -> BTreeSet<String> {
+        MOUNTED
+            .read()
+            .layers()
+            .flat_map(|layer| layer.files.keys())
+            .filter_map(|key| key.strip_prefix("assets/")?.strip_suffix("/sounds.json"))
+            .filter(|namespace| !namespace.contains('/'))
+            .map(str::to_owned)
+            .collect()
+    }
+
     #[cfg(resource_packs)]
     pub(crate) fn pack_stack(key: &str) -> Vec<Vec<u8>> {
         MOUNTED
@@ -348,6 +379,28 @@ pub(crate) mod archive {
             .filter_map(|layer| layer.get(key))
             .map(<[u8]>::to_vec)
             .collect()
+    }
+
+    #[cfg(resource_packs)]
+    pub(crate) fn pack_metadata(png: &str, meta: &str) -> Option<Option<Vec<u8>>> {
+        walk_metadata(MOUNTED.read().layers(), png, meta)
+    }
+
+    #[cfg(resource_packs)]
+    fn walk_metadata<'a>(
+        layers: impl Iterator<Item = &'a OwnedLayer>,
+        png: &str,
+        meta: &str,
+    ) -> Option<Option<Vec<u8>>> {
+        for layer in layers {
+            if let Some(bytes) = layer.get(meta) {
+                return Some(Some(bytes.to_vec()));
+            }
+            if layer.get(png).is_some() {
+                return Some(None);
+            }
+        }
+        None
     }
 
     #[cfg(resource_packs)]
@@ -415,6 +468,37 @@ pub(crate) mod archive {
                 .filter_map(|l| l.get("assets/minecraft/a"))
                 .collect();
             assert_eq!(order, [&b"s1"[..], b"s2", b"p1"]);
+        }
+
+        fn files(names: &[&str]) -> OwnedLayer {
+            let bytes: Vec<u8> = names.concat().into_bytes();
+            let mut at = 0;
+            let files = names
+                .iter()
+                .map(|name| {
+                    let range = at..at + name.len();
+                    at = range.end;
+                    ((*name).to_owned(), range)
+                })
+                .collect();
+            OwnedLayer {
+                bytes: bytes.into(),
+                files,
+            }
+        }
+
+        #[test]
+        fn metadata_walks_down_to_the_layer_with_the_image() {
+            let (png, meta) = ("a.png", "a.png.mcmeta");
+            let walk = |layers: &[OwnedLayer]| walk_metadata(layers.iter(), png, meta);
+            let found = Some(Some(meta.as_bytes().to_vec()));
+
+            assert_eq!(walk(&[files(&[png, meta])]), found);
+            assert_eq!(walk(&[files(&[meta]), files(&[png])]), found);
+            assert_eq!(walk(&[files(&[png]), files(&[png, meta])]), Some(None));
+            assert_eq!(walk(&[files(&[png]), files(&[meta])]), Some(None));
+            assert_eq!(walk(&[files(&["b.png"])]), None);
+            assert_eq!(walk(&[files(&[meta])]), found);
         }
     }
 }

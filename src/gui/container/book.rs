@@ -7,8 +7,6 @@ const BUTTON_PREV_PAGE: u8 = 1;
 const BUTTON_NEXT_PAGE: u8 = 2;
 const BUTTON_TAKE_BOOK: u8 = 3;
 
-const DONE: &str = "Done";
-
 pub fn draw(
     p: &mut Painter,
     _state: &mut GuiState,
@@ -39,6 +37,7 @@ pub fn draw(
         top,
         book::back_visible(page),
         book::forward_visible(page, num_pages),
+        false,
     )
     .saturating_add(book::page_key(ctx.input))
     .signum();
@@ -54,7 +53,7 @@ pub fn draw(
         book::CONTROLS_TOP,
         book::MENU_BUTTON_SIZE,
         widgets::WIDGET_HEIGHT,
-        DONE,
+        tooltip::label!("gui.done"),
     )
     .draw(p, ctx)
     {

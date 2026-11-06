@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use azalea::ecs::prelude::*;
@@ -9,7 +8,7 @@ use azalea_protocol::packets::game::c_game_event::EventType;
 use crate::SHARED;
 use crate::session::SharedMutex;
 
-pub(crate) fn packet(shared: &Arc<SharedMutex>, packet: &ClientboundGamePacket) {
+pub(crate) fn packet(shared: &SharedMutex, packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::GameEvent(p) if p.event == EventType::WinGame => {
             shared.lock().unwrap().session.win_game = true;

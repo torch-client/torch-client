@@ -89,7 +89,7 @@ fn pos_key(c: ChunkPos, section_y: i32) -> u64 {
     (c.x as u32 as u64) << 40 | (c.z as u32 as u64) << 8 | (section_y as u8 as u64)
 }
 
-pub fn tick(bot: &azalea::Client, shared: &Arc<crate::session::SharedMutex>) {
+pub fn tick(bot: &azalea::Client, shared: &crate::session::SharedMutex) {
     let s = store();
     let phases = ESPS.each_ref().map(|e| e.edge.poll(s));
     let running = phases

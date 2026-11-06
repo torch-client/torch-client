@@ -244,6 +244,11 @@ impl Run {
     }
 }
 
+#[cfg(self_update)]
+pub fn running() -> bool {
+    ACTIVE.load(Ordering::Relaxed)
+}
+
 pub fn mark(spot: Spot, r: Rect) {
     if ACTIVE.load(Ordering::Relaxed)
         && let Ok(mut spots) = SPOTS.lock()

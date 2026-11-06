@@ -90,7 +90,7 @@ pub(crate) struct FrameValues {
     sun_position: Vec3,
     moon_position: Vec3,
     up_position: Vec3,
-    end_flash: crate::renderer::packdraw::endflash::EndFlash,
+    end_flash: crate::renderer::endflash::EndFlash,
     is_day: bool,
     shadow_model_view: Mat4,
     shadow_projection: Mat4,
@@ -206,7 +206,7 @@ impl FrameValues {
             end_flash: if crate::renderer::dimension::current()
                 == crate::renderer::dimension::Dimension::End
             {
-                crate::renderer::packdraw::endflash::at(inputs.day_ticks)
+                crate::renderer::endflash::at(inputs.day_ticks)
             } else {
                 Default::default()
             },
@@ -284,6 +284,7 @@ impl FrameValues {
             B::Blindness => Value::Float(inputs.blindness),
             B::NightVision => Value::Float(inputs.night_vision),
             B::DarknessFactor => Value::Float(inputs.darkness),
+            B::DarknessLightFactor => Value::Float(inputs.darkness_light),
             B::HideGui => Value::Int(i32::from(inputs.hide_gui)),
             B::EndFlashIntensity => Value::Float(self.end_flash.intensity),
             B::PreviousEndFlashIntensity => Value::Float(self.end_flash.previous),

@@ -14,8 +14,8 @@ use std::num::NonZeroU64;
 
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
 use bevy::render::render_resource::{
-    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent,
-    BlendFactor, BlendOperation, BlendState, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
+    BlendFactor as F, BlendState, CachedRenderPipelineId, ColorTargetState, ColorWrites,
     FragmentState, IndexFormat, LoadOp, Operations, PipelineCache, RenderPassColorAttachment,
     RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType, ShaderStages,
     SpecializedRenderPipeline, SpecializedRenderPipelines, StoreOp, TextureFormat,
@@ -149,18 +149,12 @@ impl SpecializedRenderPipeline for GuiPipeline {
                     "vertex",
                     "vignette_fragment",
                     vec![gui_vertex_layout()],
-                    Some(BlendState {
-                        color: BlendComponent {
-                            src_factor: BlendFactor::Zero,
-                            dst_factor: BlendFactor::OneMinusSrc,
-                            operation: BlendOperation::Add,
-                        },
-                        alpha: BlendComponent {
-                            src_factor: BlendFactor::Zero,
-                            dst_factor: BlendFactor::One,
-                            operation: BlendOperation::Add,
-                        },
-                    }),
+                    Some(crate::renderer::blend(
+                        F::Zero,
+                        F::OneMinusSrc,
+                        F::Zero,
+                        F::One,
+                    )),
                     glint_def(),
                 ),
                 GuiPipelineKind::Blit => (

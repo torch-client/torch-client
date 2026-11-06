@@ -6,7 +6,6 @@ macro_rules! gpu_label {
 
 mod compile;
 mod depthcopy;
-mod endflash;
 mod entities;
 mod formats;
 mod frame;
@@ -216,6 +215,7 @@ impl Plugin for ShaderPackPlugin {
                 (install::sync_compiled_pack, install::sync_pack_vertices).chain(),
                 inputs::gather_inputs
                     .after(crate::renderer::frame_view::FrameViewSystems)
+                    .after(crate::renderer::systems::update_lightmap)
                     .run_if(resource_exists::<install::CompiledPack>),
             ),
         );
@@ -263,6 +263,10 @@ impl Plugin for ShaderPackPlugin {
                         .in_set(RenderSystems::PrepareResources)
                         .before(crate::renderer::terrain_pool::cull::prepare_cull),
                     plan::prepare_plan.in_set(RenderSystems::PrepareBindGroups),
+                    #[cfg(feature = "animated_textures")]
+                    packatlas::animate_pack_atlas
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .after(plan::prepare_plan),
                     entities::prepare_entity_draws
                         .in_set(RenderSystems::PrepareBindGroups)
                         .after(plan::prepare_plan),

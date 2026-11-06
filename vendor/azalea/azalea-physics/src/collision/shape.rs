@@ -306,7 +306,7 @@ impl VoxelShape {
             self.get(axis, first_full.try_into().unwrap())
         }
     }
-    fn max(&self, axis: Axis) -> f64 {
+    pub fn max(&self, axis: Axis) -> f64 {
         let last_full = self.shape().last_full(axis);
         if last_full <= 0 {
             f64::NEG_INFINITY

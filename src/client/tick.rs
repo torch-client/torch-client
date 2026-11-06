@@ -77,7 +77,7 @@ struct TickSnapshot {
     border: azalea::world::WorldBorder,
 }
 
-fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSnapshot> {
+fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot> {
     if let Ok(world) = bot.world() {
         set_current_world(&world);
     }
@@ -110,9 +110,13 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
     let entity_anims = collect_entities(bot, &seen_players, &mut other_positions);
     crate::play::tracking_emitter::tick(bot, shared);
     crate::play::effect_particles::tick(bot, shared);
+    crate::play::area_cloud::tick(bot, shared);
+    crate::play::arrow_particles::tick(bot, shared);
     crate::play::item_use::tick(bot, shared);
     #[cfg(feature = "audio")]
     crate::play::riding::sound::tick(bot);
+    #[cfg(feature = "audio")]
+    crate::play::entity_sounds::tick(bot);
 
     GAME_TIME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -121,51 +125,7 @@ fn read_tick_snapshot(bot: &Client, shared: &Arc<SharedMutex>) -> Option<TickSna
     let world = bot.world().ok();
 
     #[cfg(feature = "audio")]
-    {
-        use std::sync::atomic::Ordering;
-
-        let mut last = LAST_XZ.lock().unwrap();
-        let (dx, dz) = match *last {
-            Some((lx, lz)) => (pos.x - lx, pos.z - lz),
-            None => (0.0, 0.0),
-        };
-        *last = Some((pos.x, pos.z));
-        drop(last);
-
-        let on_ground = bot
-            .component::<azalea::entity::Physics>()
-            .is_ok_and(|p| p.on_ground());
-        if on_ground {
-            const STEP_DISTANCE: f32 = 2.0;
-            let travelled = f32::from_bits(TRAVELLED.load(Ordering::Relaxed))
-                + (dx * dx + dz * dz).sqrt() as f32;
-            if travelled >= STEP_DISTANCE {
-                TRAVELLED.store((travelled - STEP_DISTANCE).to_bits(), Ordering::Relaxed);
-                let feet = AzBlockPos::new(
-                    pos.x.floor() as i32,
-                    pos.y.floor() as i32 - 1,
-                    pos.z.floor() as i32,
-                );
-                let state = world.as_ref().and_then(|w| w.read().get_block_state(feet));
-                if let Some(state) = state
-                    && !state.is_air()
-                {
-                    use azalea::block::BlockTrait;
-                    let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
-                    let group = crate::util::block_model::sound_group(block.id());
-                    crate::audio::play_at(
-                        group.step_event,
-                        crate::audio::SoundCategory::Players,
-                        [pos.x, pos.y, pos.z],
-                        0.15,
-                        1.0,
-                    );
-                }
-            } else {
-                TRAVELLED.store(travelled.to_bits(), Ordering::Relaxed);
-            }
-        }
-    }
+    crate::play::player_sounds::tick(bot);
     let advanced_tooltips = reads.advanced_tooltips;
     if let Ok(id) = bot.component::<azalea_core::entity_id::MinecraftEntityId>() {
         crate::client::tracking::LOCAL_ENTITY_ID.store(id.0, std::sync::atomic::Ordering::Relaxed);
@@ -556,7 +516,7 @@ fn take_server_look(bot: &Client) -> Option<(f32, f32)> {
     look
 }
 
-fn follow_executor_look(bot: &Client, shared: &Arc<SharedMutex>) {
+fn follow_executor_look(bot: &Client, shared: &SharedMutex) {
     let look = bot
         .component::<azalea::entity::LookDirection>()
         .ok()
@@ -590,18 +550,6 @@ struct Ticker {
 }
 static TICKER: std::sync::OnceLock<std::sync::Mutex<Ticker>> = std::sync::OnceLock::new();
 
-#[cfg(feature = "audio")]
-static TRAVELLED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-#[cfg(feature = "audio")]
-static LAST_XZ: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
-
-#[cfg(feature = "audio")]
-pub(crate) fn forget_step_origin() {
-    if let Ok(mut last) = LAST_XZ.lock() {
-        *last = None;
-    }
-}
-
 pub(crate) fn reset_session_locals(blocking: bool) {
     let ticker = TICKER.get_or_init(Default::default);
     let ticker = if blocking {
@@ -613,17 +561,7 @@ pub(crate) fn reset_session_locals(blocking: bool) {
         *ticker = Ticker::default();
     }
     #[cfg(feature = "audio")]
-    {
-        TRAVELLED.store(0, std::sync::atomic::Ordering::Relaxed);
-        let last = if blocking {
-            LAST_XZ.lock().ok()
-        } else {
-            LAST_XZ.try_lock().ok()
-        };
-        if let Some(mut last) = last {
-            *last = None;
-        }
-    }
+    crate::play::player_sounds::reset(blocking);
 }
 
 fn note_movement_write(what: &str, e: impl std::fmt::Display) {
@@ -744,7 +682,7 @@ fn block_distance_sqr(pos: AzBlockPos, point: [f64; 3]) -> f64 {
     dx * dx + dy * dy + dz * dz
 }
 
-pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
+pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
     let _ticking = crate::diag::TickGuard::new();
 
     #[cfg(eagler_skins)]
@@ -783,7 +721,24 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
     };
     let applied_clicks = inv_actions.len();
     let closing = inv_actions.iter().any(|a| matches!(a, InvAction::Close));
-    apply_inv_actions(bot, inv_actions, horse);
+    let applied = apply_inv_actions(bot, inv_actions, horse);
+    if applied.creative_cursor.is_some() || !applied.horse_selected.is_empty() {
+        let mut s = shared.lock().unwrap();
+        let session = &mut s.session;
+        if applied.creative_cursor.is_some() {
+            session.creative_cursor = applied.creative_cursor;
+        }
+        if let Some(horse) = &mut session.horse
+            && !applied.horse_selected.is_empty()
+        {
+            for (slot, selected) in applied.horse_selected {
+                if let Some(bundle) = horse.slots.get_mut(slot).and_then(|s| s.bundle.as_mut()) {
+                    Arc::make_mut(bundle).selected = selected;
+                }
+            }
+            session.horse_published_state_id = horse.state_id.wrapping_add(1);
+        }
+    }
     crate::client::recipes::send_queued(bot, shared);
     if closing {
         shared.lock().unwrap().session.horse = None;
@@ -854,6 +809,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         drops,
         sign_update,
         command_block_update,
+        game_master_send,
         command_block_pos,
         sign_edit_open_pos,
         edit_book,
@@ -998,7 +954,11 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         };
         s.session.merchant_future_xp = future_xp;
         s.session.hotbar_selected = hotbar_sel;
-        s.session.health = health;
+        if !s.session.health_known && s.session.last_set_health.is_some() {
+            s.session.health_known = true;
+            s.session.health_epoch = s.session.health_epoch.wrapping_add(1);
+        }
+        s.session.health = if s.session.health_known { health } else { 20.0 };
         if dead && !s.session.dead && !s.session.show_death_screen {
             s.respawn_requested = true;
         }
@@ -1021,7 +981,15 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
         s.session.bed_orientation = bed_orientation;
         s.session.camera_distance = Some(camera_distance);
         s.session.local_body = local_body;
+        #[cfg(feature = "audio")]
+        if in_portal && s.session.portal_effect.cur == 0.0 {
+            crate::play::player_sounds::portal_trigger();
+        }
         s.session.portal_effect.tick(in_portal);
+        let nausea =
+            crate::play::mob_effects::effect_blend_factor(&s.session.active_effects, "nausea", 1.0);
+        let portal = s.session.portal_effect.cur;
+        s.session.spinning_effect.tick(portal, nausea);
         crate::play::item_pickup::tick(&mut s.session);
         let eye_target = crate::renderer::systems::session_eye_height(&s.session);
         s.session.camera_eye.tick(eye_target);
@@ -1058,6 +1026,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
             drops,
             s.session.sign_update.take(),
             s.session.command_block_update.take(),
+            std::mem::take(&mut s.session.game_master_send),
             s.session.command_block_pos,
             s.session.sign_edit_open_pos,
             s.session.edit_book.take(),
@@ -1191,6 +1160,17 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
             conditional: update.conditional,
             automatic: update.automatic,
         });
+    }
+
+    for packet in game_master_send {
+        use crate::session::GameMasterPacket as P;
+        match packet {
+            P::Structure(p) => bot.write_packet(p),
+            P::Jigsaw(p) => bot.write_packet(p),
+            P::JigsawGenerate(p) => bot.write_packet(p),
+            P::Test(p) => bot.write_packet(p),
+            P::TestInstance(p) => bot.write_packet(p),
+        }
     }
 
     if let Some(book) = edit_book {
@@ -1362,7 +1342,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &Arc<SharedMutex>) {
 
 fn hold_unsigned(
     bot: &Client,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     outgoing: Vec<String>,
     (signing, waited): (bool, u32),
 ) -> (Vec<String>, bool) {
@@ -1455,7 +1435,7 @@ fn collect_other_players(bot: &Client) -> (Vec<OtherPlayerInfo>, HashSet<i32>) {
                 sprinting: flag::<metadata::Sprinting>(eref),
                 fall_flying: flag::<metadata::FallFlying>(eref),
                 visually_swimming: pose == Pose::Swimming,
-                spin_attack: pose == Pose::SpinAttack,
+                spin_attack: flag::<metadata::AutoSpinAttack>(eref),
                 sleeping: pose == Pose::Sleeping,
                 bed_orientation: eref
                     .get_component::<metadata::SleepingPos>()
@@ -1541,7 +1521,7 @@ fn collect_other_players(bot: &Client) -> (Vec<OtherPlayerInfo>, HashSet<i32>) {
 
 fn tick_local_anim(
     bot: &Client,
-    shared: &Arc<SharedMutex>,
+    shared: &SharedMutex,
     pos: azalea::Vec3,
 ) -> (HumanoidAnim, TickReads) {
     use azalea::entity::Pose;
@@ -1615,7 +1595,7 @@ fn tick_local_anim(
         sprinting,
         fall_flying: flag::<metadata::FallFlying>(bot),
         visually_swimming: pose == Pose::Swimming,
-        spin_attack: pose == Pose::SpinAttack,
+        spin_attack: flag::<metadata::AutoSpinAttack>(bot),
         sleeping: local_sleeping_pos.is_some(),
         bed_orientation: local_sleeping_pos.and_then(|pos| bed_orientation_at(bot, pos)),
         using_item: using.is_some(),
@@ -1626,8 +1606,13 @@ fn tick_local_anim(
             .is_ok_and(|p| p.on_ground()),
         health: bot.health().unwrap_or(20.0),
     };
+    let swing_effect = bot
+        .component::<azalea::entity::ActiveEffects>()
+        .map(|e| crate::play::mob_effects::swing_adjust(&e))
+        .unwrap_or_default();
     let mut anims = anim_states().lock().unwrap();
     let anim = anims.entry(LOCAL_ANIM_ID).or_default();
+    anim.set_swing_effect(swing_effect);
     if attacking {
         anim.swing(prefs.main_hand_left);
     }
@@ -1678,7 +1663,7 @@ fn local_skin(bot: &Client, parts: u8) -> crate::client::skins::SkinState {
     }
 }
 
-pub(crate) fn swing_local_player(off_hand: bool, shared: &Arc<SharedMutex>) {
+pub(crate) fn swing_local_player(off_hand: bool, shared: &SharedMutex) {
     let left_arm = shared.lock().unwrap().skin_prefs.main_hand_left != off_hand;
     let snapshot = {
         let mut anims = anim_states().lock().unwrap();
@@ -1751,7 +1736,7 @@ fn health_display(
     use azalea::entity::metadata;
     use azalea_core::entity_id::MinecraftEntityId;
 
-    let has = |id: &str| crate::play::mob_effects::find(active_effects, id).is_some();
+    let has = |id: &str| crate::play::mob_effects::has(active_effects, id);
     let ticks_frozen = bot
         .component::<metadata::TicksFrozen>()
         .map(|t| t.0)
@@ -1972,22 +1957,26 @@ fn apply_movement(bot: &Client, flags: u8, auto_jump_enabled: bool) {
         bot.walk(walk_dir);
     }
 
-    let (on_ground, horizontal_collision) = {
-        let physics = bot.component::<azalea::entity::Physics>();
-        let (on_ground, horizontal_collision) = physics
-            .as_ref()
-            .map(|phys| (phys.on_ground(), phys.horizontal_collision))
-            .unwrap_or((false, false));
-        (on_ground, horizontal_collision)
+    let can_auto_jump =
+        auto_jump_enabled && !sneak && crate::client::tracking::local_vehicle_id().is_none();
+    let auto_jump = bot.query_self::<(
+        &mut azalea::physics::client_movement::ClientMovementState,
+        &mut azalea::entity::Physics,
+    ), _>(|(mut state, mut physics)| {
+        state.auto_jump = can_auto_jump;
+        let armed = physics.auto_jump_time > 0;
+        if armed {
+            physics.auto_jump_time -= 1;
+        }
+        armed
+    });
+    let auto_jump = match auto_jump {
+        Ok(armed) => armed,
+        Err(e) => {
+            note_movement_write("the auto-jump state", e);
+            false
+        }
     };
-
-    let auto_jump = auto_jump_enabled
-        && !jump
-        && !flying
-        && !sneak
-        && walk_dir != WalkDirection::None
-        && on_ground
-        && horizontal_collision;
 
     if let Err(e) = bot.set_jumping(jump || auto_jump) {
         note_movement_write("the jump flag", e);

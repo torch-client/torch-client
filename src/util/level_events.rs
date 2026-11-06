@@ -8,10 +8,12 @@ use azalea::entity::particle::{BlockParticle, PowerParticle, SpellParticle};
 
 #[derive(Clone, Copy)]
 #[cfg_attr(not(feature = "audio"), allow(dead_code))]
-enum Bus {
+pub(crate) enum Bus {
     Blocks,
     Hostile,
     Neutral,
+    Ambient,
+    Players,
 }
 
 #[derive(Clone, Copy)]
@@ -202,7 +204,12 @@ fn effects(event: &LevelEventEmit, ctx: &mut Emitter) {
                 .ok()
                 .and_then(|id| azalea::block::BlockState::try_from(id).ok());
             let Some(state) = state else { return };
-            break_block(ctx, cell, state);
+            if event.id == 2001 {
+                break_sound(cell, state);
+            } else {
+                brushed_sound(cell, state);
+            }
+            destroy_burst(ctx, cell, state);
         }
         2002 | 2007 => {
             let rgb = [data >> 16, data >> 8, data].map(|c| (c & 255) as f32);
@@ -674,7 +681,7 @@ fn flame_particle(data: u32) -> P {
     }
 }
 
-fn break_block(ctx: &mut Emitter, cell: [i32; 3], state: azalea::block::BlockState) {
+fn destroy_burst(ctx: &mut Emitter, cell: [i32; 3], state: azalea::block::BlockState) {
     let spawn = crate::session::ParticleSpawn {
         pos: cell,
         state,
@@ -682,14 +689,32 @@ fn break_block(ctx: &mut Emitter, cell: [i32; 3], state: azalea::block::BlockSta
         face: [0.0, 1.0, 0.0],
     };
     spawn_block_break(&spawn, Some(ctx.world), ctx.live, ctx.rng);
+}
 
+#[cfg_attr(not(feature = "audio"), allow(unused_variables))]
+fn break_sound(cell: [i32; 3], state: azalea::block::BlockState) {
     #[cfg(feature = "audio")]
-    {
-        use azalea::block::BlockTrait;
-        let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
-        let group = crate::util::block_model::sound_group(block.id());
-        sound(cell, group.break_event, Bus::Blocks, 1.0, 0.8);
+    if !state.is_air() {
+        let group = crate::blocks::sound_types::of(state);
+        let volume = (group.volume + 1.0) / 2.0;
+        sound(
+            cell,
+            group.break_event,
+            Bus::Blocks,
+            volume,
+            group.pitch * 0.8,
+        );
     }
+}
+
+fn brushed_sound(cell: [i32; 3], state: azalea::block::BlockState) {
+    use azalea_registry::builtin::BlockKind;
+    let event = match state.as_block_kind() {
+        BlockKind::SuspiciousSand => "item.brush.brushing.sand",
+        BlockKind::SuspiciousGravel => "item.brush.brushing.gravel",
+        _ => return,
+    };
+    sound(cell, event, Bus::Players, 1.0, 1.0);
 }
 
 fn smoke_cloud(ctx: &mut Emitter, cell: [i32; 3], count: u32) {
@@ -714,13 +739,13 @@ fn sound(cell: [i32; 3], event: &str, bus: Bus, volume: f32, pitch: f32) {
 }
 
 #[cfg_attr(not(feature = "audio"), allow(unused_variables))]
-fn play(event: &str, bus: Bus, at: [f64; 3], volume: f32, pitch: f32) {
+pub(crate) fn play(event: &str, bus: Bus, at: [f64; 3], volume: f32, pitch: f32) {
     #[cfg(feature = "audio")]
     crate::audio::play_at(event, bus.category(), at, volume, pitch);
 }
 
 #[cfg_attr(not(feature = "audio"), allow(unused_variables))]
-fn play_local(event: &str, bus: Bus, volume: f32, pitch: f32) {
+pub(crate) fn play_local(event: &str, bus: Bus, volume: f32, pitch: f32) {
     #[cfg(feature = "audio")]
     crate::audio::play(event, bus.category(), volume, pitch);
 }
@@ -732,6 +757,8 @@ impl Bus {
             Bus::Blocks => crate::audio::SoundCategory::Blocks,
             Bus::Hostile => crate::audio::SoundCategory::Hostile,
             Bus::Neutral => crate::audio::SoundCategory::Neutral,
+            Bus::Ambient => crate::audio::SoundCategory::Ambient,
+            Bus::Players => crate::audio::SoundCategory::Players,
         }
     }
 }

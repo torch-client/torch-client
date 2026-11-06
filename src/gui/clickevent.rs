@@ -10,7 +10,7 @@ pub enum Followup {
     Dialog(Arc<Dialog>),
 }
 
-pub fn dispatch(click: Click, shared: &Arc<SharedMutex>) -> Followup {
+pub fn dispatch(click: Click, shared: &SharedMutex) -> Followup {
     match click {
         Click::RunCommand(command) => {
             let command = command.strip_prefix('/').unwrap_or(&command).to_string();

@@ -10,6 +10,13 @@
 
 <img width="960" height="526" alt="preview" src="https://github.com/user-attachments/assets/7139ff66-3257-4841-b810-75796659f7b3" />
 
+
+<details>
+<summary><b>Android Preview</b></summary>
+<img width="960" height="432" alt="mobile-controls" src="https://github.com/user-attachments/assets/fc6ec618-e4f8-4917-8880-bf1769e4d1be" />
+
+</details>
+
 Measured on 26.1.1 at a 32 chunk render distance. Results vary by system.
 
 | | Torch | Java client |

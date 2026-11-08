@@ -27,7 +27,7 @@ Measured on 26.1.1 at a 32 chunk render distance. Results vary by system.
 
 ## Download
 
-Builds for Linux and Windows are on the [releases page](https://github.com/torch-client/torch-client/releases).
+Builds for Linux, Android and Windows are on the [releases page](https://github.com/torch-client/torch-client/releases).
 
 ## Build from source
 

@@ -1,5 +1,8 @@
 #import bevy_pbr::mesh_functions
-#import bevy_pbr::mesh_view_bindings::{view, fog}
+#import bevy_pbr::mesh_view_bindings::view
+#ifdef DISTANCE_FOG
+#import bevy_pbr::mesh_view_bindings::fog
+#endif
 #import bevy_pbr::view_transformations::position_world_to_clip
 #import client::vanilla_fog::{srgb_encode, srgb_decode, vanilla_fog_ramp}
 
@@ -75,12 +78,14 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     return out;
 }
 
+#ifdef DISTANCE_FOG
 fn far_fog(distance: f32) -> f32 {
     let start = fog.be.x;
     let band = max(fog.be.y - fog.be.x, 1.0);
     let x = max((distance - start) / band, 0.0) * 2.5;
     return 1.0 - 1.0 / exp(x * x);
 }
+#endif
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -92,6 +97,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     var color = in.color;
+#ifdef DISTANCE_FOG
     let rel = in.world_position - view.world_position;
     if fog.mode != 0u {
         let environmental = fog.directional_light_color.xy;
@@ -102,6 +108,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let mixed = mix(srgb_encode(color.rgb), srgb_encode(fog.base_color.rgb), value * fog.base_color.a);
         color = vec4(srgb_decode(mixed), color.a);
     }
+#endif
 #ifdef TONEMAP_IN_SHADER
 #ifndef TONEMAP_METHOD_NONE
     color = tone_mapping(color, view.color_grading);

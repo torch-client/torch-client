@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use azalea::ecs::entity::Entity;
 use azalea::ecs::prelude::{MessageReader, Query};
 use azalea::entity::dimensions::EntityDimensions;
@@ -7,21 +5,16 @@ use azalea::entity::indexing::EntityIdIndex;
 use azalea::entity::inventory::Inventory;
 use azalea::entity::metadata::Silent;
 use azalea::entity::{EntityKindComponent, Position};
-use azalea::local_player::WorldHolder;
 use azalea::packet::game::ReceiveGamePacketEvent;
-use azalea_core::data_registry::DataRegistryWithKey;
 use azalea_core::entity_id::MinecraftEntityId;
-use azalea_core::sound::CustomSound;
 use azalea_inventory::components::{BreakSound, EquipmentSlot};
 use azalea_protocol::packets::game::ClientboundGamePacket;
 use azalea_protocol::packets::game::c_game_event::EventType;
 use azalea_protocol::packets::game::c_sound::SoundSource;
-use azalea_registry::Holder;
-use azalea_registry::builtin::{EntityKind, SoundEvent};
-use azalea_registry::data::WorldClockKey;
-use azalea_registry::identifier::Identifier;
+use azalea_registry::builtin::EntityKind;
 
 use crate::audio::{self, SoundCategory};
+use crate::items::kinetic::{event_name, identifier_name};
 use crate::play::entity_feed::entity_event::{ARMORSTAND_WOBBLE, START_ATTACKING};
 use crate::play::entity_sounds::{self, Sound};
 
@@ -43,7 +36,6 @@ pub(crate) fn play_server_sounds(
     indexes: Query<&EntityIdIndex>,
     mobs: Query<Mob<'static>>,
     inventories: Query<&Inventory>,
-    holders: Query<&WorldHolder>,
 ) {
     for event in events.read() {
         match event.packet.as_ref() {
@@ -154,25 +146,6 @@ pub(crate) fn play_server_sounds(
                 let mob = entity.and_then(|e| mobs.get(e).ok());
                 if mob.is_some_and(|(_, kind, ..)| kind.0 == EntityKind::Illusioner) {
                     entity_sounds::hurt(p.entity_id.0);
-                }
-            }
-            ClientboundGamePacket::SetTime(p) => {
-                let Ok(holder) = holders.get(event.entity) else {
-                    continue;
-                };
-                let world = holder.shared.read();
-                let end = p
-                    .clock_updates
-                    .iter()
-                    .find(|(id, _)| id.key_owned(&world.registries) == Some(WorldClockKey::TheEnd));
-                if let Some((_, state)) = end {
-                    let ticks = state.total_ticks as i64;
-                    entity_sounds::set_end_clock(
-                        p.game_time as i64,
-                        ticks,
-                        state.partial_tick,
-                        state.rate,
-                    );
                 }
             }
             _ => {}
@@ -299,21 +272,6 @@ fn remote_break_sound(id: i32, slot: EquipmentSlot) -> &'static str {
         Some("shield") => "item.shield.break",
         Some("wolf_armor") => "item.wolf_armor.break",
         _ => "entity.item.break",
-    }
-}
-
-pub(crate) fn event_name(sound: &Holder<SoundEvent, CustomSound>) -> Cow<'_, str> {
-    match sound {
-        Holder::Reference(event) => crate::items::kinetic::sound_name(*event).into(),
-        Holder::Direct(custom) => identifier_name(&custom.sound_id),
-    }
-}
-
-fn identifier_name(id: &Identifier) -> Cow<'_, str> {
-    if id.namespace() == "minecraft" {
-        id.path().into()
-    } else {
-        format!("{}:{}", id.namespace(), id.path()).into()
     }
 }
 

@@ -14,11 +14,15 @@ pub fn register(registry: &mut Registry) {
 }
 
 fn texture(st: &EntityState) -> TexturePath {
-    match st.extras.variant_id {
-        1 => "entity/parrot/parrot_blue".into(),
-        2 => "entity/parrot/parrot_green".into(),
-        3 => "entity/parrot/parrot_yellow_blue".into(),
-        4 => "entity/parrot/parrot_grey".into(),
-        _ => "entity/parrot/parrot_red_blue".into(),
+    variant_texture(i64::from(st.extras.variant_id)).into()
+}
+
+pub(crate) fn variant_texture(id: i64) -> &'static str {
+    match id.clamp(0, 4) {
+        1 => "entity/parrot/parrot_blue",
+        2 => "entity/parrot/parrot_green",
+        3 => "entity/parrot/parrot_yellow_blue",
+        4 => "entity/parrot/parrot_grey",
+        _ => "entity/parrot/parrot_red_blue",
     }
 }

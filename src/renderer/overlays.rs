@@ -3,7 +3,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::frame_view::FrameView;
-use crate::renderer::{ATLAS_COLS, RenderOrigin, TILE_PX};
+use crate::renderer::RenderOrigin;
 use crate::session::{BreakingBlock, TargetedBlock};
 
 #[derive(Resource)]
@@ -323,16 +323,9 @@ impl ShapeGrid {
     }
 }
 
-pub(super) fn crumbling_mesh(boxes: &[[f32; 6]], tile: u32, atlas_rows: u32) -> Mesh {
+pub(super) fn crumbling_mesh(boxes: &[[f32; 6]], uv: [f32; 4]) -> Mesh {
     const INFLATE: f32 = 0.002;
-    let col = tile % ATLAS_COLS;
-    let row = tile / ATLAS_COLS;
-    let tw = 1.0 / ATLAS_COLS as f32;
-    let th = 1.0 / atlas_rows as f32;
-    let iu = 0.02 / (ATLAS_COLS * TILE_PX) as f32;
-    let iv = 0.02 / (atlas_rows * TILE_PX) as f32;
-    let (u0, v0) = (col as f32 * tw + iu, row as f32 * th + iv);
-    let (u1, v1) = ((col + 1) as f32 * tw - iu, (row + 1) as f32 * th - iv);
+    let [u0, v0, u1, v1] = uv;
     let project = |f: usize, p: [f32; 3]| -> [f32; 2] {
         let [x, y, z] = p.map(|c| c.clamp(0.0, 1.0));
         let [u, v] = match f {
@@ -463,11 +456,11 @@ pub(super) fn update_break_overlay(
         let Some(tile) = blocks.sprites().tile(STAGE_TEX[b.stage.min(9) as usize]) else {
             continue;
         };
-        let mesh = crumbling_mesh(&b.boxes, tile, blocks.sprites().rows());
+        let mesh = crumbling_mesh(&b.boxes, blocks.sprites().uv_rect(tile));
         let translation = origin.block_to_render(b.pos);
         match overlay.pool.get(used).cloned() {
             Some((entity, handle)) => {
-                if let Some(slot) = meshes.get_mut(&handle) {
+                if let Some(mut slot) = meshes.get_mut(&handle) {
                     *slot = mesh;
                 }
                 if let Ok((mut transform, mut visibility)) = targets.get_mut(entity) {
@@ -529,7 +522,7 @@ pub(super) fn update_block_outline(
     match &target {
         Some(t) => {
             let shape_changed = outline.shown.as_ref().map(|s| &s.boxes) != Some(&t.boxes);
-            if shape_changed && let Some(mesh) = meshes.get_mut(&outline.mesh) {
+            if shape_changed && let Some(mut mesh) = meshes.get_mut(&outline.mesh) {
                 *mesh = outline_mesh(&t.boxes);
             }
             transform.translation = origin.block_to_render(t.pos);
@@ -685,7 +678,7 @@ pub(super) fn update_esp(
     if frame.boxes.is_empty() {
         *visibility = Visibility::Hidden;
     } else {
-        if let Some(mesh) = meshes.get_mut(&overlay.mesh) {
+        if let Some(mut mesh) = meshes.get_mut(&overlay.mesh) {
             *mesh = esp_mesh(&frame, *origin);
         }
         *visibility = Visibility::Visible;
@@ -812,7 +805,7 @@ pub(super) fn update_world_draw(
                 Visibility::Hidden
             };
         }
-        if any && let Some(m) = meshes.get_mut(&mesh) {
+        if any && let Some(mut m) = meshes.get_mut(&mesh) {
             *m = world_draw_mesh(nodes, through, *origin);
         }
     }
@@ -849,7 +842,7 @@ pub(super) fn update_chunk_borders(
     match key {
         Some((cx, cz, sec_y0, dim)) => {
             let shape_changed = overlay.shown.map(|(_, _, sy, d)| (sy, d)) != Some((sec_y0, dim));
-            if shape_changed && let Some(mesh) = meshes.get_mut(&overlay.mesh) {
+            if shape_changed && let Some(mut mesh) = meshes.get_mut(&overlay.mesh) {
                 let (ymin, ymax) = dim.y_range();
                 *mesh = chunk_border_mesh(ymin as f32, ymax as f32, sec_y0 as f32);
             }

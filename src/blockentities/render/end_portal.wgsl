@@ -1,5 +1,8 @@
 #import bevy_pbr::mesh_functions
-#import bevy_pbr::mesh_view_bindings::{view, fog}
+#import bevy_pbr::mesh_view_bindings::view
+#ifdef DISTANCE_FOG
+#import bevy_pbr::mesh_view_bindings::fog
+#endif
 #import bevy_pbr::view_transformations::position_world_to_clip
 
 #ifdef TONEMAP_IN_SHADER
@@ -109,6 +112,7 @@ fn vanilla_fog_ramp(distance: f32, start: f32, end: f32) -> f32 {
     return (distance - start) / (end - start);
 }
 
+#ifdef DISTANCE_FOG
 fn vanilla_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
     let spherical = length(rel);
     let cylindrical = max(length(rel.xz), abs(rel.y));
@@ -120,6 +124,7 @@ fn vanilla_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
     let mixed = mix(srgb_encode(color), srgb_encode(fog.base_color.rgb), value * fog.base_color.a);
     return srgb_decode(mixed);
 }
+#endif
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -130,9 +135,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         color += sample_proj(portal_texture, portal_sampler, coord) * COLORS[i];
     }
     var rgb = srgb_decode(color);
+#ifdef DISTANCE_FOG
     if fog.mode != 0u {
         rgb = vanilla_fog(rgb, in.world_position - view.world_position);
     }
+#endif
     var out = vec4(rgb, 1.0);
 #ifdef TONEMAP_IN_SHADER
 #ifndef TONEMAP_METHOD_NONE

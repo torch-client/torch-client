@@ -5,8 +5,6 @@ use azalea::block::BlockState;
 
 use crate::modules::list::{BitList, Built, Entry, Preset};
 
-pub use crate::modules::list::NO_ROW;
-
 struct Tint {
     name: &'static str,
     color: u32,
@@ -141,7 +139,7 @@ fn storage_color(name: &str) -> u32 {
 
 const FALLBACK: u32 = 0xC8_C8_C8;
 
-fn color_of(name: &str) -> u32 {
+pub(in crate::modules) fn color_of(name: &str) -> u32 {
     if let Some(p) = ORE_PRESETS.iter().chain(TINTS).find(|p| p.name == name) {
         p.color
     } else if is_storage(name) {
@@ -151,9 +149,9 @@ fn color_of(name: &str) -> u32 {
     }
 }
 
-const PRESETS: &[Preset] = &[Preset::Defaults, Preset::Clear];
+pub(in crate::modules) const PRESETS: &[Preset] = &[Preset::Defaults, Preset::Clear];
 
-fn id_of(state: BlockState) -> &'static str {
+pub(in crate::modules) fn id_of(state: BlockState) -> &'static str {
     const PREFIX: usize = "minecraft:".len();
     &state.as_block_kind().to_str()[PREFIX..]
 }

@@ -157,13 +157,15 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     #[cfg(all(feature = "mobile_ui", target_arch = "wasm32"))]
     {
         const W: f32 = 90.0;
-        let label = if crate::platform::fullscreen::is_fullscreen() {
-            "Exit Fullscreen"
-        } else {
-            "Fullscreen"
-        };
-        if Button::new(ctx.vw - W - 4.0, 4.0, W, WIDGET_HEIGHT, label).draw(p, ctx) {
-            crate::platform::fullscreen::toggle();
+        if crate::platform::fullscreen::available() {
+            let label = if crate::platform::fullscreen::is_fullscreen() {
+                "Exit Fullscreen"
+            } else {
+                "Fullscreen"
+            };
+            if Button::new(ctx.vw - W - 4.0, 4.0, W, WIDGET_HEIGHT, label).draw(p, ctx) {
+                crate::platform::fullscreen::toggle();
+            }
         }
     }
 

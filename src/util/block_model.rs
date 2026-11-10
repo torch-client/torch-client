@@ -82,7 +82,7 @@ pub fn block_visual(state: azalea::block::BlockState) -> RenderedBlock {
 }
 
 pub fn block_visual_in(state: azalea::block::BlockState, blocks: &Blocks) -> RenderedBlock {
-    let tex = |name: &str| blocks.sprites().tile(name).unwrap_or(0);
+    let tex = |name: &str| blocks.sprites().sprite(name).unwrap_or_default();
     let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
     let name = block.id();
     let props = block.property_map();
@@ -122,7 +122,10 @@ pub fn block_visual_in(state: azalea::block::BlockState, blocks: &Blocks) -> Ren
 
     #[cfg(feature = "builtin_shaders")]
     let sways = |ambient_occlusion: bool| -> bool {
-        !ambient_occlusion && !NON_SWAYING_CUTOUTS.contains(&name) && !name.ends_with("_pane")
+        !ambient_occlusion
+            && !NON_SWAYING_CUTOUTS.contains(&name)
+            && !name.ends_with("_pane")
+            && !name.ends_with("_sign")
     };
 
     if matches!(name, "air" | "cave_air" | "void_air") {

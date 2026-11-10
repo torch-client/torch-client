@@ -124,18 +124,42 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
         );
     }
 
-    let seconds = st.age_ticks / 20.0;
-    let idle = &copper_golem_anim::COPPER_GOLEM_IDLE;
-    keyframe::apply(idle, model, parts, seconds % idle.length_seconds, 1.0);
-
-    let interaction = match st.extras.copper_golem_state {
-        1 => Some(&copper_golem_anim::COPPER_GOLEM_CHEST_INTERACTION_NOITEM_GET),
-        2 => Some(&copper_golem_anim::COPPER_GOLEM_CHEST_INTERACTION_NOITEM_NOGET),
-        3 => Some(&copper_golem_anim::COPPER_GOLEM_CHEST_INTERACTION_ITEM_DROP),
-        4 => Some(&copper_golem_anim::COPPER_GOLEM_CHEST_INTERACTION_ITEM_NODROP),
-        _ => None,
-    };
-    if let Some(animation) = interaction {
-        keyframe::apply(animation, model, parts, seconds, 1.0);
-    }
+    use crate::entities::state::anim_slot::copper_golem as slot;
+    let states = &st.extras.anim;
+    let age = st.age_ticks;
+    keyframe::apply_state(
+        &copper_golem_anim::COPPER_GOLEM_IDLE,
+        model,
+        parts,
+        states[slot::IDLE],
+        age,
+    );
+    keyframe::apply_state(
+        &copper_golem_anim::COPPER_GOLEM_CHEST_INTERACTION_NOITEM_GET,
+        model,
+        parts,
+        states[slot::INTERACTION_GET_ITEM],
+        age,
+    );
+    keyframe::apply_state(
+        &copper_golem_anim::COPPER_GOLEM_CHEST_INTERACTION_NOITEM_NOGET,
+        model,
+        parts,
+        states[slot::INTERACTION_GET_NO_ITEM],
+        age,
+    );
+    keyframe::apply_state(
+        &copper_golem_anim::COPPER_GOLEM_CHEST_INTERACTION_ITEM_DROP,
+        model,
+        parts,
+        states[slot::INTERACTION_DROP_ITEM],
+        age,
+    );
+    keyframe::apply_state(
+        &copper_golem_anim::COPPER_GOLEM_CHEST_INTERACTION_ITEM_NODROP,
+        model,
+        parts,
+        states[slot::INTERACTION_DROP_NO_ITEM],
+        age,
+    );
 }

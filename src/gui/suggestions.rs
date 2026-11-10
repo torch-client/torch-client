@@ -12,8 +12,8 @@ pub const SUGGESTION_LINE_HEIGHT: f32 = 12.0;
 #[cfg(feature = "mobile_ui")]
 const SUGGESTION_CHIP_PAD: f32 = 4.0;
 const SUGGESTION_SELECTED: u32 = 0xFFFF00;
-const SUGGESTION_UNSELECTED: u32 = 0xAAAAAA;
-const USAGE_COLOR: u32 = 0xAAAAAA;
+const SUGGESTION_UNSELECTED: u32 = crate::text::GRAY;
+const USAGE_COLOR: u32 = crate::text::GRAY;
 pub const GHOST_COLOR: u32 = 0x808080;
 
 pub struct List {
@@ -27,6 +27,7 @@ pub struct List {
     original: String,
     tab_cycles: bool,
     last_mouse: Option<(f32, f32)>,
+    #[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
     cols: Vec<f32>,
 }
 

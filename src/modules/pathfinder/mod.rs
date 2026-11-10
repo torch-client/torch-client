@@ -1,27 +1,43 @@
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering::Relaxed};
 use std::sync::{Mutex, PoisonError};
 
 use azalea::Client;
 use azalea::ecs::entity::Entity;
 use azalea::ecs::query::With;
 use azalea::entity::metadata::Player;
+use azalea::entity::{LookDirection, Physics};
 use azalea::pathfinder::goals::{BlockPosGoal, RadiusGoal};
-use azalea::pathfinder::{ExecutingPath, PathfinderClientExt, PathfinderOpts};
+use azalea::pathfinder::moves::{ExecutorIntent, MovesCtx, basic, uncommon};
+use azalea::pathfinder::positions::RelBlockPos;
+use azalea::pathfinder::{
+    ExecutingPath, PathfinderClientExt, PathfinderOpts, player_pos_to_block_pos,
+};
 use azalea::player::GameProfileComponent;
 use azalea::{BlockPos, Vec3};
 use uuid::Uuid;
 
-use crate::modules::chat_math::{GREEN, RED, show_local_colored};
+use super::sent::{Look, keys_toward, look_at};
+use super::{MS_PER_TICK, turn};
+use crate::modules::chat_math::{GREEN, RED, say};
 use crate::renderer::world_draw::{self, Node};
 use crate::session::{
     MOVE_BACK, MOVE_DESCEND, MOVE_FORWARD, MOVE_JUMP, MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK,
-    SharedMutex,
+    MOVE_SPRINT, SharedMutex,
 };
+use crate::util::mth::wrap_degrees;
 
 const OWNER: &str = "pathfinder";
 
 const TAKEOVER: u8 =
     MOVE_FORWARD | MOVE_BACK | MOVE_LEFT | MOVE_RIGHT | MOVE_JUMP | MOVE_SNEAK | MOVE_DESCEND;
+
+const TURN_RATE: f32 = 360.0;
+
+const WALK_ERR: f32 = 45.0;
+
+const NEAR_POINT: f64 = 0.3;
+
+const TICK: f32 = MS_PER_TICK / 1000.0;
 
 const START_GRACE: u32 = 5;
 
@@ -87,6 +103,24 @@ static GOING: AtomicBool = AtomicBool::new(false);
 static IDLE: AtomicBool = AtomicBool::new(false);
 
 static JUST_STOPPED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Travel {
+    Idle,
+    Going,
+    Arrived,
+    Failed,
+}
+
+impl Travel {
+    const ALL: [Travel; 4] = [Travel::Idle, Travel::Going, Travel::Arrived, Travel::Failed];
+}
+
+static TRAVEL: AtomicU8 = AtomicU8::new(0);
+
+fn set_travel(t: Travel) {
+    TRAVEL.store(t as u8, Relaxed);
+}
 
 enum Target {
     Block(BlockPos),
@@ -206,6 +240,8 @@ struct Run {
     target: Option<Target>,
     age: u32,
     drawn: Option<DrawKey>,
+    quiet: bool,
+    deferred: Option<bool>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -219,6 +255,8 @@ static RUN: Mutex<Run> = Mutex::new(Run {
     target: None,
     age: 0,
     drawn: None,
+    quiet: false,
+    deferred: None,
 });
 
 fn run() -> std::sync::MutexGuard<'static, Run> {
@@ -230,17 +268,98 @@ pub fn request(request: Request) {
     BUSY.store(true, Relaxed);
 }
 
-pub fn drives(bot: &Client, flags: u8) -> bool {
+pub fn drives(bot: &Client, hand_keys: u8) -> bool {
     if !GOING.load(Relaxed) {
         return false;
     }
-    if flags & TAKEOVER != 0 {
+    if hand_keys & TAKEOVER != 0 {
         bot.force_stop_pathfinding();
         GOING.store(false, Relaxed);
         JUST_STOPPED.store(true, Relaxed);
         return false;
     }
     !IDLE.load(Relaxed)
+}
+
+pub fn steer(bot: &Client) -> Option<(Look, u8)> {
+    let intent = bot
+        .component::<ExecutorIntent>()
+        .ok()
+        .map(|i| *i)
+        .unwrap_or_default();
+    let now = bot.component::<LookDirection>().ok().map(|l| Look {
+        yaw: l.y_rot(),
+        pitch: l.x_rot(),
+    })?;
+    let want = match (intent.look_target, bot.eye_position()) {
+        (Some(t), Ok(eye)) => {
+            let w = look_at([eye.x, eye.y, eye.z], [t.x, t.y, t.z]);
+            let (dx, dz) = (t.x - eye.x, t.z - eye.z);
+            Some(if dx * dx + dz * dz < NEAR_POINT * NEAR_POINT {
+                Look { yaw: now.yaw, ..w }
+            } else {
+                w
+            })
+        }
+        _ => None,
+    };
+    let next = want.map_or(now, |w| Look {
+        yaw: now.yaw + turn::step(wrap_degrees(w.yaw - now.yaw), TURN_RATE, TICK),
+        pitch: (now.pitch + turn::step(w.pitch - now.pitch, TURN_RATE, TICK)).clamp(-90.0, 90.0),
+    });
+
+    let facing = want.is_none_or(|w| wrap_degrees(w.yaw - next.yaw).abs() <= WALK_ERR);
+    let mut keys = 0;
+    if facing {
+        if let Some((dx, dz)) = intent.world_dir {
+            keys |= keys_toward(dx, dz, next.yaw).unwrap_or(0);
+        }
+        if intent.sprint {
+            keys |= MOVE_SPRINT;
+        }
+    }
+    if intent.jump && (facing || bot.component::<Physics>().is_ok_and(|p| p.is_in_water())) {
+        keys |= MOVE_JUMP;
+    }
+    if intent.sneak {
+        keys |= MOVE_SNEAK;
+    }
+    Some((next, keys))
+}
+
+pub fn goto_quiet(bot: &Client, goal: BlockPos, parkour: bool) {
+    let wait = JUST_STOPPED.load(Relaxed);
+    if !wait {
+        bot.start_goto_with_opts(BlockPosGoal(goal), opts_for(parkour));
+    }
+    begin(Target::Block(goal), true);
+    if wait {
+        run().deferred = Some(parkour);
+    }
+    draw(goal, goal, &[]);
+}
+
+pub fn user_route() -> bool {
+    let r = run();
+    r.target.is_some() && !r.quiet
+}
+
+pub fn travel_status() -> Travel {
+    Travel::ALL[TRAVEL.load(Relaxed) as usize]
+}
+
+pub fn cancel_quiet(bot: &Client) {
+    let quiet = {
+        let r = run();
+        r.quiet && r.target.is_some()
+    };
+    if quiet {
+        bot.force_stop_pathfinding();
+        end();
+        JUST_STOPPED.store(true, Relaxed);
+        BUSY.store(true, Relaxed);
+    }
+    set_travel(Travel::Idle);
 }
 
 pub fn reset() {
@@ -252,12 +371,9 @@ pub fn reset() {
     IDLE.store(false, Relaxed);
     JUST_STOPPED.store(false, Relaxed);
     BUSY.store(false, Relaxed);
+    set_travel(Travel::Idle);
     *run() = Run::default();
     world_draw::clear(OWNER);
-}
-
-fn say(shared: &SharedMutex, text: &str, color: u32) {
-    show_local_colored(&mut shared.lock().unwrap().session, text, color);
 }
 
 fn following() -> Option<String> {
@@ -279,6 +395,19 @@ fn opts() -> PathfinderOpts {
             .yield_fn(web_yield)
     };
     opts
+}
+
+fn opts_for(parkour: bool) -> PathfinderOpts {
+    if parkour {
+        opts()
+    } else {
+        opts().successors_fn(no_parkour)
+    }
+}
+
+fn no_parkour(ctx: &mut MovesCtx, node: RelBlockPos) {
+    basic::basic_move(ctx, node);
+    uncommon::uncommon_move(ctx, node);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -305,9 +434,13 @@ pub fn tick(bot: &Client, shared: &SharedMutex) {
     }
     let Ok(feet) = bot.position() else {
         let lost = following();
+        let quiet = travel_status() == Travel::Going;
         reset();
+        if quiet {
+            set_travel(Travel::Failed);
+        }
         if let Some(name) = lost {
-            say(shared, &format!("Lost {name}"), RED);
+            say(shared, RED, &format!("Lost {name}"));
         }
         return;
     };
@@ -333,6 +466,18 @@ pub fn tick(bot: &Client, shared: &SharedMutex) {
         && !start(bot, shared, req, feet)
     {
         return;
+    }
+
+    let deferred = {
+        let mut r = run();
+        let parkour = r.deferred.take();
+        match (parkour, &r.target) {
+            (Some(parkour), Some(Target::Block(goal))) => Some((*goal, parkour)),
+            _ => None,
+        }
+    };
+    if let Some((goal, parkour)) = deferred {
+        bot.start_goto_with_opts(BlockPosGoal(goal), opts_for(parkour));
     }
 
     let target = {
@@ -366,7 +511,7 @@ fn start(bot: &Client, shared: &SharedMutex, req: Request, feet: Vec3) -> bool {
     let was = following();
     let stopped = |shared: &SharedMutex| {
         if let Some(name) = &was {
-            say(shared, &format!("Stopped following {name}"), GREEN);
+            say(shared, GREEN, &format!("Stopped following {name}"));
         }
     };
     match req {
@@ -375,7 +520,7 @@ fn start(bot: &Client, shared: &SharedMutex, req: Request, feet: Vec3) -> bool {
             finish(shared, None);
             match &was {
                 Some(_) => stopped(shared),
-                None => say(shared, "Stopped", GREEN),
+                None => say(shared, GREEN, "Stopped"),
             }
             false
         }
@@ -391,13 +536,13 @@ fn start(bot: &Client, shared: &SharedMutex, req: Request, feet: Vec3) -> bool {
                 at[2].resolve(here[2]),
             );
             bot.start_goto_with_opts(BlockPosGoal(goal), opts());
-            begin(Target::Block(goal));
+            begin(Target::Block(goal), false);
             draw(goal, goal, &[]);
             stopped(shared);
             say(
                 shared,
-                &format!("Going to {} {} {}", goal.x, goal.y, goal.z),
                 GREEN,
+                &format!("Going to {} {} {}", goal.x, goal.y, goal.z),
             );
             true
         }
@@ -408,7 +553,7 @@ fn start(bot: &Client, shared: &SharedMutex, req: Request, feet: Vec3) -> bool {
                 stopped(shared);
                 return false;
             }
-            say(shared, "Follow who? Add a player name", RED);
+            say(shared, RED, "Follow who? Add a player name");
             keep_or_finish(shared)
         }
         Request::Follow(Some(name)) => {
@@ -424,25 +569,23 @@ fn start(bot: &Client, shared: &SharedMutex, req: Request, feet: Vec3) -> bool {
                 Ok((uuid, name)) => {
                     let same = matches!(&run().target, Some(Target::Player(f)) if f.uuid == uuid);
                     if same {
-                        say(shared, &format!("Already following {name}"), GREEN);
+                        say(shared, GREEN, &format!("Already following {name}"));
                         return true;
                     }
                     let replacing = GOING.load(Relaxed);
                     if replacing {
                         bot.force_stop_pathfinding();
                     }
-                    begin(Target::Player(Follow::new(
-                        uuid,
-                        name.clone(),
-                        feet,
-                        replacing,
-                    )));
+                    begin(
+                        Target::Player(Follow::new(uuid, name.clone(), feet, replacing)),
+                        false,
+                    );
                     let text = if was.is_some() {
                         format!("Following {name} now")
                     } else {
                         format!("Following {name}")
                     };
-                    say(shared, &text, GREEN);
+                    say(shared, GREEN, &text);
                     true
                 }
                 Err(why) => {
@@ -450,7 +593,7 @@ fn start(bot: &Client, shared: &SharedMutex, req: Request, feet: Vec3) -> bool {
                         Some(old) => format!("{why}, stopped following {old}"),
                         None => why,
                     };
-                    say(shared, &text, RED);
+                    say(shared, RED, &text);
                     if was.is_some() {
                         bot.force_stop_pathfinding();
                         finish(shared, None);
@@ -471,12 +614,21 @@ fn keep_or_finish(shared: &SharedMutex) -> bool {
     false
 }
 
-fn begin(target: Target) {
-    *run() = Run {
-        target: Some(target),
-        age: 0,
-        drawn: None,
-    };
+fn begin(target: Target, quiet: bool) {
+    {
+        let mut r = run();
+        if r.quiet && r.target.is_some() && travel_status() == Travel::Going {
+            set_travel(Travel::Failed);
+        }
+        *r = Run {
+            target: Some(target),
+            quiet,
+            ..Run::default()
+        };
+    }
+    if quiet {
+        set_travel(Travel::Going);
+    }
     IDLE.store(false, Relaxed);
     GOING.store(true, Relaxed);
     BUSY.store(true, Relaxed);
@@ -490,6 +642,17 @@ fn tick_goto(
     age: u32,
 ) -> Option<BlockPos> {
     if age >= START_GRACE && bot.is_goto_target_reached() {
+        let quiet = run().quiet;
+        if quiet {
+            let there = player_pos_to_block_pos(feet) == goal;
+            set_travel(if there {
+                Travel::Arrived
+            } else {
+                Travel::Failed
+            });
+            finish(shared, None);
+            return None;
+        }
         let near = [
             goal.x as f64 + 0.5 - feet.x,
             goal.y as f64 - feet.y,
@@ -539,8 +702,8 @@ fn tick_follow(bot: &Client, shared: &SharedMutex, feet: Vec3) -> Option<BlockPo
     }
     if let (Some(note), Some(name)) = (step.note, name) {
         match note {
-            Note::Away => say(shared, &format!("{name}'s getting away"), RED),
-            Note::Stuck => say(shared, &format!("Can't find a way to {name}"), RED),
+            Note::Away => say(shared, RED, &format!("{name}'s getting away")),
+            Note::Stuck => say(shared, RED, &format!("Can't find a way to {name}")),
             Note::GiveUp => {
                 bot.force_stop_pathfinding();
                 finish(shared, Some((&format!("Gave up on {name}"), RED)));
@@ -552,6 +715,16 @@ fn tick_follow(bot: &Client, shared: &SharedMutex, feet: Vec3) -> Option<BlockPo
 }
 
 fn finish(shared: &SharedMutex, note: Option<(&str, u32)>) {
+    let quiet = run().quiet;
+    end();
+    if let Some((text, color)) = note
+        && !quiet
+    {
+        say(shared, color, text);
+    }
+}
+
+fn end() {
     GOING.store(false, Relaxed);
     IDLE.store(false, Relaxed);
     BUSY.store(false, Relaxed);
@@ -562,11 +735,16 @@ fn finish(shared: &SharedMutex, note: Option<(&str, u32)>) {
     {
         BUSY.store(true, Relaxed);
     }
-    *run() = Run::default();
-    world_draw::clear(OWNER);
-    if let Some((text, color)) = note {
-        say(shared, text, color);
+    let quiet = {
+        let mut r = run();
+        let quiet = r.quiet && r.target.is_some();
+        *r = Run::default();
+        quiet
+    };
+    if quiet && travel_status() == Travel::Going {
+        set_travel(Travel::Failed);
     }
+    world_draw::clear(OWNER);
 }
 
 fn draw_route(bot: &Client, goal: BlockPos) {
@@ -660,6 +838,13 @@ mod tests {
         assert_eq!(Coord::Rel(4).resolve(10), 14);
         assert_eq!(Coord::Abs(4).resolve(10), 4);
         assert_eq!(Coord::Rel(1).resolve(i32::MAX), i32::MAX);
+    }
+
+    #[test]
+    fn travel_status_round_trips() {
+        for t in Travel::ALL {
+            assert_eq!(Travel::ALL[t as usize], t);
+        }
     }
 
     fn at(x: f64) -> Vec3 {

@@ -6,7 +6,9 @@ use super::{
 };
 use bevy_asset::Handle;
 use bevy_derive::Deref;
-use bevy_ecs::{component::Component, entity::Entity, reflect::ReflectComponent};
+use bevy_ecs::{
+    component::Component, entity::Entity, reflect::ReflectComponent, template::FromTemplate,
+};
 use bevy_image::Image;
 use bevy_math::{ops, Dir3, FloatOrd, Mat4, Ray3d, Rect, URect, UVec2, Vec2, Vec3, Vec3A};
 use bevy_reflect::prelude::*;
@@ -97,7 +99,7 @@ impl Default for SubCameraView {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Reflect, Clone)]
 pub struct RenderTargetInfo {
     pub physical_size: UVec2,
     pub scale_factor: f32,
@@ -112,7 +114,7 @@ impl Default for RenderTargetInfo {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Reflect, Clone)]
 pub struct ComputedCameraValues {
     pub clip_from_view: Mat4,
     pub target_info: Option<RenderTargetInfo>,
@@ -219,7 +221,6 @@ pub struct Camera {
     pub viewport: Option<Viewport>,
     pub order: isize,
     pub is_active: bool,
-    #[reflect(ignore, clone)]
     pub computed: ComputedCameraValues,
     pub output_mode: CameraOutputMode,
     pub msaa_writeback: MsaaWriteback,
@@ -448,6 +449,11 @@ impl Camera {
     }
 }
 
+#[derive(Clone, Copy, Default, Component, Debug, Reflect)]
+#[reflect(Clone, Default, Component)]
+#[require(Transform)]
+pub struct ShadowLodOrigin;
+
 #[derive(Debug, Clone, Copy, Reflect)]
 pub enum CameraOutputMode {
     Write {
@@ -485,9 +491,7 @@ impl RenderTarget {
             None
         }
     }
-}
 
-impl RenderTarget {
     pub fn normalize(&self, primary_window: Option<Entity>) -> Option<NormalizedRenderTarget> {
         match self {
             RenderTarget::Window(window_ref) => window_ref
@@ -515,7 +519,20 @@ pub enum NormalizedRenderTarget {
     },
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Component, Reflect)]
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Component,
+    Reflect,
+    FromTemplate,
+)]
 #[reflect(Component, Default, Debug, PartialEq, Hash, Clone)]
 pub struct ManualTextureViewHandle(pub u32);
 

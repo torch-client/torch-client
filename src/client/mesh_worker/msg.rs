@@ -369,6 +369,8 @@ pub enum FromWorker {
     Sections {
         chunks: Vec<PendingSection>,
         edits: Vec<PendingSection>,
+        columns: Vec<(i32, i32)>,
+        lost: Vec<(i32, i32)>,
     },
     Light(LightDelta),
 }
@@ -383,7 +385,12 @@ pub fn failed(message: &str) -> Vec<u8> {
     w.finish()
 }
 
-pub fn sections(chunks: &[PendingSection], edits: &[PendingSection]) -> Vec<u8> {
+pub fn sections(
+    chunks: &[PendingSection],
+    edits: &[PendingSection],
+    columns: &[(i32, i32)],
+    lost: &[(i32, i32)],
+) -> Vec<u8> {
     let mut w = Writer::new(FROM_SECTIONS);
     for list in [chunks, edits] {
         w.u32(list.len() as u32);
@@ -394,6 +401,13 @@ pub fn sections(chunks: &[PendingSection], edits: &[PendingSection]) -> Vec<u8> 
             w.u64(sec.vis.bits());
             mesh_buf(&mut w, &sec.opaque);
             mesh_buf(&mut w, &sec.water);
+        }
+    }
+    for list in [columns, lost] {
+        w.u32(list.len() as u32);
+        for &(cx, cz) in list {
+            w.i32(cx);
+            w.i32(cz);
         }
     }
     w.finish()
@@ -540,7 +554,21 @@ impl FromWorker {
                     }
                 }
                 let [chunks, edits] = lists;
-                FromWorker::Sections { chunks, edits }
+                let mut keys: [Vec<(i32, i32)>; 2] = [Vec::new(), Vec::new()];
+                for list in &mut keys {
+                    let n = r.count()?;
+                    list.reserve(n);
+                    for _ in 0..n {
+                        list.push((r.i32()?, r.i32()?));
+                    }
+                }
+                let [columns, lost] = keys;
+                FromWorker::Sections {
+                    chunks,
+                    edits,
+                    columns,
+                    lost,
+                }
             }
             FROM_LIGHT => {
                 let lowest = r.i32()?;

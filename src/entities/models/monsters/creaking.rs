@@ -126,23 +126,28 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
         );
     }
 
-    if st.attack_time > 0.0 {
-        let animation = &creaking_anim::CREAKING_ATTACK;
-        keyframe::apply(
-            animation,
-            model,
-            parts,
-            st.attack_time * animation.length_seconds,
-            1.0,
-        );
-    }
-    if st.death_time > 0.0 || st.extras.tearing_down {
-        keyframe::apply(
-            &creaking_anim::CREAKING_DEATH,
-            model,
-            parts,
-            st.death_time / 20.0,
-            1.0,
-        );
-    }
+    use crate::entities::state::anim_slot::creaking as slot;
+    let states = &st.extras.anim;
+    let age = st.age_ticks;
+    keyframe::apply_state(
+        &creaking_anim::CREAKING_ATTACK,
+        model,
+        parts,
+        states[slot::ATTACK],
+        age,
+    );
+    keyframe::apply_state(
+        &creaking_anim::CREAKING_INVULNERABLE,
+        model,
+        parts,
+        states[slot::INVULNERABILITY],
+        age,
+    );
+    keyframe::apply_state(
+        &creaking_anim::CREAKING_DEATH,
+        model,
+        parts,
+        states[slot::DEATH],
+        age,
+    );
 }

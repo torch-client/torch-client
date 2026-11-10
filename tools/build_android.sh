@@ -3,31 +3,68 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+export LC_ALL=C
+export TZ=UTC
+
+[ "${UNSIGNED:-0}" = 1 ] && RELEASE=1
+RELEASE="${RELEASE:-0}"
+
+pin_mismatch() {
+  if [ "$RELEASE" = 1 ]; then
+    echo "error: $1 (a release build needs the pinned version)" >&2
+    exit 1
+  fi
+  echo "warning: $1; this APK will not match a release build" >&2
+}
+
 TARGET=aarch64-linux-android
 ABI=arm64-v8a
 PROFILE=android
 MIN_SDK=28
 TARGET_SDK=36
 LIB=libtorch_client.so
+APK="dist/$(python3 tools/artifact_name.py name android)"
 
 SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
 [ -d "$SDK" ] || { echo "no Android SDK at $SDK (set ANDROID_HOME)" >&2; exit 1; }
 
+NDK_VERSION=27.1.12297006
+BUILD_TOOLS_VERSION=36.0.0
+PLATFORM_VERSION=android-36
+JDK_MAJOR=21
+
 NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
 if [ -z "$NDK" ]; then
-  NDK=$(ls -d "$SDK"/ndk/*/ 2>/dev/null | sort -V | tail -1 || true)
+  if [ -d "$SDK/ndk/$NDK_VERSION" ]; then
+    NDK="$SDK/ndk/$NDK_VERSION"
+  else
+    NDK=$(ls -d "$SDK"/ndk/*/ 2>/dev/null | sort -V | tail -1 || true)
+  fi
 fi
 [ -n "$NDK" ] && [ -d "$NDK" ] || {
-  echo "no NDK under $SDK/ndk (install one in Android Studio, or set ANDROID_NDK_HOME)" >&2
+  echo "no NDK under $SDK/ndk (install $NDK_VERSION, or set ANDROID_NDK_HOME)" >&2
   exit 1
 }
+NDK="${NDK%/}"
+NDK_FOUND=$(sed -n 's/^Pkg.Revision *= *//p' "$NDK/source.properties" 2>/dev/null | tr -d '[:space:]')
+[ "$NDK_FOUND" = "$NDK_VERSION" ] || pin_mismatch "NDK at $NDK is ${NDK_FOUND:-unknown}, pinned $NDK_VERSION"
 TOOLS="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-BUILD_TOOLS=$(ls -d "$SDK"/build-tools/*/ 2>/dev/null | sort -V | tail -1 || true)
-[ -n "$BUILD_TOOLS" ] || { echo "no build-tools under $SDK/build-tools" >&2; exit 1; }
+BUILD_TOOLS="$SDK/build-tools/$BUILD_TOOLS_VERSION"
+if [ ! -d "$BUILD_TOOLS" ]; then
+  pin_mismatch "no build-tools $BUILD_TOOLS_VERSION under $SDK/build-tools"
+  BUILD_TOOLS=$(ls -d "$SDK"/build-tools/*/ 2>/dev/null | sort -V | tail -1 || true)
+  [ -n "$BUILD_TOOLS" ] || { echo "no build-tools under $SDK/build-tools" >&2; exit 1; }
+fi
+BUILD_TOOLS="${BUILD_TOOLS%/}"
 
-PLATFORM=$(ls -d "$SDK"/platforms/android-*/ 2>/dev/null | sort -V | tail -1 || true)
-[ -n "$PLATFORM" ] || { echo "no platform under $SDK/platforms" >&2; exit 1; }
+PLATFORM="$SDK/platforms/$PLATFORM_VERSION"
+if [ ! -d "$PLATFORM" ]; then
+  pin_mismatch "no $PLATFORM_VERSION under $SDK/platforms"
+  PLATFORM=$(ls -d "$SDK"/platforms/android-*/ 2>/dev/null | sort -V | tail -1 || true)
+  [ -n "$PLATFORM" ] || { echo "no platform under $SDK/platforms" >&2; exit 1; }
+fi
+PLATFORM="${PLATFORM%/}"
 
 PLATFORM_API=$(basename "$PLATFORM" | sed 's/^android-//; s/\..*//')
 if [[ "$PLATFORM_API" =~ ^[0-9]+$ ]] && [ "$PLATFORM_API" -lt 34 ]; then
@@ -35,14 +72,20 @@ if [[ "$PLATFORM_API" =~ ^[0-9]+$ ]] && [ "$PLATFORM_API" -lt 34 ]; then
   exit 1
 fi
 
-command -v javac >/dev/null || {
-  echo "no javac on PATH; install a JDK (17 or newer) for the connection service" >&2
+JAVAC=javac
+[ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/javac" ] && JAVAC="$JAVA_HOME/bin/javac"
+command -v "$JAVAC" >/dev/null || {
+  echo "no javac on PATH; install a JDK ($JDK_MAJOR) for the connection service" >&2
   exit 1
 }
+JDK_FOUND=$("$JAVAC" -version 2>&1 | sed -n 's/^javac \([0-9]*\).*/\1/p')
+[ "$JDK_FOUND" = "$JDK_MAJOR" ] || pin_mismatch "javac is ${JDK_FOUND:-unknown}, pinned $JDK_MAJOR (set JAVA_HOME)"
 
-echo "==> ndk         $NDK"
+echo "==> ndk         $NDK ($NDK_FOUND)"
 echo "==> build-tools $BUILD_TOOLS"
 echo "==> platform    $PLATFORM"
+echo "==> javac       $JAVAC ($JDK_FOUND)"
+[ "$RELEASE" = 1 ] && echo "==> release build (not debuggable)"
 
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLS/aarch64-linux-android$MIN_SDK-clang"
 export CC_aarch64_linux_android="$TOOLS/aarch64-linux-android$MIN_SDK-clang"
@@ -51,12 +94,21 @@ export AR_aarch64_linux_android="$TOOLS/llvm-ar"
 export RANLIB_aarch64_linux_android="$TOOLS/llvm-ranlib"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=-Wl,-z,max-page-size=16384"
 
-echo "==> cargo rustc --lib --crate-type cdylib --profile $PROFILE --target $TARGET $*"
-cargo rustc \
+export CARGO_PROFILE_ANDROID_TRIM_PATHS=all
+CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+C_PREFIX_MAP="-ffile-prefix-map=$PWD=. -ffile-prefix-map=$CARGO_HOME_DIR=/cargo -ffile-prefix-map=$NDK=/ndk"
+export CFLAGS_aarch64_linux_android="$C_PREFIX_MAP"
+export CXXFLAGS_aarch64_linux_android="$C_PREFIX_MAP"
+
+cargo_extra=()
+[ "$RELEASE" = 1 ] && cargo_extra+=(--locked)
+echo "==> cargo -Z trim-paths rustc --lib --crate-type cdylib --profile $PROFILE --target $TARGET --features mobile_ui ${cargo_extra[*]} $*"
+cargo -Z trim-paths rustc \
   --lib --crate-type cdylib \
   --profile "$PROFILE" \
   --target "$TARGET" \
   --features mobile_ui \
+  ${cargo_extra[@]+"${cargo_extra[@]}"} \
   "$@"
 
 SO="target/$TARGET/$PROFILE/$LIB"
@@ -93,21 +145,22 @@ fi
 
 echo "==> javac + d8"
 mkdir -p "$STAGE/classes"
-javac -nowarn --release 11 \
+"$JAVAC" -nowarn --release 11 \
   -classpath "$PLATFORM/android.jar" \
   -d "$STAGE/classes" \
   android/java/com/torchclient/game/*.java
+mapfile -t class_files < <(find "$STAGE/classes" -name '*.class' | sort)
 "$BUILD_TOOLS/d8" --release \
   --min-api "$MIN_SDK" \
   --lib "$PLATFORM/android.jar" \
   --output "$STAGE" \
-  $(find "$STAGE/classes" -name '*.class')
+  "${class_files[@]}"
 
 echo "==> aapt2 compile"
 "$BUILD_TOOLS/aapt2" compile --dir android/res -o "$STAGE/res.zip"
 
 link_args=()
-if [ "${UNSIGNED:-0}" != 1 ]; then
+if [ "$RELEASE" != 1 ]; then
   link_args+=(--debug-mode)
 fi
 
@@ -122,8 +175,14 @@ echo "==> aapt2 link"
   ${link_args[@]+"${link_args[@]}"}
 
 echo "==> zip"
-( cd "$STAGE" && zip -q -0 -X -r base.apk classes.dex assets )
-( cd "$STAGE" && zip -q -9 -X -r base.apk "lib/$ABI" )
+( cd "$STAGE"
+  stored=(classes.dex)
+  if [ -d assets ]; then mapfile -t -O 1 stored < <(find assets -type f | sort); fi
+  mapfile -t deflated < <(find "lib/$ABI" -type f | sort)
+  chmod 0644 "${stored[@]}" "${deflated[@]}"
+  touch -h -d '1981-01-01 00:00:00' "${stored[@]}" "${deflated[@]}"
+  zip -q -0 -X -D base.apk "${stored[@]}"
+  zip -q -9 -X -D base.apk "${deflated[@]}" )
 
 echo "==> zipalign"
 "$BUILD_TOOLS/zipalign" -P 16 -f 4 "$STAGE/base.apk" "$STAGE/aligned.apk"
@@ -146,15 +205,20 @@ KEYSTORE="${ANDROID_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
 KS_PASS_ARG=pass:android; [ -n "${ANDROID_KS_PASS:-}" ] && KS_PASS_ARG=env:ANDROID_KS_PASS
 KEY_PASS_ARG=pass:android; [ -n "${ANDROID_KEY_PASS:-}" ] && KEY_PASS_ARG=env:ANDROID_KEY_PASS
 "$BUILD_TOOLS/apksigner" sign \
+  --alignment-preserved \
   --ks "$KEYSTORE" \
   --ks-pass "$KS_PASS_ARG" \
   --key-pass "$KEY_PASS_ARG" \
   --ks-key-alias "${ANDROID_KEY_ALIAS:-androiddebugkey}" \
-  --out dist/torch-client.apk \
+  --out "$APK" \
   "$STAGE/aligned.apk"
 
 echo
-ls -lh dist/torch-client.apk
+ls -lh "$APK"
+sha256sum "$APK"
+if [ "$RELEASE" = 1 ]; then
+  "$BUILD_TOOLS/apksigner" verify --print-certs "$APK" | grep 'SHA-256' || true
+fi
 echo
-echo "install it:  adb install -r dist/torch-client.apk"
+echo "install it:  adb install -r $APK"
 echo "watch it:    adb logcat -s torch-client:V RustStdoutStderr:V"

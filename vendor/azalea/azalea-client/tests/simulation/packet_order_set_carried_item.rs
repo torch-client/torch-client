@@ -65,6 +65,7 @@ fn test_packet_order_set_carried_item() {
         entity: simulation.entity,
         position: pos,
         force: false,
+        continuing: false,
     });
 
     sent_packets.clear();

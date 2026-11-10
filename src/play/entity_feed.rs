@@ -37,22 +37,15 @@ pub(crate) mod entity_event {
     pub const START_RAM: u8 = 58;
     pub const END_RAM: u8 = 59;
     pub const TENDRILS_SHIVER: u8 = 61;
+    pub const SONIC_CHARGE: u8 = 62;
+    pub const ARMADILLO_PEEK: u8 = 64;
+    pub const SHAKE: u8 = 66;
+    pub const TNT_PRIME: u8 = 70;
 }
 
-pub(crate) const TICKS_REQUIRED_TO_FREEZE: i32 = 140;
+pub(crate) use azalea::physics::TICKS_REQUIRED_TO_FREEZE;
 
 pub(crate) const METADATA_INDEX_18: u8 = 18;
-
-fn within_render_range(
-    kind: azalea_registry::builtin::EntityKind,
-    distance_sq: f64,
-    view_scale: f64,
-) -> bool {
-    let dims = azalea::entity::dimensions::EntityDimensions::from(kind);
-    let size = f64::from(dims.width + dims.height + dims.width) / 3.0;
-    let range = size * 64.0 * view_scale;
-    distance_sq < range * range
-}
 
 fn entity_view_scale(bot: &Client) -> f64 {
     let render_distance = bot
@@ -192,13 +185,30 @@ fn resolve_variant(
         .map(|ident| ident.to_string())
 }
 
-fn block_id(state: azalea::block::BlockState) -> Option<String> {
-    let id = crate::blocks::block_name(state);
-    (id != "air").then(|| id.to_string())
+pub(crate) fn block_state_id(state: azalea::block::BlockState) -> Option<u32> {
+    (!state.is_air()).then(|| state.id() as u32)
 }
 
-fn block_state_id(state: azalea::block::BlockState) -> Option<u32> {
-    (!state.is_air()).then(|| state.id() as u32)
+fn default_display_block(
+    kind: azalea_registry::builtin::EntityKind,
+    has_fuel: bool,
+) -> Option<u32> {
+    use azalea::block::BlockTrait;
+    use azalea_registry::builtin::{BlockKind, EntityKind};
+    let block = match kind {
+        EntityKind::ChestMinecart => BlockKind::Chest,
+        EntityKind::FurnaceMinecart => BlockKind::Furnace,
+        EntityKind::TntMinecart => BlockKind::Tnt,
+        EntityKind::HopperMinecart => BlockKind::Hopper,
+        EntityKind::SpawnerMinecart => BlockKind::Spawner,
+        EntityKind::CommandBlockMinecart => BlockKind::CommandBlock,
+        _ => return None,
+    };
+    let mut block = Box::<dyn BlockTrait>::from(block);
+    if has_fuel {
+        let _ = block.set_property("lit", "true");
+    }
+    block_state_id(block.as_block_state())
 }
 
 fn entity_pose(pose: azalea::entity::Pose) -> entities::Pose {
@@ -630,7 +640,7 @@ pub(crate) fn collect_entities(
     let now = game_time();
 
     let feed_cap = max_fed_entities();
-    let view_scale = entity_view_scale(bot);
+    let ranges = crate::play::render_range::ranges(entity_view_scale(bot));
     let refs = {
         let _t = crate::diag::timed(crate::diag::Phase::Nearest);
         nearby_entities(bot, origin, feed_cap)
@@ -659,7 +669,18 @@ pub(crate) fn collect_entities(
         let Some(kind) = view.get_component::<EntityKindComponent>().map(|k| **k) else {
             continue;
         };
-        if !within_render_range(kind, pos.distance_squared_to(origin), view_scale) {
+        if !ranges.drawn(
+            kind,
+            pos.distance_squared_to(origin),
+            || {
+                view.get_component::<metadata::BeamTarget>()
+                    .is_some_and(|t| t.0.is_some())
+            },
+            || {
+                view.get_component::<metadata::AttachedToTarget>()
+                    .is_some_and(|t| t.0.0.is_some())
+            },
+        ) {
             continue;
         }
         seen.insert(id);
@@ -696,9 +717,11 @@ pub(crate) fn collect_entities(
             input.walk_halted = matches!(kind, EntityKind::Camel | EntityKind::CamelHusk)
                 && (input.pose != Pose::Standing || input.shared.dash);
             input.head_targets = [None; 2];
+            input.attack_target = None;
             input.leash_holder = leash_map.and_then(|m| m.get(&id).copied());
             let (animal, camel_pose, glow_uuid) = seat_and_glow(eref, kind, input.is_passenger);
             input.outline = glow_outline(glow_uuid);
+            input.camel_pose = camel_pose;
             let deferred = EntityDeferred {
                 variant: c.variant,
                 head_target_ids: c.head_target_ids,
@@ -741,6 +764,8 @@ pub(crate) fn collect_entities(
             shared.powered = flag::<metadata::IsPowered>(eref);
 
             shared.size = meta::<metadata::SlimeSize>(eref)
+                .or_else(|| meta::<metadata::MagmaCubeSize>(eref))
+                .or_else(|| meta::<metadata::SulfurCubeSize>(eref))
                 .or_else(|| meta::<metadata::PhantomSize>(eref))
                 .unwrap_or(1);
 
@@ -892,6 +917,7 @@ pub(crate) fn collect_entities(
 
             shared.charged = flag::<metadata::Charged>(eref);
             shared.moving = flag::<metadata::Moving>(eref);
+            shared.attack_target = meta::<metadata::AttackTarget>(eref).unwrap_or(0);
 
             shared.resting = flag::<metadata::Resting>(eref);
             shared.dancing = flag::<metadata::Dancing>(eref) || flag::<metadata::IsDancing>(eref);
@@ -930,6 +956,7 @@ pub(crate) fn collect_entities(
                         S::Idle => 0,
                         S::Rolling => 1,
                         S::Scared => 2,
+                        S::Unrolling => 3,
                     }
                 })
                 .unwrap_or(0);
@@ -963,7 +990,7 @@ pub(crate) fn collect_entities(
 
             shared.puff_state = meta::<metadata::PuffState>(eref).unwrap_or(0);
 
-            shared.carried_block = meta::<metadata::CarryState>(eref).and_then(block_id);
+            shared.carried_block = meta::<metadata::CarryState>(eref).and_then(block_state_id);
             shared.creepy = flag::<metadata::Creepy>(eref);
 
             shared.spell = meta::<metadata::SpellCasting>(eref).unwrap_or(0);
@@ -983,8 +1010,9 @@ pub(crate) fn collect_entities(
             shared.hurt_time = meta::<metadata::Hurt>(eref).unwrap_or(0) as f32;
             shared.hurt_dir = meta::<metadata::Hurtdir>(eref).unwrap_or(1) as f32;
             shared.damage = meta::<metadata::Damage>(eref).unwrap_or(0.0);
-            shared.display_block =
-                meta::<metadata::CustomDisplayBlock>(eref).and_then(block_state_id);
+            shared.display_block = meta::<metadata::CustomDisplayBlock>(eref)
+                .and_then(block_state_id)
+                .or_else(|| default_display_block(kind, flag::<metadata::Fuel>(eref)));
             shared.display_offset = meta::<metadata::DisplayOffset>(eref).unwrap_or(0);
         }
 
@@ -996,6 +1024,16 @@ pub(crate) fn collect_entities(
                     .flatten()
                     .and_then(|data| azalea::block::BlockState::try_from(data).ok())
                     .and_then(block_state_id)
+            })
+            .or_else(|| {
+                (kind == EntityKind::SulfurCube)
+                    .then_some(worn.body_block)
+                    .flatten()
+            })
+            .or_else(|| {
+                (kind == EntityKind::CopperGolem)
+                    .then_some(worn.saddle_block)
+                    .flatten()
             });
         shared.fuse = meta::<metadata::Fuse>(eref).unwrap_or(0);
 
@@ -1029,6 +1067,7 @@ pub(crate) fn collect_entities(
         shared.leggings = worn.leggings;
         shared.boots = worn.boots;
         shared.armor_foil = worn.armor_foil;
+        shared.armor_trim = worn.armor_trim;
         shared.body_armor = worn.body_armor;
         if living {
             shared.left_handed = flag::<metadata::LeftHanded>(eref);
@@ -1070,6 +1109,14 @@ pub(crate) fn collect_entities(
         if living {
             shared.using_item = flag::<metadata::AbstractLivingUsingItem>(eref);
             shared.use_offhand = flag::<metadata::AbstractLivingUsingOffhand>(eref);
+            let use_item = match (shared.using_item, shared.use_offhand) {
+                (false, _) => None,
+                (true, true) => Some(&shared.off_hand),
+                (true, false) => Some(&shared.main_hand),
+            };
+            shared.max_crossbow_charge = crate::items::kinetic::crossbow_charge_ticks(
+                use_item.map_or(0, |item| item.quick_charge),
+            );
             shared.aggressive = flag::<metadata::Aggressive>(eref);
             shared.charging = meta::<metadata::VexFlags>(eref).is_some_and(|f| f & 0x01 != 0);
         }
@@ -1099,8 +1146,17 @@ pub(crate) fn collect_entities(
         if kind == EntityKind::WitherSkull {
             shared.skull_dangerous = flag::<metadata::Dangerous>(eref);
         }
+        if kind == EntityKind::FireworkRocket {
+            shared.shot_at_angle = flag::<metadata::ShotAtAngle>(eref);
+        }
+        if kind == EntityKind::Trident {
+            shared.trident_foil = flag::<metadata::Foil>(eref);
+        }
         if kind == EntityKind::EndCrystal {
             shared.shows_bottom = meta::<metadata::ShowBottom>(eref).unwrap_or(true);
+            shared.beam_target = meta::<metadata::BeamTarget>(eref)
+                .flatten()
+                .map(|p| [p.x, p.y, p.z]);
         }
         if instance_of::<metadata::AbstractDisplay>(eref) {
             shared.brightness_override = meta::<metadata::BrightnessOverride>(eref).unwrap_or(-1);
@@ -1127,6 +1183,8 @@ pub(crate) fn collect_entities(
                     .map(quat)
                     .unwrap_or(d.right_rotation),
                 view_range: meta::<metadata::ViewRange>(eref).unwrap_or(d.view_range),
+                width: meta::<metadata::AbstractDisplayWidth>(eref).unwrap_or(d.width),
+                height: meta::<metadata::AbstractDisplayHeight>(eref).unwrap_or(d.height),
                 ..d
             };
             if instance_of::<metadata::TextDisplay>(eref) {
@@ -1174,7 +1232,12 @@ pub(crate) fn collect_entities(
             -1
         };
         let ignited = living && flag::<metadata::IsIgnited>(eref);
+        let max_fuse = meta::<metadata::MaxFuse>(eref).unwrap_or(-1);
         let playing_dead = living && flag::<metadata::PlayingDead>(eref);
+        let no_ai = matches!(
+            kind,
+            EntityKind::Rabbit | EntityKind::CopperGolem | EntityKind::EnderDragon
+        ) && flag::<metadata::NoAi>(eref);
 
         let (animal, camel_pose, glow_uuid) = seat_and_glow(eref, kind, riders.contains(&id));
         let input = TickInput {
@@ -1195,15 +1258,16 @@ pub(crate) fn collect_entities(
             is_invisible: flag::<metadata::Invisible>(eref),
             display_fire: flag::<metadata::OnFire>(eref),
             scale,
-            bounding_box_width: dimensions.0 * scale,
-            bounding_box_height: dimensions.1 * scale,
-            eye_height: dimensions.2 * scale,
+            bounding_box_width: dimensions.0,
+            bounding_box_height: dimensions.1,
+            eye_height: dimensions.2,
             bed_orientation: None,
             walk_factor: walk_factor(kind),
             walk_halted: halted,
             is_passenger: riders.contains(&id),
             swell_dir,
             ignited,
+            max_fuse,
             peek_target,
             paddling_left,
             paddling_right,
@@ -1213,11 +1277,16 @@ pub(crate) fn collect_entities(
             playing_dead,
             open_mouth,
             head_targets: [None; 2],
+            attack_target: None,
             shared: std::sync::Arc::new(shared),
             eating,
             driven: false,
             leash_holder: leash_map.and_then(|m| m.get(&id).copied()),
             outline: glow_outline(glow_uuid),
+            camel_pose,
+            no_ai,
+            dragon_egg_y: None,
+            crystals: None,
         };
 
         let deferred = EntityDeferred {
@@ -1240,7 +1309,7 @@ pub(crate) fn collect_entities(
                 None
             },
             block_pos: AzBlockPos::from(pos),
-            eye_pos: AzBlockPos::from(pos.up((dimensions.2 * scale) as f64)),
+            eye_pos: AzBlockPos::from(pos.up(dimensions.2 as f64)),
         };
         Pending {
             id,
@@ -1279,17 +1348,21 @@ pub(crate) fn collect_entities(
         }
     }
 
-    if pending.iter().any(|p| p.deferred.head_target_ids != [0, 0]) {
+    if pending
+        .iter()
+        .any(|p| p.deferred.head_target_ids != [0, 0] || p.input.shared.attack_target != 0)
+    {
         use azalea::ecs::query::With;
-        let mut eyes: HashMap<i32, [f64; 3]> = HashMap::with_capacity(pending.len());
+        use entities::state::TargetBody;
+        let mut bodies: HashMap<i32, TargetBody> = HashMap::with_capacity(pending.len());
         for Pending { id, input, .. } in &pending {
-            eyes.insert(
+            bodies.insert(
                 *id,
-                [
-                    input.pos[0],
-                    input.pos[1] + input.eye_height as f64,
-                    input.pos[2],
-                ],
+                TargetBody {
+                    feet: input.pos,
+                    height: input.bounding_box_height,
+                    eye_height: input.eye_height,
+                },
             );
         }
         let players = bot
@@ -1308,8 +1381,15 @@ pub(crate) fn collect_entities(
                 .map(|p| *p)
                 .unwrap_or_default();
             let scale = EntityAttributes::of(&attributes, pid).scale();
-            let eye = crate::session::player_dimensions(pose, scale).eye_height;
-            eyes.insert(pid, [pos.x, pos.y + eye as f64, pos.z]);
+            let dimensions = crate::session::player_dimensions(pose, scale);
+            bodies.insert(
+                pid,
+                TargetBody {
+                    feet: [pos.x, pos.y, pos.z],
+                    height: dimensions.height,
+                    eye_height: dimensions.eye_height,
+                },
+            );
         }
         drop(attributes);
         for Pending {
@@ -1320,8 +1400,33 @@ pub(crate) fn collect_entities(
         {
             for i in 0..2 {
                 let target = extra.head_target_ids[i];
-                input.head_targets[i] = (target != 0).then(|| eyes.get(&target).copied()).flatten();
+                input.head_targets[i] = (target != 0)
+                    .then(|| bodies.get(&target).map(TargetBody::eye))
+                    .flatten();
             }
+            let target = input.shared.attack_target;
+            input.attack_target = (target != 0)
+                .then(|| bodies.get(&target).copied())
+                .flatten();
+        }
+    }
+
+    if pending.iter().any(|p| p.kind == EntityKind::EnderDragon) {
+        let crystals: std::sync::Arc<[entities::feed::CrystalBody]> = pending
+            .iter()
+            .filter(|p| p.kind == EntityKind::EndCrystal)
+            .map(|p| entities::feed::CrystalBody {
+                id: p.id,
+                pos: p.input.pos,
+                width: p.input.bounding_box_width,
+                height: p.input.bounding_box_height,
+            })
+            .collect();
+        for p in pending
+            .iter_mut()
+            .filter(|p| p.kind == EntityKind::EnderDragon)
+        {
+            p.input.crystals = Some(crystals.clone());
         }
     }
 
@@ -1367,6 +1472,15 @@ pub(crate) fn collect_entities(
             }
             input.is_in_water = matches!(feet, Some(FluidKind::Water));
             input.is_in_lava = matches!(feet, Some(FluidKind::Lava));
+            if *kind == EntityKind::EnderDragon {
+                input.dragon_egg_y = level.and_then(|g| {
+                    crate::util::particles::column_height(
+                        g,
+                        [0, 0, 0],
+                        azalea_core::heightmap_kind::HeightmapKind::MotionBlockingNoLeaves,
+                    )
+                });
+            }
             let on_land = !matches!(feet, Some(FluidKind::Water));
             let under_water = match (crate::play::riding::Hull::of(*kind), level) {
                 (Some(_), Some(g)) => {

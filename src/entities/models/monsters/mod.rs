@@ -17,6 +17,7 @@ pub mod silverfish;
 pub mod slime;
 pub mod snow_golem;
 pub mod spider;
+pub mod sulfur_cube;
 pub mod warden;
 pub mod warden_anim;
 pub mod wither;

@@ -42,7 +42,7 @@ static SCAFFOLDING_STABLE_SHAPE: LazyLock<VoxelShape> = LazyLock::new(|| {
 static SCAFFOLDING_UNSTABLE_BOTTOM_SHAPE: LazyLock<VoxelShape> =
     LazyLock::new(|| box_shape(0.0, 0.0, 0.0, 1.0, 0.125, 1.0));
 
-fn scaffolding_shape(
+pub(crate) fn scaffolding_shape(
     context: &PowderSnowCollision,
     block_state: BlockState,
     pos: BlockPos,

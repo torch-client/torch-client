@@ -89,8 +89,17 @@ pub fn read_packets(ecs: &mut World) {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    const WEB_READ_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+    #[cfg(target_arch = "wasm32")]
+    let read_started = bevy_platform::time::Instant::now();
+
     for entity in entities_handling_packets {
         loop {
+            #[cfg(target_arch = "wasm32")]
+            if read_started.elapsed() >= WEB_READ_BUDGET {
+                break;
+            }
             let mut conn = conn_query.get_mut(ecs, entity).unwrap();
             let net_conn = conn.net_conn().unwrap();
             let read_res = net_conn.reader.try_read();

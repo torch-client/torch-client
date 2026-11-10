@@ -1,3 +1,7 @@
+#[cfg_attr(
+    not(any(target_arch = "wasm32", target_os = "android")),
+    allow(dead_code)
+)]
 pub(crate) fn show(text: &str, anchor: usize, cursor: usize) {
     #[cfg(target_arch = "wasm32")]
     web::show(text, anchor, cursor);
@@ -22,10 +26,16 @@ pub(crate) fn arm() {
     touch::arm();
 }
 
+#[cfg_attr(
+    not(any(target_arch = "wasm32", target_os = "android")),
+    allow(dead_code)
+)]
 pub(crate) fn claim() {
     arm();
     #[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
     touch::unprime();
+    #[cfg(all(target_arch = "wasm32", not(feature = "mobile_ui")))]
+    web::note_claim();
 }
 
 pub(crate) fn disarm() {
@@ -50,6 +60,8 @@ pub(crate) fn take_zone_tap() -> bool {
 pub(crate) fn settle() {
     #[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
     touch::settle();
+    #[cfg(all(target_arch = "wasm32", not(feature = "mobile_ui")))]
+    web::release_unclaimed();
 }
 
 pub(crate) fn dismiss() {
@@ -154,6 +166,7 @@ fn log_inset(px: f32) {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn poll() -> Option<(String, usize, usize)> {
     #[cfg(target_arch = "wasm32")]
     return web::poll();
@@ -175,6 +188,7 @@ pub(crate) fn take_tab() -> Option<bool> {
     None
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn take_backspace() -> bool {
     #[cfg(target_arch = "wasm32")]
     return web::take_backspace();
@@ -204,10 +218,12 @@ pub(crate) fn take_nav() -> Nav {
     Nav::default()
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn sync(text: &str, cursor: usize) {
     sync_selection(text, cursor, cursor);
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn sync_selection(text: &str, anchor: usize, cursor: usize) {
     #[cfg(target_arch = "wasm32")]
     web::sync_selection(text, anchor, cursor);
@@ -241,6 +257,34 @@ mod web {
     static PAGE_UP: AtomicBool = AtomicBool::new(false);
     static PAGE_DOWN: AtomicBool = AtomicBool::new(false);
     static F12: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(not(feature = "mobile_ui"))]
+    static CLAIMED: AtomicBool = AtomicBool::new(false);
+    #[cfg(not(feature = "mobile_ui"))]
+    static UNCLAIMED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    #[cfg(not(feature = "mobile_ui"))]
+    const UNCLAIMED_FRAMES: u8 = 2;
+
+    #[cfg(not(feature = "mobile_ui"))]
+    pub(super) fn note_claim() {
+        CLAIMED.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "mobile_ui"))]
+    pub(super) fn release_unclaimed() {
+        if CLAIMED.swap(false, Ordering::Relaxed) || !has_focus() {
+            UNCLAIMED.store(0, Ordering::Relaxed);
+            return;
+        }
+        if UNCLAIMED.fetch_add(1, Ordering::Relaxed) + 1 >= UNCLAIMED_FRAMES {
+            UNCLAIMED.store(0, Ordering::Relaxed);
+            crate::log_info!(
+                "input",
+                "no text field claimed the keyboard: returning it to the canvas"
+            );
+            hide();
+        }
+    }
 
     pub(super) fn install_devtools_passthrough() {
         let Some(window) = web_sys::window() else {

@@ -69,7 +69,7 @@ pub fn register_set(
     names: [&'static str; 4],
     layers: ArmorLayers,
     setup: fn(&BakedModel, &mut [PartState], &EntityState),
-    visible: [fn(&EntityState) -> bool; 4],
+    visible: ArmorVisibility,
 ) {
     const TEXTURES: [fn(&EntityState) -> TexturePath; 4] = [
         helmet_texture,
@@ -77,15 +77,33 @@ pub fn register_set(
         leggings_texture,
         boots_texture,
     ];
+    const TRIM_TEXTURES: [fn(&EntityState) -> TexturePath; 4] = [
+        trim_texture::<0>,
+        trim_texture::<1>,
+        trim_texture::<2>,
+        trim_texture::<3>,
+    ];
     const FOIL: [fn(&EntityState) -> bool; 4] =
         [helmet_foil, chestplate_foil, leggings_foil, boots_foil];
     for slot in 0..4 {
         registry.add_many(
             kinds,
             RenderSpec::new(names[slot], layers[slot], TEXTURES[slot], setup)
-                .with_visible(visible[slot])
+                .with_visible(visible.pieces[slot])
                 .with_armor_glint(FOIL[slot])
                 .ignoring_invisibility(),
+        );
+        registry.add_many(
+            kinds,
+            RenderSpec::new(
+                crate::util::intern(format!("{}_trim", names[slot])),
+                layers[slot],
+                TRIM_TEXTURES[slot],
+                setup,
+            )
+            .with_visible(visible.trims[slot])
+            .with_depth_bias(1)
+            .ignoring_invisibility(),
         );
     }
     super::elytra::register(registry, kinds);
@@ -157,6 +175,7 @@ static ASSETS: Reloadable<HashMap<String, EquipmentAsset>> = Reloadable::new(loa
 
 pub(crate) fn reset() {
     ASSETS.reset();
+    super::trim::reset();
 }
 
 fn equipment_assets() -> Arc<HashMap<String, EquipmentAsset>> {
@@ -339,6 +358,30 @@ fn boots_texture(st: &EntityState) -> TexturePath {
     humanoid_texture(st.extras.boots.as_deref()).into()
 }
 
+fn worn(st: &EntityState, slot: usize) -> Option<&'static str> {
+    match slot {
+        0 => st.extras.helmet(),
+        1 => st.extras.chestplate,
+        2 => st.extras.leggings,
+        _ => st.extras.boots,
+    }
+}
+
+pub(crate) fn slot_layer_type(slot: usize) -> &'static str {
+    if slot == 2 {
+        LAYER_HUMANOID_LEGGINGS
+    } else {
+        LAYER_HUMANOID
+    }
+}
+
+fn trim_texture<const SLOT: usize>(st: &EntityState) -> TexturePath {
+    match st.extras.armor_trim[SLOT] {
+        Some(trim) => super::trim::texture_name(trim, slot_layer_type(SLOT)).into(),
+        None => slot_texture(worn(st, SLOT), slot_layer_type(SLOT)).into(),
+    }
+}
+
 fn helmet_foil(st: &EntityState) -> bool {
     st.extras.armor_foil[0]
 }
@@ -355,17 +398,66 @@ fn boots_foil(st: &EntityState) -> bool {
     st.extras.armor_foil[3]
 }
 
-pub const FILLED: [fn(&EntityState) -> bool; 4] =
-    [has_helmet, has_chestplate, has_leggings, has_boots];
+type Visible = fn(&EntityState) -> bool;
 
-pub const ADULT: [fn(&EntityState) -> bool; 4] =
-    [adult_helmet, adult_chestplate, adult_leggings, adult_boots];
+pub struct ArmorVisibility {
+    pieces: [Visible; 4],
+    trims: [Visible; 4],
+}
 
-pub const BIG_STAND: [fn(&EntityState) -> bool; 4] =
-    [big_helmet, big_chestplate, big_leggings, big_boots];
-
-pub const SMALL_STAND: [fn(&EntityState) -> bool; 4] =
+const FILLED_PIECES: [Visible; 4] = [has_helmet, has_chestplate, has_leggings, has_boots];
+const ADULT_PIECES: [Visible; 4] = [adult_helmet, adult_chestplate, adult_leggings, adult_boots];
+const BIG_STAND_PIECES: [Visible; 4] = [big_helmet, big_chestplate, big_leggings, big_boots];
+const SMALL_STAND_PIECES: [Visible; 4] =
     [small_helmet, small_chestplate, small_leggings, small_boots];
+
+pub const FILLED: ArmorVisibility = ArmorVisibility {
+    pieces: FILLED_PIECES,
+    trims: [
+        filled_trim::<0>,
+        filled_trim::<1>,
+        filled_trim::<2>,
+        filled_trim::<3>,
+    ],
+};
+
+pub const ADULT: ArmorVisibility = ArmorVisibility {
+    pieces: ADULT_PIECES,
+    trims: [
+        adult_trim::<0>,
+        adult_trim::<1>,
+        adult_trim::<2>,
+        adult_trim::<3>,
+    ],
+};
+
+pub const BIG_STAND: ArmorVisibility = ArmorVisibility {
+    pieces: BIG_STAND_PIECES,
+    trims: [big_trim::<0>, big_trim::<1>, big_trim::<2>, big_trim::<3>],
+};
+
+pub const SMALL_STAND: ArmorVisibility = ArmorVisibility {
+    pieces: SMALL_STAND_PIECES,
+    trims: [
+        small_trim::<0>,
+        small_trim::<1>,
+        small_trim::<2>,
+        small_trim::<3>,
+    ],
+};
+
+fn filled_trim<const SLOT: usize>(st: &EntityState) -> bool {
+    st.extras.armor_trim[SLOT].is_some() && FILLED_PIECES[SLOT](st)
+}
+fn adult_trim<const SLOT: usize>(st: &EntityState) -> bool {
+    st.extras.armor_trim[SLOT].is_some() && ADULT_PIECES[SLOT](st)
+}
+fn big_trim<const SLOT: usize>(st: &EntityState) -> bool {
+    st.extras.armor_trim[SLOT].is_some() && BIG_STAND_PIECES[SLOT](st)
+}
+fn small_trim<const SLOT: usize>(st: &EntityState) -> bool {
+    st.extras.armor_trim[SLOT].is_some() && SMALL_STAND_PIECES[SLOT](st)
+}
 
 fn has_helmet(st: &EntityState) -> bool {
     has_layer(st.extras.helmet(), LAYER_HUMANOID)

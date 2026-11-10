@@ -114,6 +114,7 @@ pub enum ArmadilloStateKind {
     Idle,
     Rolling,
     Scared,
+    Unrolling,
 }
 
 impl AzBuf for OptionalUnsignedInt {

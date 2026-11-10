@@ -447,12 +447,12 @@ fn apply_team(s: &mut State, name: &str, method: &TeamMethod) {
     }
 }
 
-fn team_color(color: ChatFormatting) -> Option<u32> {
-    crate::text::named_color(color.name())
+fn team_color(color: Option<ChatFormatting>) -> Option<u32> {
+    color.and_then(|color| crate::text::named_color(color.name()))
 }
 
-fn team_slot(color: ChatFormatting) -> Option<usize> {
-    let ord = color as usize;
+fn team_slot(color: Option<ChatFormatting>) -> Option<usize> {
+    let ord = color? as usize;
     (ord < 16).then_some(TEAM_SLOT_BASE + ord)
 }
 
@@ -755,7 +755,7 @@ fn name_tag(s: &State, scoreboard_name: &str, base: Vec<Span>, viewer: &str) -> 
     }
 }
 
-fn is_upside_down_name(name: &str) -> bool {
+pub(crate) fn is_upside_down_name(name: &str) -> bool {
     name == "Dinnerbone" || name == "Grumm"
 }
 
@@ -801,7 +801,7 @@ mod tests {
             "red".into(),
             Team {
                 color: Some(0xFF5555),
-                slot: team_slot(ChatFormatting::Red),
+                slot: team_slot(Some(ChatFormatting::Red)),
                 prefix: vec![Span {
                     text: "[R] ".into(),
                     style: Style::colored(0xFF5555),
@@ -921,8 +921,8 @@ mod tests {
         s.teams.insert(
             "reds".to_string(),
             Team {
-                color: team_color(ChatFormatting::Red),
-                slot: team_slot(ChatFormatting::Red),
+                color: team_color(Some(ChatFormatting::Red)),
+                slot: team_slot(Some(ChatFormatting::Red)),
                 prefix: Vec::new(),
                 suffix: Vec::new(),
                 members: Vec::new(),
@@ -937,10 +937,13 @@ mod tests {
 
     #[test]
     fn an_uncoloured_team_has_no_slot() {
-        assert_eq!(team_slot(ChatFormatting::Reset), None);
-        assert_eq!(team_slot(ChatFormatting::Bold), None);
-        assert_eq!(team_slot(ChatFormatting::Black), Some(TEAM_SLOT_BASE));
-        assert_eq!(team_slot(ChatFormatting::White), Some(TEAM_SLOT_BASE + 15));
+        assert_eq!(team_slot(None), None);
+        assert_eq!(team_slot(Some(ChatFormatting::Bold)), None);
+        assert_eq!(team_slot(Some(ChatFormatting::Black)), Some(TEAM_SLOT_BASE));
+        assert_eq!(
+            team_slot(Some(ChatFormatting::White)),
+            Some(TEAM_SLOT_BASE + 15)
+        );
     }
 
     #[test]

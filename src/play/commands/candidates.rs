@@ -50,7 +50,7 @@ pub fn matches_sub_str(pattern: &str, input: &str) -> bool {
     }
 }
 
-const CHAT_FORMATTING_COLORS: [&str; 17] = [
+const TEAM_COLORS: [&str; 16] = [
     "black",
     "dark_blue",
     "dark_green",
@@ -67,7 +67,6 @@ const CHAT_FORMATTING_COLORS: [&str; 17] = [
     "light_purple",
     "yellow",
     "white",
-    "reset",
 ];
 
 fn display_slots() -> Vec<String> {
@@ -76,7 +75,7 @@ fn display_slots() -> Vec<String> {
         "sidebar".to_string(),
         "below_name".to_string(),
     ];
-    for color in &CHAT_FORMATTING_COLORS[..16] {
+    for color in &TEAM_COLORS {
         out.push(format!("sidebar.team.{color}"));
     }
     out
@@ -149,7 +148,7 @@ fn argument_candidates(
                 "ocean_floor",
             ],
         ),
-        BrigadierParser::Color => suggest(lower, CHAT_FORMATTING_COLORS),
+        BrigadierParser::TeamColor => suggest(lower, TEAM_COLORS),
         BrigadierParser::ScoreboardSlot => suggest(lower, display_slots()),
         BrigadierParser::Entity(_)
         | BrigadierParser::GameProfile

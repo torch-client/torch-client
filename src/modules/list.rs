@@ -170,6 +170,10 @@ impl BitList {
         self.table().labels.len()
     }
 
+    pub fn find(&self, label: &str) -> Option<usize> {
+        (0..self.count()).find(|&i| self.label(i) == label)
+    }
+
     pub fn label(&self, i: usize) -> &str {
         &self.table().labels[i]
     }
@@ -302,9 +306,11 @@ pub fn widest() -> f32 {
     ALL.iter().map(|l| l.width).fold(0.0, f32::max)
 }
 
-pub static ALL: [&BitList; 6] = [
+pub static ALL: [&BitList; 8] = [
     &super::esp::blocks::XRAY,
     &super::esp::blocks::ORES,
+    &super::seed_xray::ORES,
+    &super::seed_cracker::FINDERS,
     &super::esp::blocks::STORAGE,
     &super::esp::blocks::SCAFFOLD,
     &super::entities::LIST,

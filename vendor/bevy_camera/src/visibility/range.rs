@@ -7,7 +7,7 @@ use bevy_app::{App, Plugin, PostUpdate};
 use bevy_ecs::{
     component::Component,
     entity::{Entity, EntityHashMap},
-    query::With,
+    query::{Or, With, Without},
     reflect::ReflectComponent,
     resource::Resource,
     schedule::IntoScheduleConfigs as _,
@@ -18,8 +18,8 @@ use bevy_reflect::Reflect;
 use bevy_transform::components::GlobalTransform;
 use bevy_utils::Parallel;
 
-use super::{check_visibility, VisibilitySystems};
-use crate::{camera::Camera, primitives::Aabb};
+use super::{check_visibility_cpu_culling, VisibilitySystems};
+use crate::{camera::Camera, primitives::Aabb, visibility::NoCpuCulling, ShadowLodOrigin};
 
 pub struct VisibilityRangePlugin;
 
@@ -29,7 +29,7 @@ impl Plugin for VisibilityRangePlugin {
             PostUpdate,
             check_visibility_ranges
                 .in_set(VisibilitySystems::CheckVisibility)
-                .before(check_visibility),
+                .before(check_visibility_cpu_culling),
         );
     }
 }
@@ -108,18 +108,16 @@ impl VisibleEntityRanges {
         };
         (visibility_bitmask & (1 << view_index)) != 0
     }
-
-    #[inline]
-    pub fn entity_is_in_range_of_any_view(&self, entity: Entity) -> bool {
-        self.entities.contains_key(&entity)
-    }
 }
 
 pub fn check_visibility_ranges(
     mut visible_entity_ranges: ResMut<VisibleEntityRanges>,
-    view_query: Query<(Entity, &GlobalTransform), With<Camera>>,
+    view_query: Query<(Entity, &GlobalTransform), Or<(With<Camera>, With<ShadowLodOrigin>)>>,
     mut par_local: Local<Parallel<Vec<(Entity, u32)>>>,
-    entity_query: Query<(Entity, &GlobalTransform, Option<&Aabb>, &VisibilityRange)>,
+    entity_query: Query<
+        (Entity, &GlobalTransform, Option<&Aabb>, &VisibilityRange),
+        Without<NoCpuCulling>,
+    >,
 ) {
     visible_entity_ranges.clear();
 

@@ -252,6 +252,11 @@ pub(crate) fn get_brightness(level: f32) -> f32 {
     level / (4.0 - 3.0 * level)
 }
 
+pub(crate) fn level_brightness(dim: Dimension, level: i32) -> f32 {
+    let curved = get_brightness(level as f32 / 15.0);
+    crate::util::mth::lerp(dim.ambient_light(), curved, 1.0)
+}
+
 fn parabolic_mix_factor(level: f32) -> f32 {
     (2.0 * level - 1.0) * (2.0 * level - 1.0)
 }

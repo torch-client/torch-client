@@ -307,6 +307,15 @@ pub fn apply_weather(sky: &mut SkyState, rain: f32, thunder: f32) {
     }
 }
 
+const SKY_FLASH_COLOR: Argb = Argb(0xFFCC_CCFF);
+
+const SKY_FLASH_BLEND: f32 = 0.22;
+
+pub fn apply_sky_flash(sky: &mut SkyState) {
+    sky.sky_color = Argb::lerp(SKY_FLASH_BLEND, sky.sky_color, SKY_FLASH_COLOR);
+    sky.sky_light_factor = 1.0;
+}
+
 static RAIN_LEVEL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static THUNDER_LEVEL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -602,6 +611,7 @@ pub struct Environment {
     pub thunder: f32,
     pub render_distance: i32,
     pub rain_fog: RainFog,
+    pub sky_flash: bool,
 }
 
 impl Default for Environment {
@@ -618,11 +628,13 @@ impl Default for Environment {
             thunder: 0.0,
             render_distance: 8,
             rain_fog: RainFog::default(),
+            sky_flash: false,
         }
     }
 }
 
 impl Environment {
+    #[allow(clippy::too_many_arguments, reason = "one input per layer")]
     pub fn resolve(
         &mut self,
         dim: Dimension,
@@ -632,6 +644,7 @@ impl Environment {
         delta_ticks: f32,
         sky_light: impl FnOnce() -> f32,
         has_precipitation: bool,
+        sky_flash: bool,
     ) {
         let bases = Bases::for_dimension(dim);
 
@@ -660,6 +673,9 @@ impl Environment {
             (0.0, 0.0)
         };
         apply_weather(&mut sky, rain, thunder);
+        if sky_flash {
+            apply_sky_flash(&mut sky);
+        }
 
         self.rain_fog
             .advance(rain, delta_ticks, sky_light, has_precipitation);
@@ -691,5 +707,6 @@ impl Environment {
         self.rain = rain;
         self.thunder = thunder;
         self.render_distance = render_distance;
+        self.sky_flash = sky_flash;
     }
 }

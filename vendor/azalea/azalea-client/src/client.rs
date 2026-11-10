@@ -30,7 +30,7 @@ use crate::{
     connection::RawConnection,
     cookies::ServerCookies,
     interact::BlockStatePredictionHandler,
-    local_player::{Experience, Hunger, PermissionLevel, TabList, WorldHolder},
+    local_player::{Experience, Hunger, PermissionLevel, TabList, TabListResource, WorldHolder},
     mining,
     movement::LastSentLookDirection,
     player::retroactively_add_game_profile_component,
@@ -86,7 +86,7 @@ impl Plugin for AzaleaPlugin {
             ),
         )
         .init_resource::<Worlds>()
-        .init_resource::<TabList>();
+        .init_resource::<TabListResource>();
     }
 }
 
@@ -109,10 +109,10 @@ pub fn start_ecs_runner(
     }
 
     if !matches!(std::env::var("MC_EXEC").as_deref(), Ok("mt")) {
-        use bevy_ecs::schedule::{ExecutorKind, Schedules};
+        use bevy_ecs::schedule::{Schedules, SingleThreadedExecutor};
         let mut schedules = app.world_mut().resource_mut::<Schedules>();
         for (_, schedule) in schedules.iter_mut() {
-            schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+            schedule.set_executor(SingleThreadedExecutor::new());
         }
     }
 

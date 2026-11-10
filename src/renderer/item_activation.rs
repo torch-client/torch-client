@@ -121,6 +121,10 @@ fn sync_item_activation(
     let now = view.local.age_ticks;
     match &view.item_activation {
         None => state.running = None,
+        Some(activation) if view.no_render.has(crate::modules::no_render::Part::Totem) => {
+            state.seen = activation.serial;
+            state.running = None;
+        }
         Some(activation) if activation.serial != state.seen => {
             state.seen = activation.serial;
             let swing = [
@@ -181,7 +185,7 @@ fn sync_item_activation(
                     return;
                 };
                 mesh.0 = gpu.mesh.clone();
-                if let Some(material) = materials.get_mut(&nodes.material) {
+                if let Some(mut material) = materials.get_mut(&nodes.material) {
                     material.base.base_color_texture = Some(gpu.texture.clone());
                 }
             }

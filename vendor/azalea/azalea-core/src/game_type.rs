@@ -2,10 +2,9 @@ use std::io::{self, Cursor, Write};
 
 use azalea_buf::{AzBuf, AzBufVar, BufReadError};
 use azalea_chat::translatable_component::TranslatableComponent;
-use bevy_ecs::component::Component;
 use tracing::debug;
 
-#[cfg_attr(feature = "bevy_ecs", derive(Component))]
+#[cfg_attr(feature = "bevy_ecs", derive(bevy_ecs::component::Component))]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum GameMode {
     #[default]

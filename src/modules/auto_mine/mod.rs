@@ -7,9 +7,69 @@ use azalea::mining::MineBlockPos;
 use azalea_core::hit_result::BlockHitResult;
 use azalea_core::position::BlockPos;
 
-use super::registry::{Id, auto_mine as setting};
-use super::{Edge, MS_PER_TICK, Phase, Store, roll, store};
+use super::registry::{Id, auto_mine as setting, options};
+use super::{ButtonAction, Edge, MS_PER_TICK, Phase, Store, roll, store};
 use crate::session::{Gamemode, MineIntent, SharedMutex, SharedState};
+
+mod area;
+mod draw;
+pub mod hud;
+mod pick;
+
+pub use area::block_changed;
+pub use pick::gate as pick_gate;
+
+options! {
+    pub enum MineMode {
+        Corridor = "Corridor",
+        Area = "Area",
+    }
+}
+
+options! {
+    pub enum ReachMode {
+        Adjacent = "Adjacent",
+        All = "All in reach",
+        Wide = "3x2",
+    }
+}
+
+options! {
+    pub enum FluidRule {
+        Skip = "Skip",
+        Stop = "Stop",
+    }
+}
+
+options! {
+    pub enum InvFull {
+        Stop = "Stop",
+        Ignore = "Ignore",
+    }
+}
+
+options! {
+    pub enum LowHealth {
+        Ignore = "Ignore",
+        Disconnect = "Disconnect",
+    }
+}
+
+pub fn button(key: &str) -> ButtonAction {
+    if key != "define" {
+        return ButtonAction::None;
+    }
+    pick::arm();
+    store().set_enabled(Id::AutoMine, true);
+    ButtonAction::Close
+}
+
+pub fn reset() {
+    pick::cancel();
+    area::forget();
+    *RUN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
 
 const RELEASE: f64 = 0.15;
 
@@ -55,32 +115,89 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
         Phase::Off => return false,
         Phase::Stopped => {
             *RUN.lock().unwrap() = None;
+            area::stop_run(bot);
+            pick::cancel();
+            draw::clear();
             clear(shared);
             return false;
         }
-        Phase::Started => *RUN.lock().unwrap() = None,
+        Phase::Started => {
+            *RUN.lock().unwrap() = None;
+            area::stop_run(bot);
+        }
         Phase::Running => {}
     }
 
+    if low_health(bot, shared, s) {
+        return false;
+    }
+    if pick::active() {
+        pick::tick(bot, shared);
+        clear(shared);
+        return false;
+    }
+    match s.choice(setting::MODE) {
+        MineMode::Corridor => corridor(bot, shared, hit, s),
+        MineMode::Area => area::tick(bot, shared, hit, s),
+    }
+}
+
+fn gate(shared: &SharedMutex, s: &Store) -> Option<f32> {
+    let in_gui = s.flag(setting::IN_GUI);
+    let st = shared.lock().unwrap();
+    let blocked = !st.in_world
+        || (st.screen_open && !in_gui)
+        || st.session.dead
+        || st.session.gamemode == Gamemode::Spectator;
+    (!blocked).then_some(st.camera_yaw)
+}
+
+fn low_health(bot: &Client, shared: &SharedMutex, s: &Store) -> bool {
+    if s.choice(setting::LOW_HEALTH) != LowHealth::Disconnect {
+        return false;
+    }
+    let limit = s.num(setting::HEALTH);
+    let mut st = shared.lock().unwrap();
+    if !st.session.health_known || st.session.dead || st.session_ended || st.session.health >= limit
+    {
+        return false;
+    }
+    let text = format!(
+        "AutoMine: health {:.0} fell below {:.0}",
+        st.session.health, limit
+    );
+    st.end_session(
+        "Disconnected".to_string(),
+        Some(crate::text::parse_formatted(&text)),
+    );
+    st.disconnect_requested = true;
+    drop(st);
+    *RUN.lock().unwrap() = None;
+    area::stop_run(bot);
+    store().set_enabled(Id::AutoMine, false);
+    true
+}
+
+fn publish(shared: &SharedMutex, intent: MineIntent) {
+    let mut st = shared.lock().unwrap();
+    if let Some(aim) = intent.aim
+        && super::freecam::active()
+    {
+        super::turn::body_step(&mut st, aim, intent.turn);
+    }
+    st.session.auto_mine = Some(intent);
+}
+
+fn corridor(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>, s: &Store) -> bool {
     let Ok(pos) = bot.position() else {
         clear(shared);
         *RUN.lock().unwrap() = None;
         return false;
     };
-
-    let in_gui = s.flag(setting::IN_GUI);
-    let (blocked, yaw) = {
-        let st = shared.lock().unwrap();
-        let blocked = !st.in_world
-            || (st.screen_open && !in_gui)
-            || st.session.dead
-            || st.session.gamemode == Gamemode::Spectator;
-        (blocked, st.camera_yaw)
-    };
-    if blocked {
+    let Some(yaw) = gate(shared, s) else {
         clear(shared);
         return false;
-    }
+    };
 
     let now = crate::client::tracking::game_time();
     let mut guard = RUN.lock().unwrap();
@@ -169,7 +286,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
     }
 
     debug_assert!(!(attack && intent.forward));
-    shared.lock().unwrap().session.auto_mine = Some(intent);
+    publish(shared, intent);
     attack
 }
 
@@ -246,7 +363,7 @@ fn choose(bot: &Client, run: &Run, now: i64, s: &Store) -> Result<Stage, Halt> {
             Cell::Unbreakable => return Err(Halt::Unbreakable),
             Cell::Diggable => {}
         }
-        if s.flag(setting::HAZARDS) && exposes_fluid(bot, pos) {
+        if exposes_fluid(bot, pos) {
             return Err(Halt::Hazard);
         }
         let (lo, hi) = s.range(setting::TURN);

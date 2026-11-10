@@ -314,6 +314,7 @@ impl BeRegistry {
         self.specs.len() - 1
     }
 
+    #[cfg(test)]
     pub fn specs_for(&self, kind: BlockEntityKind) -> &[usize] {
         self.by_kind.get(&kind).map_or(&[], |entry| &entry.specs)
     }
@@ -866,8 +867,8 @@ fn sync_block_entities(
                         mesh: Some(mesh), ..
                     },
                 ) => {
-                    if let Some(mesh) = meshes.get_mut(mesh) {
-                        refresh(&st, mesh);
+                    if let Some(mut mesh) = meshes.get_mut(mesh) {
+                        refresh(&st, &mut mesh);
                     }
                 }
                 _ => {}
@@ -1051,6 +1052,7 @@ fn spawn_layer(
             let (root, node) = spawn_roots(commands, spec, st);
             let material = assets.material(spec, Some(image.clone()), levels, lit, materials);
             let handle = meshes.add(mesh);
+            #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_mut))]
             let mut spawned = commands.spawn((
                 Mesh3d(handle.clone()),
                 MeshMaterial3d(material.clone()),
@@ -1259,7 +1261,6 @@ mod tests {
             BlockEntityKind::StructureBlock,
             BlockEntityKind::TestInstanceBlock,
             BlockEntityKind::ShulkerBox,
-            BlockEntityKind::Bed,
             BlockEntityKind::Conduit,
             BlockEntityKind::Bell,
             BlockEntityKind::Campfire,

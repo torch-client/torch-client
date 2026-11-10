@@ -2,7 +2,9 @@ use azalea_registry::builtin::EntityKind;
 
 use super::living::{LivingCore, MAX_HEAD_ROTATION, SwimAmount};
 use super::physics::{Body, Level, Motion, RestMemo, Shape, Void};
-use super::state::{Direction, EntityState, Extras, ExtrasShared, Pose};
+use super::state::{
+    AnimationState, Direction, EntityState, Extras, ExtrasShared, Pose, TargetBody, anim_slot,
+};
 use crate::util::interp::Interpolation;
 use crate::util::javarandom::JavaRandom;
 use crate::util::mth::ease::in_out_sine as ease_in_out_sine;
@@ -49,6 +51,7 @@ pub struct TickInput {
     pub is_passenger: bool,
     pub swell_dir: i32,
     pub ignited: bool,
+    pub max_fuse: i32,
     pub peek_target: f32,
     pub paddling_left: bool,
     pub paddling_right: bool,
@@ -58,11 +61,24 @@ pub struct TickInput {
     pub playing_dead: bool,
     pub open_mouth: bool,
     pub head_targets: [Option<[f64; 3]>; 2],
+    pub attack_target: Option<TargetBody>,
     pub shared: std::sync::Arc<ExtrasShared>,
     pub eating: bool,
     pub driven: bool,
     pub leash_holder: Option<i32>,
     pub outline: u32,
+    pub camel_pose: (bool, i64),
+    pub no_ai: bool,
+    pub dragon_egg_y: Option<i32>,
+    pub crystals: Option<std::sync::Arc<[CrystalBody]>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CrystalBody {
+    pub id: i32,
+    pub pos: [f64; 3],
+    pub width: f32,
+    pub height: f32,
 }
 
 impl TickInput {
@@ -99,6 +115,7 @@ impl TickInput {
             is_passenger: false,
             swell_dir: -1,
             ignited: false,
+            max_fuse: -1,
             peek_target: 0.0,
             paddling_left: false,
             paddling_right: false,
@@ -108,11 +125,16 @@ impl TickInput {
             playing_dead: false,
             open_mouth: false,
             head_targets: [None; 2],
+            attack_target: None,
             shared: std::sync::Arc::new(ExtrasShared::default()),
             eating: false,
             driven: false,
             leash_holder: None,
             outline: 0,
+            camel_pose: (false, i64::MAX),
+            no_ai: false,
+            dragon_egg_y: None,
+            crystals: None,
         }
     }
 }
@@ -146,6 +168,16 @@ const MAX_SWELL: i32 = 30;
 
 const EAT_ANIMATION_TICKS: i32 = 40;
 
+const MINECART_TNT_FUSE: i32 = 80;
+
+pub(crate) fn guardian_attack_duration(kind: EntityKind) -> i32 {
+    if kind == EntityKind::ElderGuardian {
+        60
+    } else {
+        80
+    }
+}
+
 pub(crate) fn stand_anim_step(stand: f32, standing: bool) -> f32 {
     if standing {
         (stand + (1.0 - stand) * 0.4 + 0.05).min(1.0)
@@ -168,6 +200,14 @@ const EVOKER_FANGS_LIFE: i32 = 22;
 
 const RABBIT_JUMP_DURATION: i32 = 15;
 
+const ARMADILLO_SCARED_DURATION: i32 = 50;
+
+const ARMADILLO_ROLLING_HIDE_AFTER: i64 = 5;
+const ARMADILLO_UNROLLING_HIDE_UNTIL: i64 = 26;
+
+const CREAKING_ATTACK_TICKS: i32 = 15;
+const CREAKING_INVULNERABLE_TICKS: i32 = 8;
+
 const GOAT_LOWER_HEAD_TICKS: i32 = 20;
 
 const PHANTOM_FLAP_OFFSET: i32 = 3;
@@ -182,6 +222,112 @@ pub fn horse_open_mouth(bits: u8) -> bool {
 
 pub fn dragon_phase_is_sitting(phase: i32) -> bool {
     matches!(phase, 5 | 6 | 7 | 10)
+}
+
+fn dragon_phase_is_landing_or_taking_off(phase: i32) -> bool {
+    matches!(phase, 3 | 4)
+}
+
+const DRAGON_HISTORY: usize = 64;
+
+pub const DRAGON_DEATH_TICKS: f32 = 200.0;
+
+#[derive(Clone, Debug)]
+struct DragonAnim {
+    samples: [super::state::DragonSample; DRAGON_HISTORY],
+    head: i32,
+    death_time: i32,
+    dying: bool,
+    nearest_crystal: Option<i32>,
+    egg_y: Option<i32>,
+}
+
+impl DragonAnim {
+    fn new() -> DragonAnim {
+        DragonAnim {
+            samples: [super::state::DragonSample::default(); DRAGON_HISTORY],
+            head: -1,
+            death_time: 0,
+            dying: false,
+            nearest_crystal: None,
+            egg_y: None,
+        }
+    }
+
+    fn record(&mut self, y: f64, y_rot: f32) {
+        let sample = super::state::DragonSample { y, y_rot };
+        if self.head < 0 {
+            self.samples = [sample; DRAGON_HISTORY];
+        }
+        self.head += 1;
+        if self.head == DRAGON_HISTORY as i32 {
+            self.head = 0;
+        }
+        self.samples[self.head as usize] = sample;
+    }
+
+    fn get(&self, delay: usize) -> super::state::DragonSample {
+        self.samples[((self.head - delay as i32) & (DRAGON_HISTORY as i32 - 1)) as usize]
+    }
+
+    fn get_lerp(&self, delay: usize, partial: f32) -> super::state::DragonSample {
+        let sample = self.get(delay);
+        let old = self.get(delay + 1);
+        super::state::DragonSample {
+            y: crate::util::mth::lerp_f64(partial, old.y, sample.y),
+            y_rot: rot_lerp(partial, old.y_rot, sample.y_rot),
+        }
+    }
+
+    fn check_crystals(
+        &mut self,
+        rng: &mut JavaRandom,
+        pos: [f64; 3],
+        width: f32,
+        height: f32,
+        crystals: &[CrystalBody],
+    ) {
+        if let Some(id) = self.nearest_crystal
+            && !crystals.iter().any(|c| c.id == id)
+        {
+            self.nearest_crystal = None;
+        }
+        if rng.next_int(10) != 0 {
+            return;
+        }
+        const INFLATE: f64 = 32.0;
+        let half = f64::from(width) / 2.0;
+        let min = [
+            pos[0] - half - INFLATE,
+            pos[1] - INFLATE,
+            pos[2] - half - INFLATE,
+        ];
+        let max = [
+            pos[0] + half + INFLATE,
+            pos[1] + f64::from(height) + INFLATE,
+            pos[2] + half + INFLATE,
+        ];
+        let mut nearest = None;
+        let mut distance = f64::MAX;
+        for c in crystals {
+            let half = f64::from(c.width) / 2.0;
+            let lo = [c.pos[0] - half, c.pos[1], c.pos[2] - half];
+            let hi = [
+                c.pos[0] + half,
+                c.pos[1] + f64::from(c.height),
+                c.pos[2] + half,
+            ];
+            if !(0..3).all(|a| lo[a] < max[a] && hi[a] > min[a]) {
+                continue;
+            }
+            let dist: f64 = (0..3).map(|a| (c.pos[a] - pos[a]).powi(2)).sum();
+            if dist < distance {
+                distance = dist;
+                nearest = Some(c.id);
+            }
+        }
+        self.nearest_crystal = nearest;
+    }
 }
 
 const SHULKER_TELEPORT_TICKS: i32 = 6;
@@ -277,6 +423,8 @@ struct KindAnim {
     squid_z_rot: f32,
     squid_z_rot_old: f32,
     squid_rotate_speed: f32,
+    cube_fuse: i32,
+    cube_max_fuse: i32,
     squish: f32,
     squish_old: f32,
     target_squish: f32,
@@ -286,6 +434,8 @@ struct KindAnim {
     tail_anim_speed: f32,
     spikes_anim: f32,
     spikes_anim_old: f32,
+    guardian_attack_time: i32,
+    minecart_fuse: i32,
     flap_time: f32,
     flap_time_old: f32,
     flap: f32,
@@ -318,6 +468,13 @@ struct KindAnim {
     head_y_rots_old: [f32; 2],
     head_x_rots: [f32; 2],
     head_x_rots_old: [f32; 2],
+    dragon: Option<Box<DragonAnim>>,
+    anim: [AnimationState; anim_slot::COUNT],
+    idle_timeout: i32,
+    idle_start_tick: i32,
+    invulnerable_ticks: i32,
+    in_state_ticks: i64,
+    peek_received: bool,
 }
 
 impl KindAnim {
@@ -376,6 +533,8 @@ impl KindAnim {
         squid_z_rot: 0.0,
         squid_z_rot_old: 0.0,
         squid_rotate_speed: 0.0,
+        cube_fuse: -1,
+        cube_max_fuse: -1,
         squish: 0.0,
         squish_old: 0.0,
         target_squish: 0.0,
@@ -385,6 +544,8 @@ impl KindAnim {
         tail_anim_speed: 0.0,
         spikes_anim: 0.0,
         spikes_anim_old: 0.0,
+        guardian_attack_time: 0,
+        minecart_fuse: -1,
         flap_time: 0.0,
         flap_time_old: 0.0,
         flap: 0.0,
@@ -417,6 +578,13 @@ impl KindAnim {
         head_y_rots_old: [0.0; 2],
         head_x_rots: [0.0; 2],
         head_x_rots_old: [0.0; 2],
+        dragon: None,
+        anim: [AnimationState::new(); anim_slot::COUNT],
+        idle_timeout: 0,
+        idle_start_tick: 0,
+        invulnerable_ticks: 0,
+        in_state_ticks: 0,
+        peek_received: false,
     };
 }
 
@@ -427,6 +595,200 @@ fn has_kind_state(kind: EntityKind) -> bool {
         kind,
         EntityKind::Tnt | EntityKind::FallingBlock | EntityKind::Item | EntityKind::ExperienceOrb
     )
+}
+
+fn tick_animation_states(
+    kind: EntityKind,
+    k: &mut KindAnim,
+    rng: &mut JavaRandom,
+    input: &TickInput,
+    tick: i32,
+    walk_moving: bool,
+    axolotl_moving: bool,
+) {
+    match kind {
+        EntityKind::Breeze => {
+            use crate::entities::state::anim_slot::breeze as s;
+            if input.pose == Pose::LongJumping {
+                k.anim[s::LONG_JUMP].start_if_stopped(tick);
+            }
+            k.anim[s::IDLE].start_if_stopped(tick);
+            if input.pose != Pose::Sliding && k.anim[s::SLIDE].is_started() {
+                k.anim[s::SLIDE_BACK].start(tick);
+                k.anim[s::SLIDE].stop();
+            }
+        }
+        EntityKind::Creaking => {
+            use crate::entities::state::anim_slot::creaking as s;
+            k.invulnerable_ticks = (k.invulnerable_ticks - 1).max(0);
+            k.anim[s::ATTACK].animate_when(k.attack_ticks > 0, tick);
+            k.anim[s::INVULNERABILITY].animate_when(k.invulnerable_ticks > 0, tick);
+            k.anim[s::DEATH].animate_when(input.shared.tearing_down, tick);
+        }
+        EntityKind::Rabbit => {
+            use crate::entities::state::anim_slot::rabbit as s;
+            if k.idle_timeout <= 0 && input.leash_holder.is_none() && !input.no_ai {
+                k.idle_timeout = rng.next_int(40) as i32 + 180;
+                k.anim[s::IDLE_HEAD_TILT].start(tick);
+            } else if k.jump_ticks > 0 {
+                k.anim[s::HOP].start_if_stopped(tick);
+                k.anim[s::IDLE_HEAD_TILT].stop();
+            } else {
+                k.idle_timeout -= 1;
+                k.anim[s::HOP].stop();
+            }
+        }
+        EntityKind::Armadillo => {
+            use crate::entities::state::anim_slot::armadillo as s;
+            match input.shared.armadillo_state {
+                0 => {
+                    k.anim[s::ROLL_OUT].stop();
+                    k.anim[s::ROLL_UP].stop();
+                    k.anim[s::PEEK].stop();
+                }
+                1 => {
+                    k.anim[s::ROLL_OUT].stop();
+                    k.anim[s::ROLL_UP].start_if_stopped(tick);
+                    k.anim[s::PEEK].stop();
+                }
+                2 => {
+                    k.anim[s::ROLL_OUT].stop();
+                    k.anim[s::ROLL_UP].stop();
+                    if k.peek_received {
+                        k.anim[s::PEEK].stop();
+                        k.peek_received = false;
+                    }
+                    if k.in_state_ticks == 0 {
+                        k.anim[s::PEEK].start(tick);
+                        k.anim[s::PEEK].fast_forward(ARMADILLO_SCARED_DURATION, 1.0);
+                    } else {
+                        k.anim[s::PEEK].start_if_stopped(tick);
+                    }
+                }
+                3 => {
+                    k.anim[s::ROLL_OUT].start_if_stopped(tick);
+                    k.anim[s::ROLL_UP].stop();
+                    k.anim[s::PEEK].stop();
+                }
+                _ => {}
+            }
+            k.in_state_ticks += 1;
+        }
+        EntityKind::CopperGolem if !input.no_ai => {
+            use crate::entities::state::anim_slot::copper_golem as s;
+            let interactions = [
+                s::INTERACTION_GET_ITEM,
+                s::INTERACTION_GET_NO_ITEM,
+                s::INTERACTION_DROP_ITEM,
+                s::INTERACTION_DROP_NO_ITEM,
+            ];
+            let state = usize::from(input.shared.copper_golem_state);
+            if state == 0 {
+                for slot in interactions {
+                    k.anim[slot].stop();
+                }
+                if k.idle_start_tick == tick {
+                    k.anim[s::IDLE].start(tick);
+                } else if k.idle_start_tick == 0 {
+                    k.idle_start_tick = tick + 200 + rng.next_int(40) as i32;
+                }
+                if tick == k.idle_start_tick + 10 {
+                    k.idle_start_tick = 0;
+                }
+            } else if let Some(&active) = interactions.get(state - 1) {
+                k.anim[s::IDLE].stop();
+                k.idle_start_tick = 0;
+                for slot in interactions {
+                    if slot != active {
+                        k.anim[slot].stop();
+                    }
+                }
+                k.anim[active].start_if_stopped(tick);
+            }
+        }
+        EntityKind::Camel | EntityKind::CamelHusk => {
+            use crate::entities::state::anim_slot::camel as s;
+            if k.idle_timeout <= 0 {
+                k.idle_timeout = rng.next_int(40) as i32 + 80;
+                k.anim[s::IDLE].start(tick);
+            } else {
+                k.idle_timeout -= 1;
+            }
+            let (sitting, pose_time) = input.camel_pose;
+            let visually_sitting = (pose_time < 0) != sitting;
+            let transition_ticks = if sitting { 40 } else { 52 };
+            let in_transition = pose_time < transition_ticks;
+            let sitting_down = sitting && (0..40).contains(&pose_time);
+            if visually_sitting {
+                k.anim[s::SIT_UP].stop();
+                k.anim[s::DASH].stop();
+                if sitting_down {
+                    k.anim[s::SIT].start_if_stopped(tick);
+                    k.anim[s::SIT_POSE].stop();
+                } else {
+                    k.anim[s::SIT].stop();
+                    k.anim[s::SIT_POSE].start_if_stopped(tick);
+                }
+            } else {
+                k.anim[s::SIT].stop();
+                k.anim[s::SIT_POSE].stop();
+                k.anim[s::DASH].animate_when(input.shared.dash, tick);
+                k.anim[s::SIT_UP].animate_when(in_transition && pose_time >= 0, tick);
+            }
+        }
+        EntityKind::Axolotl if input.shared.is_baby => {
+            use crate::entities::state::anim_slot::axolotl as s;
+            let in_water = input.is_in_water;
+            let on_ground = input.on_ground;
+            let solo = if input.playing_dead {
+                s::PLAY_DEAD
+            } else if axolotl_moving {
+                if in_water && !on_ground {
+                    s::SWIM
+                } else if !in_water && on_ground {
+                    s::WALK
+                } else {
+                    s::WALK_UNDER_WATER
+                }
+            } else if in_water && !on_ground {
+                s::IDLE_UNDER_WATER
+            } else if in_water && on_ground {
+                s::IDLE_UNDER_WATER_ON_GROUND
+            } else {
+                s::IDLE_ON_GROUND
+            };
+            for slot in [
+                s::SWIM,
+                s::WALK,
+                s::WALK_UNDER_WATER,
+                s::IDLE_UNDER_WATER,
+                s::IDLE_UNDER_WATER_ON_GROUND,
+                s::IDLE_ON_GROUND,
+                s::PLAY_DEAD,
+            ] {
+                if slot == solo {
+                    k.anim[slot].start_if_stopped(tick);
+                } else {
+                    k.anim[slot].stop();
+                }
+            }
+        }
+        EntityKind::Frog => {
+            k.anim[anim_slot::frog::SWIM_IDLE]
+                .animate_when(input.is_in_water && !walk_moving, tick);
+        }
+        EntityKind::Bat => {
+            use crate::entities::state::anim_slot::bat as s;
+            if input.shared.resting {
+                k.anim[s::FLY].stop();
+                k.anim[s::REST].start_if_stopped(tick);
+            } else {
+                k.anim[s::REST].stop();
+                k.anim[s::FLY].start_if_stopped(tick);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -449,6 +811,7 @@ struct Sampled {
     bed_orientation: Option<Direction>,
     leash_holder: Option<i32>,
     outline: u32,
+    attack_target: Option<TargetBody>,
 }
 
 impl Sampled {
@@ -472,6 +835,7 @@ impl Sampled {
             bed_orientation: input.bed_orientation,
             leash_holder: input.leash_holder,
             outline: input.outline,
+            attack_target: input.attack_target,
         }
     }
 }
@@ -529,6 +893,11 @@ impl EntityAnim {
         let mut rng = JavaRandom::new(id as i64);
         let tentacle_speed = 1.0 / (rng.next_f32() + 1.0) * 0.2;
         let tail_anim = rng.next_f32();
+        let idle_timeout = if matches!(kind, EntityKind::Rabbit) {
+            rng.next_int(40) as i32 + 180
+        } else {
+            0
+        };
         EntityAnim {
             id,
             kind,
@@ -556,6 +925,9 @@ impl EntityAnim {
                     tail_anim_old: tail_anim,
                     flapping: 1.0,
                     fangs_life: EVOKER_FANGS_LIFE,
+                    idle_timeout,
+                    dragon: matches!(kind, EntityKind::EnderDragon)
+                        .then(|| Box::new(DragonAnim::new())),
                     ..KindAnim::EMPTY
                 })
             }),
@@ -693,6 +1065,8 @@ impl EntityAnim {
             }
             self.started = true;
         }
+
+        self.synced_data_updated(input);
 
         let correction = if input.driven {
             if let Some(interp) = self.core.interp.as_mut() {
@@ -961,6 +1335,14 @@ impl EntityAnim {
                 k.squid_x_rot += (-90.0 - k.squid_x_rot) * 0.02;
             }
 
+            if input.max_fuse != k.cube_max_fuse {
+                k.cube_max_fuse = input.max_fuse;
+                k.cube_fuse = input.max_fuse;
+            }
+            if k.cube_fuse > 0 {
+                k.cube_fuse -= 1;
+            }
+
             k.squish_old = k.squish;
             k.squish += (k.target_squish - k.squish) * 0.5;
             if input.on_ground && !k.was_on_ground {
@@ -997,6 +1379,16 @@ impl EntityAnim {
                 } else {
                     k.spikes_anim += (1.0 - k.spikes_anim) * 0.06;
                 }
+
+                if input.shared.attack_target != 0
+                    && k.guardian_attack_time < guardian_attack_duration(self.kind)
+                {
+                    k.guardian_attack_time += 1;
+                }
+            }
+
+            if k.minecart_fuse > 0 {
+                k.minecart_fuse -= 1;
             }
 
             k.flap_time_old = k.flap_time;
@@ -1007,6 +1399,27 @@ impl EntityAnim {
                 } else {
                     flap_speed
                 };
+            }
+
+            if let Some(d) = k.dragon.as_deref_mut() {
+                d.dying = input.dead;
+                d.egg_y = input.dragon_egg_y;
+                if input.dead {
+                    d.death_time += 1;
+                } else {
+                    d.check_crystals(
+                        &mut self.rng,
+                        self.core.pos_old,
+                        input.bounding_box_width,
+                        input.bounding_box_height,
+                        input.crystals.as_deref().unwrap_or(&[]),
+                    );
+                    if input.no_ai {
+                        k.flap_time = 0.5;
+                    } else {
+                        d.record(self.core.pos_old[1], wrap_degrees(self.core.y_rot_old));
+                    }
+                }
             }
 
             k.flap_old = k.flap;
@@ -1051,6 +1464,16 @@ impl EntityAnim {
             } else {
                 k.roll_counter = 0;
             }
+
+            tick_animation_states(
+                self.kind,
+                k,
+                &mut self.rng,
+                input,
+                self.ticks.wrapping_add(1) as i32,
+                self.core.walk.current_speed() > 1.0e-5,
+                axolotl_moving,
+            );
 
             if k.jump_ticks != k.jump_duration {
                 k.jump_ticks += 1;
@@ -1132,7 +1555,9 @@ impl EntityAnim {
             self.core.walk.stop();
         } else {
             let position_scale = if input.shared.is_baby { 3.0 } else { 1.0 };
-            let target = if input.walk_halted {
+            let frog_jumping = matches!(self.kind, EntityKind::Frog)
+                && self.k().anim[anim_slot::frog::JUMP].is_started();
+            let target = if input.walk_halted || frog_jumping {
                 0.0
             } else {
                 walk_target(self.kind, self.core.pos_old, self.core.pos)
@@ -1188,6 +1613,12 @@ impl EntityAnim {
         self.with_kind(|k| k.eat_ticks = EAT_ANIMATION_TICKS);
     }
 
+    pub fn prime_tnt_minecart(&mut self) {
+        if self.kind == EntityKind::TntMinecart {
+            self.with_kind(|k| k.minecart_fuse = MINECART_TNT_FUSE);
+        }
+    }
+
     pub fn shake_wetness(&mut self) {
         self.with_kind(|k| {
             k.shaking = true;
@@ -1205,14 +1636,119 @@ impl EntityAnim {
     }
 
     pub fn attack_animation(&mut self) {
-        let fangs = matches!(self.kind, EntityKind::EvokerFangs);
-        self.with_kind(|k| {
-            if fangs {
-                k.fangs_started = true;
-            } else {
-                k.attack_ticks = 10;
+        let kind = self.kind;
+        let tick = self.ticks as i32;
+        self.with_kind(|k| match kind {
+            EntityKind::EvokerFangs => k.fangs_started = true,
+            EntityKind::Warden => {
+                k.anim[anim_slot::warden::ROAR].stop();
+                k.anim[anim_slot::warden::ATTACK].start(tick);
             }
+            EntityKind::Creaking => k.attack_ticks = CREAKING_ATTACK_TICKS,
+            _ => k.attack_ticks = 10,
         });
+    }
+
+    pub fn sonic_charge(&mut self) {
+        if !matches!(self.kind, EntityKind::Warden) {
+            return;
+        }
+        let tick = self.ticks as i32;
+        self.with_kind(|k| k.anim[anim_slot::warden::SONIC_BOOM].start(tick));
+    }
+
+    pub fn armadillo_peek(&mut self) {
+        if matches!(self.kind, EntityKind::Armadillo) {
+            self.with_kind(|k| k.peek_received = true);
+        }
+    }
+
+    pub fn creaking_shake(&mut self) {
+        if matches!(self.kind, EntityKind::Creaking) {
+            self.with_kind(|k| k.invulnerable_ticks = CREAKING_INVULNERABLE_TICKS);
+        }
+    }
+
+    fn synced_data_updated(&mut self, input: &TickInput) {
+        let tick = self.ticks as i32;
+        let kind = self.kind;
+        let pose_changed = input.pose != self.sampled.pose;
+        let sniffer_changed = input.shared.sniffer_state != self.sampled.shared.sniffer_state;
+        let armadillo_changed = input.shared.armadillo_state != self.sampled.shared.armadillo_state;
+        let leash_changed = input.leash_holder != self.sampled.leash_holder;
+        let attack_target_changed = input.shared.attack_target != self.sampled.shared.attack_target;
+        let Some(k) = self.kind_state.as_deref_mut() else {
+            return;
+        };
+        match kind {
+            EntityKind::Warden if pose_changed => {
+                use crate::entities::state::anim_slot::warden as s;
+                match input.pose {
+                    Pose::Emerging => k.anim[s::EMERGE].start(tick),
+                    Pose::Digging => k.anim[s::DIGGING].start(tick),
+                    Pose::Roaring => k.anim[s::ROAR].start(tick),
+                    Pose::Sniffing => k.anim[s::SNIFF].start(tick),
+                    _ => {}
+                }
+            }
+            EntityKind::Breeze if pose_changed => {
+                use crate::entities::state::anim_slot::breeze as s;
+                for slot in [s::SHOOT, s::IDLE, s::INHALE, s::LONG_JUMP] {
+                    k.anim[slot].stop();
+                }
+                match input.pose {
+                    Pose::Shooting => k.anim[s::SHOOT].start_if_stopped(tick),
+                    Pose::Inhaling => k.anim[s::INHALE].start_if_stopped(tick),
+                    Pose::Sliding => k.anim[s::SLIDE].start_if_stopped(tick),
+                    _ => {}
+                }
+            }
+            EntityKind::Frog if pose_changed => {
+                use crate::entities::state::anim_slot::frog as s;
+                for (slot, pose) in [
+                    (s::JUMP, Pose::LongJumping),
+                    (s::CROAK, Pose::Croaking),
+                    (s::TONGUE, Pose::UsingTongue),
+                ] {
+                    if input.pose == pose {
+                        k.anim[slot].start(tick);
+                    } else {
+                        k.anim[slot].stop();
+                    }
+                }
+            }
+            EntityKind::Sniffer if sniffer_changed => {
+                use crate::entities::state::anim_slot::sniffer as s;
+                for slot in [
+                    s::DIGGING,
+                    s::SNIFFING,
+                    s::RISING,
+                    s::FEELING_HAPPY,
+                    s::SCENTING,
+                ] {
+                    k.anim[slot].stop();
+                }
+                let start = match input.shared.sniffer_state {
+                    1 => Some(s::FEELING_HAPPY),
+                    2 => Some(s::SCENTING),
+                    3 => Some(s::SNIFFING),
+                    5 => Some(s::DIGGING),
+                    6 => Some(s::RISING),
+                    _ => None,
+                };
+                if let Some(slot) = start {
+                    k.anim[slot].start_if_stopped(tick);
+                }
+            }
+            EntityKind::Armadillo if armadillo_changed => k.in_state_ticks = 0,
+            EntityKind::Rabbit if leash_changed => {
+                k.anim[anim_slot::rabbit::IDLE_HEAD_TILT].stop();
+            }
+            EntityKind::Guardian | EntityKind::ElderGuardian if attack_target_changed => {
+                k.guardian_attack_time = 0;
+            }
+            _ => {}
+        }
     }
 
     pub fn squid_anim_sync(&mut self) {
@@ -1322,6 +1858,9 @@ impl EntityAnim {
     }
 
     fn render_offset(&self, partial: f32) -> [f32; 3] {
+        if self.kind == EntityKind::Enderman && self.sampled.shared.creepy {
+            return self.creepy_jitter(partial);
+        }
         let k = self.k();
         let Some(old) = k.attach_pos.filter(|_| k.teleport_interp > 0) else {
             return [0.0; 3];
@@ -1334,6 +1873,16 @@ impl EntityAnim {
             -((current[1] - old[1]) as f32 * scale),
             -((current[2] - old[2]) as f32 * scale),
         ]
+    }
+
+    fn creepy_jitter(&self, partial: f32) -> [f32; 3] {
+        let seed =
+            (i64::from(self.id) << 32) ^ ((self.ticks as i64) << 24) ^ i64::from(partial.to_bits());
+        let mut rng = JavaRandom::new(seed);
+        let d = 0.02 * f64::from(self.sampled.scale);
+        let x = rng.next_gaussian() * d;
+        let z = rng.next_gaussian() * d;
+        [x as f32, 0.0, z as f32]
     }
 
     pub fn sample(&self, partial: f32) -> EntityState {
@@ -1355,6 +1904,7 @@ impl EntityAnim {
             0
         };
         extras.on_ground = self.sampled.on_ground && self.speed_sqr < 1.0e-7;
+        extras.attack_target_body = self.sampled.attack_target;
 
         if let Some(k) = self.kind_state.as_deref() {
             extras.swell = lerp(partial, k.swell_old, k.swell);
@@ -1455,15 +2005,47 @@ impl EntityAnim {
             extras.squid_z_body_rot = lerp(partial, k.squid_z_rot_old, k.squid_z_rot);
 
             extras.squish = lerp(partial, k.squish_old, k.squish);
+            extras.fuse_remaining = if k.cube_fuse >= 0 {
+                k.cube_fuse as f32 - partial + 1.0
+            } else {
+                0.0
+            };
 
             extras.spikes_animation = lerp(partial, k.spikes_anim_old, k.spikes_anim);
             extras.tail_animation = lerp(partial, k.tail_anim_old, k.tail_anim);
+            extras.guardian_attack_time = k.guardian_attack_time as f32 + partial;
+            extras.minecart_fuse = if k.minecart_fuse > -1 {
+                k.minecart_fuse as f32 - partial + 1.0
+            } else {
+                -1.0
+            };
 
             extras.flap_time = if matches!(self.kind, EntityKind::Phantom) {
                 (self.id * PHANTOM_FLAP_OFFSET) as f32 + self.ticks as f32 + partial
             } else {
                 lerp(partial, k.flap_time_old, k.flap_time)
             };
+
+            if let Some(d) = k.dragon.as_deref() {
+                use super::state::{DragonHeadMode, DragonPose};
+                let history_partial = if d.dying { 0.0 } else { partial };
+                let phase = self.sampled.shared.dragon_phase;
+                let head_mode = if dragon_phase_is_landing_or_taking_off(phase) {
+                    let egg = [0.5, f64::from(d.egg_y.unwrap_or(0)) + 0.5, 0.5];
+                    let distance_to_egg: f64 =
+                        (0..3).map(|a| (egg[a] - self.core.pos[a]).powi(2)).sum();
+                    DragonHeadMode::LandingOrTakingOff { distance_to_egg }
+                } else if dragon_phase_is_sitting(phase) {
+                    DragonHeadMode::Sitting
+                } else {
+                    DragonHeadMode::Flying
+                };
+                extras.dragon = Some(Box::new(DragonPose {
+                    history: std::array::from_fn(|delay| d.get_lerp(delay, history_partial)),
+                    head_mode,
+                    nearest_crystal: d.nearest_crystal,
+                }));
+            }
 
             extras.flap = lerp(partial, k.flap_old, k.flap);
             extras.flap_speed = lerp(partial, k.flap_speed_old, k.flap_speed);
@@ -1501,6 +2083,14 @@ impl EntityAnim {
 
             extras.jump_cooldown = (k.dash_cooldown as f32 - partial).max(0.0);
 
+            extras.anim = k.anim;
+            extras.hiding_in_shell = match extras.armadillo_state {
+                1 => k.in_state_ticks > ARMADILLO_ROLLING_HIDE_AFTER,
+                2 => true,
+                3 => k.in_state_ticks < ARMADILLO_UNROLLING_HIDE_UNTIL,
+                _ => false,
+            };
+
             extras.arrow_shake = k.shake_time as f32 - partial;
 
             extras.bite_progress = if !k.fangs_started {
@@ -1520,6 +2110,12 @@ impl EntityAnim {
             }
         }
 
+        let (death_time, has_red_overlay) = match self.k().dragon.as_deref() {
+            Some(d) if d.death_time > 0 => (d.death_time as f32 + partial, false),
+            Some(_) => (0.0, self.core.hurt_time(0.0) > 0.0),
+            None => (self.core.death_time(partial), self.core.has_red_overlay()),
+        };
+
         EntityState {
             id: self.id,
             kind: self.kind,
@@ -1530,7 +2126,7 @@ impl EntityAnim {
             age_ticks: self.ticks as f32 + partial,
             walk_pos: self.core.walk.position(partial),
             walk_speed: self.core.walk.speed(partial),
-            death_time: self.core.death_time(partial),
+            death_time,
             scale: self.sampled.scale,
             age_scale: if self.sampled.shared.is_baby {
                 0.5
@@ -1545,7 +2141,7 @@ impl EntityAnim {
             is_fully_frozen: self.sampled.is_fully_frozen,
             is_upside_down: matches!(extras.name.as_deref(), Some("Dinnerbone") | Some("Grumm")),
             is_auto_spin_attack: self.sampled.is_auto_spin_attack,
-            has_red_overlay: self.core.has_red_overlay(),
+            has_red_overlay,
             display_fire: self.sampled.display_fire,
             pose: self.sampled.pose,
             bed_orientation: self.sampled.bed_orientation,
@@ -2252,6 +2848,27 @@ mod tests {
     }
 
     #[test]
+    fn the_dragon_history_fills_on_its_first_record() {
+        let mut anim = EntityAnim::new(1, EntityKind::EnderDragon);
+        let input = TickInput {
+            pos: [0.0, 70.0, 0.0],
+            y_rot: 30.0,
+            ..TickInput::new()
+        };
+        anim.tick(input.clone());
+        let st = anim.sample(0.5);
+        let pose = st.extras.dragon.expect("a dragon carries its pose");
+        assert_eq!(pose.historical(23).y, 70.0);
+        assert_eq!(pose.historical(0).y_rot, 30.0);
+        assert_eq!(st.death_time, 0.0);
+        anim.tick(TickInput {
+            dead: true,
+            ..input
+        });
+        assert_eq!(anim.sample(0.5).death_time, 1.5);
+    }
+
+    #[test]
     fn a_knocked_over_bee_rolls_in_five_ticks_and_back_out_in_five() {
         let mut anim = EntityAnim::new(1, EntityKind::Bee);
         let mut input = TickInput::new();
@@ -2501,5 +3118,64 @@ mod tests {
             anim.tick(input.clone());
         }
         assert_eq!(anim.sample(0.0).death_time, 20.0);
+    }
+
+    #[test]
+    fn a_warden_roar_starts_on_the_pose_change_and_event_four_replaces_it() {
+        use crate::entities::state::anim_slot::warden::{ATTACK, ROAR};
+        let mut anim = EntityAnim::new(1, EntityKind::Warden);
+        let mut input = TickInput::new();
+        anim.tick(input.clone());
+        input.pose = Pose::Roaring;
+        anim.tick(input.clone());
+        let st = anim.sample(0.0);
+        assert_eq!(st.extras.anim[ROAR].time_in_millis(st.age_ticks), 50);
+        anim.tick(input.clone());
+        let st = anim.sample(0.5);
+        assert_eq!(st.extras.anim[ROAR].time_in_millis(st.age_ticks), 125);
+        anim.attack_animation();
+        let st = anim.sample(0.0);
+        assert!(!st.extras.anim[ROAR].is_started());
+        assert!(st.extras.anim[ATTACK].is_started());
+    }
+
+    #[test]
+    fn a_rolling_armadillo_hides_after_five_ticks_in_the_state() {
+        use crate::entities::state::anim_slot::armadillo::ROLL_UP;
+        let mut anim = EntityAnim::new(1, EntityKind::Armadillo);
+        let mut input = TickInput::new();
+        input.shared_mut().armadillo_state = 1;
+        for _ in 0..5 {
+            anim.tick(input.clone());
+        }
+        let st = anim.sample(0.0);
+        assert!(!st.extras.hiding_in_shell);
+        assert!(st.extras.anim[ROLL_UP].is_started());
+        anim.tick(input.clone());
+        assert!(anim.sample(0.0).extras.hiding_in_shell);
+    }
+
+    #[test]
+    fn a_camel_sits_down_holds_the_pose_and_stands_up_from_its_pose_time() {
+        use crate::entities::state::anim_slot::camel::{SIT, SIT_POSE, SIT_UP};
+        let mut anim = EntityAnim::new(1, EntityKind::Camel);
+        let mut input = TickInput::new();
+        input.pose = Pose::Sitting;
+        input.camel_pose = (true, 10);
+        anim.tick(input.clone());
+        let st = anim.sample(0.0);
+        assert!(st.extras.anim[SIT].is_started());
+        assert!(!st.extras.anim[SIT_POSE].is_started());
+        input.camel_pose = (true, 45);
+        anim.tick(input.clone());
+        let st = anim.sample(0.0);
+        assert!(!st.extras.anim[SIT].is_started());
+        assert!(st.extras.anim[SIT_POSE].is_started());
+        input.pose = Pose::Standing;
+        input.camel_pose = (false, 5);
+        anim.tick(input.clone());
+        let st = anim.sample(0.0);
+        assert!(!st.extras.anim[SIT_POSE].is_started());
+        assert!(st.extras.anim[SIT_UP].is_started());
     }
 }

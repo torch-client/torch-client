@@ -7,11 +7,53 @@
 import re
 import sys
 
-CHROMEBOOK = (
+INSTALLABLE = (
     '<link rel="manifest" href="manifest.webmanifest">\n'
-    '<meta name="theme-color" content="#000000">\n'
+    '<meta name="theme-color" content="#000000">'
+)
+
+CHROMEBOOK = (
     '<script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js");</script>'
 )
+
+APPLE_HEAD = (
+    '<meta name="apple-mobile-web-app-capable" content="yes">\n'
+    '<meta name="mobile-web-app-capable" content="yes">\n'
+    '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">\n'
+    '<meta name="apple-mobile-web-app-title" content="Torch">\n'
+    '<link rel="apple-touch-icon" href="icon-192.png">'
+)
+
+APPLE_TAIL = """<style>
+html, body { height: 100dvh; }
+body {
+box-sizing: border-box;
+padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+#applehint {
+position: fixed; z-index: 1; left: 50%; transform: translateX(-50%);
+top: calc(env(safe-area-inset-top) + 8px); width: max-content; max-width: 90vw;
+box-sizing: border-box; padding: 8px 12px;
+font: 12px ui-monospace, monospace; color: #fff; text-align: center;
+background: rgba(0, 0, 0, 0.85); border: 1px solid #555; border-radius: 3px;
+}
+</style>
+<script>
+(() => {
+if (navigator.standalone !== false || document.fullscreenEnabled) return;
+const KEY = "apple-hint-dismissed";
+try { if (localStorage.getItem(KEY)) return; } catch {}
+const hint = document.createElement("div");
+hint.id = "applehint";
+hint.textContent = "For full screen: tap Share, then Add to Home Screen. Tap to dismiss.";
+hint.addEventListener("click", () => {
+hint.remove();
+try { localStorage.setItem(KEY, "1"); } catch {}
+});
+document.body.append(hint);
+})();
+</script>
+"""
 
 def strip_block_comments(text, opener="/*", closer="*/"):
     out = []
@@ -114,15 +156,25 @@ def minify(text):
 def main(argv):
     argv = list(argv)
     chromebook = "--chromebook" in argv[1:]
+    apple = "--apple" in argv[1:]
+    argv = [a for a in argv if a != "--apple"]
     argv = [a for a in argv if a != "--chromebook"]
     if len(argv) != 3:
         raise SystemExit(__doc__)
     source = open(argv[1], encoding="utf-8").read()
     result = minify(source) + "\n"
+    head = []
+    if chromebook or apple:
+        head.append(INSTALLABLE)
     if chromebook:
+        head.append(CHROMEBOOK)
+    if apple:
+        head.append(APPLE_HEAD)
+        result += APPLE_TAIL
+    if head:
         if result.count("</title>") != 1:
-            raise SystemExit("--chromebook needs exactly one </title> to insert after")
-        result = result.replace("</title>", "</title>\n" + CHROMEBOOK)
+            raise SystemExit("--chromebook and --apple need exactly one </title> to insert after")
+        result = result.replace("</title>", "</title>\n" + "\n".join(head))
     open(argv[2], "w", encoding="utf-8").write(result)
     before = len(source.encode("utf-8"))
     after = len(result.encode("utf-8"))

@@ -178,8 +178,12 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
         model,
         parts,
         st,
-        &adult_anim::ARMADILLO_WALK,
-        &adult_anim::ARMADILLO_ROLL_UP,
+        &Set {
+            walk: &adult_anim::ARMADILLO_WALK,
+            roll_out: &adult_anim::ARMADILLO_ROLL_OUT,
+            roll_up: &adult_anim::ARMADILLO_ROLL_UP,
+            peek: &adult_anim::ARMADILLO_PEEK,
+        },
     );
 }
 
@@ -188,18 +192,23 @@ pub fn baby_setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityS
         model,
         parts,
         st,
-        &baby_anim::ARMADILLO_BABY_WALK,
-        &baby_anim::ARMADILLO_BABY_ROLL_UP,
+        &Set {
+            walk: &baby_anim::ARMADILLO_BABY_WALK,
+            roll_out: &baby_anim::ARMADILLO_BABY_ROLL_OUT,
+            roll_up: &baby_anim::ARMADILLO_BABY_ROLL_UP,
+            peek: &baby_anim::ARMADILLO_BABY_PEEK,
+        },
     );
 }
 
-fn setup(
-    model: &BakedModel,
-    parts: &mut [PartState],
-    st: &EntityState,
-    walk: &AnimationDefinition,
-    roll_up: &AnimationDefinition,
-) {
+struct Set {
+    walk: &'static AnimationDefinition,
+    roll_out: &'static AnimationDefinition,
+    roll_up: &'static AnimationDefinition,
+    peek: &'static AnimationDefinition,
+}
+
+fn setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState, set: &Set) {
     let body = model.id("body");
     let head = model.id("head");
     let tail = model.id("tail");
@@ -207,7 +216,7 @@ fn setup(
     let right_hind = model.id("right_hind_leg");
     let left_hind = model.id("left_hind_leg");
 
-    let hiding = st.extras.armadillo_state != 0;
+    let hiding = st.extras.hiding_in_shell;
 
     if hiding {
         parts[body].skip_draw = true;
@@ -230,7 +239,7 @@ fn setup(
 
     if !hiding {
         keyframe::apply_walk(
-            walk,
+            set.walk,
             model,
             parts,
             st.walk_pos,
@@ -238,7 +247,23 @@ fn setup(
             MAX_WALK_ANIMATION_SPEED,
             WALK_ANIMATION_SCALE_FACTOR,
         );
-    } else {
-        keyframe::apply(roll_up, model, parts, roll_up.length_seconds, 1.0);
     }
+
+    use crate::entities::state::anim_slot::armadillo as slot;
+    let states = &st.extras.anim;
+    keyframe::apply_state(
+        set.roll_out,
+        model,
+        parts,
+        states[slot::ROLL_OUT],
+        st.age_ticks,
+    );
+    keyframe::apply_state(
+        set.roll_up,
+        model,
+        parts,
+        states[slot::ROLL_UP],
+        st.age_ticks,
+    );
+    keyframe::apply_state(set.peek, model, parts, states[slot::PEEK], st.age_ticks);
 }

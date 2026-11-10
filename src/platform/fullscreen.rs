@@ -1,6 +1,12 @@
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn toggle() {
     #[cfg(target_arch = "wasm32")]
     web::toggle();
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn available() -> bool {
+    web::available()
 }
 
 #[cfg(target_os = "android")]
@@ -9,6 +15,7 @@ pub fn android_init() {
     android::immersive();
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn capture_escape(take: bool) {
     #[cfg(target_arch = "wasm32")]
     web::capture_escape(take);
@@ -16,6 +23,7 @@ pub fn capture_escape(take: bool) {
     let _ = take;
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn is_fullscreen() -> bool {
     #[cfg(target_arch = "wasm32")]
     return web::is_fullscreen();
@@ -65,6 +73,16 @@ mod web {
 
     fn document() -> Option<web_sys::Document> {
         web_sys::window()?.document()
+    }
+
+    pub(super) fn available() -> bool {
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *AVAILABLE.get_or_init(|| {
+            document().is_some_and(|d| {
+                js_sys::Reflect::get(&d, &JsValue::from_str("fullscreenEnabled"))
+                    .is_ok_and(|enabled| enabled.is_truthy())
+            })
+        })
     }
 
     pub(super) fn toggle() {

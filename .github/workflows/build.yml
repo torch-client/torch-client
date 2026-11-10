@@ -1,0 +1,215 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: Publish the release as a draft
+        type: boolean
+        default: true
+      android:
+        description: Also build the Android APK
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  DESKTOP_PLAIN: shader_support,audio,explore_modrinth,tutorial
+  DESKTOP_CLICKGUI: click_gui,shader_support,audio,explore_modrinth,lua_mods,tutorial,seed_cracker
+  WEB: asset_download,multiversion,full_font,skins,resourcepacks,hud_editor,click_gui,explore_modrinth,tutorial,lua_mods,seed_cracker,browser_audio
+  WEB_MOBILE: asset_download,multiversion,full_font,skins,resourcepacks,hud_editor,click_gui,explore_modrinth,tutorial,lua_mods,mobile_ui,module_panel,seed_cracker,browser_audio
+  ANDROID_FEATURES: module_panel
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+          manifest="$(sed -n 's/.*android:versionName="\([^"]*\)".*/\1/p' android/AndroidManifest.xml)"
+          if [ "$version" != "$manifest" ]; then
+            echo "Cargo.toml says $version, android/AndroidManifest.xml says $manifest" >&2
+            exit 1
+          fi
+          if [ "$EVENT" = workflow_dispatch ] && git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already tagged; bump the version first" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: linux
+
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev
+
+      - run: tools/build_desktop.sh --features "$DESKTOP_PLAIN"
+      - run: tools/build_desktop.sh --features "$DESKTOP_CLICKGUI"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.zip
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: windows
+          target: x86_64-pc-windows-gnu
+
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64
+
+      - run: tools/build_desktop.sh --windows --features "$DESKTOP_PLAIN"
+      - run: tools/build_desktop.sh --windows --features "$DESKTOP_CLICKGUI"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  web:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: web
+            features: WEB
+          - name: web-mobile
+            features: WEB_MOBILE
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: ${{ matrix.name }}
+          target: wasm32-unknown-unknown
+
+      - run: |
+          version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - env:
+          FEATURES: ${{ matrix.features }}
+        run: |
+          tools/build_web.sh --harden --no-default-features --features "${!FEATURES}"
+          python3 tools/pack_single_html.py web-output/hardened/site
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*.html
+          if-no-files-found: error
+
+  android:
+    if: inputs.android
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: android
+          target: aarch64-linux-android
+          free-disk: "false"
+
+      - env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KS_PASS: ${{ secrets.ANDROID_KS_PASS }}
+          ANDROID_KEY_PASS: ${{ secrets.ANDROID_KEY_PASS }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "the ANDROID_KEYSTORE_B64 secret is not set" >&2
+            exit 1
+          fi
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          ANDROID_DEBUG_KEYSTORE="$RUNNER_TEMP/release.keystore" tools/build_android.sh --features "$ANDROID_FEATURES"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/*.apk
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'torch-client/torch-client' && !cancelled() && !failure()
+    needs: [version, linux, windows, web, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          VERSION: ${{ needs.version.outputs.version }}
+          DRAFT: ${{ inputs.draft }}
+          ANDROID: ${{ inputs.android }}
+        run: |
+          ls -l dist
+          expected=6
+          if [ "$ANDROID" = true ]; then
+            expected=7
+          fi
+          count="$(find dist -maxdepth 1 -type f | wc -l)"
+          if [ "$count" -ne "$expected" ]; then
+            echo "expected $expected release files, found $count" >&2
+            exit 1
+          fi
+          draft=()
+          if [ "$DRAFT" = true ]; then
+            draft=(--draft)
+          fi
+          gh release create "v$VERSION" dist/* \
+            --repo "$REPO" \
+            --target "$SHA" \
+            --title "v$VERSION" \
+            --generate-notes \
+            "${draft[@]}"

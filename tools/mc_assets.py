@@ -99,7 +99,7 @@ def main(version_id: str, output_dir: str = "minecraft_assets", workers: int = 1
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python mc_assets.py <version_id> [output_dir] [workers]")
-        print("Example: python mc_assets.py 26.1.2")
+        print("Example: python mc_assets.py 26.2")
         sys.exit(1)
 
     version = sys.argv[1]

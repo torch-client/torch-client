@@ -159,6 +159,8 @@ fn landing(bot: &Client, feet: AzVec3) -> Landing {
             },
             block_shape_type: BlockShapeType::Collider,
             fluid_pick_type: FluidPickType::Any,
+            held_item: azalea_registry::builtin::ItemKind::Air,
+            entity: None,
         },
     );
     if hit.miss {
@@ -204,19 +206,9 @@ fn explosion_damage(bot: &Client) -> f32 {
             b.min.y,
             (b.min.z + b.max.z) * 0.5,
         ];
-        total += blast(power, distance(feet, at));
+        total += crate::util::combat::blast(power, distance(feet, at), 1.0);
     });
     total * HARD
-}
-
-fn blast(power: f32, distance: f64) -> f32 {
-    let reach = power as f64 * 2.0;
-    let d = distance / reach;
-    if d > 1.0 {
-        return 0.0;
-    }
-    let p = 1.0 - d;
-    ((p * p + p) / 2.0 * 7.0 * reach + 1.0) as f32
 }
 
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -227,14 +219,6 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn blast_matches_vanilla() {
-        assert_eq!(blast(6.0, 0.0), 85.0);
-        assert_eq!(blast(6.0, 12.0), 1.0);
-        assert_eq!(blast(6.0, 12.01), 0.0);
-        assert_eq!(blast(4.0, 4.0), 22.0);
-    }
 
     #[test]
     fn fall_damage_starts_past_three_blocks() {

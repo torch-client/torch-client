@@ -170,7 +170,7 @@ const EQUIP_STEP: f32 = 0.4;
 
 const EQUIP_SWAP_THRESHOLD: f32 = 0.1;
 
-use crate::items::kinetic::CROSSBOW_CHARGE_TICKS;
+use crate::items::kinetic::crossbow_charge_ticks;
 
 const BRUSH_USE_DURATION_TICKS: f32 = 200.0;
 
@@ -190,6 +190,10 @@ const DECORATION_Z: f32 = -0.02;
 const DECORATION_Z_OFFSET: f32 = -0.001;
 
 const DECORATION_SCALE: [f32; 3] = [4.0, 4.0, 3.0];
+
+const LABEL_Z: f32 = -0.025 - 0.1;
+const LABEL_BACKGROUND: u32 = 0x8000_0000;
+const LABEL_MAX_SCALE: f32 = 6.0 / 9.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hand {
@@ -522,7 +526,7 @@ fn arm_with_item(f: &HandFrame) -> Chain {
             c.rot_y(invert * 65.3);
             c.rot_z(invert * -9.785);
             let time_held = f.time_held();
-            let power = (time_held / CROSSBOW_CHARGE_TICKS).min(1.0);
+            let power = (time_held / crossbow_charge_ticks(f.item.quick_charge)).min(1.0);
             apply_charge_shake(&mut c, time_held, power, BOW_CHARGE_Z_POS_SCALE);
             c.rot_y(-invert * ITEM_PRESWING_ROT_Y);
         } else {
@@ -589,6 +593,7 @@ fn arm_with_item(f: &HandFrame) -> Chain {
                 c.translate(invert * ITEM_POS_X, ITEM_POS_Y, ITEM_POS_Z);
                 spear_use_transform(&mut c, f);
             }
+            UseAnimation::Bundle => swing_arm(&mut c, f.attack, invert),
             UseAnimation::None
             | UseAnimation::Crossbow
             | UseAnimation::Spyglass
@@ -917,6 +922,54 @@ fn decoration_mesh(decorations: &[crate::session::MapDecoration]) -> Mesh {
     out.finish()
 }
 
+fn label_mesh(
+    decorations: &[crate::session::MapDecoration],
+    atlas: Option<&crate::gui::atlas::GuiAtlas>,
+) -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    let mut bufs = crate::gui::painter::PainterBuffers::default();
+    if let Some(atlas) = atlas {
+        let mut painter = crate::gui::painter::Painter::new(atlas, 0);
+        painter.unihex_enabled = false;
+        for decoration in decorations {
+            let Some(name) = decoration.name.as_deref() else {
+                continue;
+            };
+            let width = atlas.font.width(name);
+            let scale = (25.0 / width).clamp(0.0, LABEL_MAX_SCALE);
+            let start = painter.positions.len();
+            painter.fill(
+                -1.0,
+                -1.0,
+                width + 1.0,
+                crate::text::LINE_HEIGHT + 1.0,
+                LABEL_BACKGROUND,
+            );
+            painter.text(name, 0.0, 0.0, false);
+            let x = decoration.x as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0 - width * scale / 2.0;
+            let y = decoration.y as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0 + 4.0;
+            for position in &mut painter.positions[start..] {
+                *position = [x + position[0] * scale, y + position[1] * scale, LABEL_Z];
+            }
+        }
+        bufs = painter.into_buffers();
+    }
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        vec![[0.0f32, 0.0, 1.0]; bufs.positions.len()],
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, bufs.positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, bufs.uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, bufs.colors);
+    mesh.insert_indices(Indices::U32(bufs.indices));
+    mesh
+}
+
 #[derive(Component)]
 #[cfg_attr(
     feature = "shader_support",
@@ -951,6 +1004,7 @@ struct HandEntities {
     map_background: Entity,
     map_picture: Entity,
     map_decorations: Entity,
+    map_labels: Entity,
 }
 
 struct UploadedItem {
@@ -968,6 +1022,7 @@ struct HandState {
     item_used_seen: u32,
     map_bound: Option<Handle<Image>>,
     decorations_built: Option<(i32, u32)>,
+    labels_built: Option<(i32, u32)>,
 }
 
 impl HandState {
@@ -980,6 +1035,7 @@ impl HandState {
             item_used_seen: 0,
             map_bound: None,
             decorations_built: None,
+            labels_built: None,
         }
     }
 }
@@ -1029,6 +1085,7 @@ struct HandAssets {
     map_checkerboard: Handle<HandMaterial>,
     map_picture: [Handle<HandMaterial>; 2],
     decorations: Handle<HandMaterial>,
+    labels: Handle<HandMaterial>,
     item: [Handle<HandMaterial>; 2],
 }
 
@@ -1112,7 +1169,7 @@ fn bind_hand_arms(
         };
         if let Some(texture) = texture {
             for handle in [&assets.base, &assets.overlay] {
-                if let Some(material) = materials.get_mut(handle) {
+                if let Some(mut material) = materials.get_mut(handle) {
                     material.base.base_color_texture = Some(texture.clone());
                 }
             }
@@ -1187,12 +1244,20 @@ fn setup_hand(
             &mut images,
         ))),
         item: std::array::from_fn(|_| cutout(None)),
+        labels: materials.add(hand_material(StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        })),
         base,
         overlay,
     };
     let glint_texture = glint.map(|g| g.0.clone());
     for handle in &assets.item {
-        if let Some(material) = materials.get_mut(handle) {
+        if let Some(mut material) = materials.get_mut(handle) {
             material.extension.glint_texture = glint_texture.clone();
         }
     }
@@ -1340,6 +1405,11 @@ fn setup_hand(
             assets.decorations.clone(),
             "decorations",
         );
+        let map_labels = map_piece(
+            meshes.add(label_mesh(&[], None)),
+            assets.labels.clone(),
+            "labels",
+        );
         commands.entity(pose).add_child(map);
         commands.entity(tilt).add_children(&[pose, arm]);
 
@@ -1352,6 +1422,7 @@ fn setup_hand(
             map_background,
             map_picture,
             map_decorations,
+            map_labels,
         }
     });
 
@@ -1394,11 +1465,12 @@ fn light_hand(
         &assets.map_picture[0],
         &assets.map_picture[1],
         &assets.decorations,
+        &assets.labels,
     ] {
         if materials.get(handle).map(|m| m.base.base_color) == Some(want) {
             continue;
         }
-        if let Some(material) = materials.get_mut(handle) {
+        if let Some(mut material) = materials.get_mut(handle) {
             material.base.base_color = want;
         }
     }
@@ -1410,6 +1482,7 @@ fn sync_hands(
     view: (
         Res<crate::renderer::input::CameraView>,
         Res<crate::gui::GuiState>,
+        Option<Res<crate::gui::render::GuiAssets>>,
     ),
     rig: Option<ResMut<HandRig>>,
     hand_assets: Option<Res<HandAssets>>,
@@ -1427,7 +1500,7 @@ fn sync_hands(
         (With<HandMapNode>, Without<HandItemNode>),
     >,
 ) {
-    let (camera_view, gui) = view;
+    let (camera_view, gui, gui_assets) = view;
     crate::prof_span!("render:sync_hands");
     #[cfg(feature = "budget")]
     let _t = crate::diag::budget::timed(crate::diag::budget::Slot::Hand);
@@ -1455,18 +1528,7 @@ fn sync_hands(
         light_hand(&lightmap, eye, hand_assets, &mut hand_materials);
     }
 
-    let scoping = sample.using_item
-        && use_animation(
-            &held(
-                sample,
-                if sample.using_offhand {
-                    Hand::Off
-                } else {
-                    Hand::Main
-                },
-            )
-            .id,
-        ) == UseAnimation::Spyglass;
+    let scoping = sample.is_scoping();
     let view_yaw = wrap_degrees(sample.body_yaw + sample.head_yaw);
     advance_ticked_state(
         &mut rig,
@@ -1475,6 +1537,7 @@ fn sync_hands(
         view_yaw,
         item_used,
         frame_view.hands_busy,
+        frame_view.item_swap,
     );
     let view_lag_x = rig.x_bob.lag(live_pitch, partial);
     let view_lag_y = rig.y_bob.lag(live_yaw, partial);
@@ -1568,6 +1631,7 @@ fn sync_hands(
                 map_id,
                 &map_textures,
                 hand_assets.as_deref(),
+                gui_assets.as_deref(),
                 &mut meshes,
                 &mut hand_materials,
                 &mut nodes,
@@ -1582,6 +1646,11 @@ fn sync_hands(
 
         let use_ = ItemUse {
             owner: item_assets.local_owner(),
+            fishing_cast: item_assets.fishing_cast(
+                crate::client::tracking::local_entity_id(),
+                sample.main_hand.id,
+                hand == Hand::Main,
+            ),
             ..ItemUse::of(&frame.item, frame.using, frame.ticks_using + 1.0)
         };
         let ctx = hand.display_context(frame.main_arm_left).name();
@@ -1610,7 +1679,7 @@ fn sync_hands(
                         let stale = hand_materials.get(handle).is_some_and(|m| {
                             m.base.base_color_texture.as_ref() != Some(&gpu.texture)
                         });
-                        if stale && let Some(material) = hand_materials.get_mut(handle) {
+                        if stale && let Some(mut material) = hand_materials.get_mut(handle) {
                             material.base.base_color_texture = Some(gpu.texture.clone());
                         }
                     }
@@ -1632,7 +1701,7 @@ fn sync_hands(
                 (m.extension.glint != want).then_some(want)
             });
             if let Some(want) = stale
-                && let Some(material) = hand_materials.get_mut(handle)
+                && let Some(mut material) = hand_materials.get_mut(handle)
             {
                 material.extension.glint = want;
             }
@@ -1657,6 +1726,7 @@ fn bind_map(
     map_id: i32,
     map_textures: &crate::renderer::maps::MapTextures,
     assets: Option<&HandAssets>,
+    gui: Option<&crate::gui::render::GuiAssets>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<HandMaterial>,
     nodes: &mut NodeQuery,
@@ -1667,10 +1737,11 @@ fn bind_map(
 ) {
     let Some(assets) = assets else { return };
     let hands = &state.nodes;
-    let (background, picture, decorations) = (
+    let (background, picture, decorations, labels) = (
         hands.map_background,
         hands.map_picture,
         hands.map_decorations,
+        hands.map_labels,
     );
     let image = map_textures.image(map_id);
 
@@ -1687,13 +1758,15 @@ fn bind_map(
     let Some(image) = image else {
         set_visible(nodes, picture, false);
         set_visible(nodes, decorations, false);
+        set_visible(nodes, labels, false);
         state.map_bound = None;
         state.decorations_built = None;
+        state.labels_built = None;
         return;
     };
     set_visible(nodes, picture, true);
     if state.map_bound.as_ref() != Some(&image) {
-        if let Some(material) = materials.get_mut(&assets.map_picture[index]) {
+        if let Some(mut material) = materials.get_mut(&assets.map_picture[index]) {
             material.base.base_color_texture = Some(image.clone());
         }
         state.map_bound = Some(image);
@@ -1706,6 +1779,24 @@ fn bind_map(
             mesh.0 = meshes.add(decoration_mesh(list));
         }
         state.decorations_built = Some((map_id, revision));
+    }
+
+    let named = list.iter().any(|d| d.name.is_some());
+    set_visible(nodes, labels, named && gui.is_some());
+    if let Some(gui) = gui
+        && state.labels_built != Some((map_id, revision))
+    {
+        if materials
+            .get(&assets.labels)
+            .is_some_and(|m| m.base.base_color_texture.as_ref() != Some(&gui.image))
+            && let Some(mut material) = materials.get_mut(&assets.labels)
+        {
+            material.base.base_color_texture = Some(gui.image.clone());
+        }
+        if let Ok((mut mesh, _)) = map_nodes.get_mut(labels) {
+            mesh.0 = meshes.add(label_mesh(list, Some(&*gui.atlas)));
+        }
+        state.labels_built = Some((map_id, revision));
     }
 }
 
@@ -1720,6 +1811,7 @@ fn display_transform(gpu: &ItemGpu, hand: Hand, main_arm_left: bool) -> ItemTran
     gpu.for_context(hand.display_context(main_arm_left))
 }
 
+#[allow(clippy::too_many_arguments, reason = "one parameter per tick input")]
 fn advance_ticked_state(
     rig: &mut HandRig,
     sample: &AnimSample,
@@ -1727,7 +1819,9 @@ fn advance_ticked_state(
     view_yaw: f32,
     item_used: [u32; 2],
     hands_busy: bool,
+    item_swap: f32,
 ) {
+    let main_target = item_swap * item_swap * item_swap;
     let tick = sample.age_ticks.floor();
     let steps = match rig.last_tick {
         Some(last) => ((tick - last).max(0.0) as u32).min(20),
@@ -1735,9 +1829,10 @@ fn advance_ticked_state(
             for hand in [Hand::Main, Hand::Off] {
                 let state = &mut rig.hands[hand.index()];
                 state.shown = held(sample, hand).clone();
+                let height = if hand == Hand::Main { main_target } else { 1.0 };
                 state.ramp = EquipRamp {
-                    height: 1.0,
-                    old: 1.0,
+                    height,
+                    old: height,
                 };
                 state.item_used_seen = item_used[hand.index()];
             }
@@ -1766,7 +1861,13 @@ fn advance_ticked_state(
             if !changed {
                 state.shown = next.clone();
             }
-            let target = if hands_busy || changed { 0.0 } else { 1.0 };
+            let target = if hands_busy || changed {
+                0.0
+            } else if hand == Hand::Main {
+                main_target
+            } else {
+                1.0
+            };
             state.ramp.advance(target);
             if state.ramp.hidden_enough() {
                 state.shown = next.clone();
@@ -2278,6 +2379,7 @@ mod tests {
             map_background: Entity::PLACEHOLDER,
             map_picture: Entity::PLACEHOLDER,
             map_decorations: Entity::PLACEHOLDER,
+            map_labels: Entity::PLACEHOLDER,
         }));
         for state in &mut rig.hands {
             state.ramp = EquipRamp {
@@ -2291,7 +2393,7 @@ mod tests {
             ..Default::default()
         };
 
-        advance_ticked_state(&mut rig, &sample, 0, 0.0, [1, 0], false);
+        advance_ticked_state(&mut rig, &sample, 0, 0.0, [1, 0], false, 1.0);
         assert_eq!(rig.hands[0].ramp.height, 0.0);
         assert_eq!(
             rig.hands[0].ramp.old, 1.0,
@@ -2306,7 +2408,7 @@ mod tests {
             age_ticks: 2.0,
             ..Default::default()
         };
-        advance_ticked_state(&mut rig, &sample, 0, 0.0, [1, 0], false);
+        advance_ticked_state(&mut rig, &sample, 0, 0.0, [1, 0], false, 1.0);
         assert!(
             rig.hands[0].ramp.height > 0.0,
             "the ramp must climb back out of view"
@@ -2371,6 +2473,7 @@ mod tests {
             x: 0,
             y: 0,
             rot: 0,
+            name: None,
         };
         assert_eq!(decoration_mesh(&[]).count_vertices(), 0);
         assert_eq!(decoration_mesh(&[marker(0)]).count_vertices(), 4);
@@ -2390,6 +2493,7 @@ mod tests {
             x: 0,
             y: 0,
             rot: 0,
+            name: None,
         }]);
         let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
             Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) => v.clone(),

@@ -169,3 +169,20 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
         parts[bone].x_rot = rot_lerp_rad(roll_amount, current, 3.091_592_8);
     }
 }
+
+pub fn stinger_layer() -> LayerDef {
+    let mut mesh = MeshDef::new();
+    {
+        let root = mesh.root();
+        let cross = CubeList::new()
+            .tex_offs(0, 0)
+            .add_box(-1.0, -0.5, 0.0, 2.0, 1.0, 0.0);
+        root.child(
+            "cross_1",
+            cross.clone(),
+            PartPose::rotation(0.785_398_2, 0.0, 0.0),
+        );
+        root.child("cross_2", cross, PartPose::rotation(2.356_194_5, 0.0, 0.0));
+    }
+    LayerDef::create(mesh, 16, 16)
+}

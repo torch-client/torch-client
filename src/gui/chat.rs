@@ -47,9 +47,9 @@ const BG_ALPHA: f32 = 0.5;
 const TEXT_OPACITY: f32 = 1.0;
 const INPUT_BG: u32 = 0x8000_0000;
 const SELECTION_BG: u32 = 0xFFFF_FFFF;
-const SECURE_INDICATOR: u32 = 0x55FF55;
+const SECURE_INDICATOR: u32 = crate::text::GREEN;
 
-const MODIFIED_INDICATOR: u32 = 0xFFAA00;
+const MODIFIED_INDICATOR: u32 = crate::text::GOLD;
 
 const INPUT_TEXT_X: f32 = 4.0;
 
@@ -699,7 +699,7 @@ fn draw_span_tooltip(
 
 fn draw_tag_tooltip(p: &mut Painter, chat: &mut ChatState, ctx: &ScreenCtx) {
     const TOOLTIP_WRAP: f32 = 200.0;
-    const QUOTE: u32 = 0xAAAAAA;
+    const QUOTE: u32 = crate::text::GRAY;
     const BAR_X: std::ops::Range<f32> = 0.0..2.0;
 
     let Some(m) = ctx.mouse() else { return };

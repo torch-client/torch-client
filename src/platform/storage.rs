@@ -55,6 +55,8 @@ slots! {
     LANGUAGE = "language.txt";
     #[cfg(feature = "asset_download")]
     LANGUAGE_LIST = "language_list.txt";
+    #[cfg(feature = "seed_cracker")]
+    SEED_CRACKER_CACHE = ".seedcracker_cache";
 }
 
 impl Slot {
@@ -166,7 +168,34 @@ pub(crate) const WINDOWS_FOLDER: &str = "torch-client";
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "windows")))]
 fn default_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    if let Some(base) = xdg_config_home().filter(|p| p.is_dir()) {
+        return base.join("torch-client");
+    }
     std::path::PathBuf::from("/tmp/torch-client")
+}
+
+#[cfg(target_os = "linux")]
+fn xdg_config_home() -> Option<std::path::PathBuf> {
+    xdg_base("XDG_CONFIG_HOME", ".config")
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn xdg_cache_home() -> Option<std::path::PathBuf> {
+    xdg_base("XDG_CACHE_HOME", ".cache")
+}
+
+#[cfg(target_os = "linux")]
+fn xdg_base(var: &str, under_home: &str) -> Option<std::path::PathBuf> {
+    let absolute = |p: std::path::PathBuf| Some(p).filter(|p| p.is_absolute());
+    std::env::var_os(var)
+        .map(std::path::PathBuf::from)
+        .and_then(absolute)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(under_home))
+                .and_then(absolute)
+        })
 }
 
 #[cfg(target_os = "windows")]
@@ -212,4 +241,31 @@ mod web {
             let _ = storage.remove_item(key);
         }
     }
+
+    #[cfg(feature = "asset_download")]
+    pub(super) fn all(prefix: &str) -> Vec<(String, String)> {
+        let Some(storage) = storage() else {
+            return Vec::new();
+        };
+        let len = storage.length().unwrap_or(0);
+        (0..len)
+            .filter_map(|i| storage.key(i).ok().flatten())
+            .filter_map(|key| {
+                let name = key.strip_prefix(prefix)?.to_owned();
+                let value = storage.get_item(&key).ok().flatten()?;
+                Some((name, value))
+            })
+            .collect()
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+pub(crate) fn export() -> Vec<(String, String)> {
+    let prefix = Slot("").web_key();
+    let mut docs: Vec<_> = web::all(&prefix)
+        .into_iter()
+        .filter(|(name, _)| !name.starts_with("mod-data/"))
+        .collect();
+    docs.sort_by(|a, b| a.0.cmp(&b.0));
+    docs
 }

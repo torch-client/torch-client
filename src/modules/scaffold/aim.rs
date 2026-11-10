@@ -41,6 +41,8 @@ impl WorldCells<'_> {
                 to,
                 block_shape_type: BlockShapeType::Outline,
                 fluid_pick_type: FluidPickType::None,
+                held_item: azalea_registry::builtin::ItemKind::Air,
+                entity: None,
             },
         );
         let l = hit.location;

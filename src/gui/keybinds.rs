@@ -282,6 +282,7 @@ impl Bound {
 }
 
 pub struct BindDef {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub action: Action,
     pub id: &'static str,
     pub name: &'static str,
@@ -568,6 +569,11 @@ impl KeyBinds {
             Bound::Key(code) => keys.just_pressed(code),
             Bound::Mouse(button) => buttons.just_pressed(button),
         }
+    }
+
+    #[cfg(not(feature = "mobile_ui"))]
+    pub fn screen_owned(&self, action: Action, owned: &[MouseButton]) -> bool {
+        matches!(self.bound(action), Bound::Mouse(button) if owned.contains(&button))
     }
 
     pub fn clicks<'a>(

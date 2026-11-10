@@ -10,7 +10,7 @@ use azalea_client::{
     mining::{Mining, MiningSystems, StartMiningBlockEvent},
 };
 use azalea_core::{position::Vec3, tick::GameTick};
-use azalea_entity::{Physics, Position, inventory::Inventory};
+use azalea_entity::{LookDirection, Physics, Position, inventory::Inventory};
 use azalea_physics::{PhysicsSystems, get_block_pos_below_that_affects_movement};
 use azalea_world::{WorldName, Worlds};
 use bevy_app::{App, Plugin};
@@ -30,7 +30,7 @@ use crate::{
         custom_state::CustomPathfinderState,
         debug::debug_render_path_with_particles,
         execute::simulation::SimulatingPathState,
-        moves::{ExecuteCtx, IsReachedCtx},
+        moves::{ExecuteCtx, ExecutorIntent, IsReachedCtx},
         player_pos_to_block_pos,
     },
 };
@@ -54,6 +54,7 @@ impl Plugin for DefaultPathfinderExecutionPlugin {
                 tick_execute_path,
                 recalculate_near_end_of_path,
                 recalculate_if_has_goal_but_no_path,
+                clear_executor_intent,
             )
                 .chain()
                 .after(PhysicsSystems)
@@ -77,6 +78,8 @@ pub fn tick_execute_path(
         &WorldHolder,
         &Inventory,
         Option<&Pathfinder>,
+        Option<&LookDirection>,
+        Option<&mut ExecutorIntent>,
     )>,
     mut look_at_events: MessageWriter<LookAtEvent>,
     mut sprint_events: MessageWriter<StartSprintEvent>,
@@ -84,14 +87,26 @@ pub fn tick_execute_path(
     mut jump_events: MessageWriter<JumpEvent>,
     mut start_mining_events: MessageWriter<StartMiningBlockEvent>,
 ) {
-    for (entity, mut executing_path, position, physics, mining, world_holder, inventory, pathfinder) in
-        &mut query
+    for (
+        entity,
+        mut executing_path,
+        position,
+        physics,
+        mining,
+        world_holder,
+        inventory,
+        pathfinder,
+        look,
+        published,
+    ) in &mut query
     {
         executing_path.ticks_since_last_node_reached += 1;
 
         let can_mine = pathfinder
             .and_then(|p| p.opts.as_ref())
             .is_none_or(|opts| opts.allow_mining);
+
+        let mut intent = ExecutorIntent::default();
 
         if let Some(edge) = executing_path.path.front() {
             let mut ctx = ExecuteCtx {
@@ -111,6 +126,7 @@ pub fn tick_execute_path(
                 walk_events: &mut walk_events,
                 jump_events: &mut jump_events,
                 start_mining_events: &mut start_mining_events,
+                intent: Some(&mut intent),
             };
             ctx.on_tick_start();
             trace!(
@@ -118,7 +134,23 @@ pub fn tick_execute_path(
                 **position, executing_path.last_reached_node
             );
             (edge.movement.data.execute)(ctx);
+            intent.resolve(**position, look);
         }
+
+        match published {
+            Some(mut published) => {
+                published.set_if_neq(intent);
+            }
+            None => {
+                commands.entity(entity).insert(intent);
+            }
+        }
+    }
+}
+
+pub fn clear_executor_intent(mut query: Query<&mut ExecutorIntent, Without<ExecutingPath>>) {
+    for mut intent in &mut query {
+        intent.set_if_neq(ExecutorIntent::default());
     }
 }
 

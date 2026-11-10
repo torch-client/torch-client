@@ -15,7 +15,9 @@ pub struct FrameViewSystems;
 #[derive(Resource, Default)]
 pub struct FrameView {
     pub partial: f32,
+    pub no_render: crate::modules::no_render::Hide,
     pub player_pos: [f64; 3],
+    pub descending: bool,
     pub player_lerp: [f64; 3],
     pub eye_height: f32,
     pub camera_eye_height: f32,
@@ -31,6 +33,9 @@ pub struct FrameView {
     pub has_darkness: bool,
     pub blindness: Option<i32>,
     pub boss_darken: bool,
+    pub boss_fog: bool,
+    pub sky_flash: bool,
+    pub head_camera_overlay: bool,
     #[cfg(feature = "audio")]
     pub boss_music: bool,
     #[cfg(feature = "audio")]
@@ -39,6 +44,7 @@ pub struct FrameView {
     pub spin_degrees: f32,
     pub day_ticks: f64,
     pub day_rate: f32,
+    pub end_ticks: f64,
     pub biome: Option<BiomeLayer>,
     pub fov_modifier: f32,
     pub camera_yaw: f32,
@@ -55,6 +61,7 @@ pub struct FrameView {
     pub item_used: [u32; 2],
     pub item_activation: Option<crate::session::ItemActivation>,
     pub hands_busy: bool,
+    pub item_swap: f32,
     pub crosshair_entity: Option<i32>,
     pub main_hand_left: bool,
     pub entities: Arc<Vec<EntityAnim>>,
@@ -82,6 +89,7 @@ impl FrameView {
         self.partial = partial;
         let (prev, cur) = (session.player_pos_prev, session.player_pos);
         self.player_pos = cur;
+        self.descending = s.move_flags & crate::session::MOVE_SNEAK != 0;
         self.player_lerp =
             std::array::from_fn(|i| prev[i] + (cur[i] - prev[i]) * f64::from(partial));
         self.eye_height = super::systems::session_eye_height(session);
@@ -105,6 +113,9 @@ impl FrameView {
             self.blindness = find(effects, "blindness").map(|e| e.duration);
         }
         self.boss_darken = session.boss_bars.iter().any(|b| b.darken);
+        self.boss_fog = session.boss_bars.iter().any(|b| b.fog);
+        self.sky_flash = session.sky_flash_time > 0;
+        self.head_camera_overlay = session.head.id == "carved_pumpkin";
         #[cfg(feature = "audio")]
         {
             self.boss_music = session.boss_bars.iter().any(|b| b.music);
@@ -112,8 +123,10 @@ impl FrameView {
         }
         self.portal = session.portal_effect.sample(partial);
         self.spin_degrees = session.spinning_effect.sample(partial);
+        self.hide_effects();
         self.day_ticks = session.day_clock.at(partial);
         self.day_rate = session.day_clock.rate;
+        self.end_ticks = session.end_clock.ticks() as f64 + f64::from(partial);
         self.biome = match (session.env_prev, session.env) {
             (Some(from), Some(now)) => Some(BiomeLayer::lerp(partial, &from, &now)),
             (_, now) => now,
@@ -129,6 +142,7 @@ impl FrameView {
         self.item_used = session.item_used;
         self.item_activation.clone_from(&session.item_activation);
         self.hands_busy = session.hands_busy;
+        self.item_swap = session.item_swap;
         self.crosshair_entity = session.crosshair_entity;
         self.main_hand_left = s.skin_prefs.main_hand_left;
         self.entities = session.entities.clone();
@@ -163,6 +177,34 @@ impl FrameView {
             if self.targeted_block != session.targeted_block {
                 self.targeted_block = session.targeted_block.clone();
             }
+        }
+    }
+
+    fn hide_effects(&mut self) {
+        use crate::modules::no_render::{Part, config};
+        let hide = config();
+        self.no_render = hide;
+        if hide == crate::modules::no_render::Hide::NONE {
+            return;
+        }
+        if hide.has(Part::Portal) {
+            self.portal = 0.0;
+            self.nausea = 0.0;
+        }
+        if hide.has(Part::Blindness) {
+            self.blindness = None;
+            self.darkness = 0.0;
+            self.has_darkness = false;
+        }
+        if hide.has(Part::BossSky) {
+            self.boss_darken = false;
+            self.boss_fog = false;
+        }
+        if hide.has(Part::Lightning) {
+            self.sky_flash = false;
+        }
+        if hide.has(Part::Pumpkin) {
+            self.head_camera_overlay = false;
         }
     }
 

@@ -35,6 +35,11 @@ const SUN_SIZE: f32 = 30.0;
 const SUN_HEIGHT: f32 = 100.0;
 const MOON_SIZE: f32 = 20.0;
 const MOON_HEIGHT: f32 = 100.0;
+const END_FLASH_SIZE: f32 = 60.0;
+const END_FLASH_HEIGHT: f32 = 100.0;
+const END_FLASH_MIN_INTENSITY: f32 = 1.0e-5;
+const BOSS_FOG_START: f32 = 10.0;
+const BOSS_FOG_END: f32 = 96.0;
 const STAR_COUNT: usize = 1500;
 const STAR_DISTANCE: f32 = 100.0;
 const SUNRISE_STEPS: usize = 16;
@@ -107,6 +112,7 @@ const BIAS_SUNRISE: f32 = 1000.0 * SKY_SCALE;
 const BIAS_SUN: f32 = 2000.0 * SKY_SCALE;
 const BIAS_MOON: f32 = 3000.0 * SKY_SCALE;
 const BIAS_STARS: f32 = 4000.0 * SKY_SCALE;
+const BIAS_END_FLASH: f32 = BIAS_SUN;
 const BIAS_DARK_DISC: f32 = 5000.0 * SKY_SCALE;
 
 pub type BackdropMaterial = ExtendedMaterial<StandardMaterial, FarPlane>;
@@ -178,6 +184,7 @@ pub(crate) enum SkyPart {
     Stars,
     SunriseFan,
     EndSky,
+    EndFlash,
 }
 
 #[derive(Resource)]
@@ -186,6 +193,7 @@ pub(super) struct SkyAssets {
     dark_disc_mesh: Handle<Mesh>,
     sunrise_material: Handle<BackdropMaterial>,
     star_material: Handle<BackdropMaterial>,
+    end_flash_material: Handle<BackdropMaterial>,
     moon_materials: Vec<Handle<BackdropMaterial>>,
     discs_built_for: Option<(Argb, Argb, f32)>,
     moon_phase: usize,
@@ -349,11 +357,32 @@ fn setup(
         SkyPart::EndSky,
     ));
 
+    let end_flash_material = materials.add(backdrop(StandardMaterial {
+        base_color_texture: Some(add_celestial(
+            &mut images,
+            celestial.join("end_flash.png"),
+            false,
+        )),
+        depth_bias: BIAS_END_FLASH,
+        ..celestial_material_props()
+    }));
+    commands.spawn((
+        Mesh3d(meshes.add(celestial_quad(false))),
+        MeshMaterial3d(end_flash_material.clone()),
+        Transform::IDENTITY,
+        Visibility::Hidden,
+        ChildOf(root),
+        NotShadowCaster,
+        NoFrustumCulling,
+        SkyPart::EndFlash,
+    ));
+
     commands.insert_resource(SkyAssets {
         sky_disc_mesh,
         dark_disc_mesh,
         sunrise_material,
         star_material,
+        end_flash_material,
         moon_materials,
         discs_built_for: None,
         moon_phase: 0,
@@ -680,6 +709,10 @@ fn shade_fog(color: Argb, darkness: f32, brighten: f32) -> Argb {
     color.scale_rgb(scale, scale, scale)
 }
 
+const NO_FOG: (f32, f32) = (1.0e9, 2.0e9);
+
+use crate::modules::no_render::Part as NoRenderPart;
+
 fn blindness_fog_distance(duration: i32, render_distance: f32) -> f32 {
     if duration == -1 {
         5.0
@@ -776,7 +809,15 @@ pub(super) fn update_sky(
         None => {
             let night_vision = view.night_vision.filter(|_| !view.has_darkness);
             sky.fog_color = shade_fog(sky.fog_color, darkness, night_vision.unwrap_or(0.0));
-            env.fog_distance
+            if view.boss_fog {
+                let (start, end) = env.fog_distance;
+                let end = end.min(BOSS_FOG_END);
+                sky_end = end;
+                cloud_end.0 = Some(end);
+                (start.min(BOSS_FOG_START), end)
+            } else {
+                env.fog_distance
+            }
         }
     };
     let render_end = env.render_fog_distance.1;
@@ -796,16 +837,35 @@ pub(super) fn update_sky(
         environmental = (start, end);
         cloud_end.0 = Some(clouds);
     }
+    let hide = view.no_render;
+    let hide_environmental = effect_fog.is_none()
+        && hide.has(match eye_fluid {
+            None => NoRenderPart::Fog,
+            Some(_) => NoRenderPart::LiquidFog,
+        });
+    if hide_environmental {
+        environmental = NO_FOG;
+        cloud_end.0 = None;
+    }
+    let render_fog = if hide.has(NoRenderPart::Fog) {
+        NO_FOG
+    } else {
+        env.render_fog_distance
+    };
     let fog_color = sky.fog_color.to_color();
 
     if let Ok((mut fog, mut camera)) = world_view.single_mut() {
         fog.color = fog_color;
         fog.falloff = FogFalloff::Linear {
-            start: env.render_fog_distance.0,
-            end: env.render_fog_distance.1,
+            start: render_fog.0,
+            end: render_fog.1,
         };
-        fog.directional_light_color =
-            Color::linear_rgba(environmental.0, environmental.1, 0.0, 0.0);
+        fog.directional_light_color = Color::linear_rgba(
+            environmental.0,
+            environmental.1,
+            env.render_fog_distance.1,
+            0.0,
+        );
         camera.clear_color = ClearColorConfig::Custom(fog_color);
     }
 
@@ -816,8 +876,10 @@ pub(super) fn update_sky(
         rig.scale = Vec3::splat(SKY_SCALE);
     }
 
-    let sky_blocked =
-        view.blindness.is_some() || view.has_darkness || eye_fluid == Some(EyeFluid::Lava);
+    let sky_blocked = view.blindness.is_some()
+        || view.has_darkness
+        || eye_fluid == Some(EyeFluid::Lava)
+        || view.boss_fog;
 
     let dome_on = dome_sky() && !under_water && !sky_blocked;
 
@@ -871,7 +933,7 @@ pub(super) fn update_sky(
             if sky_materials
                 .get(&handle.0)
                 .is_some_and(|m| m.params != params)
-                && let Some(material) = sky_materials.get_mut(&handle.0)
+                && let Some(mut material) = sky_materials.get_mut(&handle.0)
             {
                 material.params = params;
             }
@@ -889,6 +951,31 @@ pub(super) fn update_sky(
             } else {
                 Visibility::Hidden
             });
+            continue;
+        }
+        if *part == SkyPart::EndFlash {
+            let flash = (skybox == Skybox::End).then(|| super::endflash::at(view.end_ticks));
+            let Some(flash) = flash.filter(|f| f.intensity > END_FLASH_MIN_INTENSITY) else {
+                visibility.set_if_neq(Visibility::Hidden);
+                continue;
+            };
+            visibility.set_if_neq(Visibility::Inherited);
+            let rotation = Quat::from_rotation_y((180.0 - flash.y_angle).to_radians())
+                * Quat::from_rotation_x((-90.0 - flash.x_angle).to_radians());
+            transform.set_if_neq(Transform {
+                translation: rotation * Vec3::new(0.0, END_FLASH_HEIGHT, 0.0),
+                rotation,
+                scale: Vec3::new(END_FLASH_SIZE, 1.0, END_FLASH_SIZE),
+            });
+            let i = flash.intensity;
+            let want = Color::srgba(i, i, i, i);
+            if materials
+                .get(&assets.end_flash_material)
+                .is_some_and(|m| m.base.base_color != want)
+                && let Some(mut m) = materials.get_mut(&assets.end_flash_material)
+            {
+                m.base.base_color = want;
+            }
             continue;
         }
         if skybox != Skybox::Overworld {
@@ -925,7 +1012,7 @@ pub(super) fn update_sky(
                 if materials
                     .get(&material.0)
                     .is_some_and(|m| m.base.base_color != want)
-                    && let Some(m) = materials.get_mut(&material.0)
+                    && let Some(mut m) = materials.get_mut(&material.0)
                 {
                     m.base.base_color = want;
                 }
@@ -945,7 +1032,7 @@ pub(super) fn update_sky(
                 if materials
                     .get(&assets.star_material)
                     .is_some_and(|m| m.base.base_color != want)
-                    && let Some(material) = materials.get_mut(&assets.star_material)
+                    && let Some(mut material) = materials.get_mut(&assets.star_material)
                 {
                     material.base.base_color = want;
                 }
@@ -973,13 +1060,13 @@ pub(super) fn update_sky(
                     if materials
                         .get(&assets.sunrise_material)
                         .is_some_and(|m| m.base.base_color != want)
-                        && let Some(material) = materials.get_mut(&assets.sunrise_material)
+                        && let Some(mut material) = materials.get_mut(&assets.sunrise_material)
                     {
                         material.base.base_color = want;
                     }
                 }
             }
-            SkyPart::EndSky => {}
+            SkyPart::EndSky | SkyPart::EndFlash => {}
         }
     }
 }
@@ -991,10 +1078,10 @@ fn rebuild_discs(assets: &mut SkyAssets, meshes: &mut Assets<Mesh>, sky: &SkySta
     }
     assets.discs_built_for = Some(key);
 
-    if let Some(mesh) = meshes.get_mut(&assets.sky_disc_mesh) {
+    if let Some(mut mesh) = meshes.get_mut(&assets.sky_disc_mesh) {
         *mesh = disc_mesh(SKY_DISC_HEIGHT, sky.sky_color, sky.fog_color, sky_end);
     }
-    if let Some(mesh) = meshes.get_mut(&assets.dark_disc_mesh) {
+    if let Some(mut mesh) = meshes.get_mut(&assets.dark_disc_mesh) {
         *mesh = disc_mesh(-SKY_DISC_HEIGHT, Argb(0xFF00_0000), sky.fog_color, sky_end);
     }
 }

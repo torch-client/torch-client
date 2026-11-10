@@ -3,10 +3,11 @@ use bevy::math::{Mat4, Quat, Vec3};
 
 use crate::entities::TexturePath;
 use crate::entities::models::objects::boat;
+use crate::entities::models::objects::misc::no_anim;
 use crate::entities::registry::Registry;
 use crate::entities::render::objects::{hook_for, hurt_wobble, mirror};
 use crate::entities::state::EntityState;
-use crate::entities::{RenderSpec, RootPose};
+use crate::entities::{Blend, RenderSpec, RootPose};
 
 pub(crate) const BOATS: &[EntityKind] = &[
     EntityKind::OakBoat,
@@ -46,6 +47,18 @@ pub fn register(registry: &mut Registry) {
             boat::setup_anim,
         )
         .with_root(root),
+    );
+    registry.add_many(
+        &[BOATS, CHEST_BOATS].concat(),
+        RenderSpec::new(
+            "boat_water_patch",
+            boat::water_patch_layer,
+            boat_texture,
+            no_anim,
+        )
+        .with_root(root)
+        .with_blend(Blend::WaterMask)
+        .with_visible(above_water),
     );
     registry.add(
         EntityKind::BambooRaft,
@@ -111,6 +124,10 @@ fn root(st: &EntityState) -> RootPose {
         extra_offset: Vec3::ZERO,
         hook: hook_for(mirror() * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)),
     }
+}
+
+fn above_water(st: &EntityState) -> bool {
+    !st.extras.under_water
 }
 
 fn mth_equal(a: f32, b: f32) -> bool {

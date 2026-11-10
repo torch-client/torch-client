@@ -58,6 +58,7 @@ async fn run_client(
         .add_plugins(flight::FlightPlugin)
         .add_plugins(crate::play::elytra::ElytraPlugin)
         .add_plugins(crate::play::riptide::RiptidePlugin)
+        .add_plugins(crate::play::geyser::GeyserPlugin)
         .add_plugins(no_fall::NoFallPlugin)
         .add_plugins(crate::play::vclip::VClipPlugin)
         .add_plugins(crate::play::riding::RidingPlugin)
@@ -575,6 +576,8 @@ async fn handle_event(
 
 fn reset_session_side_tables(blocking: bool) {
     azalea::registry::unknown::reset();
+    #[cfg(feature = "seed_cracker")]
+    crate::modules::seed_cracker::disconnected();
     if blocking {
         reset_chunk_tracking();
     } else {

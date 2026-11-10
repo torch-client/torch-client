@@ -32,7 +32,7 @@ const BUTTON_DELAY: u32 = 20;
 const BG_TOP: u32 = 0x6050_0000;
 const BG_BOTTOM: u32 = 0xA080_3030;
 
-const SCORE_COLOR: u32 = 0xFFFF55;
+const SCORE_COLOR: u32 = crate::text::YELLOW;
 
 #[derive(Default)]
 pub struct DeathState {
@@ -122,7 +122,11 @@ pub fn draw(
         )
     };
     if respawn.draw(p, ctx) {
-        shared.lock().unwrap().respawn_requested = true;
+        {
+            let mut s = shared.lock().unwrap();
+            s.respawn_requested = true;
+            s.respawns = s.respawns.wrapping_add(1);
+        }
         state.respawn_sent = true;
     }
 
@@ -186,7 +190,11 @@ fn draw_confirm(
         )
     };
     if no.draw(p, ctx) {
-        shared.lock().unwrap().respawn_requested = true;
+        {
+            let mut s = shared.lock().unwrap();
+            s.respawn_requested = true;
+            s.respawns = s.respawns.wrapping_add(1);
+        }
         state.respawn_sent = true;
         state.confirm = None;
     }

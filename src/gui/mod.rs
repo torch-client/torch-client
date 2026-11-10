@@ -123,11 +123,15 @@ pub enum Screen {
     Multiplayer,
     ManageServer,
     DirectConnect,
+    #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+    CustomProxy,
     Disconnected,
     Pause,
     Options,
     VideoSettings,
     Controls,
+    #[cfg(feature = "mobile_ui")]
+    TouchLayout,
     GameSettings,
     ManageStorage,
     #[cfg(feature = "audio")]
@@ -209,6 +213,10 @@ impl Screen {
         if matches!(self, Screen::AssetDownload | Screen::Language) {
             return true;
         }
+        #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+        if self == Screen::CustomProxy {
+            return true;
+        }
         #[cfg(self_update)]
         if self == Screen::SelfUpdate {
             return true;
@@ -268,6 +276,10 @@ impl Screen {
         if self == Screen::ExplorePacks {
             return true;
         }
+        #[cfg(feature = "mobile_ui")]
+        if self == Screen::TouchLayout {
+            return true;
+        }
         matches!(
             self,
             Screen::Options
@@ -294,6 +306,10 @@ impl Screen {
 
     pub fn tab_navigates(self) -> bool {
         if self.is_options() {
+            return true;
+        }
+        #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+        if self == Screen::CustomProxy {
             return true;
         }
         #[cfg(feature = "asset_download")]
@@ -345,20 +361,24 @@ pub enum TouchMovement {
     Joystick,
     #[default]
     PadStick,
+    Bedrock,
 }
 
 impl TouchMovement {
-    pub const ALL: [TouchMovement; 3] = [
+    pub const ALL: [TouchMovement; 4] = [
         TouchMovement::Buttons,
         TouchMovement::Joystick,
         TouchMovement::PadStick,
+        TouchMovement::Bedrock,
     ];
 
+    #[cfg(feature = "mobile_ui")]
     pub fn caption(self) -> &'static str {
         match self {
             TouchMovement::Buttons => "Buttons",
             TouchMovement::Joystick => "Joystick",
             TouchMovement::PadStick => "Pad Joystick",
+            TouchMovement::Bedrock => "Bedrock",
         }
     }
 
@@ -367,15 +387,40 @@ impl TouchMovement {
             TouchMovement::Buttons => "buttons",
             TouchMovement::Joystick => "joystick",
             TouchMovement::PadStick => "pad_joystick",
+            TouchMovement::Bedrock => "bedrock",
         }
-    }
-
-    pub fn has_stick(self) -> bool {
-        !matches!(self, TouchMovement::Buttons)
     }
 }
 
 crate::util::named_cycle::named_cycle!(TouchMovement);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TouchSneak {
+    #[default]
+    Toggle,
+    Hold,
+}
+
+impl TouchSneak {
+    pub const ALL: [TouchSneak; 2] = [TouchSneak::Toggle, TouchSneak::Hold];
+
+    #[cfg(feature = "mobile_ui")]
+    pub fn caption(self) -> &'static str {
+        match self {
+            TouchSneak::Toggle => "Toggle",
+            TouchSneak::Hold => "Hold",
+        }
+    }
+
+    pub fn serialized_name(self) -> &'static str {
+        match self {
+            TouchSneak::Toggle => "toggle",
+            TouchSneak::Hold => "hold",
+        }
+    }
+}
+
+crate::util::named_cycle::named_cycle!(TouchSneak);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LodQuality {
@@ -396,6 +441,7 @@ impl LodQuality {
         LodQuality::Extreme,
     ];
 
+    #[cfg(feature = "render_lod")]
     pub fn caption(self) -> &'static str {
         match self {
             LodQuality::Lowest => "Lowest",
@@ -416,6 +462,7 @@ impl LodQuality {
         }
     }
 
+    #[cfg(feature = "render_lod")]
     pub fn curve(self) -> (f64, i32) {
         match self {
             LodQuality::Lowest => (2.0, 4),
@@ -438,6 +485,7 @@ pub struct GuiOptions {
     pub fov_effects: u32,
     pub screen_effects: u32,
     pub damage_tilt: u32,
+    pub hide_lightning_flashes: bool,
     pub clouds: crate::renderer::clouds::CloudStatus,
     pub particles: crate::util::particles::ParticleStatus,
     pub render_distance: u32,
@@ -459,9 +507,11 @@ pub struct GuiOptions {
     pub player_shadows: bool,
     pub entity_shadows: bool,
     pub touch_movement: TouchMovement,
+    pub touch_sneak: TouchSneak,
     pub lod_distance: u32,
     pub lod_quality: LodQuality,
     pub allow_signed_chat: bool,
+    pub always_show_op_items: bool,
     pub toast_advancement: bool,
     pub toast_recipe: bool,
     pub toast_system: bool,
@@ -581,6 +631,9 @@ impl GuiOptions {
             fov_effects: effect_scale("fovEffectScale", FOV_EFFECTS_DEFAULT),
             screen_effects: effect_scale("screenEffectScale", SCREEN_EFFECTS_DEFAULT),
             damage_tilt: effect_scale("damageTiltStrength", DAMAGE_TILT_DEFAULT),
+            hide_lightning_flashes: value("hideLightningFlashes")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             clouds: value("renderClouds")
                 .and_then(|v| v.as_str().and_then(CloudStatus::from_serialized_name))
                 .unwrap_or(if cfg!(feature = "mobile_ui") {
@@ -664,6 +717,9 @@ impl GuiOptions {
             touch_movement: value("touchMovement")
                 .and_then(|v| v.as_str().and_then(TouchMovement::from_serialized_name))
                 .unwrap_or_default(),
+            touch_sneak: value("touchSneak")
+                .and_then(|v| v.as_str().and_then(TouchSneak::from_serialized_name))
+                .unwrap_or_default(),
             lod_distance: value("lodDistance")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32)
@@ -672,6 +728,9 @@ impl GuiOptions {
                 .and_then(|v| v.as_str().and_then(LodQuality::from_serialized_name))
                 .unwrap_or_default(),
             allow_signed_chat: value("allowSignedChat")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            always_show_op_items: value("alwaysShowOpItems")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             toast_advancement: value("toastAdvancement")
@@ -805,6 +864,28 @@ pub fn save_options(options: &GuiOptions) {
     crate::platform::storage::OPTIONS.store(&text);
 }
 
+#[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+const CUSTOM_PROXY_NAME_KEY: &str = "customProxyName";
+#[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+const CUSTOM_PROXY_URL_KEY: &str = "customProxyUrl";
+
+#[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+pub(crate) fn custom_proxy() -> Option<(String, String)> {
+    let chosen = CHOSEN.lock().unwrap_or_else(|e| e.into_inner());
+    let get = |key: &str| chosen.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+    Some((get(CUSTOM_PROXY_NAME_KEY)?, get(CUSTOM_PROXY_URL_KEY)?))
+}
+
+#[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+pub(crate) fn set_custom_proxy(name: &str, url: &str) {
+    let mut chosen = CHOSEN.lock().unwrap_or_else(|e| e.into_inner());
+    chosen.insert(CUSTOM_PROXY_NAME_KEY.to_owned(), name.into());
+    chosen.insert(CUSTOM_PROXY_URL_KEY.to_owned(), url.into());
+    let mut file = chosen.clone();
+    file.insert(OPTIONS_FORMAT_KEY.to_owned(), OPTIONS_FORMAT.into());
+    crate::platform::storage::OPTIONS.store(&serde_json::Value::Object(file).to_string());
+}
+
 static PENDING_OPTIONS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub(in crate::gui) fn flush_pending_options() {
@@ -824,6 +905,7 @@ fn options_json(options: &GuiOptions) -> serde_json::Value {
         "fovEffectScale": options.fov_effects,
         "screenEffectScale": options.screen_effects,
         "damageTiltStrength": options.damage_tilt,
+        "hideLightningFlashes": options.hide_lightning_flashes,
         "renderClouds": options.clouds.serialized_name(),
         "particles": options.particles.serialized_name(),
         "renderDistance": options.render_distance,
@@ -843,9 +925,11 @@ fn options_json(options: &GuiOptions) -> serde_json::Value {
         "playerShadows": options.player_shadows,
         "entityShadows": options.entity_shadows,
         "touchMovement": options.touch_movement.serialized_name(),
+        "touchSneak": options.touch_sneak.serialized_name(),
         "lodDistance": options.lod_distance,
         "lodQuality": options.lod_quality.serialized_name(),
         "allowSignedChat": options.allow_signed_chat,
+        "alwaysShowOpItems": options.always_show_op_items,
         "toastAdvancement": options.toast_advancement,
         "toastRecipe": options.toast_recipe,
         "toastSystem": options.toast_system,
@@ -928,7 +1012,7 @@ pub struct GuiState {
     pub controls_scroll: f32,
     pub controls_scroll_drag: Option<f32>,
     pub nav: Option<Screen>,
-    pub suppress_click: bool,
+    pub screen_buttons: Vec<MouseButton>,
     pub death: death::DeathState,
     pub win: winscreen::WinState,
     pub config_phase: configphase::State,
@@ -971,6 +1055,14 @@ pub struct GuiState {
 }
 
 impl GuiState {
+    pub fn claim_buttons(&mut self, buttons: &ButtonInput<MouseButton>) {
+        for b in buttons.get_pressed() {
+            if !self.screen_buttons.contains(b) {
+                self.screen_buttons.push(*b);
+            }
+        }
+    }
+
     pub fn anvil_typing(&self) -> bool {
         self.screen == Screen::Container(ContainerKind::Anvil) && self.container.anvil.editable()
     }
@@ -1016,11 +1108,13 @@ pub struct Snapshot {
     pub attack_delay: f32,
     pub targeted_entity: bool,
     pub hotbar: std::sync::Arc<[SlotStack]>,
+    pub hotbar_pop: [f32; 10],
     pub armor: std::sync::Arc<[SlotStack]>,
     pub carried: SlotStack,
     pub creative_cursor: Option<crate::session::CreativeAnswer>,
     pub selected: u8,
     pub gamemode: Gamemode,
+    pub op_level: u8,
     pub health: f32,
     pub food: u32,
     pub saturation: f32,

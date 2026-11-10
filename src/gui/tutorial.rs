@@ -16,10 +16,15 @@ pub enum Spot {
     Version,
     Video,
     Tab(Layer),
+    #[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
     ChatButton,
+    #[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
     Swap,
+    #[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
     LookArea,
+    #[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
     ZoomArea,
+    #[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
     NewArea,
     Reset,
     Done,
@@ -197,7 +202,7 @@ fn steps() -> Vec<Step> {
 const DIM: u32 = 0xB000_0000;
 const LINE: u32 = 0xFFFF_FF55;
 const PLATE: u32 = 0xF010_1010;
-const TEXT: u32 = 0xFFFFFF;
+const TEXT: u32 = crate::text::WHITE;
 const PAD: f32 = 3.0;
 const GAP: f32 = 6.0;
 const INSET: f32 = 4.0;
@@ -257,6 +262,7 @@ pub fn mark(spot: Spot, r: Rect) {
     }
 }
 
+#[cfg(feature = "mobile_ui")]
 pub fn mark_in(p: &Painter, spot: Spot, r: Rect) {
     let (s, x, y) = p.xform();
     mark(spot, Rect::new(x + r.x * s, y + r.y * s, r.w * s, r.h * s));

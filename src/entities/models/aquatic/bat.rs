@@ -1,5 +1,5 @@
 use crate::entities::geom::{BakedModel, LayerDef, MeshDef, PartPose, PartState};
-use crate::entities::keyframe::apply;
+use crate::entities::keyframe::apply_state;
 use crate::entities::models::aquatic::DEG_TO_RAD;
 use crate::entities::models::aquatic::animation::bat as anim;
 use crate::entities::state::EntityState;
@@ -65,11 +65,23 @@ pub fn layer() -> LayerDef {
 }
 
 pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
-    let seconds = st.age_ticks / 20.0;
+    use crate::entities::state::anim_slot::bat as slot;
     if st.extras.resting {
         parts[model.id("head")].y_rot = st.y_rot * DEG_TO_RAD;
-        apply(&anim::BAT_RESTING, model, parts, seconds, 1.0);
-    } else {
-        apply(&anim::BAT_FLYING, model, parts, seconds, 1.0);
     }
+    let states = &st.extras.anim;
+    apply_state(
+        &anim::BAT_FLYING,
+        model,
+        parts,
+        states[slot::FLY],
+        st.age_ticks,
+    );
+    apply_state(
+        &anim::BAT_RESTING,
+        model,
+        parts,
+        states[slot::REST],
+        st.age_ticks,
+    );
 }

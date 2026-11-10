@@ -112,7 +112,6 @@ pub enum Control {
 
 #[derive(Debug)]
 pub struct Multiline {
-    pub max_lines: Option<usize>,
     pub height: f32,
 }
 
@@ -738,7 +737,6 @@ fn control(tag: &NbtCompound) -> Option<Control> {
             multiline: tag.compound("multiline").map(|m| {
                 let max_lines = m.int("max_lines").filter(|n| *n > 0).map(|n| n as usize);
                 Multiline {
-                    max_lines,
                     height: m
                         .int("height")
                         .map(|h| h.clamp(1, 512))

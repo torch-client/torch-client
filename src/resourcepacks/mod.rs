@@ -16,7 +16,7 @@ use crate::util::pack::{Pack, Source};
 
 const ROOT: &str = "";
 
-const FORMAT: Format = (84, 0);
+const FORMAT: Format = (88, 0);
 
 type Format = (u32, u32);
 
@@ -466,8 +466,8 @@ mod tests {
             std::fs::create_dir_all(at.parent().unwrap()).unwrap();
             std::fs::write(at, body).unwrap();
         };
-        let meta = r#"{"pack": {"description": "", "min_format": 84, "max_format": 84},
-            "overlays": {"entries": [{"directory": "ov", "min_format": 84, "max_format": 84}]}}"#;
+        let meta = r#"{"pack": {"description": "", "min_format": 88, "max_format": 88},
+            "overlays": {"entries": [{"directory": "ov", "min_format": 88, "max_format": 88}]}}"#;
         file("pack.mcmeta", &format!("\u{feff}{meta}"));
         file("assets/minecraft/a.txt", "base");
         file("assets/minecraft/b.txt", "base");

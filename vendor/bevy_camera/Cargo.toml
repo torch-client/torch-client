@@ -1,7 +1,7 @@
 [package]
 edition = "2024"
 name = "bevy_camera"
-version = "0.18.1"
+version = "0.19.1"
 build = false
 autolib = false
 autobins = false
@@ -14,12 +14,12 @@ readme = false
 keywords = ["bevy"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bevyengine/bevy"
-resolver = "2"
 
 [package.metadata.docs.rs]
 rustdoc-args = [
     "-Zunstable-options",
     "--generate-link-to-definition",
+    "--generate-macro-expansion",
 ]
 all-features = true
 
@@ -31,42 +31,42 @@ name = "bevy_camera"
 path = "src/lib.rs"
 
 [dependencies.bevy_app]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_asset]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_color]
-version = "0.18.0"
+version = "0.19.1"
 features = ["serialize"]
 
 [dependencies.bevy_derive]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_ecs]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_image]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_math]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_mesh]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_reflect]
-version = "0.18.0"
+version = "0.19.1"
 features = ["wgpu-types"]
 
 [dependencies.bevy_transform]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_utils]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.bevy_window]
-version = "0.18.0"
+version = "0.19.1"
 
 [dependencies.derive_more]
 version = "2"
@@ -93,7 +93,7 @@ version = "2"
 default-features = false
 
 [dependencies.wgpu-types]
-version = "27"
+version = "29.0.3"
 default-features = false
 
 [lints.clippy]

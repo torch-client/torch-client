@@ -347,7 +347,7 @@ pub fn draw_sign(p: &mut Painter, state: &mut BookState, ctx: &ScreenCtx) -> Opt
     None
 }
 
-const DARK_GRAY: u32 = 0x555555;
+const DARK_GRAY: u32 = crate::text::DARK_GRAY;
 
 #[cfg(test)]
 mod tests {

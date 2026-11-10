@@ -71,9 +71,11 @@
 <canvas id="canvas" hidden></canvas>
 
 <script type="module">
-  import init, { start_web, take_web_assets, asset_cache_key, ships_assets, seed_mod_file } from "./torch-client.js";
+  import init, { start_web, take_web_assets, asset_cache_key, ships_assets, seed_mod_file, stored_assets_loaded } from "./torch-client.js";
 
   globalThis.torchWorker = "./worker.js";
+  globalThis.torchSeedWorker = "./seed_worker.js";
+  globalThis.torchSeedWasm = "./seedcrack_wasm.wasm";
 
   const status = document.getElementById("status");
   const label = document.getElementById("label");
@@ -194,6 +196,8 @@
     location.reload();
   };
 
+  window.keepStoredAssets = () => keepAssets();
+
   const MODS_DB = "torch-client-mods";
   const MODS_STORE = "files";
 
@@ -233,20 +237,17 @@
   }
 
   async function keepAssets() {
-    for (let attempt = 0; attempt < 600; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      const bytes = take_web_assets();
-      if (!bytes) continue;
-      try {
-        const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
-        const packed = await new Response(stream).blob();
-        const key = asset_cache_key();
-        await idb("readwrite", (store) => store.put(packed, key));
-        console.info(`stored ${(packed.size / 1048576).toFixed(1)} MB of assets as ${key}`);
-      } catch (e) {
-        console.warn("could not store the assets:", e);
-      }
-      return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const bytes = take_web_assets();
+    if (!bytes) return;
+    try {
+      const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
+      const packed = await new Response(stream).blob();
+      const key = asset_cache_key();
+      await idb("readwrite", (store) => store.put(packed, key));
+      console.info(`stored ${(packed.size / 1048576).toFixed(1)} MB of assets as ${key}`);
+    } catch (e) {
+      console.warn("could not store the assets:", e);
     }
   }
 
@@ -335,14 +336,15 @@
     try {
       start_web(assets, user, server);
     } catch (e) {
-      if (fromStore && mayRetry()) {
+      let rejected = true;
+      try { rejected = !stored_assets_loaded(); } catch {}
+      if (fromStore && rejected && mayRetry()) {
         console.warn("the stored assets did not start the client; clearing them", e);
         await window.clearStoredAssets();
         await new Promise(() => {});
       }
       throw e;
     }
-    if (assets.length === 0) keepAssets();
     label.remove();
     document.getElementById("bar").remove();
     pct.remove();

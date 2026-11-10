@@ -23,6 +23,10 @@ data/minecraft/worldgen/biome/
 
 data/minecraft/tags/banner_pattern/
 
+data/minecraft/tags/enchantment/
+
+data/minecraft/tags/painting_variant/
+
 data/minecraft/banner_pattern/
 data/minecraft/cat_variant/
 data/minecraft/chicken_variant/

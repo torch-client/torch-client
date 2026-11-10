@@ -1,12 +1,13 @@
 use azalea_registry::builtin::EntityKind;
 use bevy::math::{Quat, Vec3};
+use bevy::prelude::Transform;
 
 use crate::entities::TexturePath;
 use crate::entities::models::objects::minecart;
 use crate::entities::registry::Registry;
 use crate::entities::render::objects::{hook_for, mirror};
 use crate::entities::state::EntityState;
-use crate::entities::{RenderSpec, RootPose};
+use crate::entities::{BlockRef, RenderSpec, RootPose};
 
 const MINECARTS: &[EntityKind] = &[
     EntityKind::Minecart,
@@ -23,6 +24,16 @@ pub fn register(registry: &mut Registry) {
         MINECARTS,
         RenderSpec::new("minecart", minecart::layer, texture, minecart::setup_anim).with_root(root),
     );
+    registry.add_many(
+        MINECARTS,
+        RenderSpec::block("minecart_display", display_block)
+            .with_root(display_root)
+            .with_fuse_flash(tnt_lit),
+    );
+}
+
+fn display_block(st: &EntityState) -> Option<BlockRef> {
+    st.extras.display_block.map(BlockRef::State)
 }
 
 fn texture(_st: &EntityState) -> TexturePath {
@@ -30,6 +41,13 @@ fn texture(_st: &EntityState) -> TexturePath {
 }
 
 fn root(st: &EntityState) -> RootPose {
+    RootPose {
+        hook: hook_for(mirror()),
+        ..cart_pose(st)
+    }
+}
+
+fn cart_pose(st: &EntityState) -> RootPose {
     let [jitter_x, jitter_y, jitter_z] = jitter(st.id);
 
     let extra_rotation = Quat::from_rotation_z((-st.x_rot).to_radians()) * super::hurt_wobble(st);
@@ -40,8 +58,39 @@ fn root(st: &EntityState) -> RootPose {
         scale: 1.0,
         extra_rotation,
         extra_offset: Vec3::ZERO,
-        hook: hook_for(mirror()),
+        hook: Transform::IDENTITY,
     }
+}
+
+fn display_root(st: &EntityState) -> RootPose {
+    const SCALE: f32 = 0.75;
+    let offset = Vec3::new(-0.5, (st.extras.display_offset - 8) as f32 / 16.0, 0.5);
+    let hook = Transform {
+        translation: SCALE * offset,
+        rotation: Quat::from_rotation_y(90f32.to_radians()),
+        scale: Vec3::splat(SCALE),
+    };
+    RootPose {
+        hook: hook.mul_transform(tnt_swell(st)),
+        ..cart_pose(st)
+    }
+}
+
+fn tnt_swell(st: &EntityState) -> Transform {
+    let fuse = st.extras.minecart_fuse;
+    if st.kind != EntityKind::TntMinecart || fuse <= -1.0 || fuse >= 10.0 {
+        return Transform::IDENTITY;
+    }
+    let swell = super::blocks::swell_amount(fuse);
+    Transform {
+        translation: Vec3::new(-swell * 0.5, 0.0, -swell * 0.5),
+        rotation: Quat::IDENTITY,
+        scale: Vec3::splat(1.0 + swell),
+    }
+}
+
+fn tnt_lit(st: &EntityState) -> bool {
+    st.kind == EntityKind::TntMinecart && super::blocks::is_lit(st.extras.minecart_fuse)
 }
 
 fn jitter(id: i32) -> [f32; 3] {

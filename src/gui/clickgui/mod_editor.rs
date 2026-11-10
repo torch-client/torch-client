@@ -115,7 +115,7 @@ impl ClickGuiState {
         }
 
         let font = &p.atlas.font;
-        let mut changed = false;
+        let changed;
         if !e.on_code {
             e.name.focused = true;
             e.code.inner.focused = false;

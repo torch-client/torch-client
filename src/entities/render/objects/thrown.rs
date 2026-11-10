@@ -166,11 +166,19 @@ fn thrown_item(st: &EntityState) -> TexturePath {
 }
 
 fn thrown_root(st: &EntityState, camera: &CameraView) -> RootPose {
+    let rotation = if st.kind == EntityKind::FireworkRocket && st.extras.shot_at_angle {
+        camera.orientation
+            * Quat::from_rotation_z(std::f32::consts::PI)
+            * Quat::from_rotation_y(std::f32::consts::PI)
+            * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)
+    } else {
+        camera.orientation
+    };
     RootPose {
         scale: 1.0,
         hook: Transform {
             translation: Vec3::ZERO,
-            rotation: camera.orientation,
+            rotation,
             scale: Vec3::splat(thrown_scale(st.kind)),
         },
         ..RootPose::default()

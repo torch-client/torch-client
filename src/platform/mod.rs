@@ -2,6 +2,11 @@ pub(crate) mod address;
 pub(crate) mod assets;
 pub(crate) mod cli;
 pub(crate) mod clipboard;
+#[cfg(all(
+    target_arch = "wasm32",
+    any(feature = "asset_download", feature = "screen_record")
+))]
+pub(crate) mod download;
 pub(crate) mod env;
 pub(crate) mod executor;
 pub(crate) mod fullscreen;
@@ -31,6 +36,8 @@ pub(crate) mod orientation;
 ))]
 pub(crate) mod packfs;
 pub(crate) mod pointer;
+#[cfg(all(target_arch = "wasm32", feature = "screen_record"))]
+pub(crate) mod record;
 pub(crate) mod screenshot;
 pub(crate) mod storage;
 pub(crate) mod time;

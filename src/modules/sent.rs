@@ -74,6 +74,30 @@ pub fn keys_toward(dx: f64, dz: f64, yaw: f32) -> Option<u8> {
     Some(DIRS[i])
 }
 
+pub fn box_distance(p: [f64; 3], min: [f64; 3], max: [f64; 3]) -> f64 {
+    let d = |i: usize| (min[i] - p[i]).max(0.0).max(p[i] - max[i]);
+    (d(0) * d(0) + d(1) * d(1) + d(2) * d(2)).sqrt()
+}
+
+pub fn ray_hits(origin: [f64; 3], dir: [f64; 3], len: f64, min: [f64; 3], max: [f64; 3]) -> bool {
+    let (mut near, mut far) = (0.0_f64, len);
+    for i in 0..3 {
+        if dir[i].abs() < 1e-12 {
+            if origin[i] < min[i] || origin[i] > max[i] {
+                return false;
+            }
+            continue;
+        }
+        let (a, b) = ((min[i] - origin[i]) / dir[i], (max[i] - origin[i]) / dir[i]);
+        near = near.max(a.min(b));
+        far = far.min(a.max(b));
+        if near > far {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

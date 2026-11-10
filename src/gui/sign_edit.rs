@@ -11,37 +11,28 @@ use crate::platform::time::Instant;
 use crate::session::{SharedMutex, SignEditKind, SignEditRequest, SignUpdateRequest};
 use crate::text::Span;
 
-pub(crate) const SIGN_TEXTURE_WIDTH: u32 = 64;
+pub(crate) const SIGN_TEXTURE_SIZE: [u32; 2] = [24, 26];
 
-pub(crate) const BOARD_UV: [u32; 4] = [2, 2, 24, 12];
+pub(crate) const WALL_SIGN_ROWS: u32 = 12;
 
-pub(crate) const STICK_UV: [u32; 4] = [2, 16, 2, 14];
+const BACKGROUND_SCALE: f32 = 3.9;
 
 pub(crate) fn hanging_sprite(wood: &str) -> String {
     format!("sign_edit/hanging/{wood}")
 }
 
-pub(crate) fn board_sprite(wood: &str) -> String {
-    format!("sign_edit/board/{wood}")
+pub(crate) fn standing_sprite(wood: &str) -> String {
+    format!("sign_edit/standing/{wood}")
 }
 
-pub(crate) fn stick_sprite(wood: &str) -> String {
-    format!("sign_edit/stick/{wood}")
+pub(crate) fn wall_sprite(wood: &str) -> String {
+    format!("sign_edit/wall/{wood}")
 }
 
 const MAX_CHARS: usize = 128;
 
-const MODEL_SCALE: f32 = 62.500_004;
-
-const MODEL_BOTTOM: f32 = 168.0;
-
-const MODEL_LIFT: f32 = -0.75;
-
 enum Background {
-    Standing {
-        board: String,
-        stick: Option<String>,
-    },
+    Standing { sprite: String, rows: u32 },
     Hanging(String),
 }
 
@@ -122,9 +113,13 @@ impl SignEditState {
         self.kind = req.kind;
         self.metrics = req.kind.sign_kind().metrics();
         self.background = match req.kind {
-            SignEditKind::Standing { wall } => Background::Standing {
-                board: board_sprite(req.wood),
-                stick: (!wall).then(|| stick_sprite(req.wood)),
+            SignEditKind::Standing { wall: true } => Background::Standing {
+                sprite: wall_sprite(req.wood),
+                rows: WALL_SIGN_ROWS,
+            },
+            SignEditKind::Standing { wall: false } => Background::Standing {
+                sprite: standing_sprite(req.wood),
+                rows: SIGN_TEXTURE_SIZE[1],
             },
             SignEditKind::Hanging => Background::Hanging(hanging_sprite(req.wood)),
         };
@@ -218,12 +213,6 @@ impl SignEditState {
     }
 }
 
-fn model_rect(cx: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> (f32, f32, f32, f32) {
-    let unit = MODEL_SCALE / 16.0;
-    let top = MODEL_BOTTOM + (MODEL_LIFT * 16.0 + y0) * unit;
-    (cx + x0 * unit, top, (x1 - x0) * unit, (y1 - y0) * unit)
-}
-
 pub fn draw(
     p: &mut Painter,
     state: &mut SignEditState,
@@ -242,14 +231,15 @@ pub fn draw(
 
     let cx = ctx.vw / 2.0;
     match &state.background {
-        Background::Standing { board, stick } => {
-            let cx = cx.floor();
-            let (x, y, w, h) = model_rect(cx, -12.0, -14.0, 12.0, -2.0);
-            p.sprite(board, x, y, w, h);
-            if let Some(stick) = stick {
-                let (x, y, w, h) = model_rect(cx, -1.0, -2.0, 1.0, 12.0);
-                p.sprite(stick, x, y, w, h);
-            }
+        Background::Standing { sprite, rows } => {
+            let [width, _] = SIGN_TEXTURE_SIZE;
+            p.sprite(
+                sprite,
+                cx - 12.0 * BACKGROUND_SCALE,
+                offset_y + 27.0 - 13.0 * BACKGROUND_SCALE,
+                width as f32 * BACKGROUND_SCALE,
+                *rows as f32 * BACKGROUND_SCALE,
+            );
         }
         Background::Hanging(sprite) => {
             const SCALE: f32 = 4.5;

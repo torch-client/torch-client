@@ -4,6 +4,7 @@ pub mod glint;
 pub mod icons;
 pub(crate) mod json;
 pub mod kinetic;
+pub mod local_time;
 pub mod mesh;
 pub mod model;
 pub mod placed;

@@ -41,6 +41,7 @@ impl<'a> Reader<'a> {
         Some(b)
     }
 
+    #[cfg(test)]
     pub(crate) fn u16(&mut self) -> Option<u16> {
         Some(u16::from_be_bytes(self.take(2)?.try_into().ok()?))
     }
@@ -49,10 +50,12 @@ impl<'a> Reader<'a> {
         Some(u64::from_be_bytes(self.take(8)?.try_into().ok()?))
     }
 
+    #[cfg(eagler_skins)]
     pub(crate) fn i32(&mut self) -> Option<i32> {
         Some(i32::from_be_bytes(self.take(4)?.try_into().ok()?))
     }
 
+    #[cfg(eagler_skins)]
     pub(crate) fn uuid(&mut self) -> Option<u128> {
         Some(u128::from_be_bytes(self.take(16)?.try_into().ok()?))
     }

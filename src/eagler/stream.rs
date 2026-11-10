@@ -404,6 +404,7 @@ impl Bridge {
         if let Login::Hello(_) = self.login {
             let packet = azalea_protocol::packets::Packet::into_variant(ClientboundLoginFinished {
                 game_profile: self.profile.clone(),
+                session_id: uuid::Uuid::nil(),
             });
             let raw = azalea_protocol::write::serialize_packet(&packet)
                 .map_err(|e| io::Error::other(format!("eagler: {e}")))?;
@@ -505,8 +506,8 @@ mod tests {
     #[test]
     fn a_two_byte_packet_id_is_not_mistaken_for_a_length() {
         let mut frame = Vec::new();
-        super::write_varint(&mut frame, 0x8d);
-        frame.extend(std::iter::repeat_n(0u8, 0x8d));
+        super::write_varint(&mut frame, 0x8c);
+        frame.extend(std::iter::repeat_n(0u8, 0x8c));
         assert_eq!(super::unprefixed(frame.clone()), vec![frame]);
     }
 

@@ -247,6 +247,19 @@ pub(crate) mod archive {
             self.descendants(prefix).filter(|rest| !rest.contains('/'))
         }
 
+        #[cfg(target_arch = "wasm32")]
+        fn entries(&'static self) -> Vec<(&'static str, &'static [u8])> {
+            let mut seen = std::collections::HashSet::new();
+            self.0
+                .get()
+                .into_iter()
+                .flatten()
+                .flat_map(|layer| layer.iter())
+                .filter(|(key, _)| seen.insert(key.as_str()))
+                .map(|(key, bytes)| (key.as_str(), *bytes))
+                .collect()
+        }
+
         fn descendants(&'static self, prefix: &str) -> impl Iterator<Item = &'static str> {
             let prefix = format!("{}/", prefix.trim_end_matches('/'));
             self.0
@@ -443,6 +456,11 @@ pub(crate) mod archive {
 
     pub(crate) fn descendants(prefix: &str) -> impl Iterator<Item = &'static str> {
         BASE.descendants(prefix)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn entries() -> Vec<(&'static str, &'static [u8])> {
+        BASE.entries()
     }
 
     #[cfg(all(test, resource_packs))]

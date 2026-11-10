@@ -124,6 +124,7 @@ pub(crate) fn slot_stack(
             banner_patterns: banner_patterns(data, registries),
             banner_layers: banner_layers(data, registries),
             book: book(data).map(Box::new),
+            painting_variant: painting_variant(data, registries),
         }
         .into(),
         unbreakable: data.get_component::<comp::Unbreakable>().is_some(),
@@ -133,6 +134,7 @@ pub(crate) fn slot_stack(
             .is_some_and(|c| !c.items.is_empty()),
         rocket: charged_rocket(data),
         trim: crate::items::dispatch::trim_of(data),
+        block_state: crate::items::dispatch::block_state_of(data),
         has_lodestone,
         lodestone,
         death_protection: death_protection(data),
@@ -251,6 +253,9 @@ pub(crate) fn slot_stack_nbt(item: &simdnbt::owned::NbtCompound) -> Option<SlotS
             .map_or(0, |m| {
                 crate::items::dispatch::trim_index(strip_namespace(&m.to_str()))
             }),
+        block_state: component(components, "block_state")
+            .and_then(NbtTag::compound)
+            .map_or(0, crate::items::dispatch::block_state_of_codec),
         ..SlotStack::default()
     })
 }
@@ -277,6 +282,23 @@ fn banner_patterns(
         })
         .collect();
     (!out.is_empty()).then(|| out.into_boxed_slice())
+}
+
+fn painting_variant(
+    data: &azalea_inventory::ItemStackData,
+    registries: Option<&azalea_core::registry_holder::RegistryHolder>,
+) -> Option<Box<str>> {
+    use azalea_core::data_registry::DataRegistryWithKey;
+    use azalea_inventory::components as comp;
+
+    let component = data.get_component::<comp::PaintingVariant>()?;
+    let azalea_registry::Holder::Reference(variant) = &component.variant else {
+        return None;
+    };
+    let key = variant.key_owned(registries?)?;
+    Some(Box::from(
+        azalea_registry::DataRegistryKey::into_ident(key).path(),
+    ))
 }
 
 pub(crate) fn banner_layers(
@@ -535,7 +557,38 @@ fn creative_stack(
         out =
             out.with_component(azalea_inventory::components::OminousBottleAmplifier { amplifier });
     }
+    if let Some(&(property, value)) =
+        crate::items::dispatch::BLOCK_STATE_VALUES.get((stack.block_state as usize).wrapping_sub(1))
+    {
+        out = out.with_component(azalea_inventory::components::BlockState {
+            properties: [(property.to_owned(), value.to_owned())].into(),
+        });
+    }
+    if let Some(name) = &stack.extra.painting_variant
+        && let Some(id) = registries.and_then(|r| painting_variant_id(r, name))
+    {
+        out = out.with_component(azalea_inventory::components::PaintingVariant {
+            variant: azalea_registry::Holder::Reference(id),
+        });
+    }
     out
+}
+
+fn painting_variant_id(
+    registries: &azalea_core::registry_holder::RegistryHolder,
+    name: &str,
+) -> Option<azalea_registry::data::PaintingVariant> {
+    use azalea_registry::DataRegistry;
+    use azalea_registry::identifier::Identifier;
+
+    static KEY: std::sync::LazyLock<Identifier> =
+        std::sync::LazyLock::new(|| Identifier::from("painting_variant"));
+    let id = registries
+        .extra
+        .get(&*KEY)?
+        .map
+        .get_index_of(&Identifier::new(name))?;
+    Some(azalea_registry::data::PaintingVariant::new_raw(id as u32))
 }
 
 pub(crate) fn set_creative_slot(bot: &Client, slot: u16, stack: ItemStack) {

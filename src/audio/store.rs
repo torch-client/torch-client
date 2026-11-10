@@ -46,19 +46,6 @@ pub(crate) struct Pack {
     cache: HashMap<String, Arc<[u8]>>,
 }
 
-#[cfg(resource_packs)]
-fn from_layers(key: &str) -> Option<Arc<[u8]>> {
-    use crate::platform::assets::archive;
-    archive::packs_active()
-        .then(|| archive::pack_get(&super::defs::layer_key(key)))?
-        .map(Into::into)
-}
-
-#[cfg(not(resource_packs))]
-fn from_layers(_key: &str) -> Option<Arc<[u8]>> {
-    None
-}
-
 const MAX_CACHED: usize = 512;
 
 impl Pack {
@@ -89,7 +76,7 @@ impl Pack {
         if let Some(hit) = self.cache.get(key) {
             return Some(hit.clone());
         }
-        let bytes = match from_layers(key) {
+        let bytes = match super::pack_override(key) {
             Some(bytes) => bytes,
             None => self.from_file(key)?,
         };

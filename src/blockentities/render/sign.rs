@@ -6,30 +6,12 @@ use azalea_registry::builtin::BlockEntityKind;
 use bevy::prelude::*;
 
 use crate::blockentities::feed::{BlockEntityData, SignData, SignFace};
-use crate::blockentities::models::{self, HangingAttachment};
 use crate::blockentities::text;
-use crate::blockentities::{BeRegistry, BeSpec, BeState, BuiltTexture, GeomKey, no_anim};
+use crate::blockentities::{BeRegistry, BeSpec, BeState, BuiltTexture, GeomKey};
 use crate::entities::Blend;
-use crate::entities::geom::LayerDef;
 use crate::gui::atlas::GuiAtlas;
 
 pub fn register(registry: &mut BeRegistry) {
-    registry.add(
-        BlockEntityKind::Sign,
-        BeSpec::model("sign", plain_key, plain_layer, plain_texture, no_anim)
-            .with_transform(plain_body_transform),
-    );
-    registry.add(
-        BlockEntityKind::HangingSign,
-        BeSpec::model(
-            "hanging_sign",
-            hanging_key,
-            hanging_layer,
-            hanging_texture,
-            no_anim,
-        )
-        .with_transform(hanging_body_transform),
-    );
     registry.add_many(
         &[BlockEntityKind::Sign, BlockEntityKind::HangingSign],
         BeSpec::built(
@@ -82,66 +64,6 @@ fn sign_angle(st: &BeState) -> f32 {
     }
 }
 
-fn hanging_attachment(st: &BeState) -> HangingAttachment {
-    if is_wall(&st.state.block) {
-        HangingAttachment::Wall
-    } else if st.state.prop("attached") == "true" {
-        HangingAttachment::CeilingMiddle
-    } else {
-        HangingAttachment::Ceiling
-    }
-}
-
-fn plain_key(st: &BeState) -> Option<u64> {
-    let attachment = if is_wall(&st.state.block) {
-        "wall"
-    } else {
-        "ground"
-    };
-    Some(
-        GeomKey::new()
-            .str(wood_type(&st.state.block))
-            .str(attachment)
-            .finish(),
-    )
-}
-
-fn plain_layer(st: &BeState) -> LayerDef {
-    if is_wall(&st.state.block) {
-        models::wall_sign()
-    } else {
-        models::standing_sign()
-    }
-}
-
-fn plain_texture(st: &BeState) -> String {
-    format!("entity/signs/{}", wood_type(&st.state.block))
-}
-
-fn hanging_key(st: &BeState) -> Option<u64> {
-    let attachment = match hanging_attachment(st) {
-        HangingAttachment::Wall => "wall",
-        HangingAttachment::Ceiling => "ceiling",
-        HangingAttachment::CeilingMiddle => "ceiling_middle",
-    };
-    Some(
-        GeomKey::new()
-            .str(wood_type(&st.state.block))
-            .str(attachment)
-            .finish(),
-    )
-}
-
-fn hanging_layer(st: &BeState) -> LayerDef {
-    models::hanging_sign(hanging_attachment(st))
-}
-
-fn hanging_texture(st: &BeState) -> String {
-    format!("entity/signs/hanging/{}", wood_type(&st.state.block))
-}
-
-const PLAIN_RENDER_SCALE: f32 = 0.666_666_7;
-
 const PLAIN_TEXT_OFFSET: Vec3 = Vec3::new(0.0, 0.333_333_34, 0.046_666_667);
 
 const PLAIN_TEXT_SCALE: f32 = 0.010_416_667;
@@ -159,29 +81,10 @@ fn plain_base(st: &BeState) -> (Vec3, Quat) {
     (translation, rotation)
 }
 
-fn plain_body_transform(st: &BeState) -> Transform {
-    body_transform(
-        plain_base(st),
-        Vec3::new(PLAIN_RENDER_SCALE, -PLAIN_RENDER_SCALE, -PLAIN_RENDER_SCALE),
-    )
-}
-
-fn body_transform((translation, rotation): (Vec3, Quat), scale: Vec3) -> Transform {
-    Transform {
-        translation,
-        rotation,
-        scale,
-    }
-}
-
 fn hanging_base(st: &BeState) -> (Vec3, Quat) {
     let rotation = Quat::from_rotation_y(-sign_angle(st).to_radians());
     let translation = Vec3::new(0.5, 0.9375, 0.5) + rotation * Vec3::new(0.0, -0.3125, 0.0);
     (translation, rotation)
-}
-
-fn hanging_body_transform(st: &BeState) -> Transform {
-    body_transform(hanging_base(st), Vec3::new(1.0, -1.0, -1.0))
 }
 
 fn sign_data(st: &BeState) -> Option<&SignData> {
@@ -309,28 +212,19 @@ mod tests {
     }
 
     #[test]
-    fn a_standing_sign_stands_on_the_block_centre() {
+    fn a_standing_sign_pivots_on_the_block_centre() {
         let st = super::super::test_state("oak_sign", &[("rotation", "0")]);
-        let transform = plain_body_transform(&st);
-        assert!(
-            transform
-                .translation
-                .abs_diff_eq(Vec3::new(0.5, 0.5, 0.5), 1e-6)
-        );
-        let top = transform.transform_point(Vec3::new(0.0, -14.0 / 16.0, 0.0));
-        assert!((top.y - (0.5 + 14.0 / 16.0 * PLAIN_RENDER_SCALE)).abs() < 1e-6);
+        let (translation, _) = plain_base(&st);
+        assert!(translation.abs_diff_eq(Vec3::new(0.5, 0.5, 0.5), 1e-6));
     }
 
     #[test]
     fn a_wall_sign_hangs_off_the_block_behind_it() {
         let st = super::super::test_state("oak_wall_sign", &[("facing", "south")]);
-        let transform = plain_body_transform(&st);
+        let (translation, _) = plain_base(&st);
         assert!(
-            transform
-                .translation
-                .abs_diff_eq(Vec3::new(0.5, 0.1875, 0.0625), 1e-6),
-            "{:?}",
-            transform.translation
+            translation.abs_diff_eq(Vec3::new(0.5, 0.1875, 0.0625), 1e-6),
+            "{translation:?}"
         );
     }
 
@@ -348,13 +242,10 @@ mod tests {
     #[test]
     fn a_hanging_sign_hangs_from_the_ceiling() {
         let st = super::super::test_state("oak_hanging_sign", &[("rotation", "0")]);
-        let transform = hanging_body_transform(&st);
+        let (translation, _) = hanging_base(&st);
         assert!(
-            transform
-                .translation
-                .abs_diff_eq(Vec3::new(0.5, 0.625, 0.5), 1e-6),
-            "{:?}",
-            transform.translation
+            translation.abs_diff_eq(Vec3::new(0.5, 0.625, 0.5), 1e-6),
+            "{translation:?}"
         );
     }
 }

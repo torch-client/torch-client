@@ -15,6 +15,7 @@ pub(crate) mod chat_trace;
 pub(crate) mod cooldowns;
 pub(crate) mod dialogs;
 pub(crate) mod envprobe;
+pub(crate) mod hotbar_pop;
 #[cfg(feature = "asset_download")]
 pub(crate) mod language;
 #[cfg(feature = "render_lod")]
@@ -30,7 +31,9 @@ pub(crate) mod server_screens;
 pub(crate) mod server_sounds;
 #[cfg(feature = "skins")]
 pub(crate) mod skins;
+pub(crate) mod sky_flash;
 pub(crate) mod stats;
+pub(crate) mod sulfur_archetypes;
 pub(crate) mod tablist;
 pub(crate) mod tick;
 pub(crate) mod tracking;

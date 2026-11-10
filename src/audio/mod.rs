@@ -1,18 +1,44 @@
-#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+#[cfg(target_os = "android")]
 compile_error!(
-    "the `audio` feature is desktop-only for now: the sounds are 331 MiB in an \
-     object store a browser cannot reach, and the mixer's backend is not built \
-     for these targets. See the feature's comment in Cargo.toml."
+    "the `audio` feature is not built for Android: the sounds are 331 MiB, and \
+     the mixer's backend is not built for this target. See the feature's comment \
+     in Cargo.toml."
+);
+
+#[cfg(all(target_arch = "wasm32", not(feature = "browser_audio")))]
+compile_error!(
+    "on the web, ask for `browser_audio` rather than `audio`. See its comment in Cargo.toml."
+);
+
+#[cfg(all(feature = "browser_audio", not(target_arch = "wasm32")))]
+compile_error!(
+    "`browser_audio` is the web build's sound and needs the Web Audio API; use `audio` here."
 );
 
 mod ambience;
 mod attributes;
 pub mod category;
 pub(crate) mod defs;
-pub mod devices;
-mod engine;
 mod music;
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod subset;
+mod voice;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod devices;
+#[cfg(not(target_arch = "wasm32"))]
+mod engine;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod store;
+
+#[cfg(target_arch = "wasm32")]
+mod web;
+#[cfg(target_arch = "wasm32")]
+pub use web::devices;
+#[cfg(target_arch = "wasm32")]
+use web::engine;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web::{compact, store};
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,6 +84,7 @@ impl Listener {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn init(index_id: &str) {
     if ready() {
         return;
@@ -71,6 +98,68 @@ pub fn init(index_id: &str) {
     }
     INSTALLED.store(true, Ordering::Relaxed);
     engine::start(index_id.to_owned());
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn init_from_archive() {
+    if ready() {
+        return;
+    }
+    match store::Sounds::from_archive() {
+        Some(sounds) => adopt(sounds),
+        None => crate::log_info!(
+            "audio",
+            "the asset archive holds no sounds; the client will be silent"
+        ),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn adopt(sounds: store::Sounds) {
+    if ready() {
+        return;
+    }
+    INSTALLED.store(true, Ordering::Relaxed);
+    engine::open(sounds);
+}
+
+fn stack_defs(base: &str, has: &dyn Fn(&str) -> bool) -> Result<defs::Defs, String> {
+    let mut defs = defs::Defs::default();
+    defs.merge("minecraft", base, &|_| true)
+        .map_err(|e| format!("sounds.json will not parse: {e}"))?;
+    #[cfg(resource_packs)]
+    {
+        use crate::platform::assets::archive;
+        for namespace in archive::pack_sound_namespaces() {
+            for file in archive::pack_stack(&format!("assets/{namespace}/sounds.json")) {
+                let text = String::from_utf8_lossy(&file);
+                let text = text.trim_start_matches('\u{feff}');
+                if let Err(e) = defs.merge(&namespace, text, has) {
+                    crate::log_warn!(
+                        "audio",
+                        "invalid sounds.json in a pack, namespace {namespace}: {e}"
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(resource_packs))]
+    let _ = has;
+    defs.finish();
+    Ok(defs)
+}
+
+#[cfg(resource_packs)]
+fn pack_override(key: &str) -> Option<Arc<[u8]>> {
+    use crate::platform::assets::archive;
+    archive::packs_active()
+        .then(|| archive::pack_get(&defs::layer_key(key)))?
+        .map(Into::into)
+}
+
+#[cfg(not(resource_packs))]
+fn pack_override(_key: &str) -> Option<Arc<[u8]>> {
+    None
 }
 
 pub(crate) fn install_defs(parsed: defs::Defs) {
@@ -659,6 +748,8 @@ pub struct Director {
 
 impl Director {
     pub fn tick(&mut self, scene: &Scene) {
+        #[cfg(target_arch = "wasm32")]
+        engine::service();
         let Some(defs) = defs() else {
             return;
         };
@@ -740,7 +831,7 @@ fn linear_attenuation(offset: [f32; 3], max: f32) -> (f32, [f32; 3]) {
     if distance <= f32::EPSILON {
         return (gain, [0.0; 3]);
     }
-    let scale = engine::PAN_RADIUS / distance;
+    let scale = voice::PAN_RADIUS / distance;
     (
         gain,
         [offset[0] * scale, offset[1] * scale, offset[2] * scale],

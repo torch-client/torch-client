@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AddressMode, Buffer, BufferDescriptor, BufferUsages, CompareFunction, Extent3d, FilterMode,
-    Sampler, SamplerDescriptor, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages, TextureView, TextureViewDescriptor,
+    MipmapFilterMode, Sampler, SamplerDescriptor, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
@@ -260,7 +260,7 @@ impl Statics {
                 address_mode_w: address,
                 mag_filter: filter,
                 min_filter: filter,
-                mipmap_filter: FilterMode::Nearest,
+                mipmap_filter: MipmapFilterMode::Nearest,
                 ..default()
             })
         };
@@ -292,7 +292,7 @@ impl Statics {
                 label: Some(gpu_label!("mipmapped sampler")),
                 mag_filter: FilterMode::Linear,
                 min_filter: FilterMode::Linear,
-                mipmap_filter: FilterMode::Linear,
+                mipmap_filter: MipmapFilterMode::Linear,
                 ..default()
             }),
         }
@@ -312,7 +312,7 @@ fn noise_bytes(size: u32) -> Vec<u8> {
 }
 
 pub(super) fn display_view(image: &GpuImage) -> TextureView {
-    if !super::RAW_VIEWS || image.texture_format != TextureFormat::Rgba8UnormSrgb {
+    if !super::RAW_VIEWS || image.texture_descriptor.format != TextureFormat::Rgba8UnormSrgb {
         return image.texture_view.clone();
     }
     image.texture.create_view(&TextureViewDescriptor {

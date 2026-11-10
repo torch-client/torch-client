@@ -76,6 +76,7 @@ pub(crate) fn handle_entity_inside_block(
             if held {
                 ctx.make_stuck(physics, POWDER_SNOW);
             }
+            physics.is_in_powder_snow = true;
         }
         BlockKind::SweetBerryBush if ctx.kind == InsideKind::Living => {
             ctx.make_stuck(physics, SWEET_BERRY_BUSH)

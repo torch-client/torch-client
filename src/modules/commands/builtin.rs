@@ -4,7 +4,7 @@ use crate::gui::keybinds::Bound;
 use crate::modules::chat_math::{GREEN, RED};
 use crate::modules::registry::{self, Category, Kind, Mode, ModuleDef, SettingDef};
 use crate::modules::{Value, store};
-use crate::text::Span;
+use crate::text::{AQUA, GRAY, Span, WHITE, YELLOW};
 
 pub struct Builtin {
     pub name: &'static str,
@@ -28,12 +28,9 @@ pub enum Shape {
     Category,
     Goto,
     Follow,
+    #[cfg_attr(not(feature = "seed_cracker"), allow(dead_code))]
+    Choice(&'static [&'static str]),
 }
-
-const WHITE: u32 = 0xFFFFFF;
-const GRAY: u32 = 0xAAAAAA;
-const YELLOW: u32 = 0xFFFF55;
-const AQUA: u32 = 0x55FFFF;
 
 #[derive(Default)]
 pub struct Line(pub Vec<Span>);
@@ -96,7 +93,7 @@ impl Call<'_> {
     }
 }
 
-pub static BUILTINS: [Builtin; 11] = [
+pub static BUILTINS: [Builtin; 12 + cfg!(feature = "seed_cracker") as usize] = [
     Builtin {
         name: "help",
         aliases: &[],
@@ -152,6 +149,23 @@ pub static BUILTINS: [Builtin; 11] = [
         tip: "Shows or changes what a command line starts with",
         shape: Shape::Word,
         run: prefix,
+    },
+    Builtin {
+        name: "seedcheck",
+        aliases: &[],
+        usage: "",
+        tip: "Compares Seed Xray's prediction with the blocks around you",
+        shape: Shape::Word,
+        run: seedcheck,
+    },
+    #[cfg(feature = "seed_cracker")]
+    Builtin {
+        name: "cracker",
+        aliases: &[],
+        usage: "[status|clear|restart|help]",
+        tip: "Seed Cracker: what it has, forget it all, search again, or what to look for",
+        shape: Shape::Choice(&["status", "clear", "restart", "help"]),
+        run: cracker,
     },
     Builtin {
         name: "say",
@@ -370,6 +384,7 @@ fn set(c: &mut Call) {
             .map(|b| s.set_value(slot, Value::Bool(b)))
             .ok_or_else(|| format!("{} takes on or off, not `{word}`", def.name)),
         Kind::Slider { min, max, .. } => {
+            let max = crate::modules::registry::typed_max(slot as usize, max);
             number(&word).map(|x| s.set_value(slot, Value::Num(x.clamp(min, max))))
         }
         Kind::Range { min, max, .. } => {
@@ -540,6 +555,40 @@ fn prefix(c: &mut Call) {
     }
     store().set_text_at(registry::commands::PREFIX.0 as usize, &new);
     c.line(Line::default().t("The prefix is now ").value(new));
+}
+
+fn seedcheck(c: &mut Call) {
+    if store().enabled(registry::Id::SeedXray) {
+        crate::modules::seed_xray::request_check();
+    } else {
+        c.err("Seed Xray is off");
+    }
+}
+
+#[cfg(feature = "seed_cracker")]
+fn cracker(c: &mut Call) {
+    use crate::modules::seed_cracker::Request;
+    let word = c.arg(0).unwrap_or("status").to_string();
+    if word == "help" {
+        crate::modules::seed_cracker::open_help();
+        return;
+    }
+    let request = match word.as_str() {
+        "status" => Request::Status,
+        "clear" => Request::Clear,
+        "restart" => Request::Restart,
+        other => {
+            c.err(format!(
+                "Unknown: {other}. Usage: cracker [status|clear|restart|help]"
+            ));
+            return;
+        }
+    };
+    if store().enabled(registry::Id::SeedCracker) {
+        crate::modules::seed_cracker::request(request);
+    } else {
+        c.err("Seed Cracker is off");
+    }
 }
 
 fn say(c: &mut Call) {

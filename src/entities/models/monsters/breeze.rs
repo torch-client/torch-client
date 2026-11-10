@@ -3,7 +3,7 @@
 use crate::entities::geom::{BakedModel, CubeList, LayerDef, MeshDef, PartPose, PartState};
 use crate::entities::keyframe;
 use crate::entities::models::monsters::breeze_anim;
-use crate::entities::state::{EntityState, Pose};
+use crate::entities::state::EntityState;
 
 type Keep = fn(&str) -> bool;
 
@@ -119,23 +119,31 @@ pub fn eyes_layer() -> LayerDef {
 }
 
 pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
-    let seconds = st.age_ticks / 20.0;
-    keyframe::apply(&breeze_anim::IDLE, model, parts, seconds, 1.0);
-
-    let one_shot = match st.pose {
-        Pose::Shooting => Some(&breeze_anim::SHOOT),
-        Pose::Inhaling => Some(&breeze_anim::INHALE),
-        Pose::Sliding => Some(&breeze_anim::SLIDE),
-        Pose::LongJumping => Some(&breeze_anim::JUMP),
-        _ => None,
-    };
-    if let Some(animation) = one_shot {
-        keyframe::apply(
-            animation,
-            model,
-            parts,
-            seconds % animation.length_seconds,
-            1.0,
-        );
-    }
+    use crate::entities::state::anim_slot::breeze as slot;
+    let states = &st.extras.anim;
+    let age = st.age_ticks;
+    keyframe::apply_state(&breeze_anim::IDLE, model, parts, states[slot::IDLE], age);
+    keyframe::apply_state(&breeze_anim::SHOOT, model, parts, states[slot::SHOOT], age);
+    keyframe::apply_state(&breeze_anim::SLIDE, model, parts, states[slot::SLIDE], age);
+    keyframe::apply_state(
+        &breeze_anim::SLIDE_BACK,
+        model,
+        parts,
+        states[slot::SLIDE_BACK],
+        age,
+    );
+    keyframe::apply_state(
+        &breeze_anim::INHALE,
+        model,
+        parts,
+        states[slot::INHALE],
+        age,
+    );
+    keyframe::apply_state(
+        &breeze_anim::JUMP,
+        model,
+        parts,
+        states[slot::LONG_JUMP],
+        age,
+    );
 }

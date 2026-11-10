@@ -76,7 +76,7 @@ impl Material for EspMaterial {
             descriptor.vertex.shader_defs.push("DEPTH_TESTED".into());
         } else if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
             depth_stencil.depth_compare =
-                bevy::render::render_resource::CompareFunction::GreaterEqual;
+                Some(bevy::render::render_resource::CompareFunction::GreaterEqual);
         }
         descriptor
             .vertex

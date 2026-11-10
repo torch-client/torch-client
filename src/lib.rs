@@ -61,7 +61,7 @@ pub(crate) static CHUNK_Q: OnceLock<Arc<JobQueue>> = OnceLock::new();
 )]
 const ASSET_PROBE: &str = "font/default.json";
 
-pub(crate) const ASSET_VERSION: &str = "26.1.1";
+pub(crate) const ASSET_VERSION: &str = "26.2";
 
 pub(crate) fn assets_root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -78,7 +78,7 @@ fn pack_root() -> PathBuf {
     }
     #[cfg(not(feature = "asset_download"))]
     {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("reference/minecraft-26.1.1")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("reference/minecraft-26.2")
     }
 }
 
@@ -174,6 +174,7 @@ pub fn start_web(assets: Vec<u8>, username: String, address: String) -> Result<(
         step(&format!("unpacking {} bytes of assets", assets.len()));
         client::mesh_worker::spawn(&assets);
         load_assets(assets)?;
+        STORED_ASSETS_LOADED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     step("assets ready, starting the client");
@@ -212,6 +213,16 @@ pub fn seed_mod_file(path: String, bytes: Option<Vec<u8>>) {
     platform::packfs::seed(&path, bytes);
     #[cfg(not(lua_mods))]
     let _ = (path, bytes);
+}
+
+#[cfg(target_arch = "wasm32")]
+static STORED_ASSETS_LOADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn stored_assets_loaded() -> bool {
+    STORED_ASSETS_LOADED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -401,7 +412,11 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
         "Torch Client ({} mode)",
         if online { "online" } else { "offline" }
     );
-    log_info!("net", "protocol {PROTOCOL_VERSION} (MC 26.1.2)");
+    log_info!(
+        "net",
+        "protocol {PROTOCOL_VERSION} (MC {})",
+        azalea_protocol::packets::VERSION_NAME
+    );
     if needs_account {
         log_info!("net", "no account yet: opening the account screen");
     } else {
@@ -439,6 +454,8 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
             step("mounted the downloaded assets");
         }
     }
+    #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+    audio::init_from_archive();
 
     let assets_root = assets_root();
     let textures_dir = textures_dir().to_string_lossy().into_owned();

@@ -91,9 +91,12 @@ pub struct Painter<'a> {
     rng: u32,
     clip: Option<[f32; 4]>,
     xform: (f32, f32, f32),
+    squash: Option<[f32; 4]>,
     pub item_world: ItemWorld,
     pub item_owner: Option<Owner>,
     pub item_use: Option<(bool, f32)>,
+    pub item_use_max: i32,
+    pub fishing_cast: [bool; 2],
 }
 
 #[derive(Clone, Copy)]
@@ -137,13 +140,16 @@ impl<'a> Painter<'a> {
             rng: frame.wrapping_mul(0x9E37_79B9) | 1,
             clip: None,
             xform: (1.0, 0.0, 0.0),
+            squash: None,
             item_world: ItemWorld::default(),
             item_owner: None,
             item_use: None,
+            item_use_max: 0,
+            fishing_cast: [false; 2],
         }
     }
 
-    #[cfg(feature = "tutorial")]
+    #[cfg(all(feature = "tutorial", feature = "mobile_ui"))]
     pub fn xform(&self) -> (f32, f32, f32) {
         self.xform
     }
@@ -183,8 +189,26 @@ impl<'a> Painter<'a> {
     }
 
     fn place(&self, x: f32, y: f32) -> [f32; 3] {
+        let (x, y) = match self.squash {
+            Some([cx, cy, sx, sy]) => (cx + (x - cx) * sx, cy + (y - cy) * sy),
+            None => (x, y),
+        };
         let (s, ox, oy) = self.xform;
         [x * s + ox, y * s + oy, 0.0]
+    }
+
+    pub fn squashed<R>(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        sx: f32,
+        sy: f32,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = self.squash.replace([cx, cy, sx, sy]);
+        let out = f(self);
+        self.squash = saved;
+        out
     }
 
     pub fn scaled<R>(&mut self, scale: f32, x: f32, y: f32, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -389,29 +413,6 @@ impl<'a> Painter<'a> {
         let c = unpack(argb);
         let (u, v) = (r.x as f32 + 0.5, r.y as f32 + 0.5);
         self.quad(x, y, w, h, u, v, u, v, c, 0.0);
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "two points, a width and a colour"
-    )]
-    #[cfg_attr(not(lua_mods), allow(dead_code))]
-    pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, argb: u32) {
-        let (dx, dy) = (x1 - x0, y1 - y0);
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < 1e-3 {
-            return;
-        }
-        let (nx, ny) = (-dy / len * width * 0.5, dx / len * width * 0.5);
-        let r = self.atlas.white;
-        let uv = self.atlas.uv(r.x as f32 + 0.5, r.y as f32 + 0.5);
-        let corners = [
-            self.place(x0 + nx, y0 + ny),
-            self.place(x1 + nx, y1 + ny),
-            self.place(x1 - nx, y1 - ny),
-            self.place(x0 - nx, y0 - ny),
-        ];
-        self.push_quad(corners, [uv; 4], [unpack(argb); 4]);
     }
 
     pub fn gradient_v(&mut self, x: f32, y: f32, w: f32, h: f32, top: u32, bottom: u32) {
@@ -868,7 +869,32 @@ impl<'a> Painter<'a> {
     }
 
     pub fn stack_icon_as(&mut self, stack: &SlotStack, x: f32, y: f32, use_: ItemUse) {
+        if use_.bundle_selected
+            && let Some(inner) = stack.bundle_selected_item()
+            && let Some((back, front)) = self
+                .item_icon_tree_leaf(stack.item, &use_)
+                .and_then(|l| l.bundle_open.clone())
+        {
+            self.item_icon_glint(&back, x, y, stack.glint);
+            let inner_use = ItemUse {
+                owner: use_.owner,
+                ..inner.item_use()
+            };
+            self.stack_icon_as(inner, x, y, inner_use);
+            self.item_icon_glint(&front, x, y, stack.glint);
+            return;
+        }
         self.item_icon_for(&stack.model_key(), stack.item, use_, x, y, stack.glint);
+    }
+
+    fn item_icon_tree_leaf(
+        &self,
+        item: &str,
+        use_: &ItemUse,
+    ) -> Option<&crate::items::dispatch::Leaf> {
+        let atlas = self.atlas;
+        let tree = atlas.item_tree(item)?;
+        Some(tree.leaf(tree.eval("gui", use_, &self.item_world)))
     }
 
     pub fn item_icon_for(
@@ -1171,6 +1197,25 @@ impl<'a> Painter<'a> {
                 [inner + i + 1, outer + i, outer + i + 1],
             ]);
         }
+    }
+
+    pub fn fit<'s>(&self, s: &'s str, w: f32) -> std::borrow::Cow<'s, str> {
+        const ELLIPSIS: &str = "...";
+        let font = &self.atlas.font;
+        if font.width_str(s) <= w {
+            return std::borrow::Cow::Borrowed(s);
+        }
+        let room = w - font.width_str(ELLIPSIS);
+        let mut used = 0.0;
+        let mut end = 0;
+        for (i, c) in s.char_indices() {
+            used += font.advance(c, false);
+            if used > room {
+                break;
+            }
+            end = i + c.len_utf8();
+        }
+        std::borrow::Cow::Owned(format!("{}{ELLIPSIS}", &s[..end]))
     }
 
     pub fn text_plain(&mut self, s: &str, x: f32, y: f32, argb_rgb: u32, shadow: bool) -> f32 {

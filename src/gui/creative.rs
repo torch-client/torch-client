@@ -10,7 +10,7 @@ use crate::gui::tooltip::label;
 use crate::gui::widgets::TextBox;
 use crate::gui::{ScreenCtx, Snapshot};
 use crate::items::potions;
-use crate::session::{InvAction, SlotStack};
+use crate::session::{GAME_MASTER_LEVEL, InvAction, SlotStack};
 
 pub(crate) const IMAGE_W: f32 = 195.0;
 const IMAGE_H: f32 = 136.0;
@@ -45,8 +45,9 @@ const TAB_H: f32 = 32.0;
 const TAB_SPACING: f32 = 27.0;
 
 const TAB_SEARCH: usize = CREATIVE_TABS.len();
-const TAB_INVENTORY: usize = CREATIVE_TABS.len() + 1;
-const TAB_COUNT: usize = CREATIVE_TABS.len() + 2;
+const TAB_OP: usize = CREATIVE_TABS.len() + 1;
+const TAB_INVENTORY: usize = CREATIVE_TABS.len() + 2;
+const TAB_COUNT: usize = CREATIVE_TABS.len() + 3;
 
 pub struct CreativeState {
     pub just_opened: bool,
@@ -58,6 +59,7 @@ pub struct CreativeState {
     pub dirty: bool,
     pub hovered_tab_title: Option<&'static str>,
     pub hovered_in_list: bool,
+    pub op_items: bool,
 }
 
 impl CreativeState {
@@ -82,6 +84,7 @@ impl Default for CreativeState {
             dirty: true,
             hovered_tab_title: None,
             hovered_in_list: false,
+            op_items: false,
         }
     }
 }
@@ -110,6 +113,16 @@ fn tab_info(i: usize) -> TabInfo {
             can_scroll: true,
             show_title: true,
         },
+        TAB_OP => TabInfo {
+            title: label!("itemGroup.op"),
+            icon: "command_block",
+            top_row: false,
+            column: 5,
+            aligned_right: true,
+            background: "container/creative_inventory/tab_items",
+            can_scroll: true,
+            show_title: true,
+        },
         TAB_INVENTORY => TabInfo {
             title: label!("itemGroup.inventory"),
             icon: "chest",
@@ -134,6 +147,10 @@ fn tab_info(i: usize) -> TabInfo {
             }
         }
     }
+}
+
+fn tab_shown(i: usize, op_items: bool) -> bool {
+    i != TAB_OP || op_items
 }
 
 fn tab_x(t: &TabInfo) -> f32 {
@@ -220,6 +237,11 @@ pub enum ListItem {
     OminousBottle {
         amplifier: i32,
     },
+    BlockState {
+        item: &'static str,
+        state: u8,
+    },
+    Painting(&'static str),
 }
 
 impl ListItem {
@@ -230,6 +252,22 @@ impl ListItem {
             ListItem::Potion { item, .. } => item,
             ListItem::Stew { .. } => "suspicious_stew",
             ListItem::OminousBottle { .. } => "ominous_bottle",
+            ListItem::BlockState { item, .. } => item,
+            ListItem::Painting(_) => "painting",
+        }
+    }
+
+    fn block_state(&self) -> u8 {
+        match self {
+            ListItem::BlockState { state, .. } => *state,
+            _ => 0,
+        }
+    }
+
+    fn painting_variant(&self) -> Option<&'static str> {
+        match self {
+            ListItem::Painting(variant) => Some(*variant),
+            _ => None,
         }
     }
 
@@ -343,35 +381,86 @@ fn tab_items(i: usize) -> Vec<ListItem> {
         .collect()
 }
 
-fn search_corpus() -> &'static [ListItem] {
-    static CORPUS: OnceLock<Vec<ListItem>> = OnceLock::new();
-    CORPUS.get_or_init(|| {
+fn op_tab_items() -> &'static [ListItem] {
+    use crate::items::dispatch::block_state_index;
+
+    static ITEMS: OnceLock<Vec<ListItem>> = OnceLock::new();
+    ITEMS.get_or_init(|| {
+        let plain = [
+            "command_block",
+            "chain_command_block",
+            "repeating_command_block",
+            "command_block_minecart",
+            "jigsaw",
+            "structure_block",
+            "structure_void",
+            "barrier",
+            "debug_stick",
+            "test_instance_block",
+        ]
+        .map(ListItem::Plain);
+        let modes = ["start", "log", "fail", "accept"].map(|mode| ListItem::BlockState {
+            item: "test_block",
+            state: block_state_index("mode", mode),
+        });
+        let lights = (0..=15).rev().map(|level: u8| ListItem::BlockState {
+            item: "light",
+            state: block_state_index("level", &level.to_string()),
+        });
+        let paintings = crate::util::variants::unplaceable_paintings()
+            .iter()
+            .map(|id| ListItem::Painting(id.as_str()));
+        plain
+            .into_iter()
+            .chain(modes)
+            .chain(lights)
+            .chain(paintings)
+            .collect()
+    })
+}
+
+fn search_corpus(op_items: bool) -> &'static [ListItem] {
+    static BASE: OnceLock<Vec<ListItem>> = OnceLock::new();
+    static WITH_OP: OnceLock<Vec<ListItem>> = OnceLock::new();
+    let base = BASE.get_or_init(|| {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for tab in CREATIVE_TABS {
             for &id in tab.items {
-                if id != "enchanted_book" && seen.insert(id) {
+                if !seen.insert(id) {
+                    continue;
+                }
+                if id == "enchanted_book" {
+                    out.extend(enchanted_books(true));
+                } else {
                     out.extend(expand(id));
                 }
             }
         }
-        out.extend(enchanted_books(true));
         out
-    })
+    });
+    if !op_items {
+        return base;
+    }
+    WITH_OP.get_or_init(|| base.iter().chain(op_tab_items()).copied().collect())
 }
 
-fn search_filter(query: &str) -> Vec<ListItem> {
+fn search_filter(query: &str, op_items: bool) -> Vec<ListItem> {
+    let corpus = search_corpus(op_items);
     let q = query.trim().to_lowercase();
     if q.is_empty() {
-        return search_corpus().to_vec();
+        return corpus.to_vec();
     }
     if q.starts_with('#') {
         return Vec::new();
     }
-    search_corpus()
+    corpus
         .iter()
         .filter(|it| match it {
-            ListItem::Plain(_) | ListItem::Stew { .. } | ListItem::OminousBottle { .. } => {
+            ListItem::Plain(_)
+            | ListItem::Stew { .. }
+            | ListItem::OminousBottle { .. }
+            | ListItem::BlockState { .. } => {
                 let Some(def) = item(it.base_id()) else {
                     return false;
                 };
@@ -395,6 +484,7 @@ fn search_filter(query: &str) -> Vec<ListItem> {
                 let name = crate::gui::tooltip::translate(&key, &[]);
                 name.to_lowercase().contains(&q) || item.contains(&q) || potion.contains(&q)
             }
+            ListItem::Painting(variant) => "painting".contains(&q) || variant.contains(&q),
         })
         .cloned()
         .collect()
@@ -402,7 +492,8 @@ fn search_filter(query: &str) -> Vec<ListItem> {
 
 fn rebuild(st: &mut CreativeState) {
     st.visible = match st.tab {
-        TAB_SEARCH => search_filter(&st.search.text),
+        TAB_SEARCH => search_filter(&st.search.text, st.op_items),
+        TAB_OP => op_tab_items().to_vec(),
         TAB_INVENTORY => Vec::new(),
         i => tab_items(i.min(CREATIVE_TABS.len() - 1)),
     };
@@ -470,9 +561,11 @@ fn list_stack(it: &ListItem, count: u8) -> SlotStack {
             potion: it.potion(),
             stew_effects: it.stew_effects(),
             ominous_amplifier: it.ominous_amplifier(),
+            painting_variant: it.painting_variant().map(Box::from),
             ..Default::default()
         }
         .into(),
+        block_state: it.block_state(),
         glint: crate::items::glint::default_foil(id),
         bundle: id
             .parse()
@@ -489,6 +582,7 @@ pub(crate) fn left_pos(ctx: &ScreenCtx) -> f32 {
 pub fn draw(
     p: &mut Painter,
     st: &mut CreativeState,
+    always_op_items: bool,
     slot_state: &mut SlotState,
     puppet: &crate::gui::puppet::Worn,
     ctx: &ScreenCtx,
@@ -499,6 +593,14 @@ pub fn draw(
     let top = ((ctx.vh - IMAGE_H) / 2.0).floor();
 
     st.tab = st.tab.min(TAB_COUNT - 1);
+    let op_items = always_op_items || snap.op_level >= GAME_MASTER_LEVEL;
+    if op_items != st.op_items {
+        st.op_items = op_items;
+        st.dirty = true;
+    }
+    if !tab_shown(st.tab, op_items) {
+        select_tab(st, 0);
+    }
     st.hovered_tab_title = None;
     st.hovered_in_list = false;
 
@@ -530,7 +632,7 @@ pub fn draw(
     dim_background(p, ctx.vw, ctx.vh);
 
     for i in 0..TAB_COUNT {
-        if i != st.tab {
+        if i != st.tab && tab_shown(i, op_items) {
             draw_tab(p, &tab_info(i), false, left, top);
         }
     }
@@ -560,7 +662,7 @@ pub fn draw(
     draw_tab(p, &info, true, left, top);
 
     let mut clicked_tab = None;
-    for i in 0..TAB_COUNT {
+    for i in (0..TAB_COUNT).filter(|&i| tab_shown(i, op_items)) {
         let t = tab_info(i);
         let (tx, ty) = (left + tab_x(&t), top + tab_hit_y(&t));
         if ctx.hovering(tx, ty, TAB_W + 1.0, TAB_H + 1.0) {
@@ -679,7 +781,7 @@ pub fn draw(
         st.scroll = subtract_input_from_scroll(st.scroll, ctx.input.scroll, len);
     }
 
-    let on_tab = (0..TAB_COUNT).any(|i| {
+    let on_tab = (0..TAB_COUNT).filter(|&i| tab_shown(i, op_items)).any(|i| {
         let t = tab_info(i);
         ctx.hovering(
             left + tab_x(&t),
@@ -857,6 +959,7 @@ fn draw_item_grid(
         let glint = crate::items::glint::default_foil(it.base_id());
         let use_ = crate::items::dispatch::ItemUse {
             owner: p.owner_at(x, y),
+            block_state: it.block_state(),
             ..Default::default()
         };
         p.item_icon_for(&it.model_key(), it.base_id(), use_, x, y, glint);
@@ -875,6 +978,8 @@ fn same_item(cursor: &SlotStack, it: &ListItem) -> bool {
         && cursor.extra.potion == it.potion()
         && cursor.extra.stew_effects == it.stew_effects()
         && cursor.extra.ominous_amplifier == it.ominous_amplifier()
+        && cursor.block_state == it.block_state()
+        && cursor.extra.painting_variant.as_deref() == it.painting_variant()
 }
 
 fn list_click(it: &ListItem, ctx: &ScreenCtx, cursor: &mut SlotStack, out: &mut Vec<InvAction>) {
@@ -1077,12 +1182,12 @@ mod tests {
 
     #[test]
     fn search_matches_name_and_id() {
-        let by_name = search_filter("Diamond Sword");
+        let by_name = search_filter("Diamond Sword", false);
         assert!(
             ids(&by_name).contains(&"diamond_sword"),
             "name query missed the sword"
         );
-        let by_id = search_filter("diamond_pick");
+        let by_id = search_filter("diamond_pick", false);
         assert!(ids(&by_id).contains(&"diamond_pickaxe"));
         assert!(!ids(&by_id).contains(&"diamond_sword"));
     }
@@ -1126,14 +1231,14 @@ mod tests {
 
     #[test]
     fn search_finds_a_potion_by_its_effect() {
-        let hits = search_filter("night vision");
+        let hits = search_filter("night vision", false);
         let potions: Vec<&ListItem> = hits
             .iter()
             .filter(|it| matches!(it, ListItem::Potion { .. }))
             .collect();
         assert_eq!(potions.len(), 8, "{:?}", ids(&hits));
         assert!(
-            search_filter("splash_potion")
+            search_filter("splash_potion", false)
                 .iter()
                 .all(|it| it.base_id() == "splash_potion")
         );
@@ -1141,20 +1246,52 @@ mod tests {
 
     #[test]
     fn search_is_case_insensitive() {
-        assert_eq!(search_filter("STONE"), search_filter("stone"));
-        assert!(!search_filter("stone").is_empty());
+        assert_eq!(search_filter("STONE", false), search_filter("stone", false));
+        assert!(!search_filter("stone", false).is_empty());
     }
 
     #[test]
     fn tag_query_is_empty() {
-        assert!(search_filter("#planks").is_empty());
-        assert!(search_filter("#").is_empty());
+        assert!(search_filter("#planks", false).is_empty());
+        assert!(search_filter("#", false).is_empty());
     }
 
     #[test]
     fn empty_query_returns_everything() {
-        assert_eq!(search_filter("").len(), search_corpus().len());
-        assert!(search_corpus().len() > 500);
+        assert_eq!(search_filter("", false).len(), search_corpus(false).len());
+        assert!(search_corpus(false).len() > 500);
+    }
+
+    #[test]
+    fn op_items_follow_vanilla_order() {
+        use crate::items::dispatch::block_state_index;
+
+        let items = op_tab_items();
+        assert_eq!(items[0], ListItem::Plain("command_block"));
+        assert_eq!(items[9], ListItem::Plain("test_instance_block"));
+        assert_eq!(
+            items[10],
+            ListItem::BlockState {
+                item: "test_block",
+                state: block_state_index("mode", "start")
+            }
+        );
+        assert_eq!(
+            items[14],
+            ListItem::BlockState {
+                item: "light",
+                state: block_state_index("level", "15")
+            }
+        );
+        assert_eq!(
+            items[29],
+            ListItem::BlockState {
+                item: "light",
+                state: block_state_index("level", "0")
+            }
+        );
+        assert!(!ids(search_corpus(false)).contains(&"command_block"));
+        assert!(ids(&search_filter("command", true)).contains(&"command_block"));
     }
 
     #[test]
@@ -1214,6 +1351,14 @@ mod tests {
         assert_eq!(
             tab_sprite(&search, false),
             "container/creative_inventory/tab_top_unselected_7"
+        );
+
+        let op = tab_info(TAB_OP);
+        assert_eq!(tab_x(&op), IMAGE_W - 2.0 * 27.0 + 1.0);
+        assert_eq!(tab_hit_y(&op), 136.0);
+        assert_eq!(
+            tab_sprite(&op, false),
+            "container/creative_inventory/tab_bottom_unselected_6"
         );
 
         let inventory = tab_info(TAB_INVENTORY);

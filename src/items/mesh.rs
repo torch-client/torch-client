@@ -4,12 +4,11 @@ use std::sync::Arc;
 use image::RgbaImage;
 
 use crate::blockentities::render::skull;
-use crate::entities::geom;
 use crate::entities::quads::QUAD_INDICES;
 
 use super::icons::{
-    LAYERS, Part, Synthetic, baked_quads, banner_quads, chest_quads, cube_quads, model_quads,
-    parts_of, rgb_of, rigid_quads, shield_quads, skull_quads, tint_at,
+    LAYERS, Part, Synthetic, banner_quads, chest_quads, cube_quads, model_quads, parts_of, rgb_of,
+    rigid_quads, shield_quads, skull_quads, tint_at, transform_quads,
 };
 use super::model::{
     Assets, DIR_SHADE, DOWN, DisplayTransforms, EAST, NORTH, Resolved, SOUTH, Tex, UP, WEST,
@@ -150,13 +149,6 @@ impl ItemMeshes {
                         skull_quads(kind, *animation, *local, &tex, &mut quads);
                     }
                 }
-                Some(Synthetic::Bed(texture, is_head, local)) => {
-                    if let Some(tex) = assets.texture(texture) {
-                        let layer = crate::blockentities::models::bed_half(*is_head);
-                        let baked = geom::bake(&layer);
-                        baked_quads(&baked, *local, &tex, &mut quads);
-                    }
-                }
                 Some(Synthetic::Banner(color, local)) => {
                     banner_quads(assets, *color, &banner_layers, *local, &mut quads);
                 }
@@ -178,7 +170,10 @@ impl ItemMeshes {
                 None if model.generated => {
                     generated |= extruded_sprite(assets, &model, &part.tints, &mut quads);
                 }
-                None => model_quads(assets, &model, &part.tints, &mut quads),
+                None => {
+                    model_quads(assets, &model, &part.tints, &mut quads);
+                    transform_quads(&mut quads[before..], part.transform);
+                }
             }
             if quads.len() > before {
                 synthesised |= part.synthetic.is_some();
@@ -446,7 +441,7 @@ mod tests {
     use super::*;
     use crate::items::model::DisplayContext;
 
-    const ASSETS: &str = "reference/minecraft-26.1.1/assets/minecraft";
+    const ASSETS: &str = "reference/minecraft-26.2/assets/minecraft";
 
     fn meshes() -> Option<ItemMeshes> {
         if !std::path::Path::new(ASSETS).exists() {

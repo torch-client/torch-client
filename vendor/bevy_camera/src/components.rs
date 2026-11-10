@@ -20,8 +20,6 @@ pub struct Camera2d;
 pub struct Camera3d {
     pub depth_load_op: Camera3dDepthLoadOp,
     pub depth_texture_usages: Camera3dDepthTextureUsage,
-    pub screen_space_specular_transmission_steps: usize,
-    pub screen_space_specular_transmission_quality: ScreenSpaceTransmissionQuality,
 }
 
 impl Default for Camera3d {
@@ -29,8 +27,6 @@ impl Default for Camera3d {
         Self {
             depth_load_op: Default::default(),
             depth_texture_usages: TextureUsages::RENDER_ATTACHMENT.into(),
-            screen_space_specular_transmission_steps: 1,
-            screen_space_specular_transmission_quality: Default::default(),
         }
     }
 }
@@ -73,15 +69,15 @@ impl From<Camera3dDepthLoadOp> for LoadOp<f32> {
     }
 }
 
-#[derive(Resource, Default, Clone, Copy, Reflect, PartialEq, PartialOrd, Debug)]
-#[reflect(Resource, Default, Clone, Debug, PartialEq)]
-pub enum ScreenSpaceTransmissionQuality {
-    Low,
+#[derive(Component, Default, Copy, Clone, Reflect, PartialEq, Eq, Hash, Debug)]
+#[reflect(Component, Default, PartialEq, Hash, Debug)]
+pub struct Hdr;
 
+#[derive(Component, Copy, Clone, Reflect, PartialEq, Eq, Hash, Debug, Default)]
+#[reflect(Component, PartialEq, Hash, Debug, Default)]
+pub enum CompositingSpace {
     #[default]
-    Medium,
-
-    High,
-
-    Ultra,
+    Srgb,
+    Linear,
+    Oklab,
 }

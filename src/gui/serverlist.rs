@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerEntry {
     pub name: String,
@@ -53,11 +51,6 @@ pub fn pack_policy(address: &str) -> PackPolicy {
         .find(|e| e.address == address)
         .map(|e| e.resource_packs)
         .unwrap_or_default()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn path() -> PathBuf {
-    crate::platform::storage::SERVERS.path()
 }
 
 pub fn load() -> Vec<ServerEntry> {

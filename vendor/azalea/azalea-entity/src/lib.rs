@@ -244,6 +244,9 @@ pub struct Physics {
     pub remaining_fire_ticks: i32,
 
     pub stuck_speed_multiplier: Vec3,
+
+    pub is_in_powder_snow: bool,
+    pub was_in_powder_snow: bool,
 }
 
 impl Physics {
@@ -280,6 +283,9 @@ impl Physics {
             remaining_fire_ticks: 0,
 
             stuck_speed_multiplier: Vec3::ZERO,
+
+            is_in_powder_snow: false,
+            was_in_powder_snow: false,
         }
     }
 
@@ -305,6 +311,10 @@ impl Physics {
     pub fn make_stuck_in_block(&mut self, multiplier: Vec3) {
         self.reset_fall_distance();
         self.stuck_speed_multiplier = multiplier;
+    }
+    pub fn base_tick_powder_snow(&mut self) {
+        self.was_in_powder_snow = self.is_in_powder_snow;
+        self.is_in_powder_snow = false;
     }
     pub fn clear_fire(&mut self) {
         self.remaining_fire_ticks = 0;
@@ -338,6 +348,9 @@ impl Attributes {
             block_break_speed: AttributeInstance::new(1.0),
             submerged_mining_speed: AttributeInstance::new(0.2),
             scale: AttributeInstance::new(1.0),
+            air_drag_modifier: AttributeInstance::new(1.0),
+            friction_modifier: AttributeInstance::new(1.0),
+            bounciness: AttributeInstance::new(0.0),
         }
     }
 }

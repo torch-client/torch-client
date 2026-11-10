@@ -56,9 +56,9 @@ pub(in crate::gui) const LOWER_ROW_BUTTON_W: f32 = 74.0;
 pub(in crate::gui) const BUTTON_GAP: f32 = 4.0;
 const GREY: u32 = 0x808080;
 const CANT_CONNECT_RED: u32 = 0xFF0000;
-const VERSION_RED: u32 = 0xFF5555;
-const COUNT_GRAY: u32 = 0xAAAAAA;
-const COUNT_DARK_GRAY: u32 = 0x555555;
+const VERSION_RED: u32 = crate::text::RED;
+const COUNT_GRAY: u32 = crate::text::GRAY;
+const COUNT_DARK_GRAY: u32 = crate::text::DARK_GRAY;
 const MOTD_INSET: f32 = ICON_SIZE + 2.0;
 const MOTD_LINES: usize = 2;
 const MOTD_Y: f32 = 12.0;
@@ -93,6 +93,10 @@ pub struct MenuState {
     confirm_delete_text: String,
     version_open: bool,
     proxy_open: bool,
+    #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+    custom_name: TextBox,
+    #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+    custom_url: TextBox,
 }
 
 impl Default for MenuState {
@@ -112,6 +116,10 @@ impl Default for MenuState {
             confirm_delete_text: String::new(),
             version_open: false,
             proxy_open: false,
+            #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+            custom_name: TextBox::bordered(NAME_MAX_LEN, ""),
+            #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+            custom_url: TextBox::bordered(ADDRESS_MAX_LEN, ""),
         }
     }
 }
@@ -291,7 +299,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let confirming = state.menu.confirm_delete.is_some();
     let dropped = (state.menu.version_open || state.menu.proxy_open) && !confirming;
     let locked = confirming || dropped;
-    let tooltip = draw_rows(p, state, ctx, locked);
+    let (tooltip, list_focused) = draw_rows(p, state, ctx, locked);
     draw_scrollbar(p, &mut state.menu, ctx, lh, locked);
     draw_footer(p, state, ctx, locked);
     draw_version_menu(p, state, ctx, confirming);
@@ -306,7 +314,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     if confirming {
         draw_delete_confirm(p, state, ctx);
     } else if !dropped {
-        handle_list_keys(state, ctx);
+        handle_list_keys(state, ctx, list_focused);
     }
 }
 
@@ -359,13 +367,76 @@ fn draw_proxy_menu(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locke
         ctx,
         (PROXY_X, w),
         &label,
-        proxy::ALL.iter().map(|proxy| proxy.name),
+        proxy::ALL
+            .iter()
+            .map(|proxy| proxy.name)
+            .chain(std::iter::once(CUSTOM_ENTRY)),
         &mut state.menu.proxy_open,
         locked,
     );
-    if let Some(index) = picked {
-        proxy::select(index);
+    match picked {
+        Some(index) if index == proxy::custom_index() => {
+            let (name, url) = crate::gui::custom_proxy().unwrap_or_default();
+            let menu = &mut state.menu;
+            menu.custom_name.set_text(&name);
+            menu.custom_url.set_text(&url);
+            menu.custom_name.focus();
+            menu.custom_url.focused = false;
+            state.nav = Some(Screen::CustomProxy);
+        }
+        Some(index) => {
+            proxy::select(index);
+            ping::refresh();
+        }
+        None => {}
+    }
+}
+
+#[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+const CUSTOM_ENTRY: &str = "Custom...";
+
+#[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+const WISP_HINT: &str = "Must be a Wisp protocol proxy: wss://host/";
+
+#[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+pub fn draw_custom_proxy(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
+    use crate::eagler::proxy;
+
+    let quarter = (ctx.vh / 4.0).floor();
+    #[cfg(feature = "mobile_ui")]
+    let (name_label, name_y, url_label, url_y) = (33.0, 46.0, 74.0, 86.0);
+    #[cfg(not(feature = "mobile_ui"))]
+    let (name_label, name_y, url_label, url_y) = (53.0, 66.0, 94.0, 106.0);
+    let hint_y = url_y + WIDGET_HEIGHT + 4.0;
+    #[cfg(feature = "mobile_ui")]
+    let ok_y = hint_y + 22.0;
+    #[cfg(not(feature = "mobile_ui"))]
+    let ok_y = (quarter + 96.0).max(hint_y + 22.0);
+
+    let form = Form {
+        title: "Custom Java Proxy",
+        title_y: 17.0,
+        ok_label: tr::done(),
+        button_y: ok_y - quarter,
+    };
+    let (confirmed, cancelled) = draw_form(p, state, ctx, &form, |p, menu, ctx, x| {
+        p.text_plain("Proxy name", x + 1.0, name_label, 0xA0A0A0, true);
+        p.text_plain("Proxy URL", x + 1.0, url_label, 0xA0A0A0, true);
+        menu.custom_name
+            .update(p, ctx, x, name_y, WIDGET_WIDTH_BIG, WIDGET_HEIGHT);
+        menu.custom_url
+            .update(p, ctx, x, url_y, WIDGET_WIDTH_BIG, WIDGET_HEIGHT);
+        p.text_centered(WISP_HINT, ctx.vw / 2.0, hint_y, 0xA0A0A0, true);
+        proxy::wisp_url(&menu.custom_url.text).is_some()
+    });
+
+    if confirmed && let Some(url) = proxy::wisp_url(&state.menu.custom_url.text) {
+        proxy::select_custom(&state.menu.custom_name.text, &url);
         ping::refresh();
+        state.nav = Some(Screen::Multiplayer);
+    }
+    if cancelled {
+        state.nav = Some(Screen::Multiplayer);
     }
 }
 
@@ -428,7 +499,7 @@ fn draw_rows(
     state: &mut GuiState,
     ctx: &ScreenCtx,
     locked: bool,
-) -> Option<Tooltip> {
+) -> (Option<Tooltip>, bool) {
     let (lx, ly, lw, lh) = LAYOUT.content_rect(ctx.vw, ctx.vh);
     let cursor = ctx
         .mouse()
@@ -500,7 +571,7 @@ fn draw_rows(
         *connect = Some(entry.address.clone());
         *nav = Some(Screen::None);
     }
-    tooltip
+    (tooltip, list_focused)
 }
 
 type Tooltip = Vec<Vec<Span>>;
@@ -762,6 +833,9 @@ fn draw_footer(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locked: b
         ],
     );
 
+    let add = add || (!locked && ctx.input.select_all);
+    let edit = edit || (!locked && has_selection && ctx.input.edit_shortcut);
+
     if join && let Some(i) = selected {
         state.connect = Some(state.menu.servers[i].address.clone());
         state.nav = Some(Screen::None);
@@ -793,10 +867,13 @@ fn draw_footer(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locked: b
     }
 }
 
-fn handle_list_keys(state: &mut GuiState, ctx: &ScreenCtx) {
+fn handle_list_keys(state: &mut GuiState, ctx: &ScreenCtx, list_focused: bool) {
     let input = ctx.input;
     if input.escape {
         state.nav = Some(Screen::Title);
+        return;
+    }
+    if !list_focused {
         return;
     }
     let count = state.menu.servers.len();
@@ -806,7 +883,7 @@ fn handle_list_keys(state: &mut GuiState, ctx: &ScreenCtx) {
         input.up_arrow,
         input.down_arrow,
     );
-    if input.enter
+    if input.select
         && let Some(i) = state.menu.selected
         && let Some(entry) = state.menu.servers.get(i)
     {

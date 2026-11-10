@@ -3,7 +3,7 @@ use crate::shaderpack::expressions::Customs;
 use crate::shaderpack::options::{self, Values};
 use crate::shaderpack::pipeline::Layout;
 use crate::shaderpack::programs::{self, Geometry};
-use crate::shaderpack::{backend, discover, features, include, pipeline, properties, transform};
+use crate::shaderpack::{discover, features, include, properties};
 use crate::util::pack::Source;
 
 use super::images::{CustomTexture, CustomTextures};
@@ -561,7 +561,7 @@ fn hold_sizes(
 mod tests {
     use super::*;
     use crate::shaderpack::transform::Stage;
-
+    use crate::shaderpack::{backend, pipeline, transform};
     #[test]
     fn a_compute_block_is_sized_as_the_shader_declares_it() {
         let csh = "#version 430\nlayout(local_size_x = 8) in;\nuniform float rainStrength;\nuniform vec3 cameraPosition;\n\

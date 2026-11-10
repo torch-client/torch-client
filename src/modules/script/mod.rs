@@ -38,8 +38,8 @@ pub use author::{
 };
 pub use chunk::{arrived as chunk_arrived, changed as block_changed};
 pub use game::{
-    CAMERA as CANVAS_CAMERA, Camera, FileAsk, OverPrompt, UiButton, UiForm, UiList, UiRow,
-    draw_canvas, draw_canvas_overlay, draw_hud, draw_panel,
+    CAMERA as CANVAS_CAMERA, Camera, FileAsk, OverPrompt, UiButton, UiForm, UiList, draw_canvas,
+    draw_canvas_overlay, draw_hud, draw_panel,
 };
 pub use install::uninstall;
 pub use install::{

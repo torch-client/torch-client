@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashSet};
+use std::{borrow::Cow, collections::HashSet, sync::LazyLock};
 
 use azalea_block::{
     BlockState,
@@ -11,10 +11,13 @@ use azalea_core::{
     math::{self, EPSILON, lerp},
     position::{BlockPos, Vec3},
 };
-use azalea_registry::{builtin::BlockKind, tags};
+use azalea_registry::{
+    builtin::{BlockKind, ItemKind},
+    tags,
+};
 use azalea_world::ChunkStorage;
 
-use crate::collision::{BlockWithShape, EMPTY_SHAPE, VoxelShape};
+use crate::collision::{BLOCK_SHAPE, BlockWithShape, EMPTY_SHAPE, Shapes, VoxelShape, box_shape};
 
 #[derive(Clone, Debug)]
 pub struct ClipContext {
@@ -22,13 +25,24 @@ pub struct ClipContext {
     pub to: Vec3,
     pub block_shape_type: BlockShapeType,
     pub fluid_pick_type: FluidPickType,
+    pub held_item: ItemKind,
+    pub entity: Option<ClipEntity>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ClipEntity {
+    pub bottom: f64,
+    pub descending: bool,
 }
 impl ClipContext {
     pub fn block_shape(&self, block_state: BlockState, pos: BlockPos) -> Cow<'static, VoxelShape> {
         match self.block_shape_type {
             BlockShapeType::Collider => block_state.collision_shape(pos),
-            BlockShapeType::Outline => block_state.outline_shape(pos),
-            BlockShapeType::Visual => block_state.collision_shape(pos),
+            BlockShapeType::Outline => match holding_outline(block_state, self.held_item) {
+                Some(shape) => Cow::Borrowed(shape),
+                None => block_state.outline_shape(pos),
+            },
+            BlockShapeType::Visual => visual_shape(block_state, pos, self.entity),
             BlockShapeType::FallDamageResetting => {
                 if tags::blocks::FALL_DAMAGE_RESETTING.contains(&BlockKind::from(block_state)) {
                     block_state.collision_shape(pos)
@@ -50,6 +64,101 @@ impl ClipContext {
         } else {
             &EMPTY_SHAPE
         }
+    }
+}
+
+pub fn holding_outline(block_state: BlockState, held_item: ItemKind) -> Option<&'static VoxelShape> {
+    let full = match BlockKind::from(block_state) {
+        BlockKind::Scaffolding => held_item == ItemKind::Scaffolding,
+        BlockKind::Light => held_item == ItemKind::Light,
+        _ => false,
+    };
+    full.then_some(&*BLOCK_SHAPE)
+}
+
+static SNOW_LAYER_SHAPES: LazyLock<[VoxelShape; 9]> =
+    LazyLock::new(|| std::array::from_fn(|layers| box_shape(0.0, 0.0, 0.0, 1.0, layers as f64 / 8.0, 1.0)));
+
+pub fn visual_shape(
+    block_state: BlockState,
+    pos: BlockPos,
+    entity: Option<ClipEntity>,
+) -> Cow<'static, VoxelShape> {
+    use azalea_block::properties::Layers;
+
+    let kind = BlockKind::from(block_state);
+    match kind {
+        BlockKind::SoulSand | BlockKind::Mud => return Cow::Borrowed(&*BLOCK_SHAPE),
+        BlockKind::PowderSnow => return Cow::Borrowed(&*EMPTY_SHAPE),
+        BlockKind::Snow => {
+            let layers = block_state.property::<Layers>().map_or(1, |l| l as usize + 1);
+            return Cow::Borrowed(&SNOW_LAYER_SHAPES[layers]);
+        }
+        BlockKind::Scaffolding => {
+            let context = crate::collision::world_collisions::PowderSnowCollision {
+                has_entity: entity.is_some(),
+                entity_bottom: entity.map_or(0.0, |e| e.bottom),
+                descending: entity.is_some_and(|e| e.descending),
+                ..Default::default()
+            };
+            return Cow::Borrowed(
+                crate::collision::world_collisions::scaffolding_shape(&context, block_state, pos)
+                    .unwrap_or(&*EMPTY_SHAPE),
+            );
+        }
+        _ => {}
+    }
+    if tags::blocks::FENCES.contains(&kind) {
+        return block_state.outline_shape(pos);
+    }
+    let id = kind.to_str();
+    let transparent = matches!(kind, BlockKind::Glass | BlockKind::TintedGlass)
+        || id.ends_with("_stained_glass")
+        || id.ends_with("copper_grate");
+    let bars = kind == BlockKind::IronBars || id.ends_with("copper_bars") || id.ends_with("glass_pane");
+    if transparent || bars {
+        return Cow::Borrowed(&*EMPTY_SHAPE);
+    }
+    block_state.collision_shape(pos)
+}
+
+static CAULDRON_INSIDE: LazyLock<VoxelShape> =
+    LazyLock::new(|| box_shape(0.125, 0.25, 0.125, 0.875, 1.0, 0.875));
+
+static HOPPER_INTERACTION: LazyLock<[VoxelShape; 5]> = LazyLock::new(|| {
+    let inside = || box_shape(0.125, 0.6875, 0.125, 0.875, 1.0, 0.875);
+    let spout = |x0: f64, z0: f64, x1: f64, z1: f64| {
+        Shapes::or(inside(), box_shape(x0, 0.5, z0, x1, 0.625, z1))
+    };
+    [
+        inside(),
+        spout(0.375, 0.0, 0.625, 0.25),
+        spout(0.375, 0.75, 0.625, 1.0),
+        spout(0.0, 0.375, 0.25, 0.625),
+        spout(0.75, 0.375, 1.0, 0.625),
+    ]
+});
+
+pub fn interaction_shape(block_state: BlockState) -> &'static VoxelShape {
+    use azalea_block::properties::Facing;
+
+    match BlockKind::from(block_state) {
+        BlockKind::Scaffolding | BlockKind::Composter => &*BLOCK_SHAPE,
+        BlockKind::Cauldron
+        | BlockKind::WaterCauldron
+        | BlockKind::LavaCauldron
+        | BlockKind::PowderSnowCauldron => &*CAULDRON_INSIDE,
+        BlockKind::Hopper => {
+            let i = match block_state.property::<Facing>().unwrap_or(Facing::Down) {
+                Facing::Down => 0,
+                Facing::North => 1,
+                Facing::South => 2,
+                Facing::West => 3,
+                Facing::East => 4,
+            };
+            &HOPPER_INTERACTION[i]
+        }
+        _ => &*EMPTY_SHAPE,
     }
 }
 
@@ -125,12 +234,12 @@ fn clip_with_interaction_override(
     to: Vec3,
     block_pos: BlockPos,
     block_shape: &VoxelShape,
-    _block_state: BlockState,
+    block_state: BlockState,
 ) -> Option<BlockHitResult> {
     let block_hit_result = block_shape.clip(from, to, block_pos);
 
     if let Some(block_hit_result) = block_hit_result {
-        let interaction_shape = &*EMPTY_SHAPE;
+        let interaction_shape = interaction_shape(block_state);
         let interaction_hit_result = interaction_shape.clip(from, to, block_pos);
         if let Some(interaction_hit_result) = interaction_hit_result
             && interaction_hit_result.location.distance_squared_to(from)

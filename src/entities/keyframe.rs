@@ -132,6 +132,78 @@ fn catmullrom(t: f32, p0: f32, p1: f32, p2: f32, p3: f32) -> f32 {
         + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t * t * t)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AnimationState {
+    start_tick: i32,
+}
+
+impl AnimationState {
+    const STOPPED: i32 = i32::MIN;
+
+    pub const fn new() -> AnimationState {
+        AnimationState {
+            start_tick: Self::STOPPED,
+        }
+    }
+
+    pub fn start(&mut self, tick_count: i32) {
+        self.start_tick = tick_count;
+    }
+
+    pub fn start_if_stopped(&mut self, tick_count: i32) {
+        if !self.is_started() {
+            self.start(tick_count);
+        }
+    }
+
+    pub fn animate_when(&mut self, condition: bool, tick_count: i32) {
+        if condition {
+            self.start_if_stopped(tick_count);
+        } else {
+            self.stop();
+        }
+    }
+
+    pub fn stop(&mut self) {
+        self.start_tick = Self::STOPPED;
+    }
+
+    pub fn fast_forward(&mut self, ticks: i32, time_scale: f32) {
+        if self.is_started() {
+            self.start_tick -= (ticks as f32 * time_scale) as i32;
+        }
+    }
+
+    pub fn is_started(&self) -> bool {
+        self.start_tick != Self::STOPPED
+    }
+
+    pub fn time_in_millis(&self, age_ticks: f32) -> i64 {
+        let time_in_ticks = age_ticks - self.start_tick as f32;
+        (time_in_ticks * 50.0) as i64
+    }
+}
+
+impl Default for AnimationState {
+    fn default() -> AnimationState {
+        AnimationState::new()
+    }
+}
+
+pub fn apply_state(
+    animation: &AnimationDefinition,
+    model: &BakedModel,
+    parts: &mut [PartState],
+    state: AnimationState,
+    age_ticks: f32,
+) {
+    if !state.is_started() {
+        return;
+    }
+    let seconds = state.time_in_millis(age_ticks) as f32 / 1000.0;
+    apply(animation, model, parts, seconds, 1.0);
+}
+
 pub fn apply_static(animation: &AnimationDefinition, model: &BakedModel, parts: &mut [PartState]) {
     apply(animation, model, parts, 0.0, 1.0);
 }
@@ -199,6 +271,24 @@ mod tests {
         let mut parts = model.rest_pose();
         apply(&ANIMATION, &model, &mut parts, 2.5, 1.0);
         assert!((parts[model.id("head")].x_rot - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_stopped_state_applies_nothing_and_a_started_one_runs_from_its_start() {
+        let model = one_part_model();
+        let mut parts = model.rest_pose();
+        let mut state = AnimationState::new();
+        apply_state(&ANIMATION, &model, &mut parts, state, 30.0);
+        assert_eq!(parts[model.id("head")].x_rot, 0.0);
+        state.start(20);
+        apply_state(&ANIMATION, &model, &mut parts, state, 30.0);
+        assert!((parts[model.id("head")].x_rot - 0.5).abs() < 1e-6);
+        state.start_if_stopped(25);
+        assert_eq!(state.time_in_millis(30.0), 500);
+        state.fast_forward(10, 1.0);
+        assert_eq!(state.time_in_millis(30.0), 1000);
+        state.animate_when(false, 30);
+        assert!(!state.is_started());
     }
 
     #[test]

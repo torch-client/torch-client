@@ -47,6 +47,7 @@ pub enum UseAnimation {
     TootHorn,
     Brush,
     Spear,
+    Bundle,
 }
 
 const SPEARS: &[&str] = &[
@@ -115,6 +116,8 @@ pub fn use_animation(id: &str) -> UseAnimation {
         _ if DRINKS.contains(&id) => UseAnimation::Drink,
         _ if FOODS.contains(&id) => UseAnimation::Eat,
         _ if SPEARS.contains(&id) => UseAnimation::Spear,
+        "bundle" => UseAnimation::Bundle,
+        _ if id.ends_with("_bundle") => UseAnimation::Bundle,
         _ => UseAnimation::None,
     }
 }
@@ -123,6 +126,7 @@ pub fn use_animation(id: &str) -> UseAnimation {
 pub struct Armor {
     pub items: [Option<&'static str>; 4],
     pub foil: [bool; 4],
+    pub trim: [Option<&'static str>; 4],
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -140,8 +144,12 @@ pub struct HeldItem {
     pub rocket: bool,
     pub profile_skin: Option<ProfileSkin>,
     pub trim: u8,
+    pub block_state: u8,
     pub has_lodestone: bool,
     pub lodestone: Option<[i32; 3]>,
+    pub broken: bool,
+    pub use_duration: i32,
+    pub quick_charge: u8,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -167,6 +175,23 @@ impl AnimSample {
             &self.main_hand,
             &self.off_hand,
         )
+    }
+
+    pub fn render_rot(&self) -> (f32, f32) {
+        if self.layers.upside_down {
+            (-self.pitch, -self.head_yaw)
+        } else {
+            (self.pitch, self.head_yaw)
+        }
+    }
+
+    pub fn is_scoping(&self) -> bool {
+        let held = if self.using_offhand {
+            &self.off_hand
+        } else {
+            &self.main_hand
+        };
+        self.using_item && use_animation(held.id) == UseAnimation::Spyglass
     }
 }
 
@@ -250,7 +275,8 @@ pub fn arm_pose_for(item: &HeldItem, using: bool, swinging: bool) -> ArmPose {
             UseAnimation::TootHorn => return ArmPose::TootHorn,
             UseAnimation::Brush => return ArmPose::Brush,
             UseAnimation::Spear => return ArmPose::Spear,
-            UseAnimation::None | UseAnimation::Eat | UseAnimation::Drink => {}
+            UseAnimation::None | UseAnimation::Eat | UseAnimation::Drink | UseAnimation::Bundle => {
+            }
         }
     }
     if SPEARS.contains(&item.id) {
@@ -321,6 +347,17 @@ pub struct AnimSample {
     #[cfg(feature = "skins")]
     pub cape: [f32; 3],
     pub elytra: [f32; 3],
+    pub layers: AvatarLayers,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AvatarLayers {
+    pub id: i32,
+    pub arrows: u32,
+    pub stingers: u32,
+    pub parrots: [Option<u32>; 2],
+    pub extra_ears: bool,
+    pub upside_down: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -348,6 +385,7 @@ pub struct AnimInput {
     pub interpolated: bool,
     #[cfg(feature = "skins")]
     pub on_ground: bool,
+    pub layers: AvatarLayers,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -497,6 +535,10 @@ impl HumanoidAnim {
         let lerp = self.core.interp.is_some();
         self.core.rotate_head(input.head_yaw, lerp);
         deferred
+    }
+
+    pub fn layers(&self) -> AvatarLayers {
+        self.flags.layers
     }
 
     pub fn body_yaw_pair(&self) -> (f32, f32) {
@@ -720,6 +762,7 @@ impl HumanoidAnim {
             ticks_since_kinetic_hit: self
                 .kinetic_hit_at
                 .map_or(0.0, |at| self.ticks.wrapping_sub(at) as f32 + t),
+            layers: self.flags.layers,
         }
     }
 }

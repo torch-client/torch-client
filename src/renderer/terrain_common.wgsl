@@ -51,8 +51,20 @@ fn vanilla_fog(color: vec4<f32>, distance: vec2<f32>) -> vec4<f32> {
         vanilla_fog_ramp(distance.x, params.fog_ramps.xy),
         vanilla_fog_ramp(distance.y, params.fog_ramps.zw),
     );
-    let mixed = mix(encode_srgb(color.rgb), params.fog_color.rgb, value * params.fog_color.a);
-    return vec4(decode_srgb(mixed), color.a);
+    let t = value * params.fog_color.a;
+    let linear = max(color.rgb, vec3(0.0));
+    let encoded = fog_encode(linear);
+    let mixed = fog_decode(mix(encoded, params.fog_color.rgb, t)) + (1.0 - t) * (linear - fog_decode(encoded));
+    return vec4(mixed, color.a);
+}
+
+fn fog_encode(c: vec3<f32>) -> vec3<f32> {
+    let r = sqrt(c);
+    return r * (1.2563794 + c * 0.2620541) - c * 0.5098001;
+}
+
+fn fog_decode(y: vec3<f32>) -> vec3<f32> {
+    return y * y * (0.6272203 + y * (0.5902529 - y * 0.2205727));
 }
 
 fn encode_srgb(c: vec3<f32>) -> vec3<f32> {

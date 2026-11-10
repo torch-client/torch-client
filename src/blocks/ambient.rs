@@ -67,6 +67,9 @@ pub enum Ambient {
     CreakingHeart,
     DeadBush,
     DryGrass,
+    PotentSulfur,
+    EndGateway,
+    LightningRod { axis: u8 },
 }
 
 pub const HORIZONTAL: [[f32; 3]; 4] = [
@@ -270,6 +273,9 @@ fn build(state: BlockState) -> Option<Ambient> {
                 ],
             });
         }
+        "potent_sulfur" => {
+            return (prop("potent_sulfur_state") != Some("dry")).then_some(Ambient::PotentSulfur);
+        }
         "firefly_bush" => return Some(Ambient::FireflyBush),
         "open_eyeblossom" => return Some(Ambient::OpenEyeblossom),
         "pale_hanging_moss" => return Some(Ambient::PaleHangingMoss),
@@ -278,9 +284,19 @@ fn build(state: BlockState) -> Option<Ambient> {
                 .then_some(Ambient::CreakingHeart);
         }
         "dead_bush" => return Some(Ambient::DeadBush),
+        "end_gateway" => return Some(Ambient::EndGateway),
         "short_dry_grass" | "tall_dry_grass" => return Some(Ambient::DryGrass),
         "sand" | "red_sand" => return Some(Ambient::FallingDust { sand: true }),
         _ => {}
+    }
+
+    if name.ends_with("lightning_rod") {
+        let axis = match prop("facing") {
+            Some("east" | "west") => 0,
+            Some("north" | "south") => 2,
+            _ => 1,
+        };
+        return Some(Ambient::LightningRod { axis });
     }
 
     if let Some((leaf, chance)) = leaf_particle(name) {

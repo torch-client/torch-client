@@ -7,15 +7,26 @@ pub mod gateway;
 pub mod items;
 pub mod piston;
 pub mod pot;
+pub mod potent_sulfur;
 pub mod shulker;
 pub mod spawner;
 pub mod vault;
 
 use azalea::block::BlockState;
+use azalea::entity::particle::Particle;
 use azalea_core::position::BlockPos;
 use azalea_registry::builtin::BlockEntityKind;
 
 use super::feed::{BlockEntityData, BlockStateInfo};
+use crate::session::{LevelParticle, ParticleEmit, SharedMutex};
+use crate::util::javarandom::JavaRandom;
+
+#[derive(Clone, Copy, Debug)]
+pub struct PlayerSeen {
+    pub feet: [f64; 3],
+    pub uuid: u128,
+    pub height: f32,
+}
 
 pub struct TickCtx<'a> {
     pub world: &'a azalea_world::World,
@@ -23,7 +34,7 @@ pub struct TickCtx<'a> {
     pub state: &'a BlockStateInfo,
     pub data: &'a BlockEntityData,
     pub game_time: u64,
-    pub players: &'a [[f64; 3]],
+    pub players: &'a [PlayerSeen],
 }
 
 impl TickCtx<'_> {
@@ -35,14 +46,52 @@ impl TickCtx<'_> {
     pub fn nearest_player(&self, at: [f64; 3], range: f64) -> Option<[f64; 3]> {
         self.players
             .iter()
-            .map(|p| (*p, dist_sq(*p, at)))
+            .map(|p| (p.feet, dist_sq(p.feet, at)))
             .filter(|(_, d)| range < 0.0 || *d < range * range)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(p, _)| p)
     }
 
     pub fn player_within(&self, at: [f64; 3], range: f64) -> bool {
-        self.players.iter().any(|p| dist_sq(*p, at) < range * range)
+        self.players
+            .iter()
+            .any(|p| dist_sq(p.feet, at) < range * range)
+    }
+
+    pub fn player_by_uuid(&self, uuid: u128) -> Option<&PlayerSeen> {
+        self.players.iter().find(|p| p.uuid == uuid)
+    }
+
+    pub fn random<R>(&self, f: impl FnOnce(&mut JavaRandom) -> R) -> R {
+        let mut random = RANDOM.lock();
+        f(random.get_or_insert_with(JavaRandom::time_seeded))
+    }
+
+    pub fn add_particle(&self, particle: Particle, at: [f64; 3], velocity: [f64; 3]) {
+        let range = crate::play::emit::EMIT_RANGE;
+        if !crate::util::particles::overrides_limiter(&particle)
+            && self
+                .players
+                .first()
+                .is_some_and(|me| dist_sq(me.feet, at) > range * range)
+        {
+            return;
+        }
+        PENDING
+            .lock()
+            .push(LevelParticle::add(particle, at, velocity.map(|v| v as f32)));
+    }
+
+    pub fn add_always_visible_particle(
+        &self,
+        particle: Particle,
+        at: [f64; 3],
+        velocity: [f64; 3],
+    ) {
+        let mut emit = LevelParticle::add(particle, at, velocity.map(|v| v as f32));
+        emit.override_limiter = true;
+        emit.always_show = true;
+        PENDING.lock().push(emit);
     }
 
     pub fn center(&self) -> [f64; 3] {
@@ -54,18 +103,26 @@ impl TickCtx<'_> {
     }
 }
 
-fn idle_sound(ctx: &TickCtx, event: &str) {
-    let [x, y, z] = ctx.pos.map(|v| v as u32 as u64);
-    let mut state = ((x << 40) ^ (y << 20) ^ z) ^ ctx.game_time.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let mut next = || {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32
+static RANDOM: parking_lot::Mutex<Option<JavaRandom>> = parking_lot::Mutex::new(None);
+
+static PENDING: parking_lot::Mutex<Vec<LevelParticle>> = parking_lot::Mutex::new(Vec::new());
+
+pub fn flush(shared: &SharedMutex) {
+    let batch = {
+        let mut pending = PENDING.lock();
+        if pending.is_empty() {
+            return;
+        }
+        std::mem::take(&mut *pending)
     };
-    if next() <= 0.02 {
-        let (volume, pitch) = (next() * 0.25 + 0.75, next() + 0.5);
+    crate::play::emit::queue(shared, batch, ParticleEmit::Level);
+}
+
+fn idle_sound(ctx: &TickCtx, event: &str) {
+    let roll = ctx.random(|r| {
+        (r.next_f32() <= 0.02).then(|| (r.next_f32() * 0.25 + 0.75, r.next_f32() + 0.5))
+    });
+    if let Some((volume, pitch)) = roll {
         crate::util::level_events::play(
             event,
             crate::util::level_events::Bus::Blocks,
@@ -74,6 +131,21 @@ fn idle_sound(ctx: &TickCtx, event: &str) {
             pitch,
         );
     }
+}
+
+fn center_offset_random(ctx: &TickCtx, offset: f32) -> [f64; 3] {
+    let c = ctx.center();
+    ctx.random(|r| {
+        let mut out = c;
+        for axis in &mut out {
+            *axis += f64::from((r.next_f32() - 0.5) * offset);
+        }
+        out
+    })
+}
+
+fn next_double(r: &mut JavaRandom, min: f64, max: f64) -> f64 {
+    min + r.next_f64() * (max - min)
 }
 
 fn dist_sq(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -96,6 +168,8 @@ pub enum Anim {
     Gateway(gateway::Gateway),
     Beacon(beacon::Beacon),
     Piston(piston::Progress),
+    PotentSulfur(potent_sulfur::Sulfur),
+    Campfire,
 }
 
 impl Anim {
@@ -117,6 +191,8 @@ impl Anim {
             BlockEntityKind::EndGateway => Anim::Gateway(Default::default()),
             BlockEntityKind::Beacon => Anim::Beacon(Default::default()),
             BlockEntityKind::Piston => Anim::Piston(Default::default()),
+            BlockEntityKind::PotentSulfur => Anim::PotentSulfur(Default::default()),
+            BlockEntityKind::Campfire => Anim::Campfire,
             _ => Anim::None,
         };
         anim.on_data(data);
@@ -141,7 +217,14 @@ impl Anim {
             Anim::Bell(bell) => bell.tick(),
             Anim::Pot(_) => {}
             Anim::Book(book) => book.tick(ctx),
-            Anim::Conduit(conduit) => conduit.tick(ctx),
+            Anim::Conduit(conduit) => {
+                if !matches!(private, Private::Conduit(_)) {
+                    *private = Private::Conduit(Vec::new());
+                }
+                if let Private::Conduit(effect_blocks) = private {
+                    conduit.tick(ctx, effect_blocks);
+                }
+            }
             Anim::Spawner(spin) => spin.tick(ctx),
             Anim::Vault(vault) => vault.tick(ctx),
             Anim::Gateway(gateway) => gateway.tick(),
@@ -154,6 +237,8 @@ impl Anim {
                 }
             }
             Anim::Piston(progress) => progress.tick(),
+            Anim::PotentSulfur(sulfur) => sulfur.tick(ctx),
+            Anim::Campfire => items::campfire_particle_tick(ctx),
         }
     }
 
@@ -165,6 +250,7 @@ impl Anim {
             Anim::Pot(wobble) => wobble.event(action, param, game_time),
             Anim::Gateway(gateway) => gateway.event(action),
             Anim::Spawner(spin) => spin.event(action),
+            Anim::PotentSulfur(sulfur) => sulfur.event(game_time),
             _ => {}
         }
     }
@@ -175,6 +261,7 @@ pub enum Private {
     #[default]
     None,
     Beacon(beacon::Scan),
+    Conduit(Vec<[i32; 3]>),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

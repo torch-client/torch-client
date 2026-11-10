@@ -1,10 +1,13 @@
 use std::ops::Range;
 
 use super::auto_mace::{AimPoint, MaceSlot};
+use super::auto_mine::{FluidRule, InvFull, LowHealth, MineMode, ReachMode};
 use super::auto_totem::TotemMode;
+use super::crystal_aura::CrystalSwitch;
 use super::esp::Shape;
 use super::extra_hud::{Durability, Shown};
 use super::flight::AntiKick;
+use super::fullbright::FullbrightMode;
 use super::list::BitList;
 use super::nametags::{Health, Sizing};
 use super::scaffold::{BlockFilter, ScaffoldMode, Tower};
@@ -87,7 +90,6 @@ pub enum Kind {
     Key {
         default: Bound,
     },
-    #[cfg_attr(not(lua_mods), allow(dead_code))]
     Button {
         text: &'static str,
         key: &'static str,
@@ -373,6 +375,9 @@ macro_rules! handles {
     ($id:ident; $n:expr; $konst:ident List; $($rest:tt)*) => {
         handles!($id; $n + 1; $($rest)*);
     };
+    ($id:ident; $n:expr; $konst:ident Button; $($rest:tt)*) => {
+        handles!($id; $n + 1; $($rest)*);
+    };
     ($id:ident; $n:expr; $konst:ident $v:ident; $($rest:tt)*) => {
         pub const $konst: handle::$v = handle::$v(slot(Id::$id, $n));
         handles!($id; $n + 1; $($rest)*);
@@ -392,6 +397,7 @@ macro_rules! modules {
         pub const COUNT: usize = 0 $(+ one!($id))*;
 
         impl Id {
+            #[cfg(test)]
             pub const ALL: [Id; COUNT] = [$(Id::$id),*];
         }
 
@@ -468,6 +474,22 @@ const EXTRA_HUD_EMPTY: Show = Show::is(
     extra_hud::SHOWN.0,
     &[Shown::Always as u8, Shown::IfAny as u8],
 );
+
+const AUTO_MINE_AREA: Show = Show::is(auto_mine::MODE.0, &[MineMode::Area as u8]);
+const AUTO_MINE_CORRIDOR: Show = Show::is(auto_mine::MODE.0, &[MineMode::Corridor as u8]);
+const AUTO_MINE_DISCONNECT: Show =
+    Show::is(auto_mine::LOW_HEALTH.0, &[LowHealth::Disconnect as u8]);
+
+const TYPED_MAX: &[(u16, f32)] = &[(auto_mine::HEALTH.0, i16::MAX as f32)];
+
+pub fn typed_max(slot: usize, max: f32) -> f32 {
+    TYPED_MAX
+        .iter()
+        .find(|(s, _)| *s as usize == slot)
+        .map_or(max, |(_, m)| *m)
+}
+
+const NAMETAGS_ARMOR: Show = Show::On(offset_of(nametags::ARMOR.0));
 
 modules! {
     TriggerBot / trigger_bot: Combat, Normal,
@@ -576,6 +598,79 @@ modules! {
             Range { min: 0.0, max: 500.0, low: 0.0, high: 100.0, decimals: 0, log: false };
     }
 
+    CrystalAura / crystal_aura: Combat, Blatant,
+        "Places end crystals where they hurt a target most and breaks them" {
+        TARGETS: "Targets",
+            "Which entity kinds may be targeted, shared with TriggerBot and AimAssist",
+            List { list: &super::entities::LIST };
+        STRICT: "Strict",
+            "Only clicks a hand could make: the look the server has is on the block or crystal, survival reach, nothing through walls. Off lifts all three",
+            Toggle { on: true };
+        TARGET_RANGE: "Target range",
+            "Blocks from you a target may stand",
+            Slider { min: 2.0, max: 16.0, value: 10.0, decimals: 0 };
+        MIN_DAMAGE: "Min damage",
+            "Least a crystal must deal the target, where 2 is one heart",
+            Slider { min: 0.0, max: 36.0, value: 6.0, decimals: 1 };
+        MAX_SELF: "Max self damage",
+            "Most a crystal may deal you",
+            Slider { min: 0.0, max: 36.0, value: 6.0, decimals: 1 };
+        ANTI_SUICIDE: "Anti suicide",
+            "Never place or break a crystal that would take all your health, absorption included",
+            Toggle { on: true };
+        PLACE: "Place",
+            "Place crystals on obsidian and bedrock",
+            Toggle { on: true };
+        PLACE_DELAY: "Place delay",
+            "Milliseconds between placements, rolled fresh inside this range",
+            Range { min: 0.0, max: 1000.0, low: 100.0, high: 150.0, decimals: 0, log: false } if Show::On(offset_of(crystal_aura::PLACE.0));
+        PLACE_RANGE: "Place range",
+            "Blocks from your eye to the clicked block. Strict holds it to 4.5, survival block reach",
+            Slider { min: 1.0, max: 6.0, value: 4.5, decimals: 1 } if Show::On(offset_of(crystal_aura::PLACE.0));
+        BREAK: "Break",
+            "Hit crystals that hurt a target enough",
+            Toggle { on: true };
+        BREAK_DELAY: "Break delay",
+            "Milliseconds between hits, rolled fresh inside this range",
+            Range { min: 0.0, max: 1000.0, low: 50.0, high: 100.0, decimals: 0, log: false } if Show::On(offset_of(crystal_aura::BREAK.0));
+        BREAK_RANGE: "Break range",
+            "Blocks from your eye to the crystal's hitbox. Strict holds it to 3, survival attack reach",
+            Slider { min: 1.0, max: 6.0, value: 3.0, decimals: 1 } if Show::On(offset_of(crystal_aura::BREAK.0));
+        FAST_BREAK: "Fast break",
+            "Hit a crystal you placed as soon as it appears, without waiting out Break delay",
+            Toggle { on: true } if Show::On(offset_of(crystal_aura::BREAK.0));
+        ATTEMPTS: "Break attempts",
+            "Hits on one crystal before giving up on it",
+            Slider { min: 1.0, max: 5.0, value: 2.0, decimals: 0 } if Show::On(offset_of(crystal_aura::BREAK.0));
+        FACE_PLACE: "Face place",
+            "Drop Min damage to 1.5 against a target at or under Face health, or wearing a nearly broken piece",
+            Toggle { on: true };
+        FACE_HEALTH: "Face health",
+            "Target health, absorption included, at or under which Face place starts",
+            Slider { min: 1.0, max: 36.0, value: 8.0, decimals: 0 } if Show::On(offset_of(crystal_aura::FACE_PLACE.0));
+        FACE_DURABILITY: "Face durability",
+            "Percent durability left on any worn piece at or under which Face place starts",
+            Slider { min: 0.0, max: 100.0, value: 2.0, decimals: 0 } if Show::On(offset_of(crystal_aura::FACE_PLACE.0));
+        SWITCH: "Switch",
+            "Normal moves to the crystals and stays. Silent goes back afterwards. Off only places while crystals are held",
+            Enum<CrystalSwitch> { default: CrystalSwitch::Silent };
+        ANTI_WEAKNESS: "Anti weakness",
+            "Under Weakness, take a weapon from the hotbar for the hit, since a bare hand deals nothing",
+            Toggle { on: true };
+        TURN: "Turn speed",
+            "Degrees per second the sent look may travel, rolled fresh inside this range for every new spot",
+            Range { min: 90.0, max: 1800.0, low: 600.0, high: 1000.0, decimals: 0, log: false };
+        MOVE_FIX: "Move fix",
+            "While the sent look is off your camera, re-pick the walk keys so you keep heading the same way",
+            Toggle { on: true };
+        PAUSE_EAT: "Pause while using",
+            "Do nothing while you eat, drink or hold any use",
+            Toggle { on: true };
+        RENDER: "Render",
+            "Outline the block the next crystal goes on",
+            Toggle { on: true };
+    }
+
     Xray / xray: Render, Legit,
         "Draws chosen blocks through terrain, each in its own colour" {
         BLOCKS: "Blocks",
@@ -608,6 +703,53 @@ modules! {
             Slider { min: 0.0, max: 255.0, value: 25.0, decimals: 0 };
     }
 
+    SeedXray / seed_xray: Render, Legit,
+        "Works out where the ores are from the world seed, hidden ones included" {
+        SEED: "Seed",
+            "The world's seed, a number or the text it was made from",
+            Text { max_len: 32, default: "", expand: false, hint: "Type a seed" };
+        BLOCKS: "Ores",
+            "Which ores are drawn, and in what colour",
+            List { list: &super::seed_xray::ORES };
+        RANGE: "Range",
+            "How far from you in blocks ores are worked out and drawn",
+            Slider { min: 16.0, max: 256.0, value: 64.0, decimals: 0 };
+        SHAPE: "Shape",
+            "Lines draws the outline of a shape, Sides fills its faces, Both does each",
+            Enum<Shape> { default: Shape::Both };
+        FILL: "Fill",
+            "How solid the filled faces are, 0 to 255",
+            Slider { min: 0.0, max: 255.0, value: 25.0, decimals: 0 };
+    }
+
+    SeedCracker / seed_cracker: World, Legit,
+        "Works out the world seed from structures, End pillars and decorations" {
+        FINDERS: "Finders",
+            "Which structures and decorations are looked for",
+            List { list: &super::seed_cracker::FINDERS };
+        SHOW_BOXES: "Show boxes",
+            "Draw what each finder matched, in its colour",
+            Toggle { on: true };
+        SEND: "Send to Seed Xray",
+            "Put a found seed into Seed Xray's Seed setting",
+            Toggle { on: true };
+        HELP: "Help",
+            "What to look for, and which finds are key",
+            Button { text: "Open Help", key: "help" };
+        HUD: "HUD",
+            "Show progress in a HUD panel instead of chat; the found seed still goes to chat to copy",
+            Toggle { on: true };
+        SHARE: "Share",
+            "Copy this world's finds as text, for a friend to import and search with",
+            Button { text: "Copy", key: "share" };
+        FRIEND: "Friend's share",
+            "Paste a friend's copied finds here, then press Import",
+            Text { max_len: 65536, default: "", expand: true, hint: "Paste a share" };
+        IMPORT: "Import",
+            "Same hashed seed as yours: adds their finds. Another: replaces yours with theirs",
+            Button { text: "Import", key: "import" };
+    }
+
     StorageEsp / storage_esp: Render, Legit,
         "Draws chests, shulkers and furnaces through terrain" {
         BLOCKS: "Blocks",
@@ -625,7 +767,7 @@ modules! {
     }
 
     Nametags / nametags: Render, Legit,
-        "Enlarges player names and shows health, gamemode and distance" {
+        "Enlarges player names and shows health, gamemode, distance and armor" {
         SCALE: "Scale", "",
             Slider { min: 0.5, max: 4.0, value: 1.6, decimals: 1 };
         SIZING: "Sizing",
@@ -638,6 +780,15 @@ modules! {
             "Show each player's gamemode, and mark one the tab list has never heard of",
             Toggle { on: true };
         DISTANCE: "Distance", "", Toggle { on: true };
+        ARMOR: "Armor",
+            "Draw each player's armor above the name, as Meteor does",
+            Toggle { on: true };
+        DURABILITY: "Durability",
+            "The item's own bar only, or the bar with the uses left or the percentage left written above it",
+            Enum<Durability> { default: Durability::Percent } if NAMETAGS_ARMOR;
+        ENCHANTS: "Enchants",
+            "List each piece's enchantments above it, cut to three letters and a level",
+            Toggle { on: true } if NAMETAGS_ARMOR;
     }
 
     Zoom / zoom: Render, Legit,
@@ -677,7 +828,51 @@ modules! {
     }
 
     Fullbright / fullbright: Render, Legit,
-        "Draws the world at full light, overriding the Lighting option" {}
+        "Draws the world at full light, either baked into the meshes or as a night vision floor on the lightmap" {
+        MODE: "Mode",
+            "Lighting bakes full light into every chunk mesh and remeshes the world on a switch. Night Vision raises the lightmap floor instead, with no remesh",
+            Enum<FullbrightMode> { default: FullbrightMode::NightVision };
+    }
+
+    NoRender / no_render: Render, Legit,
+        "Hides overlays, HUD elements and world effects you pick" {
+        HURT_CAM: "Hurt camera", "No camera tilt when you take damage or die",
+            Toggle { on: false };
+        PORTAL: "Portal and nausea", "No portal swirl, nausea overlay or screen warp",
+            Toggle { on: false };
+        FIRE: "Fire", "No fire overlay while burning",
+            Toggle { on: false };
+        LIQUID_OVERLAY: "Liquid overlay", "No water texture over the screen underwater",
+            Toggle { on: false };
+        IN_WALL: "In wall", "No black overlay with your head inside a block",
+            Toggle { on: false };
+        PUMPKIN: "Pumpkin", "No carved pumpkin blur while wearing one",
+            Toggle { on: false };
+        VIGNETTE: "Vignette", "No world border warning tint",
+            Toggle { on: false };
+        TOTEM: "Totem animation", "No item popping up in front of you when a totem triggers",
+            Toggle { on: false };
+        BOSS_BARS: "Boss bars", "No boss bars at the top of the screen",
+            Toggle { on: false };
+        SCOREBOARD: "Scoreboard", "No scoreboard sidebar",
+            Toggle { on: false };
+        POTION_ICONS: "Potion icons", "No effect icons in the top right corner",
+            Toggle { on: false };
+        TITLES: "Titles", "No title and subtitle text in the middle of the screen",
+            Toggle { on: false };
+        FOG: "Fog", "No distance fog in air, including a boss's world fog",
+            Toggle { on: false };
+        LIQUID_FOG: "Liquid fog", "No fog under water or in lava",
+            Toggle { on: false };
+        BLINDNESS: "Blindness", "No fog, dark sky or dimming from blindness and darkness",
+            Toggle { on: false };
+        BOSS_SKY: "Boss sky", "No sky darkening or world fog from a boss bar",
+            Toggle { on: false };
+        WEATHER: "Weather", "No rain or snow and no rain splashes; the rain sound and the darker sky stay",
+            Toggle { on: false };
+        LIGHTNING: "Lightning flash", "No sky flash when lightning strikes",
+            Toggle { on: false };
+    }
 
     Freecam / freecam: World, Legit,
         "Detaches the camera and leaves your body where it stands" {
@@ -686,22 +881,46 @@ modules! {
             Slider { min: 1.0, max: 60.0, value: 5.0, decimals: 1 };
         SPRINT_SPEED: "Sprint speed", "",
             Slider { min: 1.0, max: 120.0, value: 20.0, decimals: 1 };
+        PAUSE_CLICKS: "Pause clicks",
+            "Swallow left and right click while detached. Off, a click acts on the block under the freecam's crosshair, within your body's reach",
+            Toggle { on: true };
     }
 
     AutoMine / auto_mine: World, Normal,
-        "Digs a two-block-tall corridor straight ahead, one column at a time" {
+        "Digs a corridor straight ahead, or clears a box you mark out" {
+        MODE: "Mode",
+            "Corridor digs straight ahead. Area clears the box you mark with Define area, top down",
+            Enum<MineMode> { default: MineMode::Corridor };
+        DEFINE: "Define area",
+            "Closes this screen; left click a block for the first corner, right click for the second",
+            Button { text: "Define area", key: "define" } if AUTO_MINE_AREA;
+        REACH: "Reach",
+            "Adjacent mines only the blocks touching you. All mines everything in reach. 3x2 clears a 3 wide, 2 tall slice around you",
+            Enum<ReachMode> { default: ReachMode::Wide } if AUTO_MINE_AREA;
         LENGTH: "Length",
             "Columns to dig before switching off, or 0 to keep going",
-            Slider { min: 0.0, max: 256.0, value: 0.0, decimals: 0 };
+            Slider { min: 0.0, max: 256.0, value: 0.0, decimals: 0 } if AUTO_MINE_CORRIDOR;
         TURN: "Turn speed",
             "Degrees per second the aim may travel, rolled fresh inside this range for every block",
             Range { min: 45.0, max: 900.0, low: 180.0, high: 400.0, decimals: 0, log: false };
         DELAY: "Delay",
             "Milliseconds between one block breaking and the next being dug, rolled fresh inside this range",
             Range { min: 0.0, max: 600.0, low: 90.0, high: 260.0, decimals: 0, log: false };
-        HAZARDS: "Stop on hazard",
-            "Switch off rather than open a wall with lava or water behind it",
-            Toggle { on: true };
+        FLUIDS: "Fluids",
+            "A block with lava or water behind it: Skip leaves it standing, Stop switches off. A corridor always stops",
+            Enum<FluidRule> { default: FluidRule::Skip };
+        INV_FULL: "Inventory full",
+            "Stop switches off with a chat line once nothing more fits; Ignore keeps mining and leaves the drops",
+            Enum<InvFull> { default: InvFull::Stop } if AUTO_MINE_AREA;
+        LOW_HEALTH: "On low health",
+            "Disconnect leaves the server once health drops below the Health setting",
+            Enum<LowHealth> { default: LowHealth::Ignore };
+        HEALTH: "Health",
+            "Disconnect below this many half hearts. The bar stops at 20; type a larger number for more",
+            Slider { min: 1.0, max: 20.0, value: 6.0, decimals: 0 } if AUTO_MINE_DISCONNECT;
+        PROGRESS: "Progress HUD",
+            "Show a bar of how much of the area is cleared",
+            Toggle { on: false } if AUTO_MINE_AREA;
         IN_GUI: "Allow in GUI",
             "Keep digging while a screen is open, which no hand could do",
             Toggle { on: false };
@@ -781,6 +1000,18 @@ modules! {
     Sneak / sneak: Movement, Legit,
         "Holds sneak on whether or not the key is pressed" {}
 
+    AutoWalk / auto_walk: Movement, Legit,
+        "Holds forward on whether or not the key is pressed" {
+        PAUSE_ON_SCREEN: "Pause on screen",
+            "Stop walking while a screen is open, as a hand on the keys would",
+            Toggle { on: false };
+        SPRINT: "Sprint", "Hold the sprint key too",
+            Toggle { on: true };
+        AUTO_JUMP: "Auto jump",
+            "Jump up one-block steps in the way, as the Auto-Jump option does, whatever that option is set to",
+            Toggle { on: true };
+    }
+
     NoFall / no_fall: Movement, Blatant,
         "Reports you as standing on the ground while you fall, so the server charges no fall damage" {
         PAUSE_ON_MACE: "Pause on mace",
@@ -833,6 +1064,13 @@ modules! {
         PREFIX: "Prefix",
             "What a line starts with to be run here rather than sent. Never /",
             Text { max_len: 4, default: ".", expand: false, hint: "." };
+    }
+
+    BetterTooltips / better_tooltips: Misc, Legit,
+        "Adds extra rows to item tooltips" {
+        FOOD_VALUES: "Food values",
+            "Show a food's hunger and saturation as rows of icons at the bottom of its tooltip, as AppleSkin does",
+            Toggle { on: true };
     }
 
     Spam / spam: Misc, Blatant,

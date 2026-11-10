@@ -1,8 +1,8 @@
 mod targets;
 
 pub(crate) use targets::{
-    MAX_COLOR_TARGETS, MAX_SHADOW_COLORS, SampleKind, TargetFormat, TargetSettings, Targets,
-    read_sizes, shadow_index, target_index,
+    MAX_COLOR_TARGETS, MAX_SHADOW_COLORS, SampleKind, TargetFormat, Targets, read_sizes,
+    shadow_index, target_index,
 };
 
 use super::literal::{self, broadcast, const_declaration, constructor_args};
@@ -269,6 +269,7 @@ fn find_comment_directive<'a>(haystack: &'a str, name: &str) -> Option<(usize, &
 
 #[cfg(test)]
 mod tests {
+    use super::targets::TargetSettings;
     use super::*;
 
     #[test]

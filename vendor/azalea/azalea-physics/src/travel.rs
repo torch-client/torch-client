@@ -28,7 +28,8 @@ use crate::{
             PowderSnowCollision, get_block_and_liquid_collisions, get_block_collisions_for,
         },
     },
-    get_block_pos_below_that_affects_movement, handle_relative_friction_and_calculate_movement,
+    compute_modified_friction, get_block_pos_below_that_affects_movement,
+    handle_relative_friction_and_calculate_movement,
 };
 
 static FULL_WATER_EFFICIENCY: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
@@ -234,13 +235,15 @@ fn travel_in_air(ctx: &mut MoveCtx) {
     let chunk_below_loaded = block_state_below.is_some()
         || block_pos_below.y < ctx.world.chunks.min_y()
         || block_pos_below.y >= ctx.world.chunks.min_y() + ctx.world.chunks.height() as i32;
-    let block_below: Box<dyn BlockTrait> = block_state_below.unwrap_or(BlockState::AIR).into();
-    let block_friction = block_below.behavior().friction;
-
-    let inertia = if ctx.physics.on_ground() {
-        block_friction * 0.91
+    let block_friction = if ctx.physics.on_ground() {
+        let block_below: Box<dyn BlockTrait> =
+            block_state_below.unwrap_or(BlockState::AIR).into();
+        compute_modified_friction(
+            block_below.behavior().friction,
+            ctx.attributes.friction_modifier_value() as f32,
+        )
     } else {
-        0.91
+        1.0
     };
 
     let mut movement = handle_relative_friction_and_calculate_movement(ctx, block_friction);
@@ -258,10 +261,13 @@ fn travel_in_air(ctx: &mut MoveCtx) {
         movement.y = 0.;
     }
 
+    let air_drag_modifier = ctx.attributes.air_drag_modifier_value() as f32;
+    let friction = block_friction * compute_modified_friction(0.91, air_drag_modifier);
+    let vertical_friction = compute_modified_friction(0.98, air_drag_modifier);
     ctx.physics.velocity = Vec3 {
-        x: movement.x * inertia as f64,
-        y: movement.y * 0.9800000190734863f64,
-        z: movement.z * inertia as f64,
+        x: movement.x * f64::from(friction),
+        y: movement.y * f64::from(vertical_friction),
+        z: movement.z * f64::from(friction),
     };
 }
 
@@ -464,7 +470,7 @@ fn contains_any_liquid(world: &World, bounding_box: Aabb) -> bool {
     false
 }
 
-fn effective_gravity(ctx: &MoveCtx) -> f64 {
+pub(crate) fn effective_gravity(ctx: &MoveCtx) -> f64 {
     let gravity = ctx.attributes.gravity.calculate();
     if ctx.physics.velocity.y <= 0. && has_effect(ctx, MobEffect::SlowFalling) {
         f64::min(gravity, 0.01)

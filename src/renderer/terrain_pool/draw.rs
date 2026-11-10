@@ -6,11 +6,12 @@ use bevy::asset::uuid::Uuid;
 use bevy::asset::{AssetId, UntypedAssetId};
 use bevy::core_pipeline::core_3d::{
     AlphaMask3d, Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, Transparent3d,
+    TransparentSortingInfo3d,
 };
 use bevy::core_pipeline::prepass::{OpaqueNoLightmap3dBatchSetKey, OpaqueNoLightmap3dBinKey};
 use bevy::ecs::query::Has;
+use bevy::ecs::system::SystemParamItem;
 use bevy::ecs::system::lifetimeless::{Read, SRes};
-use bevy::ecs::system::{SystemChangeTick, SystemParamItem};
 use bevy::mesh::{
     MeshVertexBufferLayout, MeshVertexBufferLayoutRef, MeshVertexBufferLayouts, VertexBufferLayout,
 };
@@ -19,7 +20,7 @@ use bevy::pbr::{
     SetMeshViewBindingArrayBindGroup, ViewKeyCache,
 };
 use bevy::prelude::*;
-use bevy::render::mesh::allocator::SlabId;
+use bevy::render::mesh::allocator::MeshSlabs;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_phase::{
     AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
@@ -203,6 +204,7 @@ pub struct TerrainPipeline {
     #[cfg(feature = "builtin_shaders")]
     prepass: PrepassPipeline,
     shader: Handle<Shader>,
+    #[cfg_attr(not(feature = "builtin_shaders"), allow(dead_code))]
     shadow_shader: Handle<Shader>,
     vertex_layout_ref: MeshVertexBufferLayoutRef,
     layout_indirect: BindGroupLayoutDescriptor,
@@ -324,8 +326,11 @@ impl TerrainPipeline {
     }
 
     fn specialize_main(&self, key: TerrainPipelineKey) -> RenderPipelineDescriptor {
-        let mut view_key =
-            key.view | MeshPipelineKey::from_primitive_topology(PrimitiveTopology::TriangleList);
+        let mut view_key = key.view
+            | MeshPipelineKey::from_primitive_topology_and_strip_index(
+                PrimitiveTopology::TriangleList,
+                None,
+            );
         if key.stream == STREAM_WATER {
             view_key |= MeshPipelineKey::BLEND_ALPHA;
         }
@@ -356,7 +361,7 @@ impl TerrainPipeline {
 
         descriptor.primitive.cull_mode = Some(Face::Back);
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = true;
+            depth.depth_write_enabled = Some(true);
         }
 
         for def in Self::terrain_defs(key) {
@@ -400,7 +405,7 @@ impl TerrainPipeline {
                 self.prepass.empty_layout.clone(),
                 self.terrain_layout(key.direct),
             ],
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             vertex: VertexState {
                 shader: self.shadow_shader.clone(),
                 shader_defs: shader_defs.clone(),
@@ -415,8 +420,8 @@ impl TerrainPipeline {
             },
             depth_stencil: Some(DepthStencilState {
                 format: CORE_3D_DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: CompareFunction::GreaterEqual,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::GreaterEqual),
                 stencil: StencilState {
                     front: StencilFaceState::IGNORE,
                     back: StencilFaceState::IGNORE,
@@ -697,16 +702,47 @@ pub fn queue_terrain(
         ResMut<ViewBinnedRenderPhases<Shadow>>,
         Query<(&ExtractedView, &LightEntity)>,
     ),
-    ticks: SystemChangeTick,
+    mut queued_pools: Local<u32>,
     #[cfg(feature = "shader_support")] takeover: Option<Res<PackTakeover>>,
 ) {
+    for (view, is_terrain, lights) in views.iter() {
+        if !is_terrain {
+            continue;
+        }
+        for pool in 0..*queued_pools {
+            if let Some(phase) = opaque_phases.get_mut(&view.retained_view_entity) {
+                phase.remove(item_entity(pool, STREAM_SOLID).1);
+            }
+            if let Some(phase) = alpha_phases.get_mut(&view.retained_view_entity) {
+                phase.remove(item_entity(pool, STREAM_CUTOUT).1);
+            }
+        }
+        #[cfg(feature = "builtin_shaders")]
+        if let Some(lights) = lights {
+            for &light_entity in &lights.lights {
+                let Ok((light_view, _)) = light_views.get(light_entity) else {
+                    continue;
+                };
+                let Some(phase) = shadow_phases.get_mut(&light_view.retained_view_entity) else {
+                    continue;
+                };
+                for pool in 0..*queued_pools {
+                    for stream in [STREAM_SOLID, STREAM_CUTOUT] {
+                        phase.remove(item_entity(pool, stream).1);
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "builtin_shaders"))]
+        let _ = lights;
+    }
+    *queued_pools = (*queued_pools).max(pools.pools.len() as u32);
     if pools.pools.is_empty() {
         return;
     }
     let direct = !tier.indirect;
     let fancy = crate::renderer::terrain::builtin_world_shading();
     let specular = fancy && crate::renderer::terrain::sun_specular_enabled();
-    let change_tick = ticks.this_run();
     let transparent_draw = transparent_draws.read().id::<DrawTerrainMain>();
     #[cfg(feature = "builtin_shaders")]
     let shadow_draw = shadow_draws.read().id::<DrawTerrainShadow>();
@@ -749,8 +785,7 @@ pub fn queue_terrain(
                         pipeline: specialize(STREAM_SOLID, false, view_key),
                         draw_function: opaque_draw,
                         material_bind_group_index: None,
-                        vertex_slab: SlabId::default(),
-                        index_slab: None,
+                        slabs: MeshSlabs::default(),
                         lightmap_slab: None,
                     },
                     Opaque3dBinKey {
@@ -759,7 +794,6 @@ pub fn queue_terrain(
                     item_entity(pool, STREAM_SOLID),
                     InputUniformIndex::default(),
                     BinnedRenderPhaseType::NonMesh,
-                    change_tick,
                 );
             }
 
@@ -769,8 +803,7 @@ pub fn queue_terrain(
                         pipeline: specialize(STREAM_CUTOUT, false, view_key),
                         draw_function: alpha_draw,
                         material_bind_group_index: None,
-                        vertex_slab: SlabId::default(),
-                        index_slab: None,
+                        slabs: MeshSlabs::default(),
                     },
                     OpaqueNoLightmap3dBinKey {
                         asset_id: item_asset_id(pool, STREAM_CUTOUT),
@@ -778,12 +811,15 @@ pub fn queue_terrain(
                     item_entity(pool, STREAM_CUTOUT),
                     InputUniformIndex::default(),
                     BinnedRenderPhaseType::NonMesh,
-                    change_tick,
                 );
             }
 
             if let Some(phase) = transparent_phases.get_mut(&view.retained_view_entity) {
-                phase.add(Transparent3d {
+                phase.add_transient(Transparent3d {
+                    sorting_info: TransparentSortingInfo3d::Sorted {
+                        mesh_center: Vec3::ZERO,
+                        depth_bias: f32::MIN,
+                    },
                     distance: f32::MIN,
                     pipeline: specialize(STREAM_WATER, false, view_key),
                     entity: item_entity(pool, STREAM_WATER),
@@ -830,8 +866,7 @@ pub fn queue_terrain(
                                 pipeline,
                                 draw_function: shadow_draw,
                                 material_bind_group_index: None,
-                                vertex_slab: SlabId::default(),
-                                index_slab: None,
+                                slabs: MeshSlabs::default(),
                             },
                             ShadowBinKey {
                                 asset_id: item_asset_id(pool, stream),
@@ -839,7 +874,6 @@ pub fn queue_terrain(
                             item_entity(pool, stream),
                             InputUniformIndex::default(),
                             BinnedRenderPhaseType::NonMesh,
-                            change_tick,
                         );
                     }
                 }
@@ -996,7 +1030,10 @@ pub fn build(app: &mut App) {
             init_terrain_pipeline.after(bevy::pbr::init_prepass_pipeline),
         );
     #[cfg(not(feature = "builtin_shaders"))]
-    render_app.add_systems(RenderStartup, init_terrain_pipeline);
+    render_app.add_systems(
+        RenderStartup,
+        init_terrain_pipeline.after(bevy::pbr::MeshPipelineSystems),
+    );
 }
 
 pub fn finish(app: &mut App) {

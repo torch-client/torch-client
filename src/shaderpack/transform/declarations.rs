@@ -40,6 +40,7 @@ fn declarator_name(tokens: &[Token], from: usize, to: usize) -> Option<usize> {
     (from..end).rev().find(|at| tokens[*at].kind == Kind::Word)
 }
 
+#[cfg(test)]
 pub(crate) fn split_declarators(source: &str) -> String {
     lexer::render(&split_declarator_tokens(lexer::lex(source)))
 }
@@ -94,6 +95,7 @@ fn split_text(tokens: &[Token]) -> Option<String> {
     Some(out)
 }
 
+#[cfg(test)]
 pub(crate) fn rename_texture_sampler(source: &str) -> String {
     let mut tokens = lexer::lex(source);
     rename_texture_sampler_tokens(&mut tokens);

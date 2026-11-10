@@ -8,38 +8,10 @@ use std::sync::Arc;
 
 use super::SoundCategory;
 use super::store::Pack;
-
-pub(super) struct Play {
-    pub key: Arc<str>,
-    pub event: &'static str,
-    pub category: SoundCategory,
-    pub volume: f32,
-    pub pitch: f32,
-    pub relative: Option<[f32; 3]>,
-    pub stream: bool,
-}
+use super::voice::{EAR_OFFSET, MAX_VOICES};
+pub(super) use super::voice::{Place, Play, StartLoop};
 
 const QUEUE: usize = 64;
-
-pub(super) struct StartLoop {
-    pub id: u64,
-    pub key: Arc<str>,
-    pub event: &'static str,
-    pub category: SoundCategory,
-    pub entry_volume: f32,
-    pub entry_pitch: f32,
-    pub volume: f32,
-    pub pitch: f32,
-    pub stream: bool,
-    pub place: Option<Place>,
-    pub live: Option<Arc<AtomicUsize>>,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct Place {
-    pub attenuation: f32,
-    pub pan: [f32; 3],
-}
 
 enum Command {
     Play(Play),
@@ -127,29 +99,14 @@ pub(super) fn reload() {
 
 fn build_defs(index_id: &str, pack: &Pack) -> Result<super::defs::Defs, String> {
     let text = super::store::load_defs(index_id).ok_or("the sound definitions will not read")?;
-    let mut defs = super::defs::Defs::default();
-    defs.merge("minecraft", &text, &|_| true)
-        .map_err(|e| format!("sounds.json will not parse: {e}"))?;
     #[cfg(resource_packs)]
-    {
-        use crate::platform::assets::archive;
-        for namespace in archive::pack_sound_namespaces() {
-            for file in archive::pack_stack(&format!("assets/{namespace}/sounds.json")) {
-                let text = String::from_utf8_lossy(&file);
-                let text = text.trim_start_matches('\u{feff}');
-                if let Err(e) = defs.merge(&namespace, text, &|key| pack.has(key)) {
-                    crate::log_warn!(
-                        "audio",
-                        "invalid sounds.json in a pack, namespace {namespace}: {e}"
-                    );
-                }
-            }
-        }
-    }
+    let has = |key: &str| pack.has(key);
     #[cfg(not(resource_packs))]
-    let _ = pack;
-    defs.finish();
-    Ok(defs)
+    let has = {
+        let _ = pack;
+        |_: &str| true
+    };
+    super::stack_defs(&text, &has)
 }
 
 fn run(index_id: &str) {
@@ -522,9 +479,3 @@ fn reap_ended(loops: &mut HashMap<u64, LoopVoice>, early_ends: &mut Vec<u64>, la
         }
     }
 }
-
-const MAX_VOICES: usize = 32;
-
-const EAR_OFFSET: f32 = 0.125;
-
-pub const PAN_RADIUS: f32 = 1.0 - EAR_OFFSET;

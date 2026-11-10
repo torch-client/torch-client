@@ -25,6 +25,7 @@ const RIGHT_CLICK_DELAY: u32 = 4;
 
 static BREAK_DELAY: AtomicU32 = AtomicU32::new(0);
 static PLACE_DELAY: AtomicU32 = AtomicU32::new(0);
+static SEEN_PUBLISHES: AtomicU32 = AtomicU32::new(0);
 static USE_ITEM: Mutex<UseItem> = Mutex::new(UseItem {
     started: false,
     item: None,
@@ -106,7 +107,7 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
             let state = bot.world().ok()?.read().get_block_state(h.block_pos)?;
             Some(TargetedBlock {
                 pos: [h.block_pos.x, h.block_pos.y, h.block_pos.z],
-                boxes: outline_boxes(state, h.block_pos),
+                boxes: outline_boxes(state, h.block_pos, main_hand_kind(bot)),
             })
         });
 
@@ -157,6 +158,25 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
         }
     };
 
+    let (attack_held, attack_clicked, use_held, use_clicked) =
+        crate::modules::auto_mine::pick_gate(attack_held, attack_clicked, use_held, use_clicked);
+    let freecam = if !crate::modules::freecam::active() {
+        FreecamClick::Attached
+    } else if attack_held || attack_clicked || use_held || use_clicked {
+        freecam_click(bot)
+    } else {
+        FreecamClick::Swallow
+    };
+    let (attack_held, attack_clicked, use_held, use_clicked) = match freecam {
+        FreecamClick::Swallow => (false, false, false, false),
+        _ => (attack_held, attack_clicked, use_held, use_clicked),
+    };
+    let forced_face = matches!(freecam, FreecamClick::At(_));
+    let hand_hit = match &freecam {
+        FreecamClick::At(h) => Some(h.clone()),
+        _ => hit.clone(),
+    };
+
     if let Some(include_data) = pick {
         apply_pick_block(bot, include_data);
     }
@@ -166,8 +186,11 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
     let attack_entity = attack_clicked || (attack_held && attack_strength >= 1.0 && !hands_busy);
     #[cfg(not(feature = "mobile_ui"))]
     let attack_entity = attack_clicked;
+    let attack_entity = attack_entity && !forced_face;
 
     crate::modules::esp::tick(bot, shared);
+
+    crate::modules::seed_cracker::tick(bot, shared);
 
     crate::modules::aim_assist::tick(bot, shared);
 
@@ -180,6 +203,8 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
     let attack_held = crate::modules::auto_mine::tick(bot, shared, hit.as_ref()) || attack_held;
 
     crate::modules::auto_mace::tick(bot, shared);
+
+    crate::modules::crystal_aura::tick(bot, shared);
 
     crate::modules::scaffold::tick(bot, shared);
 
@@ -206,19 +231,28 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
         .component::<GameMode>()
         .is_ok_and(|gm| *gm == GameMode::Spectator)
     {
-        if attack_clicked
-            && let Ok(HitResult::Entity(e)) = bot.hit_result()
-            && let Ok(id) = bot
-                .entity_component::<azalea_core::entity_id::MinecraftEntityId>(e.entity)
-                .map(|id| *id)
-        {
+        if attack_clicked {
+            let target = match bot.hit_result() {
+                Ok(HitResult::Entity(e)) => bot
+                    .entity_component::<azalea_core::entity_id::MinecraftEntityId>(e.entity)
+                    .map(|id| *id)
+                    .ok(),
+                _ => None,
+            };
             bot.write_packet(
-                azalea_protocol::packets::game::s_spectate_entity::ServerboundSpectateEntity {
-                    entity_id: id,
+                azalea_protocol::packets::game::s_spectator_action::ServerboundSpectatorAction {
+                    spectate_entity_id: azalea_core::entity_id::OptionalEntityId(target),
                 },
             );
         }
-        apply_break(bot, shared, hit.as_ref(), attack_held, attack_clicked);
+        apply_break(
+            bot,
+            shared,
+            hand_hit.as_ref(),
+            attack_held,
+            attack_clicked,
+            forced_face,
+        );
         apply_place(bot, shared, use_held, use_clicked, hands_busy);
         publish_item_in_use(bot);
         return;
@@ -263,9 +297,25 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
     }
 
     if !piercing && !attacked_entity {
-        apply_break(bot, shared, hit.as_ref(), attack_held, attack_clicked);
+        apply_break(
+            bot,
+            shared,
+            hand_hit.as_ref(),
+            attack_held,
+            attack_clicked,
+            forced_face,
+        );
     }
+    let restore = match &freecam {
+        FreecamClick::At(h) if use_held || use_clicked => {
+            swap_hit_result(bot, HitResult::Block(h.clone()))
+        }
+        _ => None,
+    };
     apply_place(bot, shared, use_held, use_clicked, hands_busy);
+    if let Some(old) = restore {
+        swap_hit_result(bot, old);
+    }
     publish_item_in_use(bot);
 }
 
@@ -306,9 +356,12 @@ fn publish_item_in_use(bot: &Client) {
 
 const REMOTE_BREAK_TIMEOUT: u32 = 400;
 
-fn outline_boxes(state: BlockState, pos: BlockPos) -> Vec<[f32; 6]> {
-    state
-        .outline_shape(pos)
+fn outline_boxes(state: BlockState, pos: BlockPos, held: ItemKind) -> Vec<[f32; 6]> {
+    let shape = match azalea::physics::clip::holding_outline(state, held) {
+        Some(full) => std::borrow::Cow::Borrowed(full),
+        None => state.outline_shape(pos),
+    };
+    shape
         .to_aabbs()
         .iter()
         .map(|a| {
@@ -347,7 +400,7 @@ fn breaking_overlays(
         out.push(BreakingBlock {
             pos,
             stage,
-            boxes: outline_boxes(state, block),
+            boxes: outline_boxes(state, block, ItemKind::Air),
         });
     }
     out
@@ -370,7 +423,7 @@ fn mining_overlay(bot: &Client) -> (Option<BreakingBlock>, Option<ParticleSpawn>
     let breaking = BreakingBlock {
         pos: [pos.x, pos.y, pos.z],
         stage: stage.min(9) as u8,
-        boxes: outline_boxes(state, pos),
+        boxes: outline_boxes(state, pos, ItemKind::Air),
     };
     let face = match block_hit(bot) {
         Some(h) if h.block_pos == pos => {
@@ -386,6 +439,48 @@ fn mining_overlay(bot: &Client) -> (Option<BreakingBlock>, Option<ParticleSpawn>
         face,
     };
     (Some(breaking), Some(spawn))
+}
+
+enum FreecamClick {
+    Attached,
+    Swallow,
+    At(BlockHitResult),
+}
+
+const FREECAM_PICK: f64 = 128.0;
+
+fn freecam_click(bot: &Client) -> FreecamClick {
+    if crate::modules::freecam::pause_clicks() || crate::modules::auto_mine::enabled() {
+        return FreecamClick::Swallow;
+    }
+    let Some((eye, dir)) = crate::modules::freecam::ray() else {
+        return FreecamClick::Attached;
+    };
+    let (Ok(body), Ok(attrs)) = (
+        bot.eye_position(),
+        bot.component::<azalea::entity::Attributes>(),
+    ) else {
+        return FreecamClick::Swallow;
+    };
+    let range = attrs.block_interaction_range.calculate() + 1.0;
+    drop(attrs);
+    let held_item = main_hand_kind(bot);
+    let Some(hit) = crate::modules::freecam::far_hit(bot, eye, dir, FREECAM_PICK, held_item) else {
+        return FreecamClick::Swallow;
+    };
+    let p = hit.block_pos;
+    let gap = |e: f64, lo: i32| (f64::from(lo) - e).max(0.0).max(e - f64::from(lo) - 1.0);
+    let d2 = gap(body.x, p.x).powi(2) + gap(body.y, p.y).powi(2) + gap(body.z, p.z).powi(2);
+    if d2 >= range * range {
+        return FreecamClick::Swallow;
+    }
+    FreecamClick::At(hit)
+}
+
+fn swap_hit_result(bot: &Client, with: HitResult) -> Option<HitResult> {
+    let mut ecs = bot.ecs.write();
+    let mut current = ecs.get_mut::<azalea::interact::pick::HitResultComponent>(bot.entity)?;
+    Some(std::mem::replace(&mut **current, with))
 }
 
 fn block_hit(bot: &Client) -> Option<BlockHitResult> {
@@ -432,6 +527,7 @@ fn apply_break(
     hit: Option<&BlockHitResult>,
     held: bool,
     clicked: bool,
+    forced_face: bool,
 ) {
     let game_mode = bot
         .component::<GameMode>()
@@ -440,11 +536,6 @@ fn apply_break(
     let creative = game_mode == GameMode::Creative;
     let (held, clicked) = match game_mode {
         GameMode::Spectator => (false, false),
-        _ => (held, clicked),
-    };
-    let editing_pos = shared.lock().unwrap().session.sign_edit_open_pos;
-    let (held, clicked) = match (hit, editing_pos) {
-        (Some(h), Some(editing)) if h.block_pos == editing => (false, false),
         _ => (held, clicked),
     };
 
@@ -495,7 +586,12 @@ fn apply_break(
         let pos = hit
             .expect("break_step only starts when there is a target")
             .block_pos;
-        bot.start_mining(pos);
+        if forced_face {
+            let face = hit.expect("checked above").direction;
+            bot.start_mining_with_face(pos, face, !clicked);
+        } else {
+            bot.start_mining_with(pos, !clicked);
+        }
     }
 
     if start || mining_at.is_some() || (clicked && outside) {
@@ -543,11 +639,13 @@ fn apply_place(bot: &Client, shared: &SharedMutex, held: bool, clicked: bool, ha
     if was_using && !held {
         release_using_item(bot);
     }
+    let publishes = crate::renderer::intent::publishes();
+    let confirmed = SEEN_PUBLISHES.swap(publishes, Ordering::Relaxed) != publishes;
     let mut swung = InteractionHand::Main;
     let (swing, delay) = place_step(
         game_mode,
         clicked,
-        held,
+        held && confirmed,
         PLACE_DELAY.load(Ordering::Relaxed),
         was_using,
         || {
@@ -652,7 +750,14 @@ fn use_hand(bot: &Client, shared: &SharedMutex, hand: InteractionHand, click: &C
                 sounds::bottle_on_hive(bot, stack.kind, hit);
             }
             if consumed {
-                return Used::Done { swing: true };
+                let light = bot
+                    .world()
+                    .ok()
+                    .and_then(|w| w.read().get_block_state(hit.block_pos))
+                    .is_some_and(|s| {
+                        s.as_block_kind() == azalea_registry::builtin::BlockKind::Light
+                    });
+                return Used::Done { swing: !light };
             }
             if click.spectator {
                 return Used::Done { swing: false };
@@ -1138,6 +1243,12 @@ fn pov_hit(bot: &Client, fluid: azalea::physics::clip::FluidPickType) -> Option<
     bot.world().ok()?.read().get_block_state(hit.block_pos)
 }
 
+fn main_hand_kind(bot: &Client) -> ItemKind {
+    bot.component::<azalea::entity::inventory::Inventory>()
+        .map(|inv| inv.held_item().kind())
+        .unwrap_or(ItemKind::Air)
+}
+
 fn pov_block_hit(
     bot: &Client,
     fluid: azalea::physics::clip::FluidPickType,
@@ -1151,6 +1262,7 @@ fn pov_block_hit(
         .ok()?
         .block_interaction_range
         .calculate();
+    let held_item = main_hand_kind(bot);
     let world = bot.world().ok()?;
     let world = world.read();
     let hit = clip(
@@ -1160,6 +1272,8 @@ fn pov_block_hit(
             to: eye + azalea::entity::view_vector(look) * range,
             block_shape_type: BlockShapeType::Outline,
             fluid_pick_type: fluid,
+            held_item,
+            entity: None,
         },
     );
     (!hit.miss).then_some(hit)
@@ -1394,7 +1508,7 @@ fn held_item_kind(bot: &Client, hand: InteractionHand) -> Option<ItemKind> {
     }
 }
 
-fn use_duration(held: &azalea_inventory::ItemStackData) -> i32 {
+pub(crate) fn use_duration(held: &azalea_inventory::ItemStackData) -> i32 {
     use azalea_inventory::components::{BlocksAttacks, KineticWeapon};
 
     if let Some(consume) = Consumption::of(held) {
@@ -1718,7 +1832,7 @@ fn open_command_block(
     s.session.command_block_pos = Some(hit.block_pos);
 }
 
-pub(crate) fn command_block_mode(state: azalea::blocks::BlockState) -> Option<CommandBlockMode> {
+pub(crate) fn command_block_mode(state: azalea::block::BlockState) -> Option<CommandBlockMode> {
     match crate::blocks::block_name(state) {
         "command_block" => Some(CommandBlockMode::Redstone),
         "repeating_command_block" => Some(CommandBlockMode::Auto),
@@ -1771,6 +1885,18 @@ pub(crate) fn module_place(
     item_used(shared, main);
     swing_hand(bot, shared, main);
     true
+}
+
+pub(crate) fn module_use_on(
+    bot: &Client,
+    shared: &SharedMutex,
+    hit: &BlockHitResult,
+    hand: InteractionHand,
+) {
+    send_use_item_on(bot, hit, false, hand);
+    consume_held_item(bot, hand);
+    item_used(shared, hand);
+    swing_hand(bot, shared, hand);
 }
 
 pub(crate) fn select_hotbar_slot(bot: &Client, slot: u8) {

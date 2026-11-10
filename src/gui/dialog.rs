@@ -121,14 +121,6 @@ impl DialogState {
         self.parent
     }
 
-    pub fn is_open(&self) -> bool {
-        !matches!(self.phase, Phase::Closed)
-    }
-
-    pub fn pauses(&self) -> bool {
-        matches!(&self.phase, Phase::Showing(dialog) if dialog.pause)
-    }
-
     pub fn on_escape(&mut self, shared: &SharedMutex) -> Outcome {
         match &self.overlay {
             Overlay::Warning | Overlay::Link(_) => {

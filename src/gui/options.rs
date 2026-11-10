@@ -66,6 +66,7 @@ mod tr {
         fov_effects = "options.fovEffectScale",
         screen_effects = "options.screenEffectScale",
         damage_tilt = "options.damageTiltStrength",
+        hide_lightning_flashes = "options.hideLightningFlashes",
         inactivity_fps_limit = "options.inactivityFpsLimit",
         inactivity_afk = "options.inactivityFpsLimit.afk",
         inactivity_minimized = "options.inactivityFpsLimit.minimized",
@@ -145,6 +146,12 @@ const FPS_COUNTER: &str = "FPS Counter";
 #[cfg(feature = "mobile_ui")]
 const TOUCH_MOVEMENT: &str = "Movement";
 
+#[cfg(feature = "mobile_ui")]
+const TOUCH_SNEAK: &str = "Sneak";
+
+#[cfg(feature = "mobile_ui")]
+const EDIT_CONTROL_LAYOUT: &str = "Edit control layout...";
+
 const RESET_VIDEO: &str = "Reset Video Settings";
 
 const RESET_GAME: &str = "Reset Game Settings";
@@ -158,10 +165,24 @@ const OPEN_CLIENT_FOLDER: &str = "Open torch-client Folder";
 const CHECK_ASSETS: &str = "Install missing assets";
 #[cfg(feature = "asset_download")]
 const NOTHING_MISSING: &str = "Nothing is missing";
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+const EXPORT_DATA: &str = "Export Client Data";
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+const EXPORT_FILE: &str = "torch-client-data.zip";
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+const EXPORT_TOOLTIP: [&str; 5] = [
+    "Downloads a .zip with:",
+    "+ options, keybinds, modules",
+    "+ accounts, servers, HUD, skins",
+    "- not assets, mods or mod data",
+    "Has sign-ins: keep it private",
+];
 #[cfg(self_update)]
 const ENABLE_SELF_UPDATE: &str = "Enable self update";
 
 const SPRINT_MODE: &str = "Sprint Mode";
+
+const ALWAYS_OP_ITEMS: &str = "Always Show OP Items";
 
 #[cfg(feature = "skins")]
 const SKIN_HEADER: &str = "Skin Customisation";
@@ -255,8 +276,9 @@ const Y_DISPLAY_ROW_1: f32 = Y_DISPLAY_ROW_0 + ROW_H;
 const Y_DISPLAY_ROW_2: f32 = Y_DISPLAY_ROW_1 + ROW_H;
 const Y_DISPLAY_ROW_3: f32 = Y_DISPLAY_ROW_2 + ROW_H;
 const Y_DISPLAY_ROW_4: f32 = Y_DISPLAY_ROW_3 + ROW_H;
+const Y_DISPLAY_ROW_5: f32 = Y_DISPLAY_ROW_4 + ROW_H;
 #[cfg(feature = "render_lod")]
-const Y_LOD_HEADER: f32 = Y_DISPLAY_ROW_4 + ROW_H;
+const Y_LOD_HEADER: f32 = Y_DISPLAY_ROW_5 + ROW_H;
 #[cfg(feature = "render_lod")]
 const Y_LOD_HINT: f32 = Y_LOD_HEADER + HEADER_PAD_TOP + HEADER_H;
 #[cfg(feature = "render_lod")]
@@ -270,7 +292,7 @@ const Y_LOD_ROW_2: f32 = Y_LOD_ROW_1 + ROW_H;
 #[cfg(feature = "render_lod")]
 const Y_QUALITY_HEADER: f32 = Y_LOD_ROW_2 + ROW_H;
 #[cfg(not(feature = "render_lod"))]
-const Y_QUALITY_HEADER: f32 = Y_DISPLAY_ROW_4 + ROW_H;
+const Y_QUALITY_HEADER: f32 = Y_DISPLAY_ROW_5 + ROW_H;
 const Y_QUALITY_ROW_0: f32 = Y_QUALITY_HEADER + HEADER_PAD_TOP + HEADER_H;
 const Y_QUALITY_ROW_1: f32 = Y_QUALITY_ROW_0 + ROW_H;
 const Y_QUALITY_ROW_2: f32 = Y_QUALITY_ROW_1 + ROW_H;
@@ -843,6 +865,7 @@ const VIDEO_KEYS: &[&str] = &[
     "fovEffectScale",
     "screenEffectScale",
     "damageTiltStrength",
+    "hideLightningFlashes",
     "renderClouds",
     "particles",
     "renderDistance",
@@ -858,7 +881,6 @@ const VIDEO_KEYS: &[&str] = &[
     "shaderQuality",
     "playerShadows",
     "entityShadows",
-    "touchMovement",
     #[cfg(feature = "render_lod")]
     "lodDistance",
     #[cfg(feature = "render_lod")]
@@ -870,6 +892,7 @@ const GAME_KEYS: &[&str] = &[
     "toggleSprint",
     "mainHand",
     "allowSignedChat",
+    "alwaysShowOpItems",
     "toastAdvancement",
     "toastRecipe",
     "toastSystem",
@@ -884,6 +907,28 @@ fn reset_game_options(o: &mut crate::gui::GuiOptions) {
     crate::gui::reset_options(o, |key| {
         GAME_KEYS.contains(&key) || key.starts_with("modelPart_")
     });
+}
+
+#[cfg(feature = "mobile_ui")]
+fn touch_movement_changed(o: &crate::gui::GuiOptions) -> bool {
+    o.touch_movement != crate::gui::TouchMovement::default()
+}
+
+#[cfg(feature = "mobile_ui")]
+fn reset_touch_movement(o: &mut crate::gui::GuiOptions) {
+    crate::gui::reset_options(o, |key| key == "touchMovement");
+    crate::gui::save_options(o);
+}
+
+#[cfg(feature = "mobile_ui")]
+fn touch_sneak_changed(o: &crate::gui::GuiOptions) -> bool {
+    o.touch_sneak != crate::gui::TouchSneak::default()
+}
+
+#[cfg(feature = "mobile_ui")]
+fn reset_touch_sneak(o: &mut crate::gui::GuiOptions) {
+    crate::gui::reset_options(o, |key| key == "touchSneak");
+    crate::gui::save_options(o);
 }
 
 #[cfg(feature = "audio")]
@@ -1027,6 +1072,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 }
 
+#[allow(unused_assignments)]
 pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     #[cfg(all(not(target_arch = "wasm32"), feature = "asset_download"))]
     if state.confirm_clear_assets {
@@ -1050,6 +1096,9 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         count += 1;
     }
     if cfg!(self_update) {
+        count += 1;
+    }
+    if cfg!(all(target_arch = "wasm32", feature = "asset_download")) {
         count += 1;
     }
     let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
@@ -1137,8 +1186,37 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         }
     }
 
+    #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+    {
+        let (x, y) = cell(next);
+        next += 1;
+        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, EXPORT_DATA).draw(p, ctx) {
+            export_client_data();
+        }
+        if let Some(m) = ctx
+            .mouse()
+            .filter(|_| ctx.hovering(x, y, COLUMN_W, WIDGET_HEIGHT))
+        {
+            let lines = EXPORT_TOOLTIP.map(str::to_owned);
+            draw_bind_tooltip(p, &lines, m.x, m.y, ctx.vw);
+        }
+    }
+
     if draw_done(p, ctx) {
         state.nav = Some(Screen::Options);
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+fn export_client_data() {
+    let docs = crate::platform::storage::export();
+    let files: Vec<(&str, &[u8])> = docs
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.as_bytes()))
+        .collect();
+    let zip = crate::util::zip::write(&files);
+    if let Err(e) = crate::platform::download::save(EXPORT_FILE, &zip, "application/zip") {
+        crate::log_warn!("storage", "could not export the client data: {e}");
     }
 }
 
@@ -1281,6 +1359,9 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             crate::gui::save_options(&state.options);
         }
     }
+
+    let (x, y) = cell(0.0, Y_DISPLAY_ROW_5);
+    opt_toggle!(p, ctx, state; x, y, tr::hide_lightning_flashes(), hide_lightning_flashes);
 
     header(p, Y_QUALITY_HEADER, HEADER_PAD_TOP, tr::quality_header());
 
@@ -1464,6 +1545,9 @@ const BIND_PADDING: f32 = 10.0;
 
 const BIND_BUTTON_GAP: f32 = 5.0;
 
+const BIND_SIDE_MARGIN: f32 = 4.0;
+const BIND_NAME_GAP: f32 = 8.0;
+
 const COLLISION_COLOR: u32 = 0xFFFF_FF00;
 const COLLISION_W: f32 = 3.0;
 
@@ -1483,16 +1567,28 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let content_h = rows.len() as f32 * BIND_ROW_H;
     let list_h_total = content_h + LIST_PAD_BOTTOM;
 
-    let left = (ctx.vw / 2.0 - BIND_ROW_W / 2.0).floor();
+    let row_w = BIND_ROW_W
+        .min(ctx.vw - 2.0 * (SCROLLBAR_GAP + SCROLLBAR_W + BIND_SIDE_MARGIN))
+        .floor();
+    let left = (ctx.vw / 2.0 - row_w / 2.0).floor();
     let (list_x, list_y, list_w, list_h) = LAYOUT.content_rect(ctx.vw, ctx.vh);
+
+    let bar_x = left + row_w + SCROLLBAR_GAP;
+    let reset_x = bar_x - RESET_W - BIND_PADDING;
+    let change_x = reset_x - BIND_BUTTON_GAP - CHANGE_W;
 
     #[cfg(feature = "mobile_ui")]
     let (list_y, list_h) = {
-        let x = centered_x(ctx.vw) + (WIDGET_WIDTH_BIG - COLUMN_W) / 2.0;
-        let label = generic_value(TOUCH_MOVEMENT, state.options.touch_movement.caption());
-        if Button::new(x, list_y, COLUMN_W, WIDGET_HEIGHT, &label).draw(p, ctx) {
-            state.options.touch_movement = state.options.touch_movement.next();
-            crate::gui::save_options(&state.options);
+        let edit = Button::new(
+            centered_x(ctx.vw),
+            list_y,
+            WIDGET_WIDTH_BIG,
+            WIDGET_HEIGHT,
+            EDIT_CONTROL_LAYOUT,
+        );
+        if edit.draw(p, screen_ctx) {
+            state.keybinds.capturing = None;
+            state.nav = Some(Screen::TouchLayout);
         }
         let advance = WIDGET_HEIGHT + ROW_SPACING;
         (list_y + advance, (list_h - advance).max(0.0))
@@ -1503,7 +1599,7 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         &mut state.controls_scroll_drag,
         screen_ctx,
         left,
-        BIND_ROW_W,
+        row_w,
         list_y,
         list_h,
         list_h_total,
@@ -1517,10 +1613,6 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         false,
     );
     let list_ctx = &ctx.with_input(&list_input);
-
-    let bar_x = left + BIND_ROW_W + SCROLLBAR_GAP;
-    let reset_x = bar_x - RESET_W - BIND_PADDING;
-    let change_x = reset_x - BIND_BUTTON_GAP - CHANGE_W;
 
     focus::suspend();
     let clip = p.push_clip(list_x, list_y, list_w, list_h);
@@ -1546,7 +1638,9 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                 let collisions = state.keybinds.collisions(*bind);
                 let selected = state.keybinds.capturing == Some(*bind);
 
-                p.text_plain(def.label(), left, row_y + 6.0, 0xFFFFFF, true);
+                let name_w = (change_x - BIND_NAME_GAP - left).max(0.0);
+                let name = p.fit(def.label(), name_w);
+                p.text_plain(&name, left, row_y + 6.0, 0xFFFFFF, true);
 
                 if !collisions.is_empty() {
                     p.fill(
@@ -1603,7 +1697,7 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         p,
         state.controls_scroll,
         left,
-        BIND_ROW_W,
+        row_w,
         list_y,
         list_h,
         list_h_total,
@@ -1615,13 +1709,14 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     let footer_left = centered_row_x(ctx.vw, 2.0 * FOOTER_W + FOOTER_GAP);
     let footer_y = LAYOUT.footer_y(ctx.vh);
+    let any_changed = state.keybinds.any_rebound();
     let reset_all = Button {
         x: footer_left,
         y: footer_y,
         w: FOOTER_W,
         h: WIDGET_HEIGHT,
         label: tr::reset_all_keys(),
-        active: state.keybinds.any_rebound(),
+        active: any_changed,
     };
     if reset_all.draw(p, screen_ctx) {
         state.keybinds.reset_all();
@@ -1636,6 +1731,55 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     if done.draw(p, screen_ctx) {
         state.keybinds.capturing = None;
         state.nav = Some(Screen::Options);
+    }
+}
+
+#[cfg(feature = "mobile_ui")]
+pub fn draw_touch_layout(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
+    let other = crate::mobile::pad::top_controls_bottom(ctx.vw, ctx.vh);
+    let bedrock = crate::mobile::bedrock::Layout::new(ctx.vw, ctx.vh).top_bottom();
+    let y = (other.max(bedrock) + ROW_SPACING).ceil();
+    let row_w = COLUMN_W + BIND_BUTTON_GAP + RESET_W;
+    let clear = crate::mobile::pad::movement_right(ctx.vw, ctx.vh) + ROW_SPACING;
+    let x = ((ctx.vw - row_w) / 2.0).floor().max(clear.ceil());
+    let label = generic_value(TOUCH_MOVEMENT, state.options.touch_movement.caption());
+    if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &label).draw(p, ctx) {
+        state.options.touch_movement = state.options.touch_movement.next();
+        crate::gui::save_options(&state.options);
+    }
+    let reset = Button {
+        x: x + COLUMN_W + BIND_BUTTON_GAP,
+        y,
+        w: RESET_W,
+        h: WIDGET_HEIGHT,
+        label: tr::reset(),
+        active: touch_movement_changed(&state.options),
+    };
+    if reset.draw(p, ctx) {
+        reset_touch_movement(&mut state.options);
+    }
+
+    let y = y + WIDGET_HEIGHT + ROW_SPACING;
+    let label = generic_value(TOUCH_SNEAK, state.options.touch_sneak.caption());
+    if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &label).draw(p, ctx) {
+        state.options.touch_sneak = state.options.touch_sneak.next();
+        crate::gui::save_options(&state.options);
+    }
+    let reset = Button {
+        x: x + COLUMN_W + BIND_BUTTON_GAP,
+        y,
+        w: RESET_W,
+        h: WIDGET_HEIGHT,
+        label: tr::reset(),
+        active: touch_sneak_changed(&state.options),
+    };
+    if reset.draw(p, ctx) {
+        reset_touch_sneak(&mut state.options);
+    }
+
+    let y = y + WIDGET_HEIGHT + ROW_SPACING;
+    if Button::new(x, y, row_w, WIDGET_HEIGHT, tr::done()).draw(p, ctx) {
+        state.nav = Some(Screen::Controls);
     }
 }
 
@@ -1756,6 +1900,9 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         state.options.toggle_sprint = !state.options.toggle_sprint;
         crate::gui::save_options(&state.options);
     }
+
+    let (x, y) = cell(1.0, Y_GAME_ROW_1);
+    opt_toggle!(p, ctx, state; x, y, ALWAYS_OP_ITEMS, always_show_op_items);
 
     p.text_plain(
         tr::chat_header(),
@@ -2127,6 +2274,7 @@ mod tests {
         assert_eq!(Y_DISPLAY_ROW_2, 63.0);
         assert_eq!(Y_DISPLAY_ROW_3, 88.0);
         assert_eq!(Y_DISPLAY_ROW_4, 113.0);
+        assert_eq!(Y_DISPLAY_ROW_5, 138.0);
         const LOD_GROUP: f32 = if cfg!(feature = "render_lod") {
             31.0 + 23.0 + 3.0 * ROW_H
         } else {
@@ -2134,17 +2282,17 @@ mod tests {
         };
         #[cfg(feature = "render_lod")]
         {
-            assert_eq!(Y_LOD_HEADER, 138.0);
-            assert_eq!(Y_LOD_HINT, 169.0);
-            assert_eq!(Y_LOD_ROW_0, 192.0);
-            assert_eq!(Y_LOD_ROW_1, 217.0);
-            assert_eq!(Y_LOD_ROW_2, 242.0);
+            assert_eq!(Y_LOD_HEADER, 163.0);
+            assert_eq!(Y_LOD_HINT, 194.0);
+            assert_eq!(Y_LOD_ROW_0, 217.0);
+            assert_eq!(Y_LOD_ROW_1, 242.0);
+            assert_eq!(Y_LOD_ROW_2, 267.0);
         }
-        assert_eq!(Y_QUALITY_HEADER, 138.0 + LOD_GROUP);
-        assert_eq!(Y_QUALITY_ROW_0, 169.0 + LOD_GROUP);
+        assert_eq!(Y_QUALITY_HEADER, 163.0 + LOD_GROUP);
+        assert_eq!(Y_QUALITY_ROW_0, 194.0 + LOD_GROUP);
         const EXTRA_ROWS: f32 = cfg!(feature = "builtin_shaders") as u32 as f32
             + cfg!(feature = "shader_support") as u32 as f32;
-        assert_eq!(Y_RESET_ROW, 269.0 + EXTRA_ROWS * ROW_H + LOD_GROUP);
+        assert_eq!(Y_RESET_ROW, 294.0 + EXTRA_ROWS * ROW_H + LOD_GROUP);
         assert_eq!(VIDEO_CONTENT_H, Y_RESET_ROW + ROW_H);
     }
 

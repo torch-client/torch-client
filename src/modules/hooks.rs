@@ -1,6 +1,6 @@
 use azalea::Client;
 
-use super::{aim_assist, auto_mace, auto_mine, scaffold, sneak};
+use super::{aim_assist, auto_mace, auto_mine, auto_walk, crystal_aura, scaffold, sneak};
 use crate::session::{SharedMutex, SharedState};
 
 pub fn shapes_look() -> bool {
@@ -30,7 +30,7 @@ pub fn look_delta(s: &SharedState, yaw: f32, pitch: f32, dt: f32, hand: (f32, f3
 }
 
 pub fn shapes_movement() -> bool {
-    sneak::enabled() || auto_mine::enabled()
+    sneak::enabled() || auto_mine::enabled() || auto_walk::enabled()
 }
 
 pub fn move_flags(s: &SharedState, keys: u8) -> u8 {
@@ -41,7 +41,14 @@ pub fn move_flags(s: &SharedState, keys: u8) -> u8 {
     if s.session.auto_mine.is_some_and(|i| i.forward) {
         flags |= crate::session::MOVE_FORWARD;
     }
+    if auto_walk::enabled() {
+        flags |= auto_walk::flags(s);
+    }
     flags
+}
+
+pub fn auto_jump(option: bool) -> bool {
+    option || auto_walk::auto_jump()
 }
 
 pub fn script_flags(base: u8) -> u8 {
@@ -61,6 +68,11 @@ pub fn sent_look(
     let (look, flags) = scaffold::steer(bot, shared, yaw, pitch, flags);
     if let Some(l) = look {
         return (l.yaw, l.pitch, flags);
+    }
+    if crystal_aura::enabled()
+        && let Some(sent) = crystal_aura::steer(bot, yaw, pitch, flags)
+    {
+        return sent;
     }
     if auto_mace::enabled() {
         auto_mace::steer(bot, yaw, pitch, flags)

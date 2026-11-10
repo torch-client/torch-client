@@ -260,6 +260,7 @@ impl Goal for ReachBlockPosGoal {
             eye_position,
             &self.chunk_storage,
             self.distance,
+            azalea_registry::builtin::ItemKind::Air,
         );
 
         block_hit_result.block_pos == self.pos

@@ -33,13 +33,17 @@ impl EntityDimensions {
     }
 
     pub fn scale(self, factor: f32) -> Self {
-        if self.fixed || factor == 1.0 {
+        self.scale_xy(factor, factor)
+    }
+
+    pub fn scale_xy(self, width_factor: f32, height_factor: f32) -> Self {
+        if self.fixed || (width_factor == 1.0 && height_factor == 1.0) {
             return self;
         }
         Self {
-            width: self.width * factor,
-            height: self.height * factor,
-            eye_height: self.eye_height * factor,
+            width: self.width * width_factor,
+            height: self.height * height_factor,
+            eye_height: self.eye_height * height_factor,
             fixed: false,
         }
     }
@@ -72,7 +76,7 @@ impl From<EntityKind> for EntityDimensions {
             EntityKind::BambooChestRaft => EntityDimensions::new(1.375, 0.5625).eye_height(0.5625),
             EntityKind::BambooRaft => EntityDimensions::new(1.375, 0.5625).eye_height(0.5625),
             EntityKind::Bat => EntityDimensions::new(0.5, 0.9).eye_height(0.45),
-            EntityKind::Bee => EntityDimensions::new(0.7, 0.6).eye_height(0.3),
+            EntityKind::Bee => EntityDimensions::new(0.55, 0.5).eye_height(0.3),
             EntityKind::BirchBoat => EntityDimensions::new(1.375, 0.5625).eye_height(0.5625),
             EntityKind::BirchChestBoat => EntityDimensions::new(1.375, 0.5625).eye_height(0.5625),
             EntityKind::Blaze => EntityDimensions::new(0.6, 1.8),
@@ -195,6 +199,7 @@ impl From<EntityKind> for EntityDimensions {
             EntityKind::Squid => EntityDimensions::new(0.8, 0.8).eye_height(0.4),
             EntityKind::Stray => EntityDimensions::new(0.6, 1.99).eye_height(1.74),
             EntityKind::Strider => EntityDimensions::new(0.9, 1.7),
+            EntityKind::SulfurCube => EntityDimensions::new(0.49, 0.49).eye_height(0.175),
             EntityKind::Tadpole => EntityDimensions::new(0.4, 0.3).eye_height(0.195),
             EntityKind::TextDisplay => EntityDimensions::new(0.0, 0.0),
             EntityKind::Tnt => EntityDimensions::new(0.98, 0.98).eye_height(0.15),
@@ -234,4 +239,65 @@ pub fn calculate_dimensions(kind: EntityKind, pose: Pose) -> EntityDimensions {
         (EntityKind::Player, Pose::Dying) => EntityDimensions::new(0.2, 1.2).eye_height(1.62),
         _ => EntityDimensions::from(kind),
     }
+}
+
+#[cfg_attr(feature = "bevy_ecs", derive(bevy_ecs::component::Component))]
+#[derive(Clone, Copy, Debug)]
+pub struct RemoteScale(pub f32);
+
+pub fn baby_dimensions(kind: EntityKind) -> EntityDimensions {
+    let adult = EntityDimensions::from(kind);
+    let sized = |width, height, eye| EntityDimensions::new(width, height).eye_height(eye);
+    match kind {
+        EntityKind::Zombie | EntityKind::Drowned => sized(0.49, 0.98, 0.775),
+        EntityKind::Husk => sized(0.49, 0.98, 0.825),
+        EntityKind::ZombieVillager => sized(0.49, 0.98, 0.67),
+        EntityKind::ZombifiedPiglin | EntityKind::Piglin => sized(0.49, 0.98, 0.78),
+        EntityKind::Villager => sized(0.49, 0.98, 0.63),
+        EntityKind::Zoglin | EntityKind::Hoglin => sized(0.75, 0.85, 0.625),
+        EntityKind::Strider => sized(0.45, 0.85, 0.4375),
+        EntityKind::Wolf => sized(0.3, 0.425, 0.34375),
+        EntityKind::Cat | EntityKind::Ocelot => sized(0.3, 0.35, 0.34375),
+        EntityKind::Rabbit => sized(0.24, 0.4, 0.39),
+        EntityKind::Sheep => sized(0.45, 0.65, 0.65625),
+        EntityKind::Goat => sized(0.45, 0.65, 0.59375),
+        EntityKind::Cow | EntityKind::Mooshroom => sized(0.45, 0.7, 0.69),
+        EntityKind::PolarBear => sized(0.7, 0.7, 0.34375),
+        EntityKind::Squid | EntityKind::GlowSquid => sized(0.5, 0.5, 0.37),
+        EntityKind::Pig => sized(0.45, 0.45, 0.40625),
+        EntityKind::Chicken => sized(0.3, 0.4, 0.28125),
+        EntityKind::Axolotl => sized(0.375, 0.21, 0.09375),
+        EntityKind::Panda => adult.scale(0.5).eye_height(0.28125),
+        EntityKind::HappyGhast => adult.scale(0.2375).eye_height(0.46875),
+        EntityKind::Dolphin => adult.scale(0.65).eye_height(0.09375),
+        EntityKind::Armadillo => adult.scale(0.6).eye_height(0.21875),
+        EntityKind::Fox => adult.scale(0.6).eye_height(0.34375),
+        EntityKind::Horse | EntityKind::ZombieHorse | EntityKind::SkeletonHorse => adult.scale(0.7),
+        EntityKind::Turtle => adult.scale(0.3),
+        EntityKind::Camel | EntityKind::CamelHusk => sized(0.95, 1.4, 1.38),
+        _ => adult.scale(0.5),
+    }
+}
+
+#[cfg_attr(feature = "bevy_ecs", derive(bevy_ecs::component::Component))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShulkerPeekAmount(pub f32);
+
+pub fn shulker_bounding_box(
+    scale: f32,
+    attach_face: azalea_core::direction::Direction,
+    peek_amount: f32,
+    pos: Vec3,
+) -> Aabb {
+    let physical_peek = 0.5 - (((0.5 + peek_amount) * std::f32::consts::PI) as f64).sin() as f32 * 0.5;
+    let direction = attach_face.opposite().normal_vec3();
+    let size = scale as f64;
+    let at_bottom_center = Aabb {
+        min: Vec3::new(-size * 0.5, 0.0, -size * 0.5),
+        max: Vec3::new(size * 0.5, size, size * 0.5),
+    };
+    let max_movement = physical_peek as f64;
+    at_bottom_center
+        .expand_towards(direction * (max_movement * size))
+        .move_relative(pos)
 }

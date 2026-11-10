@@ -1,5 +1,5 @@
 use crate::entities::geom::{BakedModel, CubeList, Grow, LayerDef, MeshDef, PartPose, PartState};
-use crate::entities::keyframe::{self, AnimationDefinition};
+use crate::entities::keyframe;
 use crate::entities::state::EntityState;
 
 use super::animations::sniffer as anim;
@@ -160,12 +160,7 @@ pub fn baby_setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityS
     keyframe::apply_static(&anim::BABY_TRANSFORM, model, parts);
 }
 
-const STATE_FEELING_HAPPY: u8 = 1;
-const STATE_SCENTING: u8 = 2;
-const STATE_SNIFFING: u8 = 3;
 const STATE_SEARCHING: u8 = 4;
-const STATE_DIGGING: u8 = 5;
-const STATE_RISING: u8 = 6;
 
 fn setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
     let head = model.id("head");
@@ -188,16 +183,36 @@ fn setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
         WALK_ANIMATION_SCALE_FACTOR,
     );
 
-    let one_shot: Option<&AnimationDefinition> = match st.extras.sniffer_state {
-        STATE_DIGGING => Some(&anim::SNIFFER_DIG),
-        STATE_SNIFFING => Some(&anim::SNIFFER_LONGSNIFF),
-        STATE_RISING => Some(&anim::SNIFFER_STAND_UP),
-        STATE_FEELING_HAPPY => Some(&anim::SNIFFER_HAPPY),
-        STATE_SCENTING => Some(&anim::SNIFFER_SNIFFSNIFF),
-        _ => None,
-    };
-    if let Some(animation) = one_shot {
-        let seconds = (st.age_ticks / 20.0).rem_euclid(animation.length_seconds);
-        keyframe::apply(animation, model, parts, seconds, 1.0);
-    }
+    use crate::entities::state::anim_slot::sniffer as slot;
+    let states = &st.extras.anim;
+    let age = st.age_ticks;
+    keyframe::apply_state(&anim::SNIFFER_DIG, model, parts, states[slot::DIGGING], age);
+    keyframe::apply_state(
+        &anim::SNIFFER_LONGSNIFF,
+        model,
+        parts,
+        states[slot::SNIFFING],
+        age,
+    );
+    keyframe::apply_state(
+        &anim::SNIFFER_STAND_UP,
+        model,
+        parts,
+        states[slot::RISING],
+        age,
+    );
+    keyframe::apply_state(
+        &anim::SNIFFER_HAPPY,
+        model,
+        parts,
+        states[slot::FEELING_HAPPY],
+        age,
+    );
+    keyframe::apply_state(
+        &anim::SNIFFER_SNIFFSNIFF,
+        model,
+        parts,
+        states[slot::SCENTING],
+        age,
+    );
 }

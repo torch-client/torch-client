@@ -406,6 +406,8 @@ struct Editor {
     title: String,
     max_len: usize,
     text: MultiLineTextBox,
+    top: usize,
+    caret: usize,
 }
 
 enum Overlay {
@@ -620,7 +622,6 @@ pub struct ClickGuiState {
     hover_last: Option<ModuleIx>,
     #[cfg(feature = "module_panel")]
     modules: panel::State,
-    #[cfg(feature = "module_panel")]
     close: bool,
 }
 
@@ -683,7 +684,6 @@ impl Default for ClickGuiState {
             hover_last: None,
             #[cfg(feature = "module_panel")]
             modules: panel::State::default(),
-            #[cfg(feature = "module_panel")]
             close: false,
         }
     }
@@ -947,10 +947,7 @@ impl ClickGuiState {
 
     pub fn opened(&mut self) {
         self.opened_at = None;
-        #[cfg(feature = "module_panel")]
-        {
-            self.close = false;
-        }
+        self.close = false;
         self.field.clear();
         self.field.focused = true;
         crate::platform::keyboard::dismiss();
@@ -959,7 +956,6 @@ impl ClickGuiState {
         self.match_top = 0;
     }
 
-    #[cfg(feature = "module_panel")]
     pub fn take_close(&mut self) -> bool {
         std::mem::take(&mut self.close)
     }
@@ -1292,7 +1288,12 @@ impl ClickGuiState {
         font: &crate::text::Font,
         ui: &Ui,
     ) {
-        let mut text = MultiLineTextBox::new(max_len, EDITOR_MAX_LINES);
+        let limit = if max_len > EDITOR_SCROLL_LEN {
+            0
+        } else {
+            EDITOR_MAX_LINES
+        };
+        let mut text = MultiLineTextBox::new(max_len, limit);
         text.set_text(&store().text_at(slot as usize));
         text.inner.focused = true;
         text.inner.browser_keyboard = true;
@@ -1306,6 +1307,8 @@ impl ClickGuiState {
             title,
             max_len,
             text,
+            top: 0,
+            caret: usize::MAX,
         }));
         self.owner.drop_field();
         #[cfg(feature = "module_panel")]
@@ -1722,7 +1725,19 @@ impl ClickGuiState {
                 ) => {
                     let was = v;
                     let v = self.slider(
-                        p, ui, ix, sy, iw, d.name, v, min, max, decimals, ctl, active,
+                        p,
+                        ui,
+                        ix,
+                        sy,
+                        iw,
+                        d.name,
+                        v,
+                        min,
+                        max,
+                        crate::modules::registry::typed_max(slot, max),
+                        decimals,
+                        ctl,
+                        active,
                     );
                     if v != was {
                         store().set_value(slot, Value::Num(v));
@@ -1760,12 +1775,26 @@ impl ClickGuiState {
                     self.bind_button(p, ui, ix, sy, iw, d.name, target, bound, active);
                 }
                 (Kind::Button { text, key }, _) => {
-                    let live = store().enabled(id);
-                    if self.action_button(p, ui, ix, sy, iw, d.name, text, live, active) {
-                        #[cfg(lua_mods)]
-                        crate::modules::script::setting_button(id, key);
-                        #[cfg(not(lua_mods))]
-                        let _ = key;
+                    let builtin = (id.0 as usize) < crate::modules::registry::COUNT;
+                    let live = builtin || store().enabled(id);
+                    let label = if builtin {
+                        crate::modules::builtin_button_text(id, key, text, ui.input.time)
+                    } else {
+                        text
+                    };
+                    if self.action_button(p, ui, ix, sy, iw, d.name, label, live, active) {
+                        if builtin {
+                            if crate::modules::builtin_button(id, key, ui.input.time)
+                                == crate::modules::ButtonAction::Close
+                            {
+                                self.close = true;
+                            }
+                        } else {
+                            #[cfg(lua_mods)]
+                            crate::modules::script::setting_button(id, key);
+                            #[cfg(not(lua_mods))]
+                            let _ = key;
+                        }
                     }
                 }
                 (
@@ -2000,9 +2029,40 @@ impl ClickGuiState {
         self.sync_pointer(ui, active);
         let tx = x + EDITOR_PAD;
         let ty = by + 3.0;
-        e.text
-            .handle_mouse(&self.mouse_input, &p.atlas.font, tx, ty, inner_w);
-        e.text.draw(p, tx, ty, inner_w, look.text_title());
+        if e.text.line_limit == 0 {
+            let rows = EDITOR_MAX_LINES;
+            let caret = e.text.inner.cursor;
+            if caret != e.caret {
+                e.caret = caret;
+                let row = e.text.caret_row(&p.atlas.font, inner_w);
+                e.top = e.top.clamp((row + 1).saturating_sub(rows), row);
+            }
+            let in_box = ui
+                .input
+                .mouse
+                .is_some_and(|m| m.x >= bx && m.x <= bx + bw && m.y >= by && m.y <= by + box_h);
+            if active && in_box && ui.input.scroll != 0.0 {
+                let step = (ui.input.scroll * EDITOR_WHEEL_ROWS).round() as isize;
+                e.top = (e.top as isize - step).max(0) as usize;
+            }
+            e.top = e.top.min(lines.saturating_sub(rows));
+            let shift = e.top as f32 * crate::text::LINE_HEIGHT;
+            if in_box {
+                e.text
+                    .handle_mouse(&self.mouse_input, &p.atlas.font, tx, ty - shift, inner_w);
+            }
+            e.text
+                .draw_rows(p, tx, ty, inner_w, look.text_title(), e.top, rows);
+            if lines > rows {
+                let th = (box_h * rows as f32 / lines as f32).max(4.0);
+                let tyy = by + (box_h - th) * e.top as f32 / (lines - rows) as f32;
+                p.rounded_rect(bx + bw - 3.0, tyy, 2.0, th, 1.0, look.text_dim());
+            }
+        } else {
+            e.text
+                .handle_mouse(&self.mouse_input, &p.atlas.font, tx, ty, inner_w);
+            e.text.draw(p, tx, ty, inner_w, look.text_title());
+        }
 
         let used = e.text.text().chars().count();
         self.scratch.clear();
@@ -2085,7 +2145,11 @@ impl ClickGuiState {
         );
         let all = on == total && total > 0;
         let (px, py) = (x + pw - PILL_W - 4.0, y + (BLOCK_H - PILL_H) * 0.5);
-        pill(p, look, px, py, all);
+        if on > 0 && !all {
+            pill_mixed(p, look, px, py);
+        } else {
+            pill(p, look, px, py, all);
+        }
         if self.press(ui, px, y, PILL_W + 4.0, BLOCK_H, active) {
             list.set_group(g, !all);
             return;
@@ -2145,6 +2209,7 @@ impl ClickGuiState {
                             name,
                             v,
                             0.0,
+                            255.0,
                             255.0,
                             0,
                             Control::Channel(c as u8),
@@ -2303,6 +2368,7 @@ impl ClickGuiState {
                         now * shown,
                         min,
                         max,
+                        max,
                         decimals,
                         Control::Config(ctl),
                         active,
@@ -2353,6 +2419,7 @@ impl ClickGuiState {
             "Scale",
             was,
             SCALE_MIN * 100.0,
+            SCALE_MAX * 100.0,
             SCALE_MAX * 100.0,
             0,
             Control::Config(Cfg::Scale),
@@ -2792,6 +2859,7 @@ impl ClickGuiState {
         value: f32,
         min: f32,
         max: f32,
+        typed_max: f32,
         decimals: u8,
         id: Control,
         active: bool,
@@ -2805,7 +2873,7 @@ impl ClickGuiState {
             v = track_value(t, min, max, false);
         }
 
-        let (tw, typed) = self.readout(p, ui, x + w, y, v, min, max, decimals, id, 0, active);
+        let (tw, typed) = self.readout(p, ui, x + w, y, v, min, typed_max, decimals, id, 0, active);
         if let Some(t) = typed {
             v = t;
         }
@@ -2953,6 +3021,14 @@ impl ClickGuiState {
             return index;
         }
 
+        p.rounded_rect(
+            x,
+            y + box_h,
+            w,
+            options_h(options.len()),
+            TAB_RADIUS,
+            look.header(),
+        );
         let mut oy = y + box_h + options_h(0);
         for (i, option) in options.iter().enumerate() {
             let on = i as u8 == index;
@@ -3158,6 +3234,8 @@ const CONFIG_W: f32 = 150.0;
 const EDITOR_W: f32 = 240.0;
 const EDITOR_MIN_LINES: usize = 2;
 const EDITOR_MAX_LINES: usize = 8;
+const EDITOR_SCROLL_LEN: usize = 512;
+const EDITOR_WHEEL_ROWS: f32 = 3.0;
 const EDITOR_PAD: f32 = 7.0;
 
 #[allow(clippy::too_many_arguments, reason = "one widget, flat arguments")]
@@ -3198,6 +3276,14 @@ fn pill(p: &mut Painter, look: Look, x: f32, y: f32, on: bool) {
     );
     let knob = h - 1.0;
     let kx = if on { x + w - knob - 0.5 } else { x + 0.5 };
+    p.rounded_rect(kx, y + 0.5, knob, knob, knob * 0.5, theme::KNOB);
+}
+
+fn pill_mixed(p: &mut Painter, look: Look, x: f32, y: f32) {
+    let (w, h) = (PILL_W, PILL_H);
+    p.rounded_rect(x, y, w, h, h * 0.5, look.accent());
+    let knob = h - 1.0;
+    let kx = (x + (w - knob) * 0.5).floor();
     p.rounded_rect(kx, y + 0.5, knob, knob, knob * 0.5, theme::KNOB);
 }
 

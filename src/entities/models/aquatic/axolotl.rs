@@ -1,7 +1,7 @@
 #![allow(clippy::approx_constant)]
 
 use crate::entities::geom::{BakedModel, CubeList, Grow, LayerDef, MeshDef, PartPose, PartState};
-use crate::entities::keyframe::{apply, apply_walk};
+use crate::entities::keyframe::{apply_state, apply_walk};
 use crate::entities::models::aquatic::DEG_TO_RAD;
 use crate::entities::models::aquatic::animation::baby_axolotl as anim;
 use crate::entities::state::EntityState;
@@ -331,13 +331,10 @@ const MAX_WALK_ANIMATION_SPEED: f32 = 15.0;
 const WALK_ANIMATION_SCALE_FACTOR: f32 = 30.0;
 
 pub fn baby_setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
-    let seconds = st.age_ticks / 20.0;
-    let in_water = st.extras.in_water_factor;
-    let on_ground = st.extras.on_ground_factor;
-    let moving = st.extras.moving_factor;
-    let not_moving = 1.0 - moving;
-
-    if st.walk_speed > 0.0 {
+    use crate::entities::state::anim_slot::axolotl as slot;
+    let states = &st.extras.anim;
+    let age = st.age_ticks;
+    if states[slot::WALK].is_started() {
         apply_walk(
             &anim::AXOLOTL_WALK_FLOOR,
             model,
@@ -348,25 +345,46 @@ pub fn baby_setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
             WALK_ANIMATION_SCALE_FACTOR,
         );
     }
-
-    let choices = [
-        (moving.min(in_water), &anim::BABY_AXOLOTL_SWIM),
-        (moving.min(on_ground), &anim::WALK_FLOOR_UNDERWATER),
-        (not_moving.min(in_water), &anim::IDLE_UNDERWATER),
-        (not_moving.min(on_ground), &anim::BABY_AXOLOTL_IDLE_FLOOR),
-    ];
-    if let Some((_, animation)) = choices
-        .iter()
-        .copied()
-        .filter(|(weight, _)| *weight > 1.0e-5)
-        .max_by(|a, b| a.0.total_cmp(&b.0))
-    {
-        apply(animation, model, parts, seconds, 1.0);
-    }
-    if not_moving.min(on_ground.min(in_water)) > 1.0e-5 {
-        apply(&anim::IDLE_FLOOR_UNDERWATER, model, parts, seconds, 1.0);
-    }
-    if st.extras.playing_dead_factor > 1.0e-5 {
-        apply(&anim::BABY_AXOLOTL_PLAY_DEAD, model, parts, seconds, 1.0);
-    }
+    apply_state(
+        &anim::BABY_AXOLOTL_SWIM,
+        model,
+        parts,
+        states[slot::SWIM],
+        age,
+    );
+    apply_state(
+        &anim::WALK_FLOOR_UNDERWATER,
+        model,
+        parts,
+        states[slot::WALK],
+        age,
+    );
+    apply_state(
+        &anim::BABY_AXOLOTL_IDLE_FLOOR,
+        model,
+        parts,
+        states[slot::IDLE_ON_GROUND],
+        age,
+    );
+    apply_state(
+        &anim::IDLE_UNDERWATER,
+        model,
+        parts,
+        states[slot::IDLE_UNDER_WATER],
+        age,
+    );
+    apply_state(
+        &anim::IDLE_FLOOR_UNDERWATER,
+        model,
+        parts,
+        states[slot::IDLE_UNDER_WATER_ON_GROUND],
+        age,
+    );
+    apply_state(
+        &anim::BABY_AXOLOTL_PLAY_DEAD,
+        model,
+        parts,
+        states[slot::PLAY_DEAD],
+        age,
+    );
 }

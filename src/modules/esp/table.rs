@@ -76,23 +76,28 @@ fn key(sources: &[Option<Source>; COUNT]) -> u64 {
     h
 }
 
+pub(in crate::modules) fn look(shape: Shape, fill: f32) -> (u8, bool, bool) {
+    let alpha = if shape == Shape::Lines {
+        0
+    } else {
+        fill.clamp(0.0, 255.0) as u8
+    };
+    (alpha, shape != Shape::Sides, shape != Shape::Lines)
+}
+
 fn sources() -> [Option<Source>; COUNT] {
     let s = store();
     ESPS.each_ref().map(|e| {
         if !s.enabled(e.edge.id()) {
             return None;
         }
-        let shape = s.choice(e.shape);
+        let (alpha, lines, sides) = look(s.choice(e.shape), s.num(e.fill));
         Some(Source {
             list: e.list,
             range: s.num(e.range).max(0.0) as i32,
-            alpha: if shape == Shape::Lines {
-                0
-            } else {
-                s.num(e.fill).clamp(0.0, 255.0) as u8
-            },
-            lines: shape != Shape::Sides,
-            sides: shape != Shape::Lines,
+            alpha,
+            lines,
+            sides,
         })
     })
 }

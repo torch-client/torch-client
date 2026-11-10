@@ -83,7 +83,6 @@ impl Dispatch {
 #[derive(Clone, Debug)]
 pub(super) enum Synthetic {
     Chest(String),
-    Bed(String, bool, Mat4),
     Skull(String, f32, Mat4),
     Banner(u8, Mat4),
     Shield(Mat4),
@@ -96,6 +95,7 @@ pub(super) struct Part {
     pub(super) model: String,
     pub(super) tints: Vec<[f32; 3]>,
     pub(super) synthetic: Option<Synthetic>,
+    pub(super) transform: Mat4,
 }
 
 pub(super) fn parse_transformation(special: &Json) -> Mat4 {
@@ -118,7 +118,7 @@ pub(super) fn parse_transformation(special: &Json) -> Mat4 {
         * Mat4::from_quat(quat("right_rotation"))
 }
 
-pub use super::dispatch::{ChargeType, ItemUse, ItemWorld};
+pub use super::dispatch::{ItemUse, ItemWorld};
 
 pub(super) fn parts_of(
     assets: &Assets,
@@ -158,6 +158,7 @@ pub(super) fn collect_parts(
                 model: strip_namespace(model).to_string(),
                 tints: parse_tints(assets, node),
                 synthetic: None,
+                transform: local,
             });
         }
         Dispatch::Special => {
@@ -178,18 +179,6 @@ pub(super) fn collect_parts(
                         .map(strip_namespace)
                         .unwrap_or("normal");
                     Synthetic::Chest(format!("entity/chest/{}", texture))
-                }
-                "bed" => {
-                    let part = inner
-                        .and_then(|m| m.get("part"))
-                        .and_then(Json::as_str)
-                        .unwrap_or("head");
-                    let texture = inner
-                        .and_then(|m| m.get("texture"))
-                        .and_then(Json::as_str)
-                        .map(strip_namespace)
-                        .unwrap_or("red");
-                    Synthetic::Bed(format!("entity/bed/{}", texture), part == "head", local)
                 }
                 "banner" => {
                     let color = inner
@@ -243,6 +232,7 @@ pub(super) fn collect_parts(
                 model: strip_namespace(base).to_string(),
                 tints: parse_tints(assets, node),
                 synthetic: Some(synthetic),
+                transform: Mat4::IDENTITY,
             });
         }
         Dispatch::Composite => {
@@ -360,6 +350,17 @@ pub(super) fn model_quads(
                 tex,
                 color: [tint[0] * shade, tint[1] * shade, tint[2] * shade],
             });
+        }
+    }
+}
+
+pub(super) fn transform_quads(quads: &mut [Quad], transform: Mat4) {
+    if transform == Mat4::IDENTITY {
+        return;
+    }
+    for quad in quads {
+        for p in quad.pos.iter_mut() {
+            *p = transform.transform_point3(Vec3::from(*p)).to_array();
         }
     }
 }
@@ -757,20 +758,24 @@ fn bake_leaf_variants(
             continue;
         };
         for leaf in tree.leaves() {
-            let Some(path) = leaf.icon.as_deref() else {
-                continue;
-            };
-            if !seen.insert(path.to_string()) {
-                continue;
-            }
-            let model = assets.model(path);
-            if !model.generated {
-                continue;
-            }
-            let mut image = RgbaImage::new(FLAT_ICON, FLAT_ICON);
-            if flat_icon(assets, &model, &parse_tints(assets, &leaf.json), &mut image) {
-                let entry = (vec![(FLAT_ICON, image)], Dispatch::Model, Source::Rendered);
-                out.push((path.to_string(), entry));
+            let open = leaf
+                .bundle_open
+                .iter()
+                .flat_map(|(back, front)| [back, front]);
+            for path in leaf.icon.iter().chain(open) {
+                let path: &str = path;
+                if !seen.insert(path.to_string()) {
+                    continue;
+                }
+                let model = assets.model(path);
+                if !model.generated {
+                    continue;
+                }
+                let mut image = RgbaImage::new(FLAT_ICON, FLAT_ICON);
+                if flat_icon(assets, &model, &parse_tints(assets, &leaf.json), &mut image) {
+                    let entry = (vec![(FLAT_ICON, image)], Dispatch::Model, Source::Rendered);
+                    out.push((path.to_string(), entry));
+                }
             }
         }
         trees.insert(id.clone(), tree);
@@ -805,14 +810,6 @@ fn bake_one(
             Some(Synthetic::Chest(texture)) => {
                 if let Some(tex) = assets.texture(texture) {
                     chest_quads(&tex, &mut quads);
-                    transform.get_or_insert(model.gui.unwrap_or(block_gui));
-                }
-            }
-            Some(Synthetic::Bed(texture, is_head, local)) => {
-                if let Some(tex) = assets.texture(texture) {
-                    let layer = models::bed_half(*is_head);
-                    let baked = geom::bake(&layer);
-                    baked_quads(&baked, *local, &tex, &mut quads);
                     transform.get_or_insert(model.gui.unwrap_or(block_gui));
                 }
             }
@@ -855,7 +852,9 @@ fn bake_one(
             }
             None if model.generated => flat.push((model, part.tints.clone())),
             None => {
+                let before = quads.len();
                 model_quads(assets, &model, &part.tints, &mut quads);
+                transform_quads(&mut quads[before..], part.transform);
                 transform.get_or_insert(model.gui.unwrap_or(Transform::NONE));
             }
         }
@@ -1071,7 +1070,7 @@ pub fn bake_item_icons(assets: &Path) -> ItemIcons {
 mod tests {
     use super::*;
 
-    const ASSETS: &str = "reference/minecraft-26.1.1/assets/minecraft";
+    const ASSETS: &str = "reference/minecraft-26.2/assets/minecraft";
 
     #[test]
     fn parse_transformation_matches_vanillas_compose_order() {

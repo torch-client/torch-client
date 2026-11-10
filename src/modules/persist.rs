@@ -91,6 +91,7 @@ fn read_setting(s: &Store, idx: usize, kind: Kind, v: &Json) {
         }
         Kind::Slider { min, max, .. } => {
             if let Some(x) = v.as_f64() {
+                let max = super::registry::typed_max(idx, max);
                 s.set_value(idx, Value::Num((x as f32).clamp(min, max)));
             }
         }

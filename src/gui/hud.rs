@@ -11,17 +11,17 @@ use crate::text::LINE_HEIGHT;
 use crate::util::bytes::Bytes;
 
 const DEBUG_COLOR: u32 = 0xE6FFA0;
-const STATUS_COLOR: u32 = 0xFFFF55;
-const GOLD: u32 = 0xFFAA00;
-const GREEN: u32 = 0x55FF55;
-const FLYING_COLOR: u32 = 0x55FFFF;
+const STATUS_COLOR: u32 = crate::text::YELLOW;
+const GOLD: u32 = crate::text::GOLD;
+const GREEN: u32 = crate::text::GREEN;
+const FLYING_COLOR: u32 = crate::text::AQUA;
 const DEBUG_BG: u32 = 0x9000_0000;
-const HEADER_COLOR: u32 = 0xFFFFFF;
-const LABEL_COLOR: u32 = 0xAAAAAA;
+const HEADER_COLOR: u32 = crate::text::WHITE;
+const LABEL_COLOR: u32 = crate::text::GRAY;
 const VALUE_COLOR: u32 = DEBUG_COLOR;
-const GOOD_COLOR: u32 = 0x55FF55;
-const WARN_COLOR: u32 = 0xFFFF55;
-const BAD_COLOR: u32 = 0xFF5555;
+const GOOD_COLOR: u32 = crate::text::GREEN;
+const WARN_COLOR: u32 = crate::text::YELLOW;
+const BAD_COLOR: u32 = crate::text::RED;
 
 const MS_60FPS: f32 = 1000.0 / 60.0;
 const MS_30FPS: f32 = 1000.0 / 30.0;
@@ -70,6 +70,7 @@ pub struct NameTag {
     pub health: Option<f32>,
     pub max_health: f32,
     pub gamemode: TagGamemode,
+    pub armor: Option<std::sync::Arc<[crate::session::SlotStack; 4]>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -82,6 +83,13 @@ pub enum TagGamemode {
 
 const HEALTH_BAR_H: f32 = 1.5;
 const HEALTH_BAR_GAP: f32 = 1.5;
+
+const ARMOR_ITEM: f32 = 16.0;
+const ARMOR_SPACING: f32 = 1.0;
+const ARMOR_GAP: f32 = 3.0;
+const ARMOR_DURABILITY_SCALE: f32 = 0.75;
+const ARMOR_ENCHANT_SCALE: f32 = 0.5;
+const ARMOR_ENCHANT_LENGTH: usize = 3;
 
 pub const FRAME_HISTORY_LEN: usize = 160;
 
@@ -149,7 +157,7 @@ fn rate(n: f64) -> String {
     format!("{}/s", Bytes(n.max(0.0) as u64))
 }
 
-pub const TEXT_COLOR: u32 = 0xFFFFFF;
+pub const TEXT_COLOR: u32 = crate::text::WHITE;
 
 fn facing_towards(d: Direction) -> &'static str {
     match d {
@@ -711,8 +719,10 @@ fn world_items(info: &HudInfo, d: &DebugInfo) -> Vec<Item<'static>> {
     let pipe = &d.pipeline;
     let mem = &d.memory;
     let in_world = info.in_world;
-    let dropped_total =
-        pipe[Stat::ChunksDropped] + pipe[Stat::LightJobsDropped] + pipe[Stat::MeshPanics];
+    let dropped_total = pipe[Stat::ChunksDropped]
+        + pipe[Stat::LightJobsDropped]
+        + pipe[Stat::MeshPanics]
+        + pipe[Stat::MeshGaveUp];
     vec![
         na_row(
             "Chunks in",
@@ -728,12 +738,19 @@ fn world_items(info: &HudInfo, d: &DebugInfo) -> Vec<Item<'static>> {
             "Dropped",
             in_world,
             format!(
-                "{} chunk / {} light / {} panic",
+                "{} chunk / {} light / {} panic / {} lost",
                 pipe[Stat::ChunksDropped],
                 pipe[Stat::LightJobsDropped],
-                pipe[Stat::MeshPanics]
+                pipe[Stat::MeshPanics],
+                pipe[Stat::MeshGaveUp]
             ),
             count_color(dropped_total, 1, 50),
+        ),
+        na_row_c(
+            "Remeshed",
+            in_world,
+            format!("{} columns", pipe[Stat::MeshRequeued]),
+            count_color(pipe[Stat::MeshRequeued], 1, 50),
         ),
         na_row(
             "World",
@@ -985,8 +1002,10 @@ fn overview_sections(info: &HudInfo, d: &DebugInfo) -> Vec<(&'static str, Vec<It
     let pipe = &d.pipeline;
     let mem = &d.memory;
     let in_world = info.in_world;
-    let dropped_total =
-        pipe[Stat::ChunksDropped] + pipe[Stat::LightJobsDropped] + pipe[Stat::MeshPanics];
+    let dropped_total = pipe[Stat::ChunksDropped]
+        + pipe[Stat::LightJobsDropped]
+        + pipe[Stat::MeshPanics]
+        + pipe[Stat::MeshGaveUp];
     let mut perf: Vec<Item<'static>> = vec![
         row_c(
             "FPS",
@@ -1057,13 +1076,14 @@ fn overview_sections(info: &HudInfo, d: &DebugInfo) -> Vec<(&'static str, Vec<It
 
 pub fn draw_nametags(p: &mut Painter, _ctx: &ScreenCtx, tags: &[NameTag]) {
     let mut scratch = String::new();
-    let (on, show_distance, health_number, health_bar) = match crate::modules::nametags::config() {
+    let mut armor_scratch = ArmorScratch::default();
+    let cfg = crate::modules::nametags::config();
+    let (on, show_distance, health_number, health_bar) = match cfg {
         Some(c) => (true, c.distance, c.health.number(), c.health.bar()),
         None => (false, false, false, false),
     };
     let bg = if on { NAMETAG_BG_MODULE } else { NAMETAG_BG };
     let shadow = on;
-    let space = p.atlas.font.width_str(" ");
 
     for tag in tags {
         if tag.scale <= 0.0 {
@@ -1131,9 +1151,11 @@ pub fn draw_nametags(p: &mut Painter, _ctx: &ScreenCtx, tags: &[NameTag]) {
                 p.text_plain(distance_text, x, y, DISTANCE_COLOR, shadow);
             }
 
+            let mut top = y - 1.0;
             if let Some(hp) = tag.health.filter(|_| health_bar) {
                 let ratio = health_ratio(hp, tag.max_health);
                 let bar_y = y - 1.0 - HEALTH_BAR_GAP - HEALTH_BAR_H;
+                top = bar_y - 1.0;
                 let x = -w / 2.0;
                 p.fill(
                     x - 1.0,
@@ -1150,8 +1172,115 @@ pub fn draw_nametags(p: &mut Painter, _ctx: &ScreenCtx, tags: &[NameTag]) {
                     0xFF00_0000 | health_color(ratio),
                 );
             }
+
+            if let (Some(armor), Some(cfg)) = (&tag.armor, cfg) {
+                draw_tag_armor(
+                    p,
+                    armor,
+                    top - ARMOR_GAP,
+                    tag.scale,
+                    cfg.durability,
+                    cfg.enchants,
+                    &mut armor_scratch,
+                );
+            }
         });
     }
+}
+
+#[derive(Default)]
+struct ArmorScratch {
+    labels: String,
+    lines: Vec<(std::ops::Range<usize>, bool)>,
+    durability: String,
+}
+
+fn draw_tag_armor(
+    p: &mut Painter,
+    armor: &[crate::session::SlotStack; 4],
+    bottom: f32,
+    tag_scale: f32,
+    durability: crate::modules::nametags::Durability,
+    enchants: bool,
+    scratch: &mut ArmorScratch,
+) {
+    use crate::gui::tooltip::{is_curse, ordered_enchantments, short_enchantment};
+    use crate::modules::nametags::Durability;
+    use std::fmt::Write;
+
+    scratch.labels.clear();
+    scratch.lines.clear();
+    let mut columns: [(f32, std::ops::Range<usize>); 4] = Default::default();
+    for (stack, column) in armor.iter().zip(&mut columns) {
+        if stack.is_empty() {
+            continue;
+        }
+        let first = scratch.lines.len();
+        let mut w = ARMOR_ITEM + ARMOR_SPACING;
+        if enchants {
+            for (id, level) in ordered_enchantments(&stack.extra.enchantments) {
+                let start = scratch.labels.len();
+                short_enchantment(id, *level, ARMOR_ENCHANT_LENGTH, &mut scratch.labels);
+                let range = start..scratch.labels.len();
+                w = w.max(
+                    p.atlas.font.width_str(&scratch.labels[range.clone()]) * ARMOR_ENCHANT_SCALE,
+                );
+                scratch.lines.push((range, is_curse(id)));
+            }
+        }
+        *column = (w, first..scratch.lines.len());
+    }
+    let total: f32 = columns.iter().map(|(w, _)| w).sum();
+    if total == 0.0 {
+        return;
+    }
+
+    let y = bottom - ARMOR_ITEM;
+    let line_h = LINE_HEIGHT * ARMOR_ENCHANT_SCALE;
+    let mut x = -total / 2.0;
+    let device = p.scale;
+    p.scale = device * tag_scale;
+    let label = &mut scratch.durability;
+    for (stack, (w, lines)) in armor.iter().zip(&columns) {
+        if stack.is_empty() {
+            continue;
+        }
+        let icon_x = x + (w - ARMOR_SPACING - ARMOR_ITEM) / 2.0;
+        crate::gui::slots::draw_stack(p, stack, icon_x, y);
+
+        if stack.max_damage > 0 && !stack.unbreakable {
+            let left = stack.max_damage.saturating_sub(stack.damage);
+            label.clear();
+            match durability {
+                Durability::Bar => {}
+                Durability::Number => _ = write!(label, "{left}"),
+                Durability::Percent => {
+                    let pct = (f32::from(left) * 100.0 / f32::from(stack.max_damage)).round();
+                    _ = write!(label, "{pct}%");
+                }
+            }
+            if !label.is_empty() {
+                let color = crate::gui::painter::bar_color(stack.damage, stack.max_damage);
+                let text: &str = label;
+                p.scaled_in(ARMOR_DURABILITY_SCALE, icon_x, y, |p| {
+                    p.text_plain(text, 0.0, 0.0, color, true);
+                });
+            }
+        }
+
+        let n = lines.len() as f32;
+        for (k, (range, curse)) in scratch.lines[lines.clone()].iter().enumerate() {
+            let text = &scratch.labels[range.clone()];
+            let tw = p.atlas.font.width_str(text) * ARMOR_ENCHANT_SCALE;
+            let ty = y - (n + 1.0) * line_h + k as f32 * line_h;
+            let color = if *curse { crate::text::RED } else { 0xFF_FFFF };
+            p.scaled_in(ARMOR_ENCHANT_SCALE, x + w / 2.0 - tw / 2.0, ty, |p| {
+                p.text_plain(text, 0.0, 0.0, color, true);
+            });
+        }
+        x += w;
+    }
+    p.scale = device;
 }
 
 fn white_run_width(p: &Painter, spans: &[crate::text::Span]) -> f32 {
@@ -1403,6 +1532,7 @@ pub fn draw_overlays(
     ctx: &ScreenCtx,
     ov: &HudOverlays,
     gamemode: Gamemode,
+    show_title: bool,
     elements: &mut Hud,
 ) {
     let now = ctx.input.time * TICKS_PER_SECOND;
@@ -1431,7 +1561,7 @@ pub fn draw_overlays(
         }
     });
 
-    if let Some(title) = &ov.title {
+    if let Some(title) = ov.title.as_ref().filter(|_| show_title) {
         let alpha = title_alpha(ov.title_ends - now, ov.fade_in, ov.stay, ov.fade_out);
         if alpha > 0.0 {
             let (cx, cy) = ((vw / 2.0).floor(), (vh / 2.0).floor());

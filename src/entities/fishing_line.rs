@@ -146,6 +146,7 @@ pub(crate) fn sync_fishing_lines(
                 }
                 None => {
                     let handle = meshes.add(mesh);
+                    #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_mut))]
                     let mut node = commands.spawn((
                         Mesh3d(handle.clone()),
                         MeshMaterial3d(material.clone()),

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::math::Vec3A;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
@@ -94,6 +96,13 @@ impl Layouts {
         entry
     }
 
+    fn keep(&mut self, id: i32) {
+        let generation = self.generation;
+        if let Some(layout) = self.by_entity.get_mut(&id) {
+            layout.generation = generation;
+        }
+    }
+
     fn sweep(&mut self) {
         let generation = self.generation;
         self.by_entity
@@ -112,6 +121,7 @@ fn sync_text_displays(
     mut materials: ResMut<Assets<EntityMaterial>>,
     origin: Res<crate::renderer::RenderOrigin>,
     mut layouts: Local<Layouts>,
+    frusta: Query<&Frustum, With<crate::renderer::systems::WorldCamera>>,
     mut drawn: Local<bool>,
 ) {
     crate::prof_span!("render:text_displays");
@@ -129,6 +139,7 @@ fn sync_text_displays(
     let frame = (time.elapsed_secs() * 20.0) as u32;
 
     let partial = view.partial;
+    let frustum = frusta.single().ok();
     let mut painted: Option<([Painter<'_>; 2], [Vec<[f32; 3]>; 2])> = None;
     layouts.generation = layouts.generation.wrapping_add(1);
     for anim in view.entities.iter() {
@@ -144,6 +155,24 @@ fn sync_text_displays(
             continue;
         }
         let pos = origin.to_render_array(world);
+        if let Some(frustum) = frustum
+            && display.width != 0.0
+            && display.height != 0.0
+        {
+            let half = Vec3A::new(
+                display.width * 0.5,
+                display.height * 0.5,
+                display.width * 0.5,
+            );
+            let center = Vec3A::from(pos) + Vec3A::new(0.0, half.y, 0.0);
+            if !frustum.intersects_obb_identity(&Aabb {
+                center,
+                half_extents: half,
+            }) {
+                layouts.keep(anim.id);
+                continue;
+            }
+        }
         if painted.is_none() {
             let Some(taken) = take_buffers(&mut meshes, &assets, &gui.atlas, frame) else {
                 return;
@@ -196,7 +225,7 @@ fn take_buffers<'a>(
     let mut bufs = [PainterBuffers::default(), PainterBuffers::default()];
     let mut normals: [Vec<[f32; 3]>; 2] = [Vec::new(), Vec::new()];
     for (i, handle) in assets.meshes.iter().enumerate() {
-        let mesh = meshes.get_mut(handle)?;
+        let mut mesh = meshes.get_mut(handle)?;
         bufs[i] = PainterBuffers {
             positions: f32x3(mesh.remove_attribute(Mesh::ATTRIBUTE_POSITION)),
             uvs: f32x2(mesh.remove_attribute(Mesh::ATTRIBUTE_UV_0)),
@@ -284,7 +313,7 @@ fn put_back(
 ) {
     for (i, painter) in painters.into_iter().enumerate() {
         let bufs = painter.into_buffers();
-        let Some(mesh) = meshes.get_mut(&assets.meshes[i]) else {
+        let Some(mut mesh) = meshes.get_mut(&assets.meshes[i]) else {
             continue;
         };
         normals[i].clear();
@@ -323,9 +352,11 @@ fn setup(
             glint_texture: None,
             alpha_mode: AlphaMode::Blend,
             depth_bias: 0,
+            sort_bias: 0.0,
             see_through,
         });
 
+        #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_variables, unused_mut))]
         let mut spawned = commands.spawn((
             Mesh3d(mesh),
             MeshMaterial3d(material),

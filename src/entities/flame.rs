@@ -266,6 +266,7 @@ fn spawn_node(
         } else {
             Visibility::Hidden
         };
+        #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_mut))]
         let mut quad = commands.spawn((
             Mesh3d(pair[k].clone().unwrap_or_default()),
             MeshMaterial3d(materials[k].clone()),

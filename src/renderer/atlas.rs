@@ -4,17 +4,64 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 
+use super::TILE_PX;
 #[cfg(feature = "animated_textures")]
 use super::atlas_anim::{self, AnimatedSprite, AtlasFrames};
 use super::atlas_meta::{self, FrameRect, SpriteLayout, SpriteMeta};
-use super::{ATLAS_COLS, TILE_PX};
 
 pub struct Sprites {
     tiles: HashMap<String, u32>,
     opaque: HashSet<String>,
-    rows: u32,
+    masks: HashMap<String, OpaqueMask>,
+    grid: AtlasGrid,
+    cells: CellSpans,
     #[cfg(feature = "render_lod")]
     tile_colors: std::sync::Arc<crate::renderer::tile_colors::TileColors>,
+}
+
+struct OpaqueMask {
+    w: u32,
+    h: u32,
+    opaque: Vec<bool>,
+}
+
+impl OpaqueMask {
+    fn of(rgba: &image::RgbaImage, layout: &SpriteLayout) -> Option<Self> {
+        let first = layout.first_rect()?;
+        let mut mask = Self {
+            w: first.w,
+            h: first.h,
+            opaque: vec![true; (first.w * first.h) as usize],
+        };
+        let mut fold = |rect: FrameRect| {
+            for y in 0..rect.h.min(mask.h) {
+                for x in 0..rect.w.min(mask.w) {
+                    if rgba.get_pixel(rect.x + x, rect.y + y)[3] != 255 {
+                        mask.opaque[(y * mask.w + x) as usize] = false;
+                    }
+                }
+            }
+        };
+        match layout {
+            SpriteLayout::Animated(anim) => {
+                anim.steps.iter().for_each(|step| fold(anim.rect(step.0)))
+            }
+            _ => fold(first),
+        }
+        Some(mask)
+    }
+
+    fn region_is_opaque(&self, [u0, v0, u1, v1]: [f32; 4]) -> bool {
+        let span = |lo: f32, hi: f32, n: u32| {
+            let (lo, hi) = (lo.min(hi), lo.max(hi));
+            let a = ((lo / 16.0 * n as f32).floor().max(0.0) as u32).min(n.saturating_sub(1));
+            let b = ((hi / 16.0 * n as f32).ceil().max(0.0) as u32).clamp(a + 1, n);
+            a..b
+        };
+        let (xs, ys) = (span(u0, u1, self.w), span(v0, v1, self.h));
+        ys.into_iter()
+            .all(|y| xs.clone().all(|x| self.opaque[(y * self.w + x) as usize]))
+    }
 }
 
 impl Default for Sprites {
@@ -22,7 +69,9 @@ impl Default for Sprites {
         Self {
             tiles: HashMap::new(),
             opaque: HashSet::new(),
-            rows: 1,
+            masks: HashMap::new(),
+            grid: AtlasGrid { cols: 1, rows: 1 },
+            cells: CellSpans::default(),
             #[cfg(feature = "render_lod")]
             tile_colors: Default::default(),
         }
@@ -34,12 +83,35 @@ impl Sprites {
         self.tiles.get(stem).copied()
     }
 
-    pub fn rows(&self) -> u32 {
-        self.rows
+    pub fn sprite(&self, stem: &str) -> Option<SpriteTile> {
+        self.tile(stem).map(|tile| SpriteTile {
+            tile,
+            span: self.span(tile),
+        })
+    }
+
+    pub fn span(&self, tile: u32) -> u32 {
+        self.cells.span(tile)
+    }
+
+    pub fn uv_rect(&self, tile: u32) -> [f32; 4] {
+        crate::blocks::bake::tile_uv_rect(tile, self.span(tile), self.grid)
+    }
+
+    #[cfg_attr(not(feature = "render_lod"), allow(dead_code))]
+    pub fn grid(&self) -> AtlasGrid {
+        self.grid
     }
 
     pub fn is_opaque(&self, stem: &str) -> bool {
         self.opaque.contains(stem)
+    }
+
+    pub fn region_is_opaque(&self, stem: &str, uv: [f32; 4]) -> bool {
+        if self.opaque.contains(stem) {
+            return true;
+        }
+        self.masks.get(stem).is_some_and(|m| m.region_is_opaque(uv))
     }
 
     #[cfg(feature = "render_lod")]
@@ -49,18 +121,185 @@ impl Sprites {
 
     pub fn mesh_tiles(&self) -> MeshTiles {
         MeshTiles {
-            rows: self.rows,
-            water_still: self.tile("water_still").unwrap_or(0),
-            water_flow: self.tile("water_flow").unwrap_or(0),
+            grid: self.grid,
+            water_still: self.sprite("water_still").unwrap_or_default(),
+            water_flow: self.sprite("water_flow").unwrap_or_default(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AtlasGrid {
+    pub cols: u32,
+    pub rows: u32,
+}
+
+impl AtlasGrid {
+    pub fn cell(self, tile: u32) -> (u32, u32) {
+        (tile % self.cols.max(1), tile / self.cols.max(1))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpriteTile {
+    pub tile: u32,
+    pub span: u32,
+}
+
+impl SpriteTile {
+    pub const PLACEHOLDER: SpriteTile = SpriteTile { tile: 0, span: 1 };
+
+    pub fn uv_rect(self, grid: AtlasGrid) -> [f32; 4] {
+        crate::blocks::bake::tile_uv_rect(self.tile, self.span, grid)
+    }
+}
+
+impl Default for SpriteTile {
+    fn default() -> Self {
+        Self::PLACEHOLDER
     }
 }
 
 #[derive(Clone, Copy)]
 pub struct MeshTiles {
-    pub rows: u32,
-    pub water_still: u32,
-    pub water_flow: u32,
+    pub grid: AtlasGrid,
+    pub water_still: SpriteTile,
+    pub water_flow: SpriteTile,
+}
+
+const MAX_SPAN: u32 = 4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CellSpans {
+    cols: u32,
+    spans: Vec<u8>,
+}
+
+impl Default for CellSpans {
+    fn default() -> Self {
+        Self {
+            cols: 1,
+            spans: Vec::new(),
+        }
+    }
+}
+
+impl CellSpans {
+    pub(crate) fn span(&self, cell: u32) -> u32 {
+        self.spans
+            .get(cell as usize)
+            .map_or(1, |&n| u32::from(n.max(1)))
+    }
+
+    pub(crate) fn starts(&self, cell: u32) -> u32 {
+        self.spans.get(cell as usize).map_or(1, |&n| u32::from(n))
+    }
+
+    pub(crate) fn cells(&self) -> u32 {
+        self.spans.len() as u32
+    }
+
+    pub(crate) fn cols(&self) -> u32 {
+        self.cols
+    }
+
+    pub(crate) fn rows(&self) -> u32 {
+        self.cells() / self.cols
+    }
+
+    pub(crate) fn grid(&self) -> AtlasGrid {
+        AtlasGrid {
+            cols: self.cols,
+            rows: self.rows().max(1),
+        }
+    }
+}
+
+#[cfg_attr(
+    not(any(
+        feature = "shader_support",
+        feature = "animated_textures",
+        feature = "render_lod",
+        test
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn block_cells(origin: u32, span: u32, cols: u32) -> impl Iterator<Item = u32> {
+    (0..span * span).map(move |i| origin + (i / span) * cols + i % span)
+}
+
+pub(super) fn grid_cols(spans: &[u32]) -> u32 {
+    let area: u32 = spans.iter().map(|&n| n.clamp(1, MAX_SPAN).pow(2)).sum();
+    let widest = spans.iter().copied().max().unwrap_or(1).clamp(1, MAX_SPAN);
+    let mut cols = 1;
+    while cols * cols < area {
+        cols += 1;
+    }
+    cols.max(widest)
+}
+
+pub(super) fn place_blocks(spans: &[u32], cols: u32) -> (Vec<u32>, CellSpans) {
+    let cols = cols.max(1) as usize;
+    let mut taken: Vec<bool> = Vec::new();
+    let mut cover: Vec<u8> = Vec::new();
+    let mut first_free = 0usize;
+    let mut origins = Vec::with_capacity(spans.len());
+    for &span in spans {
+        let n = span.clamp(1, cols as u32) as usize;
+        let free = |taken: &[bool], at: usize| {
+            let (col, row) = (at % cols, at / cols);
+            col + n <= cols
+                && (0..n).all(|dy| {
+                    (0..n).all(|dx| {
+                        !taken
+                            .get((row + dy) * cols + col + dx)
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                })
+        };
+        let mut at = first_free;
+        while !free(&taken, at) {
+            at += 1;
+        }
+        let (col, row) = (at % cols, at / cols);
+        let end = (row + n) * cols;
+        if taken.len() < end {
+            taken.resize(end, false);
+            cover.resize(end, 1);
+        }
+        for dy in 0..n {
+            for dx in 0..n {
+                let cell = (row + dy) * cols + col + dx;
+                taken[cell] = true;
+                cover[cell] = 0;
+            }
+        }
+        cover[at] = n as u8;
+        origins.push(at as u32);
+        while taken.get(first_free) == Some(&true) {
+            first_free += 1;
+        }
+    }
+    cover.resize(cover.len().max(cols), 1);
+    (
+        origins,
+        CellSpans {
+            cols: cols as u32,
+            spans: cover,
+        },
+    )
+}
+
+fn span_of(rect: Option<FrameRect>, tile_px: u32) -> u32 {
+    let Some(rect) = rect else { return 1 };
+    let n = rect.w / tile_px.max(1);
+    let fits = rect.w == rect.h && rect.w % tile_px.max(1) == 0 && rect.w <= MAX_TILE_PX;
+    if fits && (2..=MAX_SPAN).contains(&n) {
+        n
+    } else {
+        1
+    }
 }
 
 pub struct BlockAtlas {
@@ -171,7 +410,10 @@ fn decode_dir(dir: &str) -> Vec<Decoded> {
 }
 
 #[cfg(feature = "shader_support")]
-pub(crate) type UntintedTiles = Vec<(u32, Vec<Vec<u8>>)>;
+pub(crate) struct UntintedTiles {
+    pub cols: u32,
+    pub tiles: Vec<(u32, Vec<Vec<u8>>)>,
+}
 
 #[cfg(feature = "shader_support")]
 static UNTINTED: parking_lot::RwLock<Option<std::sync::Arc<UntintedTiles>>> =
@@ -189,18 +431,33 @@ fn collect_untinted(
     tiles: &HashMap<String, u32>,
     n_mips: u32,
 ) -> UntintedTiles {
-    let (level0, atlas_w, atlas_h, _) = pack_tiles(entries);
+    let Packed {
+        data: level0,
+        width: atlas_w,
+        height: atlas_h,
+        cells,
+        ..
+    } = pack_tiles(entries);
+    let cols = cells.cols();
     let chain = if n_mips > 1 {
-        build_mip_chain(&level0, atlas_w, atlas_h, n_mips)
+        build_mip_chain(&level0, atlas_w, atlas_h, n_mips, &cells)
     } else {
         level0
     };
-    let mut out: UntintedTiles = Vec::with_capacity(biome_tinted.len());
+    let mut out = UntintedTiles {
+        cols,
+        tiles: Vec::with_capacity(biome_tinted.len()),
+    };
     for stem in biome_tinted {
         let Some(&tile) = tiles.get(*stem) else {
             continue;
         };
-        out.push((tile, tile_levels(&chain, atlas_w, atlas_h, tile, n_mips)));
+        for cell in block_cells(tile, cells.span(tile), cols) {
+            out.tiles.push((
+                cell,
+                tile_levels(&chain, atlas_w, atlas_h, cols, cell, n_mips),
+            ));
+        }
     }
     out
 }
@@ -210,11 +467,12 @@ pub(super) fn tile_levels(
     chain: &[u8],
     atlas_w: u32,
     atlas_h: u32,
+    cols: u32,
     tile: u32,
     n_mips: u32,
 ) -> Vec<Vec<u8>> {
-    let tile_px = atlas_w / ATLAS_COLS;
-    let (tx, ty) = (tile % ATLAS_COLS, tile / ATLAS_COLS);
+    let tile_px = atlas_w / cols;
+    let (tx, ty) = (tile % cols, tile / cols);
     let mut offset = 0usize;
     let mut levels = Vec::with_capacity(n_mips as usize);
     for level in 0..n_mips {
@@ -259,6 +517,7 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str, with_frames: b
         };
     }
     let mut opaque: HashSet<String> = HashSet::new();
+    let mut masks: HashMap<String, OpaqueMask> = HashMap::new();
     let mut recoloured: BTreeMap<&str, image::RgbaImage> = BTreeMap::new();
     #[cfg(feature = "shader_support")]
     let mut biome_tinted: Vec<&str> = Vec::new();
@@ -295,6 +554,11 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str, with_frames: b
             opaque.insert(stem.clone());
         }
         let layout = SpriteLayout::of(textures.meta.get(stem), rgba.width(), rgba.height());
+        if !opaque.contains(stem) {
+            if let Some(mask) = OpaqueMask::of(rgba, &layout) {
+                masks.insert(stem.clone(), mask);
+            }
+        }
         if layout == SpriteLayout::Broken {
             crate::log_warn!(
                 "atlas",
@@ -307,12 +571,20 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str, with_frames: b
     }
     let opaque_count = opaque.len();
 
-    let (atlas_data, atlas_w, atlas_h, tex_to_tile) = pack_tiles(&entries);
+    let Packed {
+        data: atlas_data,
+        width: atlas_w,
+        height: atlas_h,
+        tile_px,
+        tiles: tex_to_tile,
+        cells,
+    } = pack_tiles(&entries);
     #[cfg(feature = "render_lod")]
     let tile_colors = std::sync::Arc::new(crate::renderer::tile_colors::TileColors::from_atlas(
         &atlas_data,
         atlas_w,
         atlas_h,
+        &cells,
     ));
     #[cfg(feature = "shader_support")]
     let untinted_entries: Vec<PackEntry> = entries
@@ -323,9 +595,9 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str, with_frames: b
         })
         .collect();
 
-    let n_mips = (atlas_w / ATLAS_COLS).trailing_zeros() + 1;
+    let n_mips = tile_px.trailing_zeros() + 1;
     let mip_data = if n_mips > 1 {
-        build_mip_chain(&atlas_data, atlas_w, atlas_h, n_mips)
+        build_mip_chain(&atlas_data, atlas_w, atlas_h, n_mips, &cells)
     } else {
         atlas_data
     };
@@ -350,15 +622,17 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str, with_frames: b
                 let pack_image = biome_tinted.contains(stem).then(|| untinted_entries[at].1);
                 #[cfg(not(feature = "shader_support"))]
                 let (pack_image, _) = (None, at);
+                let atlas_tile = *tex_to_tile.get(*stem)?;
                 Some(AnimatedSprite {
-                    atlas_tile: *tex_to_tile.get(*stem)?,
+                    atlas_tile,
+                    span: cells.span(atlas_tile),
                     image: rgba,
                     pack_image,
                     layout,
                 })
             })
             .collect();
-        atlas_anim::build_frames(&sprites, (atlas_w, atlas_h), n_mips)
+        atlas_anim::build_frames(&sprites, (atlas_w, atlas_h), cells.cols(), n_mips)
     });
 
     let mut image = Image::new_uninit(
@@ -384,20 +658,32 @@ pub fn build_block_atlas(textures: &Textures, textures_dir: &str, with_frames: b
     super::packdraw::allow_display_view(&mut image);
     crate::log_info!(
         "atlas",
-        "{} block textures loaded ({} fully opaque), atlas {}×{}, {} mip levels",
+        "{} block textures loaded ({} fully opaque), atlas {}×{} ({}×{} cells of {} px), {} mip levels",
         entries.len(),
         opaque_count,
         atlas_w,
         atlas_h,
+        cells.cols(),
+        cells.rows(),
+        tile_px,
         n_mips
     );
-    let rows = super::atlas_rows(&image);
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    if atlas_w.max(atlas_h) > SMALL_DEVICE_MAX_TEXTURE {
+        crate::log_warn!(
+            "atlas",
+            "atlas {atlas_w}×{atlas_h} is over {SMALL_DEVICE_MAX_TEXTURE}, the 2D texture size a small device may offer"
+        );
+    }
+    let grid = cells.grid();
     BlockAtlas {
         image,
         sprites: Sprites {
             tiles: tex_to_tile,
             opaque,
-            rows,
+            masks,
+            grid,
+            cells,
             #[cfg(feature = "render_lod")]
             tile_colors,
         },
@@ -421,25 +707,33 @@ fn block_atlas_sampler() -> ImageSampler {
     })
 }
 
-pub(super) fn build_mip_chain(level0: &[u8], atlas_w: u32, atlas_h: u32, n_mips: u32) -> Vec<u8> {
+pub(super) fn build_mip_chain(
+    level0: &[u8],
+    atlas_w: u32,
+    atlas_h: u32,
+    n_mips: u32,
+    cells: &CellSpans,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(level0.len() * 2);
     out.extend_from_slice(level0);
 
-    let tile_px = atlas_w / ATLAS_COLS;
+    let cols = cells.cols();
+    let tile_px = atlas_w / cols;
     let tiles_y0 = atlas_h / tile_px;
-    let mut tile_alpha = vec![0u8; (tile_px * tile_px) as usize];
-    let cutout_coverage: Vec<Option<f32>> = (0..tiles_y0 * ATLAS_COLS)
+    let cutout_coverage: Vec<Option<f32>> = (0..tiles_y0 * cols)
         .map(|t| {
-            let (s_ox, s_oy) = ((t % ATLAS_COLS) * tile_px, (t / ATLAS_COLS) * tile_px);
-            for y in 0..tile_px {
-                for x in 0..tile_px {
-                    let si = (((s_oy + y) * atlas_w + s_ox + x) * 4 + 3) as usize;
-                    tile_alpha[(y * tile_px + x) as usize] = level0[si];
-                }
+            let span = cells.starts(t);
+            if span == 0 {
+                return None;
             }
-            tile_alpha
+            let side = span * tile_px;
+            let (s_ox, s_oy) = ((t % cols) * tile_px, (t / cols) * tile_px);
+            let alpha: Vec<u8> = (0..side * side)
+                .map(|i| level0[(((s_oy + i / side) * atlas_w + s_ox + i % side) * 4 + 3) as usize])
+                .collect();
+            alpha
                 .contains(&0)
-                .then(|| alpha_test_coverage(&tile_alpha, tile_px, MIP_ALPHA_CUTOFF, 1.0))
+                .then(|| alpha_test_coverage(&alpha, side, MIP_ALPHA_CUTOFF, 1.0))
         })
         .collect();
     for level in 1..n_mips {
@@ -447,7 +741,7 @@ pub(super) fn build_mip_chain(level0: &[u8], atlas_w: u32, atlas_h: u32, n_mips:
         let f = tile_px / ts;
         let lw = atlas_w >> level;
         let lh = atlas_h >> level;
-        let tiles_x = ATLAS_COLS;
+        let tiles_x = cols;
         let tiles_y = lh / ts;
         let mut buf = vec![0u8; (lw * lh * 4) as usize];
 
@@ -485,10 +779,13 @@ pub(super) fn build_mip_chain(level0: &[u8], atlas_w: u32, atlas_h: u32, n_mips:
                         buf[di + 3] = (sa / n) as u8;
                     }
                 }
-                if let Some(Some(coverage)) = cutout_coverage.get((ty * tiles_x + tx) as usize) {
-                    scale_tile_alpha_to_coverage(&mut buf, lw, (d_ox, d_oy), ts, *coverage);
-                }
             }
+        }
+        for (t, coverage) in cutout_coverage.iter().enumerate() {
+            let Some(coverage) = coverage else { continue };
+            let t = t as u32;
+            let origin = ((t % tiles_x) * ts, (t / tiles_x) * ts);
+            scale_tile_alpha_to_coverage(&mut buf, lw, origin, cells.span(t) * ts, *coverage);
         }
         out.extend_from_slice(&buf);
     }
@@ -678,18 +975,19 @@ fn composite_over(base: &mut image::RgbaImage, overlay: &image::RgbaImage) {
 pub(super) fn blit_tile(
     atlas: &mut [u8],
     tile: u32,
-    atlas_w: u32,
+    span: u32,
+    (atlas_w, cols): (u32, u32),
     rgba: &image::RgbaImage,
     rect: FrameRect,
 ) {
-    let tile_px = atlas_w / ATLAS_COLS;
-    let col = tile % ATLAS_COLS;
-    let row = tile / ATLAS_COLS;
+    let tile_px = atlas_w / cols;
+    let side = span * tile_px;
+    let (col, row) = (tile % cols, tile / cols);
     let (ox, oy) = (col * tile_px, row * tile_px);
-    for py in 0..tile_px {
-        for px in 0..tile_px {
-            let sx = (rect.x + px * rect.w / tile_px).min(rgba.width() - 1);
-            let sy = (rect.y + py * rect.h / tile_px).min(rgba.height() - 1);
+    for py in 0..side {
+        for px in 0..side {
+            let sx = (rect.x + px * rect.w / side).min(rgba.width() - 1);
+            let sy = (rect.y + py * rect.h / side).min(rgba.height() - 1);
             let p = rgba.get_pixel(sx, sy);
             let dst = (((oy + py) * atlas_w + (ox + px)) * 4) as usize;
             atlas[dst..dst + 4].copy_from_slice(&p.0);
@@ -697,9 +995,9 @@ pub(super) fn blit_tile(
     }
 }
 
-fn blit_gray_placeholder(atlas: &mut [u8], tile: u32, atlas_w: u32, tile_px: u32) {
-    let col = tile % ATLAS_COLS;
-    let row = tile / ATLAS_COLS;
+fn blit_gray_placeholder(atlas: &mut [u8], tile: u32, atlas_w: u32, cols: u32) {
+    let tile_px = atlas_w / cols;
+    let (col, row) = (tile % cols, tile / cols);
     let (ox, oy) = (col * tile_px, row * tile_px);
     let texel = tile_px / TILE_PX;
     for py in 0..tile_px {
@@ -724,13 +1022,16 @@ fn blit_gray_placeholder(atlas: &mut [u8], tile: u32, atlas_w: u32, tile_px: u32
 
 pub fn placeholder_atlas() -> Image {
     let mut data = vec![0u8; (TILE_PX * TILE_PX * 4) as usize];
-    blit_gray_placeholder(&mut data, 0, TILE_PX, TILE_PX);
+    blit_gray_placeholder(&mut data, 0, TILE_PX, 1);
     #[cfg_attr(not(feature = "shader_support"), allow(unused_mut))]
     let mut image = super::rgba_image(TILE_PX, TILE_PX, data, RenderAssetUsages::RENDER_WORLD);
     #[cfg(feature = "shader_support")]
     super::packdraw::allow_display_view(&mut image);
     image
 }
+
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+const SMALL_DEVICE_MAX_TEXTURE: u32 = 2048;
 
 const MAX_TILE_PX: u32 = 64;
 
@@ -750,26 +1051,47 @@ fn tile_px(entries: &[PackEntry]) -> u32 {
         .map_or(TILE_PX, |(side, _)| side)
 }
 
-fn pack_tiles(entries: &[PackEntry]) -> (Vec<u8>, u32, u32, HashMap<String, u32>) {
+struct Packed {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+    tile_px: u32,
+    tiles: HashMap<String, u32>,
+    cells: CellSpans,
+}
+
+fn pack_tiles(entries: &[PackEntry]) -> Packed {
     let tile_px = tile_px(entries);
-    let n_tiles = 1 + entries.len() as u32;
-    let atlas_w = ATLAS_COLS * tile_px;
-    let atlas_h = n_tiles.div_ceil(ATLAS_COLS) * tile_px;
+    let spans: Vec<u32> = std::iter::once(1)
+        .chain(entries.iter().map(|(_, _, rect)| span_of(*rect, tile_px)))
+        .collect();
+    let (origins, cells) = place_blocks(&spans, grid_cols(&spans));
+    let cols = cells.cols();
+    let atlas_w = cols * tile_px;
+    let atlas_h = cells.rows() * tile_px;
 
     let mut data = vec![0u8; (atlas_w * atlas_h * 4) as usize];
-    blit_gray_placeholder(&mut data, 0, atlas_w, tile_px);
+    blit_gray_placeholder(&mut data, origins[0], atlas_w, cols);
 
     let mut tiles: HashMap<String, u32> = HashMap::new();
-    for (idx, (stem, rgba, rect)) in entries.iter().enumerate() {
-        let tile = idx as u32 + 1;
+    for ((stem, rgba, rect), (&tile, &span)) in
+        entries.iter().zip(origins.iter().zip(&spans).skip(1))
+    {
         match rect {
-            Some(rect) => blit_tile(&mut data, tile, atlas_w, rgba, *rect),
-            None => blit_gray_placeholder(&mut data, tile, atlas_w, tile_px),
+            Some(rect) => blit_tile(&mut data, tile, span, (atlas_w, cols), rgba, *rect),
+            None => blit_gray_placeholder(&mut data, tile, atlas_w, cols),
         }
         tiles.insert((*stem).to_owned(), tile);
     }
 
-    (data, atlas_w, atlas_h, tiles)
+    Packed {
+        data,
+        width: atlas_w,
+        height: atlas_h,
+        tile_px,
+        tiles,
+        cells,
+    }
 }
 
 #[cfg(test)]
@@ -818,6 +1140,7 @@ mod tests {
             chain,
             size.width,
             size.height,
+            atlas.sprites.grid().cols,
             tile,
             image.texture_descriptor.mip_level_count,
         )
@@ -902,6 +1225,193 @@ mod tests {
         assert!(atlas.tables.frames.is_none());
     }
 
+    fn solid(side: u32, rgba: [u8; 4]) -> image::RgbaImage {
+        image::RgbaImage::from_pixel(side, side, image::Rgba(rgba))
+    }
+
+    fn big() -> image::RgbaImage {
+        image::RgbaImage::from_fn(32, 32, |x, y| {
+            let alpha = if x < 16 && y < 16 { 0 } else { 255 };
+            image::Rgba([x as u8 * 8, y as u8 * 8, 200, alpha])
+        })
+    }
+
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+
+    fn with_big() -> BlockAtlas {
+        let mut sprites = vec![("big", big(), None)];
+        let names: Vec<String> = (0..20).map(|i| format!("a{i:02}")).collect();
+        sprites.extend(
+            names
+                .iter()
+                .map(|name| (name.as_str(), solid(16, BLUE), None)),
+        );
+        build_block_atlas(&textures(sprites), "/nonexistent", false)
+    }
+
+    #[test]
+    fn single_spans_pack_in_row_major_order() {
+        let (origins, cells) = place_blocks(&[1; 40], 16);
+        assert_eq!(origins, (0..40).collect::<Vec<u32>>());
+        assert_eq!(cells.rows(), 3);
+    }
+
+    #[test]
+    fn blocks_take_the_first_square_that_fits_and_leave_no_hole() {
+        let mut spans = vec![1, 2];
+        spans.extend([1; 20]);
+        let (origins, cells) = place_blocks(&spans, 16);
+        assert_eq!(&origins[..4], &[0, 1, 3, 4]);
+        assert_eq!(origins[14], 15);
+        assert_eq!(&origins[15..17], &[16, 19]);
+        assert_eq!(
+            (
+                cells.starts(1),
+                cells.starts(2),
+                cells.starts(17),
+                cells.starts(18)
+            ),
+            (2, 0, 0, 0)
+        );
+        assert_eq!(cells.rows(), 2);
+
+        let mut spans = vec![1; 15];
+        spans.extend([2, 1]);
+        let (origins, _) = place_blocks(&spans, 16);
+        assert_eq!(&origins[15..], &[16, 15]);
+    }
+
+    #[test]
+    fn a_32px_sprite_gets_a_2x2_block_at_full_resolution() {
+        let atlas = with_big();
+        let tile = atlas.sprites.tile("big").unwrap();
+        assert_eq!(atlas.sprites.span(tile), 2);
+        assert_eq!(
+            atlas.sprites.sprite("big"),
+            Some(SpriteTile { tile, span: 2 })
+        );
+        let source = big();
+        for (i, cell) in block_cells(tile, 2, atlas.sprites.grid().cols).enumerate() {
+            let level0 = &atlas_levels(&atlas, cell)[0];
+            let (ox, oy) = ((i as u32 % 2) * 16, (i as u32 / 2) * 16);
+            for y in 0..16 {
+                for x in 0..16 {
+                    let at = ((y * 16 + x) * 4) as usize;
+                    assert_eq!(
+                        &level0[at..at + 4],
+                        &source.get_pixel(ox + x, oy + y).0,
+                        "cell {cell} texel {x},{y}"
+                    );
+                }
+            }
+        }
+        let block: Vec<u32> = block_cells(tile, 2, atlas.sprites.grid().cols).collect();
+        for i in 0..20 {
+            let other = atlas.sprites.tile(&format!("a{i:02}")).unwrap();
+            assert!(!block.contains(&other), "a{i:02} at {other}");
+        }
+    }
+
+    #[test]
+    fn a_blocks_uv_rect_covers_exactly_the_block() {
+        let atlas = with_big();
+        let AtlasGrid { cols, rows } = atlas.sprites.grid();
+        let tile = atlas.sprites.tile("big").unwrap();
+        let [u0, v0, u1, v1] = atlas.sprites.uv_rect(tile);
+        let (col, row) = (tile % cols, tile / cols);
+        let cell = |u: f32, n: u32| u * n as f32;
+        assert_eq!(cell(u0, cols).round() as u32, col);
+        assert_eq!(cell(u1, cols).round() as u32, col + 2);
+        assert_eq!(cell(v0, rows).round() as u32, row);
+        assert_eq!(cell(v1, rows).round() as u32, row + 2);
+        assert!(cell(u0, cols) > col as f32 && cell(u1, cols) < (col + 2) as f32);
+        assert!(cell(v0, rows) > row as f32 && cell(v1, rows) < (row + 2) as f32);
+    }
+
+    #[test]
+    fn sixteen_px_tiles_are_unchanged() {
+        let names: Vec<String> = (0..20).map(|i| format!("a{i:02}")).collect();
+        let plain: Vec<_> = names
+            .iter()
+            .map(|name| (name.as_str(), solid(16, BLUE), None))
+            .collect();
+        let atlas = build_block_atlas(&textures(plain), "/nonexistent", false);
+        for (i, name) in names.iter().enumerate() {
+            let tile = atlas.sprites.tile(name).unwrap();
+            assert_eq!(tile, i as u32 + 1);
+            assert_eq!(atlas.sprites.span(tile), 1);
+            assert_eq!(
+                atlas.sprites.uv_rect(tile),
+                crate::blocks::bake::tile_uv_rect(tile, 1, atlas.sprites.grid())
+            );
+        }
+        assert_eq!(atlas.sprites.grid(), AtlasGrid { cols: 5, rows: 5 });
+        assert_eq!(atlas.image.texture_descriptor.size.width, 5 * TILE_PX);
+        assert_eq!(atlas.image.texture_descriptor.size.height, 5 * TILE_PX);
+
+        let atlas = with_big();
+        for i in 0..20 {
+            let tile = atlas.sprites.tile(&format!("a{i:02}")).unwrap();
+            assert_eq!(atlas.sprites.span(tile), 1);
+            for level in atlas_levels(&atlas, tile) {
+                assert!(level.chunks_exact(4).all(|p| p == BLUE), "a{i:02}");
+            }
+        }
+    }
+
+    #[test]
+    fn mips_stay_within_the_block() {
+        let atlas = with_big();
+        let tile = atlas.sprites.tile("big").unwrap();
+        let levels: Vec<Vec<Vec<u8>>> = block_cells(tile, 2, atlas.sprites.grid().cols)
+            .map(|cell| atlas_levels(&atlas, cell))
+            .collect();
+        assert_eq!(levels[0].len(), 5);
+        for (cell, cell_levels) in levels.iter().enumerate() {
+            for (level, bytes) in cell_levels.iter().enumerate() {
+                assert!(
+                    bytes.chunks_exact(4).all(|p| p[2] == 200 || p[2] == 0),
+                    "cell {cell} level {level}"
+                );
+            }
+        }
+        for level in 0..5 {
+            let alphas: Vec<u8> = levels[1..]
+                .iter()
+                .flat_map(|cell| cell[level].chunks_exact(4).map(|p| p[3]))
+                .collect();
+            assert!(alphas.iter().all(|a| *a == alphas[0]), "level {level}");
+        }
+    }
+
+    #[cfg(feature = "animated_textures")]
+    #[test]
+    fn a_32px_animated_sprite_animates_its_whole_block() {
+        let textures = textures(vec![
+            (
+                "a",
+                strip(32, 3),
+                Some(r#"{"animation":{"frames":[1,0,2]}}"#),
+            ),
+            ("b", strip(16, 1), None),
+            ("c", strip(16, 1), None),
+        ]);
+        let atlas = build_block_atlas(&textures, "/nonexistent", true);
+        let tile = atlas.sprites.tile("a").unwrap();
+        assert_eq!(atlas.sprites.span(tile), 2);
+        let frames = atlas.tables.frames.as_ref().expect("one animated sprite");
+        let animation = &frames.animations[0];
+        assert_eq!(animation.span, 2);
+        let first = animation.frames[0].tile;
+        for (i, cell) in block_cells(tile, 2, atlas.sprites.grid().cols).enumerate() {
+            assert_eq!(
+                frames.block_levels(first + i as u32),
+                atlas_levels(&atlas, cell),
+                "cell {cell}"
+            );
+        }
+    }
+
     #[cfg(feature = "animated_textures")]
     #[test]
     fn the_worker_builds_no_frames() {
@@ -918,5 +1428,173 @@ mod tests {
                 .frames
                 .is_some()
         );
+    }
+
+    fn gradient(side: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(side, side, |x, y| {
+            let alpha = if x < side / 2 && y < side / 2 { 0 } else { 255 };
+            image::Rgba([x as u8 * 3, y as u8 * 3, 200, alpha])
+        })
+    }
+
+    fn rect(side: u32) -> Option<FrameRect> {
+        Some(FrameRect {
+            x: 0,
+            y: 0,
+            w: side,
+            h: side,
+        })
+    }
+
+    #[test]
+    fn span_follows_the_size_ratio_up_to_the_cap() {
+        assert_eq!(span_of(None, 16), 1);
+        assert_eq!(span_of(rect(16), 16), 1);
+        assert_eq!(span_of(rect(32), 16), 2);
+        assert_eq!(span_of(rect(64), 16), 4);
+        assert_eq!(span_of(rect(64), 32), 2);
+        assert_eq!(span_of(rect(128), 16), 1);
+        assert_eq!(
+            span_of(
+                Some(FrameRect {
+                    x: 0,
+                    y: 0,
+                    w: 64,
+                    h: 32
+                }),
+                16
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn a_64px_sprite_gets_a_4x4_block_at_full_resolution() {
+        let source = gradient(64);
+        let names: Vec<String> = (0..20).map(|i| format!("a{i:02}")).collect();
+        let mut sprites = vec![("big", source.clone(), None)];
+        sprites.extend(
+            names
+                .iter()
+                .map(|name| (name.as_str(), solid(16, BLUE), None)),
+        );
+        let atlas = build_block_atlas(&textures(sprites), "/nonexistent", false);
+        let tile = atlas.sprites.tile("big").unwrap();
+        let cols = atlas.sprites.grid().cols;
+        assert_eq!(atlas.sprites.span(tile), 4);
+        assert_eq!(
+            atlas.sprites.sprite("big"),
+            Some(SpriteTile { tile, span: 4 })
+        );
+        let block: Vec<u32> = block_cells(tile, 4, cols).collect();
+        assert_eq!(block.len(), 16);
+        for (i, &cell) in block.iter().enumerate() {
+            let levels = atlas_levels(&atlas, cell);
+            assert_eq!(levels.len(), 5);
+            let (ox, oy) = ((i as u32 % 4) * 16, (i as u32 / 4) * 16);
+            for y in 0..16 {
+                for x in 0..16 {
+                    let at = ((y * 16 + x) * 4) as usize;
+                    assert_eq!(
+                        &levels[0][at..at + 4],
+                        &source.get_pixel(ox + x, oy + y).0,
+                        "cell {cell} texel {x},{y}"
+                    );
+                }
+            }
+        }
+        for name in &names {
+            let other = atlas.sprites.tile(name).unwrap();
+            assert!(!block.contains(&other), "{name} at {other}");
+            assert_eq!(atlas.sprites.span(other), 1);
+        }
+        for level in 0..5 {
+            let alphas: Vec<u8> = block[12..]
+                .iter()
+                .flat_map(|&cell| {
+                    atlas_levels(&atlas, cell)[level]
+                        .chunks_exact(4)
+                        .map(|p| p[3])
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert!(alphas.iter().all(|a| *a == alphas[0]), "level {level}");
+        }
+    }
+
+    #[test]
+    fn the_grid_grows_square_and_keeps_every_cell() {
+        for count in [1usize, 20, 100, 1_000, 1_300, 5_000] {
+            let spans = vec![1; count];
+            let cols = grid_cols(&spans);
+            let (origins, cells) = place_blocks(&spans, cols);
+            assert_eq!(cells.cols(), cols);
+            assert_eq!(origins.last(), Some(&(count as u32 - 1)));
+            assert!(
+                cells.rows() <= cols,
+                "{count} cells: {cols} x {}",
+                cells.rows()
+            );
+            assert!(cells.rows() * cols >= count as u32);
+            assert!(
+                cols - cells.rows() <= 1 + cols / 8 || count < 4,
+                "{count} cells: {cols} x {}",
+                cells.rows()
+            );
+        }
+        let mut spans = vec![1; 300];
+        spans.extend([4; 40]);
+        let cols = grid_cols(&spans);
+        let (origins, cells) = place_blocks(&spans, cols);
+        assert_eq!(cols, 31);
+        assert!(cells.rows() <= cols + cols / 4, "{} rows", cells.rows());
+        assert_eq!(grid_cols(&[4]), 4);
+        assert_eq!(place_blocks(&spans, cols).0, origins);
+    }
+
+    #[test]
+    fn a_pack_atlas_is_square_and_its_mips_follow_the_cell() {
+        let names: Vec<String> = (0..399).map(|i| format!("s{i:03}")).collect();
+        let sprites: Vec<_> = names
+            .iter()
+            .map(|name| (name.as_str(), solid(32, BLUE), None))
+            .collect();
+        let atlas = build_block_atlas(&textures(sprites), "/nonexistent", false);
+        let grid = atlas.sprites.grid();
+        let size = atlas.image.texture_descriptor.size;
+        assert_eq!(grid, AtlasGrid { cols: 20, rows: 20 });
+        assert_eq!((size.width, size.height), (640, 640));
+        assert_eq!(atlas.image.texture_descriptor.mip_level_count, 6);
+        for stem in ["s000", "s398"] {
+            let tile = atlas.sprites.tile(stem).unwrap();
+            assert!(
+                atlas_levels(&atlas, tile)
+                    .iter()
+                    .all(|l| l.chunks_exact(4).all(|p| p == BLUE)),
+                "{stem}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tile_round_trips_through_its_uv_for_any_column_count() {
+        let grid = AtlasGrid { cols: 37, rows: 9 };
+        for tile in 0..grid.cols * grid.rows {
+            let [u0, v0, u1, v1] = SpriteTile { tile, span: 1 }.uv_rect(grid);
+            let (col, row) = grid.cell(tile);
+            assert_eq!((col, row), (tile % 37, tile / 37));
+            let centre = [[(u0 + u1) / 2.0, (v0 + v1) / 2.0]; 4];
+            assert_eq!(
+                crate::renderer::tile_colors::tile_of_uv(&centre, grid),
+                tile
+            );
+        }
+        let [u0, v0, u1, v1] = SpriteTile {
+            tile: 37 + 5,
+            span: 3,
+        }
+        .uv_rect(grid);
+        assert_eq!(((u1 - u0) * 37.0).round(), 3.0);
+        assert_eq!(((v1 - v0) * 9.0).round(), 3.0);
     }
 }

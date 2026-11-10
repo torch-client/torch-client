@@ -1,7 +1,7 @@
 use crate::gui::hud_layout::{ElementId, Hud};
 use crate::gui::painter::Painter;
 use crate::gui::render::GuiInput;
-use crate::gui::slots::{self, CONTAINER_W, INV_H, INV_W, Layout, draw_stack, draw_stack_held};
+use crate::gui::slots::{self, INV_H, INV_W, Layout, draw_stack, draw_stack_held};
 use crate::gui::{
     GuiState, Screen, ScreenCtx, Snapshot, book, chat, container, creative, focus, health, hud,
     multiplayer, options, pause, profile, sign_edit, sleep, spectator_menu, tablist, title, toast,
@@ -47,11 +47,16 @@ pub fn draw(
             titles_clear: s.session.titles_clear.take(),
             menu_slots,
             hotbar: s.session.hotbar.clone(),
+            hotbar_pop: {
+                let partial = crate::renderer::systems::partial_ticks(&s);
+                s.session.hotbar_pop.map(|pop| f32::from(pop) - partial)
+            },
             armor: s.session.armor_stacks.clone(),
             carried: s.session.carried.clone(),
             creative_cursor: s.session.creative_cursor.take(),
             selected: s.session.hotbar_selected,
             gamemode: s.session.gamemode,
+            op_level: s.session.op_level,
             health: s.session.health,
             food: s.session.food,
             saturation: s.session.saturation,
@@ -225,6 +230,8 @@ pub fn draw(
         crate::gui::hud_editor::draw_under(p, &state.hud_state, &ctx);
     }
     let hud_visible = hud_shown && !hide_gui;
+    let no_render = crate::modules::no_render::config();
+    use crate::modules::no_render::Part as NoRenderPart;
 
     if !in_menu {
         crate::gui::screen_effects::draw(p, &state.screen_effects, ctx.vw, ctx.vh);
@@ -241,7 +248,9 @@ pub fn draw(
     );
 
     if hud_visible {
-        if shows_active_effects(state.screen, &ctx, &snap) {
+        if shows_active_effects(state.screen, &ctx, &snap)
+            || no_render.has(NoRenderPart::PotionIcons)
+        {
             state.hud.active_effects.clear();
         }
         draw_hud(
@@ -255,18 +264,31 @@ pub fn draw(
         );
         hud::draw_nametags(p, &ctx, &state.hud.nametags);
         let show_fps = state.options.fps_counter && state.hud.debug.is_none();
+        let no_sidebar;
+        let sidebar = if no_render.has(NoRenderPart::Scoreboard) {
+            no_sidebar = crate::client::tablist::Sidebar::default();
+            &no_sidebar
+        } else {
+            &*snap.sidebar
+        };
         hud::draw(
             p,
             &ctx,
             &state.hud,
-            &snap.sidebar,
+            sidebar,
             state.screen.chat_open(),
             show_fps,
             &mut elements,
         );
         crate::modules::hud_panels::draw(p, ctx.vw, ctx.vh, &snap, &mut elements);
         elements.draw(p, ctx.vw, ctx.vh, ElementId::BossBars, |p| {
-            hud::draw_boss_bars(p, &ctx, &snap.boss_bars);
+            let bars: &[crate::client::bossbar::BossBar] = if no_render.has(NoRenderPart::BossBars)
+            {
+                &[]
+            } else {
+                &snap.boss_bars
+            };
+            hud::draw_boss_bars(p, &ctx, bars);
         });
         if snap.gamemode == crate::session::Gamemode::Spectator {
             elements.follow(p, ctx.vw, ctx.vh, ElementId::Hotbar, |p| {
@@ -284,9 +306,18 @@ pub fn draw(
 
     if !hide_gui && hud_shown {
         elements.draw(p, ctx.vw, ctx.vh, ElementId::Sidebar, |p| {
-            hud::draw_sidebar(p, &ctx, &snap.sidebar);
+            if !no_render.has(NoRenderPart::Scoreboard) {
+                hud::draw_sidebar(p, &ctx, &snap.sidebar);
+            }
         });
-        hud::draw_overlays(p, &ctx, &state.hud_overlays, snap.gamemode, &mut elements);
+        hud::draw_overlays(
+            p,
+            &ctx,
+            &state.hud_overlays,
+            snap.gamemode,
+            !no_render.has(NoRenderPart::Titles),
+            &mut elements,
+        );
     }
 
     if !in_menu {
@@ -398,6 +429,7 @@ pub fn draw(
         Screen::Creative => creative::draw(
             p,
             &mut state.creative,
+            state.options.always_show_op_items,
             &mut state.slots,
             &state.puppet,
             &ctx,
@@ -433,6 +465,14 @@ pub fn draw(
                 Screen::ManageStorage => options::draw_manage_storage(p, state, &ctx),
                 _ => options::draw(p, state, &ctx),
             }
+            None
+        }
+        #[cfg(feature = "mobile_ui")]
+        Screen::TouchLayout => {
+            if in_menu {
+                crate::gui::menu::background(p, ctx.vw, ctx.vh);
+            }
+            options::draw_touch_layout(p, state, &ctx);
             None
         }
         #[cfg(feature = "audio")]
@@ -489,6 +529,11 @@ pub fn draw(
             multiplayer::draw_direct(p, state, &ctx);
             None
         }
+        #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+        Screen::CustomProxy => {
+            multiplayer::draw_custom_proxy(p, state, &ctx);
+            None
+        }
         Screen::Accounts => {
             profile::draw(p, state, &ctx);
             None
@@ -538,7 +583,6 @@ pub fn draw(
                 crate::gui::menu::background(p, ctx.vw, ctx.vh);
             }
             crate::gui::clickgui::draw(p, &mut state.clickgui, &ctx);
-            #[cfg(feature = "module_panel")]
             if state.clickgui.take_close() {
                 state.nav = Some(state.clickgui_parent);
             }
@@ -582,7 +626,6 @@ pub fn draw(
             dim_background(p, ctx.vw, ctx.vh);
             if let Some(next) = crate::gui::serverpack::draw(p, &ctx, shared, state) {
                 state.nav = Some(next);
-                clear_world_clicks(shared);
             }
             None
         }
@@ -613,7 +656,6 @@ pub fn draw(
                 crate::gui::advancements::draw(p, &mut state.advancements, &ctx, &snap, shared)
             {
                 state.nav = Some(next);
-                clear_world_clicks(shared);
             }
             None
         }
@@ -627,11 +669,7 @@ pub fn draw(
             None
         }
         Screen::Dialog => {
-            if state.in_menu() {
-                crate::gui::menu::background(p, ctx.vw, ctx.vh);
-            } else if state.dialog.pauses() {
-                dim_background(p, ctx.vw, ctx.vh);
-            }
+            backdrop(p, state, &ctx);
             let out = crate::gui::dialog::draw(p, &mut state.dialog, &ctx, shared);
             if out.disconnect {
                 state.disconnect = true;
@@ -650,7 +688,6 @@ pub fn draw(
                 crate::gui::command_block::draw(p, &mut state.command_block, &ctx, shared)
             {
                 state.nav = Some(next);
-                clear_world_clicks(shared);
             }
             None
         }
@@ -671,7 +708,6 @@ pub fn draw(
             };
             if let Some(next) = next {
                 state.nav = Some(next);
-                clear_world_clicks(shared);
             }
             None
         }
@@ -679,14 +715,12 @@ pub fn draw(
             dim_background(p, ctx.vw, ctx.vh);
             if let Some(next) = sign_edit::draw(p, &mut state.sign_edit, &ctx, shared) {
                 state.nav = Some(next);
-                clear_world_clicks(shared);
             }
             None
         }
         Screen::BookView => {
             if let Some(next) = book::draw_view(p, &mut state.book, &ctx) {
                 state.nav = Some(next);
-                clear_world_clicks(shared);
             }
             None
         }
@@ -844,9 +878,11 @@ fn local_stack(stack: &SlotStack) -> SlotStack {
             potion: stack.extra.potion.clone(),
             stew_effects: stack.extra.stew_effects.clone(),
             ominous_amplifier: stack.extra.ominous_amplifier,
+            painting_variant: stack.extra.painting_variant.clone(),
             ..Default::default()
         }
         .into(),
+        block_state: stack.block_state,
         glint: crate::items::glint::default_foil(stack.item)
             || (stack.item != "enchanted_book" && !stack.extra.enchantments.is_empty()),
         bundle: stack.bundle.clone(),
@@ -963,6 +999,7 @@ fn draw_hud(
     if screen_effects.vignette != 0 {
         p.vignette(vw, vh, screen_effects.vignette);
     }
+    crate::gui::screen_effects::draw_camera_overlay(p, screen_effects, vw, vh);
     health::draw_freeze_overlay(p, snap, vw, vh);
     crate::gui::screen_effects::draw_portal(p, screen_effects, vw, vh);
     crate::gui::screen_effects::draw_confusion(p, screen_effects, vw, vh);
@@ -1023,8 +1060,18 @@ fn draw_hotbar_cluster(
         for i in 0..9 {
             let stack = snap.hotbar(i);
             if !stack.is_empty() {
-                let using = main_use.filter(|_| i == snap.selected as usize);
-                draw_stack_held(p, stack, g.item_x(i), item_y, using);
+                let selected = i == snap.selected as usize;
+                let using = main_use.filter(|_| selected);
+                let hand = selected.then_some(false);
+                draw_stack_held(
+                    p,
+                    stack,
+                    g.item_x(i),
+                    item_y,
+                    using,
+                    hand,
+                    snap.hotbar_pop[i],
+                );
             }
         }
         if !offhand.is_empty() {
@@ -1033,7 +1080,15 @@ fn draw_hotbar_cluster(
             } else {
                 left - 26.0
             };
-            draw_stack_held(p, offhand, x, item_y, off_use);
+            draw_stack_held(
+                p,
+                offhand,
+                x,
+                item_y,
+                off_use,
+                Some(true),
+                snap.hotbar_pop[9],
+            );
         }
     }
 
@@ -1542,14 +1597,6 @@ fn shows_active_effects(screen: Screen, ctx: &ScreenCtx, snap: &Snapshot) -> boo
     }
 }
 
-fn clear_world_clicks(shared: &SharedMutex) {
-    let mut s = shared.lock().unwrap();
-    s.session.attack_held = false;
-    s.session.use_held = false;
-    s.session.attack_clicked = false;
-    s.session.use_clicked = false;
-}
-
 fn apply_book_out(out: book::BookOut, state: &mut GuiState, shared: &SharedMutex) {
     match out {
         book::BookOut::Nav(next) => state.nav = Some(next),
@@ -1558,7 +1605,6 @@ fn apply_book_out(out: book::BookOut, state: &mut GuiState, shared: &SharedMutex
             state.nav = Some(Screen::None);
         }
     }
-    clear_world_clicks(shared);
 }
 
 pub fn dim_background(p: &mut Painter, vw: f32, vh: f32) {

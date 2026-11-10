@@ -501,7 +501,6 @@ pub enum LightJob {
         light: Option<ServerLight>,
     },
     Block {
-        world: Arc<RwLock<World>>,
         pos: BlockPos,
     },
     Light {
@@ -520,13 +519,17 @@ pub struct LightThread {
 
 impl LightThread {
     pub fn send(&self, job: LightJob) {
-        let _ = self.tx.send(job);
+        if self.tx.send(job).is_err() {
+            crate::diag::bump(crate::diag::Stat::LightJobsDropped);
+        }
     }
 }
 
 pub fn spawn<F>(map: Arc<RwLock<LightMap>>, mut on_dirty: F) -> LightThread
 where
-    F: FnMut(&[SectionPos], &[(Arc<RwLock<World>>, ColumnPos)]) + Send + 'static,
+    F: FnMut(&Arc<RwLock<World>>, &[SectionPos], &[(Arc<RwLock<World>>, ColumnPos)])
+        + Send
+        + 'static,
 {
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -612,7 +615,7 @@ impl LightWorker {
 
     pub fn run_batch<F>(&mut self, batch: Vec<LightJob>, on_dirty: &mut F)
     where
-        F: FnMut(&[SectionPos], &[(Arc<RwLock<World>>, ColumnPos)]),
+        F: FnMut(&Arc<RwLock<World>>, &[SectionPos], &[(Arc<RwLock<World>>, ColumnPos)]),
     {
         let stats = self.stats;
         let (level, view, map, changed) = (
@@ -676,12 +679,9 @@ impl LightWorker {
                         lv.apply_light_update(col, light);
                     }
                 }
-                LightJob::Block { world, pos } => {
+                LightJob::Block { pos } => {
                     crate::prof_span!("light:check_block");
-                    let v = view.get_or_insert_with(|| {
-                        std::cell::RefCell::new(WorldView::new(world.clone()))
-                    });
-                    if let Some(lv) = level.as_mut() {
+                    if let (Some(lv), Some(v)) = (level.as_mut(), view.as_ref()) {
                         lv.check_block(v, pos);
                     }
                 }
@@ -725,7 +725,8 @@ impl LightWorker {
         );
         if !dirty.is_empty() || !to_mesh.is_empty() {
             crate::prof_span!("light:on_dirty");
-            on_dirty(&dirty, &to_mesh);
+            let world = v.borrow().world.clone();
+            on_dirty(&world, &dirty, &to_mesh);
         }
     }
 }
@@ -735,7 +736,8 @@ struct WebLight {
     rx: Receiver<LightJob>,
     worker: LightWorker,
     #[allow(clippy::type_complexity)]
-    on_dirty: Box<dyn FnMut(&[SectionPos], &[(Arc<RwLock<World>>, ColumnPos)])>,
+    on_dirty:
+        Box<dyn FnMut(&Arc<RwLock<World>>, &[SectionPos], &[(Arc<RwLock<World>>, ColumnPos)])>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -771,7 +773,7 @@ pub fn pump() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn light_loop<F: FnMut(&[SectionPos], &[(Arc<RwLock<World>>, ColumnPos)])>(
+fn light_loop<F: FnMut(&Arc<RwLock<World>>, &[SectionPos], &[(Arc<RwLock<World>>, ColumnPos)])>(
     rx: Receiver<LightJob>,
     map: Arc<RwLock<LightMap>>,
     on_dirty: &mut F,

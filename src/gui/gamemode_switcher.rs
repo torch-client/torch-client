@@ -1,7 +1,7 @@
 use crate::gui::ScreenCtx;
 use crate::gui::painter::Painter;
 use crate::session::Gamemode;
-use crate::text::{Span, Style};
+use crate::text::{AQUA, Span, Style};
 
 pub const SHEET: &str = "container/gamemode_switcher";
 const SHEET_W: f32 = 125.0;
@@ -14,7 +14,6 @@ const SLOT_AREA_PADDED: f32 = 31.0;
 const ALL_SLOTS_WIDTH: i32 = Icon::VALUES.len() as i32 * SLOT_AREA_PADDED as i32 - 5;
 const ICON_TOP_LEFT: f32 = 5.0;
 const HELP_TIPS_OFFSET_Y: f32 = 5.0;
-const AQUA: u32 = 0x55FFFF;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Icon {

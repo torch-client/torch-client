@@ -27,6 +27,12 @@ use crate::session::{
     MapDecoration, MapUpdate, SharedMutex, WaypointInfo, WaypointKey, WaypointPos,
 };
 
+thread_local! {
+    static LAST_BLOCK_UPDATE: std::cell::Cell<
+        Option<(azalea::BlockPos, azalea::block::BlockState)>,
+    > = const { std::cell::Cell::new(None) };
+}
+
 pub(crate) fn handle_packet(
     world: &WorldHolder,
     shared: &SharedMutex,
@@ -68,6 +74,7 @@ pub(crate) fn handle_packet(
         drop(s);
         crate::play::tracking_emitter::reset();
         unsecure_server_warning(shared, p.enforces_secure_chat);
+        crate::client::tick::request_attack_ticker_reset();
     }
     if let ClientboundGamePacket::Respawn(p) = packet {
         let mut s = shared.lock().unwrap();
@@ -85,6 +92,7 @@ pub(crate) fn handle_packet(
         if let Some(anim) = anim_states().lock().unwrap().get_mut(&LOCAL_ANIM_ID) {
             anim.reset_hurt();
         }
+        crate::client::tick::request_attack_ticker_reset();
     }
     if let ClientboundGamePacket::SetHealth(p) = packet {
         let last = shared
@@ -115,6 +123,9 @@ pub(crate) fn handle_packet(
     }
 
     trace(packet);
+    if let ClientboundGamePacket::BlockUpdate(p) = packet {
+        LAST_BLOCK_UPDATE.set(Some((p.pos, p.block_state)));
+    }
     #[cfg(target_arch = "wasm32")]
     match packet {
         ClientboundGamePacket::BlockUpdate(_) => {
@@ -137,6 +148,8 @@ pub(crate) fn handle_packet(
     level_lifecycle(world, shared, packet);
     crate::client::tablist::packet(shared, packet);
     crate::client::bossbar::packet(shared, packet);
+    crate::client::sky_flash::packet(shared, packet);
+    crate::client::hotbar_pop::packet(shared, packet);
     crate::client::cooldowns::packet(packet);
     crate::client::advancements::packet(world, shared, packet);
     crate::client::recipes::packet(world, shared, packet);
@@ -351,6 +364,21 @@ fn horse_slots(
             .map(|i| slot_stack(i, registries, advanced_tooltips))
             .collect(),
     )
+}
+
+fn block_item_state(stack: &azalea_inventory::ItemStack) -> Option<u32> {
+    use azalea::block::{BlockState, BlockTrait};
+    use std::str::FromStr;
+
+    let data = stack.as_present()?;
+    let kind = azalea_registry::builtin::BlockKind::from_str(data.kind.to_str()).ok()?;
+    let mut block = Box::<dyn BlockTrait>::from(BlockState::from(kind));
+    if let Some(props) = data.get_component::<azalea_inventory::components::BlockState>() {
+        for (name, value) in &props.properties {
+            let _ = block.set_property(name, value);
+        }
+    }
+    crate::play::entity_feed::block_state_id(block.as_block_state())
 }
 
 fn enchantment_id(world: &WorldHolder, clue: i16) -> Option<Box<str>> {
@@ -677,6 +705,10 @@ fn animations(packet: &ClientboundGamePacket) {
                     entity_event::ARMORSTAND_WOBBLE => anim.wiggle(),
                     entity_event::RAVAGER_STUNNED => anim.stunned(),
                     entity_event::TENDRILS_SHIVER => anim.tendril_shiver(),
+                    entity_event::SONIC_CHARGE => anim.sonic_charge(),
+                    entity_event::ARMADILLO_PEEK => anim.armadillo_peek(),
+                    entity_event::SHAKE => anim.creaking_shake(),
+                    entity_event::TNT_PRIME => anim.prime_tnt_minecart(),
                     _ => {}
                 }
             }
@@ -709,6 +741,10 @@ fn maps(shared: &SharedMutex, packet: &ClientboundGamePacket) {
                     x: d.x,
                     y: d.y,
                     rot: d.rot as u8 & 15,
+                    name: d
+                        .name
+                        .as_ref()
+                        .map(|name| crate::client::chat_text::to_spans(name).into()),
                 })
                 .collect(),
         )
@@ -915,12 +951,17 @@ fn session_state(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbound
                 .read()
                 .get_block_state(p.pos)
                 .map(|state| crate::blocks::block_name(state).to_string());
+            let updated_block = LAST_BLOCK_UPDATE
+                .get()
+                .filter(|(pos, _)| *pos == p.pos)
+                .map(|(_, state)| crate::blocks::block_name(state));
             let mut s = shared.lock().unwrap();
             let key = [p.pos.x, p.pos.y, p.pos.z];
             let entry = s.session.block_entities.get(&key);
             let Some((kind, wood)) = entry
                 .and_then(|info| SignEditKind::from_block(&info.state.block))
                 .or_else(|| world_block.as_deref().and_then(SignEditKind::from_block))
+                .or_else(|| updated_block.and_then(SignEditKind::from_block))
             else {
                 crate::log_warn!(
                     "sign",
@@ -1053,20 +1094,62 @@ fn session_state(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbound
             use azalea_inventory::components::{BannerPatterns, EquipmentSlot};
             mark_meta_dirty(p.entity_id.0);
             let patterned = p.slots.slots.iter().any(|(_, s)| {
-                s.as_present()
-                    .is_some_and(|d| d.get_component::<BannerPatterns>().is_some())
+                s.as_present().is_some_and(|d| {
+                    d.get_component::<BannerPatterns>().is_some()
+                        || d.get_component::<azalea_inventory::components::Trim>()
+                            .is_some()
+                        || d.get_component::<azalea_inventory::components::Enchantments>()
+                            .is_some_and(|e| !e.levels.is_empty())
+                })
             });
             let (mut main_hand, mut off_hand, mut head) = (None, None, None);
+            let mut trims: [Option<&'static str>; 4] = [None; 4];
+            let mut worn = [crate::util::combat::Worn::default(); 4];
+            let mut stacks: [Option<crate::session::SlotStack>; 4] = Default::default();
             {
                 let guard = patterned.then(|| world.shared.read());
                 let registries = guard.as_deref().map(|w| &w.registries);
                 let item =
                     |stack: &azalea_inventory::ItemStack| held_item_patterned(stack, registries);
+                let trim = |stack: &azalea_inventory::ItemStack| {
+                    item_id(stack).and_then(|id| {
+                        crate::entities::render::humanoid::trim::resolve(stack, id, registries)
+                    })
+                };
+                use azalea_inventory::components::EquipmentSlotGroup as Group;
+                let wear = |stack: &azalea_inventory::ItemStack, group: Group| {
+                    crate::util::combat::Worn::of(stack, group, registries)
+                };
+                let gui = |stack: &azalea_inventory::ItemStack| {
+                    Some(crate::play::inventory_bridge::slot_stack(
+                        stack, registries, false,
+                    ))
+                };
                 for (slot, stack) in &p.slots.slots {
                     match slot {
                         EquipmentSlot::Mainhand => main_hand = Some(item(stack)),
                         EquipmentSlot::Offhand => off_hand = Some(item(stack)),
-                        EquipmentSlot::Head => head = Some(item(stack)),
+                        EquipmentSlot::Head => {
+                            head = Some(item(stack));
+                            trims[0] = trim(stack);
+                            worn[0] = wear(stack, Group::Head);
+                            stacks[0] = gui(stack);
+                        }
+                        EquipmentSlot::Chest => {
+                            trims[1] = trim(stack);
+                            worn[1] = wear(stack, Group::Chest);
+                            stacks[1] = gui(stack);
+                        }
+                        EquipmentSlot::Legs => {
+                            trims[2] = trim(stack);
+                            worn[2] = wear(stack, Group::Legs);
+                            stacks[2] = gui(stack);
+                        }
+                        EquipmentSlot::Feet => {
+                            trims[3] = trim(stack);
+                            worn[3] = wear(stack, Group::Feet);
+                            stacks[3] = gui(stack);
+                        }
                         _ => {}
                     }
                 }
@@ -1096,28 +1179,68 @@ fn session_state(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbound
                     EquipmentSlot::Head => {
                         entry.head = head.take().unwrap_or_default();
                         entry.armor_foil[0] = foil(stack);
+                        entry.armor_trim[0] = trims[0];
+                        entry.worn[0] = worn[0];
                     }
                     EquipmentSlot::Chest => {
                         entry.chestplate = item_id(stack);
                         entry.armor_foil[1] = foil(stack);
+                        entry.armor_trim[1] = trims[1];
+                        entry.worn[1] = worn[1];
                     }
                     EquipmentSlot::Legs => {
                         entry.leggings = item_id(stack);
                         entry.armor_foil[2] = foil(stack);
+                        entry.armor_trim[2] = trims[2];
+                        entry.worn[2] = worn[2];
                     }
                     EquipmentSlot::Feet => {
                         entry.boots = item_id(stack);
                         entry.armor_foil[3] = foil(stack);
+                        entry.armor_trim[3] = trims[3];
+                        entry.worn[3] = worn[3];
                     }
-                    EquipmentSlot::Body => entry.body_armor = item_id(stack),
-                    EquipmentSlot::Saddle => entry.saddle = item_id(stack),
+                    EquipmentSlot::Body => {
+                        entry.body_armor = item_id(stack);
+                        entry.body_block = block_item_state(stack);
+                    }
+                    EquipmentSlot::Saddle => {
+                        entry.saddle = item_id(stack);
+                        entry.saddle_block = block_item_state(stack);
+                    }
+                }
+            }
+            if stacks.iter().any(Option::is_some) {
+                let armor = Arc::make_mut(&mut entry.armor);
+                for (dst, src) in armor.iter_mut().zip(stacks) {
+                    if let Some(src) = src {
+                        *dst = src;
+                    }
                 }
             }
         }
+        ClientboundGamePacket::ChangeDifficulty(p) => {
+            crate::client::tracking::DIFFICULTY
+                .store(p.difficulty as u8, std::sync::atomic::Ordering::Relaxed);
+        }
         ClientboundGamePacket::SetTime(p) => {
             GAME_TIME.store(p.game_time as i64, std::sync::atomic::Ordering::Relaxed);
-            if let Some(clock) = overworld_clock(world, p) {
-                shared.lock().unwrap().session.day_clock.resync(clock);
+            let clock = overworld_clock(world, p);
+            let end = crate::client::tracking::end_clock(world, p);
+            let mut s = shared.lock().unwrap();
+            match end {
+                Some((ticks, partial, rate)) => {
+                    s.session
+                        .end_clock
+                        .set(p.game_time as i64, ticks, partial, rate)
+                }
+                None => {
+                    s.session.end_clock.tick(p.game_time as i64);
+                }
+            }
+            s.session.game_time = p.game_time as u64;
+            if let Some(clock) = clock {
+                s.session.day_clock.resync(clock);
             }
         }
         ClientboundGamePacket::SetActionBarText(p) => {
@@ -1357,7 +1480,7 @@ fn level_lifecycle(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbou
                 crate::play::player_sounds::reset(false);
             }
             worldsync::set_dimension(world, &p.common);
-            worldsync::reset_level(shared);
+            worldsync::reset_level(world, shared);
         }
         ClientboundGamePacket::Login(p) => {
             #[cfg(feature = "audio")]
@@ -1365,8 +1488,10 @@ fn level_lifecycle(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbou
             crate::client::worker::reset_biome_table();
             #[cfg(feature = "audio")]
             crate::audio::publish_synced(&world.shared.read().registries);
+            #[cfg(feature = "seed_cracker")]
+            crate::modules::seed_cracker::logged_in();
             worldsync::set_dimension(world, &p.common);
-            worldsync::reset_level(shared);
+            worldsync::reset_level(world, shared);
         }
         ClientboundGamePacket::StartConfiguration(_) => crate::client::worker::reset_biome_table(),
         _ => {}

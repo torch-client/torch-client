@@ -3,7 +3,7 @@
 use crate::entities::geom::{BakedModel, CubeList, LayerDef, MeshDef, PartPose, PartState};
 use crate::entities::keyframe;
 use crate::entities::models::monsters::warden_anim;
-use crate::entities::state::{EntityState, Pose};
+use crate::entities::state::EntityState;
 use crate::util::mth::DEG_TO_RAD;
 
 const DEFAULT_ARM_X_Y: f32 = 13.0;
@@ -210,32 +210,49 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
     parts[model.id("left_tendril")].x_rot = tendril_x_rot;
     parts[model.id("right_tendril")].x_rot = -tendril_x_rot;
 
-    let seconds = st.age_ticks / 20.0;
-    if st.attack_time > 0.0 {
-        let animation = &warden_anim::WARDEN_ATTACK;
-        keyframe::apply(
-            animation,
-            model,
-            parts,
-            st.attack_time * animation.length_seconds,
-            1.0,
-        );
-    }
-    let one_shot = match st.pose {
-        Pose::Emerging => Some(&warden_anim::WARDEN_EMERGE),
-        Pose::Digging => Some(&warden_anim::WARDEN_DIG),
-        Pose::Roaring => Some(&warden_anim::WARDEN_ROAR),
-        Pose::Sniffing => Some(&warden_anim::WARDEN_SNIFF),
-        Pose::Shooting => Some(&warden_anim::WARDEN_SONIC_BOOM),
-        _ => None,
-    };
-    if let Some(animation) = one_shot {
-        keyframe::apply(
-            animation,
-            model,
-            parts,
-            seconds % animation.length_seconds,
-            1.0,
-        );
-    }
+    use crate::entities::state::anim_slot::warden as slot;
+    let states = &st.extras.anim;
+    let age = st.age_ticks;
+    keyframe::apply_state(
+        &warden_anim::WARDEN_ATTACK,
+        model,
+        parts,
+        states[slot::ATTACK],
+        age,
+    );
+    keyframe::apply_state(
+        &warden_anim::WARDEN_SONIC_BOOM,
+        model,
+        parts,
+        states[slot::SONIC_BOOM],
+        age,
+    );
+    keyframe::apply_state(
+        &warden_anim::WARDEN_DIG,
+        model,
+        parts,
+        states[slot::DIGGING],
+        age,
+    );
+    keyframe::apply_state(
+        &warden_anim::WARDEN_EMERGE,
+        model,
+        parts,
+        states[slot::EMERGE],
+        age,
+    );
+    keyframe::apply_state(
+        &warden_anim::WARDEN_ROAR,
+        model,
+        parts,
+        states[slot::ROAR],
+        age,
+    );
+    keyframe::apply_state(
+        &warden_anim::WARDEN_SNIFF,
+        model,
+        parts,
+        states[slot::SNIFF],
+        age,
+    );
 }

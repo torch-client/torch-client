@@ -24,8 +24,14 @@ impl ItemUse {
             use_ticks: if using { use_ticks } else { 0.0 },
             charge,
             trim: item.trim,
+            block_state: item.block_state,
             has_lodestone: item.has_lodestone,
             lodestone: item.lodestone,
+            bundle_selected: false,
+            broken: item.broken,
+            fishing_cast: false,
+            use_max: item.use_duration,
+            quick_charge: item.quick_charge,
             owner: None,
         }
     }
@@ -58,6 +64,7 @@ pub struct ItemAssets {
     world: ItemWorld,
     needles: Needles,
     local: Option<Owner>,
+    fishers: Vec<i32>,
 }
 
 struct Built {
@@ -91,16 +98,23 @@ impl ItemAssets {
             world: ItemWorld::default(),
             needles: Needles::default(),
             local: None,
+            fishers: Vec::new(),
         }
     }
 
-    pub fn begin_frame(&mut self, view: &crate::renderer::frame_view::FrameView, sun_angle: f32) {
+    pub fn begin_frame(
+        &mut self,
+        view: &crate::renderer::frame_view::FrameView,
+        sun_angle: f32,
+        moon_phase: usize,
+    ) {
         let local = &view.local;
         let yaw = local.body_yaw + local.head_yaw;
         self.world = self.needles.step(
             view.game_time,
             yaw,
             sun_angle,
+            moon_phase,
             view.compass_spawn,
             view.compass_death,
             crate::renderer::dimension::level_name(),
@@ -111,6 +125,17 @@ impl ItemAssets {
             local: true,
             seed: 0,
         });
+        self.fishers.clear();
+        self.fishers.extend(
+            view.entities
+                .iter()
+                .filter(|anim| anim.kind == azalea_registry::builtin::EntityKind::FishingBobber)
+                .filter_map(|anim| anim.sample(view.partial).extras.hook_owner),
+        );
+    }
+
+    pub fn fishing_cast(&self, entity_id: i32, main_hand_id: &str, main_hand: bool) -> bool {
+        self.fishers.contains(&entity_id) && (main_hand_id == "fishing_rod") == main_hand
     }
 
     pub fn world(&self) -> ItemWorld {
@@ -257,7 +282,7 @@ pub fn step_item_world(
     environment: Res<crate::renderer::environment::Environment>,
     mut assets: ResMut<ItemAssets>,
 ) {
-    assets.begin_frame(&view, environment.sky.sun_angle);
+    assets.begin_frame(&view, environment.sky.sun_angle, environment.sky.moon_phase);
 }
 
 fn parts(

@@ -126,7 +126,7 @@ pub(crate) fn quart_biome(
         .unwrap_or(UNRESOLVED)
 }
 
-fn quart_biome_id(chunk: &azalea_world::Chunk, min_y: i32, q: [i32; 3]) -> Option<u32> {
+pub(crate) fn quart_biome_id(chunk: &azalea_world::Chunk, min_y: i32, q: [i32; 3]) -> Option<u32> {
     use azalea_registry::DataRegistry;
 
     let section = chunk.sections.get(((q[1] * 4 - min_y) >> 4) as usize)?;

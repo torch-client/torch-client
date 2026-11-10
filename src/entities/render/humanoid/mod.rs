@@ -6,6 +6,7 @@ pub mod elytra;
 pub mod illager;
 pub mod piglin;
 pub mod skeleton;
+pub mod trim;
 pub mod villager;
 pub mod zombie;
 

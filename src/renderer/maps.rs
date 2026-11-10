@@ -154,8 +154,12 @@ pub fn upload_maps(
             pixels.extend_from_slice(&rgba_from_packed_id(*packed));
         }
         let existing = maps.by_id.get(&update.id).map(|entry| entry.image.clone());
-        match existing.as_ref().and_then(|h| images.get_mut(h)) {
-            Some(image) => image.data = Some(pixels),
+        match existing.filter(|h| images.contains(h)) {
+            Some(handle) => {
+                if let Some(mut image) = images.get_mut(&handle) {
+                    image.data = Some(pixels);
+                }
+            }
             None => {
                 let usage = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
                 let handle = images.add(crate::renderer::rgba_image(

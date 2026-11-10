@@ -43,6 +43,7 @@ struct BiomeRow {
     modifier: GrassModifier,
     dry_foliage_override: Option<u32>,
     env: BiomeEnv,
+    ambient_particles: Vec<(azalea::entity::particle::Particle, f32)>,
 }
 
 impl From<&FallbackRow> for BiomeRow {
@@ -56,6 +57,7 @@ impl From<&FallbackRow> for BiomeRow {
             foliage_override: row.foliage_override,
             modifier: row.modifier,
             dry_foliage_override: row.dry_foliage_override,
+            ambient_particles: Vec::new(),
             env: BiomeEnv {
                 temperature: row.temperature as f32,
                 ..BiomeEnv::NONE
@@ -168,6 +170,28 @@ fn env_from_json(json: &Value, temperature: f64) -> BiomeEnv {
     }
 }
 
+fn parse_ambient_particles(json: &Value) -> Vec<(azalea::entity::particle::Particle, f32)> {
+    let Some(list) = json
+        .get("attributes")
+        .and_then(|a| a.get("minecraft:visual/ambient_particles"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|entry| {
+            let kind = entry
+                .get("particle")?
+                .get("type")?
+                .as_str()?
+                .parse::<azalea_registry::builtin::ParticleKind>()
+                .ok()?;
+            let probability = entry.get("probability")?.as_f64()? as f32;
+            Some((azalea::entity::particle::Particle::from(kind), probability))
+        })
+        .collect()
+}
+
 const DEFAULT_WATER_COLOR: u32 = 0x3f76e4;
 
 fn rows_from_datapack() -> Vec<BiomeRow> {
@@ -198,6 +222,7 @@ fn rows_from_datapack() -> Vec<BiomeRow> {
                 modifier,
                 dry_foliage_override: color("dry_foliage_color"),
                 env: env_from_json(&json, temperature),
+                ambient_particles: parse_ambient_particles(&json),
             })
         })
         .collect()
@@ -959,13 +984,23 @@ struct Table {
     envs: Vec<BiomeEnv>,
     downfalls: Vec<f32>,
     any_env: bool,
+    any_ambient_particles: bool,
 }
 
 static TABLE: OnceLock<Table> = OnceLock::new();
 
+static PRE_DOWNLOAD: OnceLock<Table> = OnceLock::new();
+
 fn table() -> &'static Table {
+    if let Some(table) = TABLE.get() {
+        return table;
+    }
+    let datapack_rows = rows_from_datapack();
+    if datapack_rows.is_empty() && !crate::assets_present() {
+        return PRE_DOWNLOAD
+            .get_or_init(|| Table::from_rows(BIOME_DATA.iter().map(BiomeRow::from).collect()));
+    }
     TABLE.get_or_init(|| {
-        let datapack_rows = rows_from_datapack();
         let rows: Vec<BiomeRow> = if datapack_rows.is_empty() {
             crate::log_warn!(
                 "biome",
@@ -976,6 +1011,12 @@ fn table() -> &'static Table {
             datapack_rows
         };
         crate::log_info!("biome", "{} biomes loaded", rows.len());
+        Table::from_rows(rows)
+    })
+}
+
+impl Table {
+    fn from_rows(rows: Vec<BiomeRow>) -> Table {
         let index_by_name = rows
             .iter()
             .enumerate()
@@ -984,14 +1025,16 @@ fn table() -> &'static Table {
         let envs: Vec<BiomeEnv> = rows.iter().map(|row| row.env).collect();
         let downfalls = rows.iter().map(|row| row.downfall as f32).collect();
         let any_env = envs.iter().any(|env| !env.is_identity());
+        let any_ambient_particles = rows.iter().any(|row| !row.ambient_particles.is_empty());
         Table {
             rows,
             index_by_name,
             envs,
             downfalls,
             any_env,
+            any_ambient_particles,
         }
-    })
+    }
 }
 
 pub struct Tints {
@@ -1091,6 +1134,19 @@ fn with_tints<R>(f: impl FnOnce(Option<&Tints>) -> R) -> R {
     })
 }
 
+pub fn map_biomes<T>(
+    registries: &azalea_core::registry_holder::RegistryHolder,
+    mut f: impl FnMut(&str) -> T,
+) -> Vec<T> {
+    let registry = azalea::Identifier::from("worldgen/biome");
+    let mut out = Vec::new();
+    while let Some(ident) = registries.protocol_id_to_identifier(registry.clone(), out.len() as u32)
+    {
+        out.push(f(ident.path()));
+    }
+    out
+}
+
 pub fn biome_index(name: &str) -> Option<u8> {
     table().index_by_name.get(name).copied()
 }
@@ -1106,6 +1162,17 @@ pub fn downfall(idx: u8) -> f32 {
 
 pub fn any_biome_env() -> bool {
     table().any_env
+}
+
+pub fn ambient_particles(idx: u8) -> &'static [(azalea::entity::particle::Particle, f32)] {
+    table()
+        .rows
+        .get(idx as usize)
+        .map_or(&[][..], |row| row.ambient_particles.as_slice())
+}
+
+pub fn any_ambient_particles() -> bool {
+    table().any_ambient_particles
 }
 
 pub const NEUTRAL: [f32; 3] = [1.0, 1.0, 1.0];

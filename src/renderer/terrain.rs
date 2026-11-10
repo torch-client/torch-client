@@ -528,7 +528,7 @@ impl Plugin for TerrainMaterialPlugin {
                     SunLight,
                     DirectionalLight {
                         illuminance: 1.0,
-                        shadows_enabled: true,
+                        shadow_maps_enabled: true,
                         shadow_depth_bias: 0.03,
                         shadow_normal_bias: SHADOW_NORMAL_BIAS,
                         ..default()

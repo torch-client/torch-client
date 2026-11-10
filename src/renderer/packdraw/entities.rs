@@ -264,14 +264,15 @@ pub(crate) fn prepare_entity_draws(
         let Some(image) = images.get(id) else {
             continue;
         };
-        if image.texture_format != TextureFormat::Rgba8UnormSrgb
+        if image.texture_descriptor.format != TextureFormat::Rgba8UnormSrgb
             || entity_textures
                 .get(&id)
                 .is_some_and(|(from, _)| *from == image.texture_view.id())
         {
             continue;
         }
-        let size = extent(image.size.width, image.size.height);
+        let size = image.texture_descriptor.size;
+        let size = extent(size.width, size.height);
         let copy = device.create_texture(&TextureDescriptor {
             label: Some(&format!("{GPU_LABEL} entity texture")),
             size,

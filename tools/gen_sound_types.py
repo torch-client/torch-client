@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 
+import argparse
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MC = ROOT / "reference/minecraft-26.1.1/net/minecraft"
+
+_ap = argparse.ArgumentParser(description="Generate src/blocks/sound_types.rs.")
+_ap.add_argument("--version", default="26.2",
+                 help="reference/minecraft-<version> tree to read (default 26.2)")
+MC = ROOT / "reference" / f"minecraft-{_ap.parse_args().version}" / "net/minecraft"
 BLOCK = MC / "world/level/block"
 PROPERTIES = BLOCK / "state/properties"
 KINDS = ROOT / "vendor/azalea/azalea-registry/src/builtin.rs"
 OUT = ROOT / "src/blocks/sound_types.rs"
 
 DEFAULT = "STONE"
+COLORS = ("white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+          "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black")
 WEATHER_PREFIXES = ("", "exposed_", "weathered_", "oxidized_", "waxed_", "waxed_exposed_",
                     "waxed_weathered_", "waxed_oxidized_")
 SETTERS = {
@@ -147,8 +154,20 @@ def block_statements(src):
     return fields + statements(static[static.index("{") + 1:])
 
 def resolve(src, types, tables):
-    ids = dict(re.findall(r"ResourceKey<Block> (\w+) = createKey\(\"([a-z0-9_]+)\"\)",
-                          (MC / "references/BlockIds.java").read_text()))
+    ids, colors, copper = {}, {}, {}
+    for holder in ("BlockIds", "BlockItemIds"):
+        ref = (MC / "references" / (holder + ".java")).read_text()
+        for const, name in re.findall(
+                r"\b([A-Z][A-Z0-9_]*) = (?:BlockItemId\.)?create\(\"([a-z0-9_]+)\"", ref):
+            ids[holder + "." + const] = name
+        for const, base in re.findall(r"\b([A-Z][A-Z0-9_]*) = createSimpleColored\(\"(\w+)\"\)", ref):
+            colors[holder + "." + const] = base
+        for const, base in re.findall(r"\b([A-Z][A-Z0-9_]*) = createSimpleCopper\(\"(\w+)\"\)", ref):
+            copper[holder + "." + const] = [base] * 4
+        special = re.search(r"COPPER_BLOCK_SPECIAL_NAMES = new WeatheringCopperCollection\.ByState"
+                            r"\(\"(\w+)\", \"(\w+)\", \"(\w+)\", \"(\w+)\"\)", ref)
+        if special:
+            copper[holder + ".COPPER_BLOCK"] = list(special.groups())
     helper = helpers(src)
     by_const, sound, pairs, rule = {}, {}, {}, Counter()
     registered = 0
@@ -163,25 +182,27 @@ def resolve(src, types, tables):
         rule[how] += 1
 
     for st in block_statements(src):
-        weather = re.match(r"(\w+) = WeatheringCopperBlocks\.create\(\"([a-z0-9_]+)\"", st)
-        if weather:
-            direct = re.findall(r"\.sound\(SoundType\.(\w+)\)", st)
-            if not direct:
-                die("no sound in " + weather.group(1))
-            for prefix in WEATHER_PREFIXES:
-                add(weather.group(1), prefix + weather.group(2), direct[-1], "weathering")
-            registered += 8
-            continue
-        m = re.match(r"(\w+) = (\w+)\((?:BlockIds\.(\w+)|\"([a-z0-9_]+)\")", st)
+        m = re.match(r"(\w+) = ([\w.]+)\((?:(?:BlockIds|BlockItemIds)\.\w+)", st)
         if not m:
             if re.match(r"[A-Z_0-9]+ = ", st):
                 die("unparsed statement: " + st[:100])
             continue
         const = m.group(1)
-        name = m.group(4) or ids.get(m.group(3))
-        if not name:
-            die("no BlockIds entry for " + m.group(3))
-        registered += 1
+        ref = re.match(r"\w+ = [\w.]+\(((?:BlockIds|BlockItemIds)\.\w+)", st).group(1)
+        if m.group(2) == "ColorCollection.registerBlocks":
+            if ref not in colors:
+                die("no colour collection for " + ref)
+            names = [c + "_" + colors[ref] for c in COLORS]
+        elif m.group(2) == "WeatheringCopperCollection.registerBlocks":
+            if ref not in copper:
+                die("no copper collection for " + ref)
+            names = [pre + ref_name for pre, ref_name in zip(
+                WEATHER_PREFIXES, copper[ref] * 2)]
+        else:
+            if ref not in ids:
+                die("no block id for " + ref)
+            names = [ids[ref]]
+        registered += len(names)
 
         classes = re.findall(r"new (\w+Block\w*)\(", st) + re.findall(r"(\w+Block\w*)::new", st)
         setters = {setter_of(c) for c in classes} - {None}
@@ -194,16 +215,18 @@ def resolve(src, types, tables):
             if len(found) != 1 or next(iter(found))[0] != cls:
                 die("%s: %s needs one %s, found %s" % (const, setter, cls, found))
             row = tables[cls][next(iter(found))[1]]
-            add(const, name, row[field], "constructor")
-            if events:
-                pairs[name] = (row[events[0]], row[events[1]])
+            for name in names:
+                add(const, name, row[field], "constructor")
+                if events:
+                    pairs[name] = (row[events[0]], row[events[1]])
             continue
 
         direct = re.findall(r"\.sound\(SoundType\.(\w+)\)", st)
         if st.count(".sound(") != len(direct):
             die("non-constant .sound in " + const)
         if direct:
-            add(const, name, direct[-1], "direct")
+            for name in names:
+                add(const, name, direct[-1], "direct")
             continue
 
         used = [h for h in helper if re.search(r"\b%s\(" % h, st)]
@@ -216,15 +239,19 @@ def resolve(src, types, tables):
                 arg = args(st, call_at)[value]
                 if not arg.startswith("SoundType."):
                     die("%s: helper argument %s" % (const, arg))
-                add(const, name, arg.removeprefix("SoundType."), "helper argument")
+                for name in names:
+                    add(const, name, arg.removeprefix("SoundType."), "helper argument")
             elif value:
-                add(const, name, value, "helper constant")
+                for name in names:
+                    add(const, name, value, "helper constant")
             else:
-                add(const, name, DEFAULT, "default")
+                for name in names:
+                    add(const, name, DEFAULT, "default")
             continue
 
-        copies = re.findall(r"Properties\.of(?:Full|Legacy)Copy\(([^()]*)\)", st)
-        stair = re.match(r"\w+ = register(?:Legacy)?Stair\(\"[a-z0-9_]+\", (\w+)\)", st)
+        copies = re.findall(r"Properties\.of(?:Full|Legacy)Copy\((?:\(BlockBehaviour\))?([\w.]+?)"
+                            r"(?:\.weathering\(\)\.pick\(\w+\))?\)", st)
+        stair = re.match(r"\w+ = register(?:Legacy)?(?:Stair|Slab|Wall)\([\w.]+, (\w+)\)", st)
         if "Copy(" in st and len(copies) != 1:
             die("unreadable copy in " + const)
         source = copies[0] if copies else stair.group(1) if stair else None
@@ -232,10 +259,12 @@ def resolve(src, types, tables):
             source = source.removeprefix("Blocks.")
             if source not in by_const:
                 die("%s copies %s, not yet resolved" % (const, source))
-            add(const, name, by_const[source], "copy")
+            for name in names:
+                add(const, name, by_const[source], "copy")
             continue
 
-        add(const, name, DEFAULT, "default")
+        for name in names:
+            add(const, name, DEFAULT, "default")
 
     sound["decorated_pot"] = "DECORATED_POT"
     rule["default"] -= 1

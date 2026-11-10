@@ -83,6 +83,7 @@ fn in_shallow_water(feet: DVec3, eye_height: f32) -> bool {
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub(crate) struct Inputs {
     pub(crate) day_ticks: f64,
+    pub(crate) end_ticks: f64,
     pub(crate) sun_angle: f32,
     pub(crate) moon_angle: f32,
     pub(crate) moon_phase: i32,
@@ -301,6 +302,7 @@ pub(crate) fn gather_inputs(
 
     *inputs = Inputs {
         day_ticks,
+        end_ticks: view.end_ticks,
         sun_angle: environment.sky.sun_angle,
         moon_angle: environment.sky.moon_angle,
         moon_phase: environment.sky.moon_phase as i32,

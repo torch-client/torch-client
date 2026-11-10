@@ -1,9 +1,11 @@
 use core::borrow::Borrow;
 
+use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{component::Component, entity::EntityHashMap, reflect::ReflectComponent};
 use bevy_math::{
     bounding::{Aabb3d, BoundingVolume},
-    Affine3A, Mat3A, Mat4, Vec3, Vec3A, Vec4, Vec4Swizzles,
+    primitives::{HalfSpace, ViewFrustum},
+    Affine3A, Mat3A, Vec3, Vec3A,
 };
 use bevy_mesh::{Mesh, VertexAttributeValues};
 use bevy_reflect::prelude::*;
@@ -128,9 +130,11 @@ impl From<Sphere> for Aabb {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+#[reflect(Component, Clone, Debug, Default)]
 pub struct Sphere {
     pub center: Vec3A,
+
     pub radius: f32,
 }
 
@@ -139,99 +143,25 @@ impl Sphere {
     pub fn intersects_obb(&self, aabb: &Aabb, world_from_local: &Affine3A) -> bool {
         let aabb_center_world = world_from_local.transform_point3a(aabb.center);
         let v = aabb_center_world - self.center;
-        let d = v.length();
-        let relative_radius = aabb.relative_radius(&(v / d), &world_from_local.matrix3);
-        d < self.radius + relative_radius
+        let d_sq = v.length_squared();
+        let d = d_sq.sqrt();
+        let relative_radius_unscaled = aabb.relative_radius(&v, &world_from_local.matrix3);
+        d_sq <= self.radius * d + relative_radius_unscaled
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct HalfSpace {
-    normal_d: Vec4,
-}
-
-impl HalfSpace {
-    #[inline]
-    pub fn new(normal_d: Vec4) -> Self {
-        Self {
-            normal_d: normal_d * normal_d.xyz().length_recip(),
-        }
-    }
-
-    #[inline]
-    pub fn normal(&self) -> Vec3A {
-        Vec3A::from_vec4(self.normal_d)
-    }
-
-    #[inline]
-    pub fn d(&self) -> f32 {
-        self.normal_d.w
-    }
-
-    #[inline]
-    pub fn normal_d(&self) -> Vec4 {
-        self.normal_d
-    }
-}
-
-#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+#[derive(Component, Clone, Copy, Debug, Default, Deref, DerefMut, Reflect)]
 #[reflect(Component, Default, Debug, Clone)]
-pub struct Frustum {
-    #[reflect(ignore, clone)]
-    pub half_spaces: [HalfSpace; 6],
-}
+pub struct Frustum(pub ViewFrustum);
 
 impl Frustum {
-    pub const NEAR_PLANE_IDX: usize = 4;
-    const FAR_PLANE_IDX: usize = 5;
-    const INACTIVE_HALF_SPACE: Vec4 = Vec4::new(0.0, 0.0, 0.0, f32::INFINITY);
-
-    #[inline]
-    pub fn from_clip_from_world(clip_from_world: &Mat4) -> Self {
-        let mut frustum = Frustum::from_clip_from_world_no_far(clip_from_world);
-        frustum.half_spaces[Self::FAR_PLANE_IDX] = HalfSpace::new(clip_from_world.row(2));
-        frustum
-    }
-
-    #[inline]
-    pub fn from_clip_from_world_custom_far(
-        clip_from_world: &Mat4,
-        view_translation: &Vec3,
-        view_backward: &Vec3,
-        far: f32,
-    ) -> Self {
-        let mut frustum = Frustum::from_clip_from_world_no_far(clip_from_world);
-        let far_center = *view_translation - far * *view_backward;
-        frustum.half_spaces[Self::FAR_PLANE_IDX] =
-            HalfSpace::new(view_backward.extend(-view_backward.dot(far_center)));
-        frustum
-    }
-
-    fn from_clip_from_world_no_far(clip_from_world: &Mat4) -> Self {
-        let row0 = clip_from_world.row(0);
-        let row1 = clip_from_world.row(1);
-        let row2 = clip_from_world.row(2);
-        let row3 = clip_from_world.row(3);
-
-        Self {
-            half_spaces: [
-                HalfSpace::new(row3 + row0),
-                HalfSpace::new(row3 - row0),
-                HalfSpace::new(row3 + row1),
-                HalfSpace::new(row3 - row1),
-                HalfSpace::new(row3 + row2),
-                HalfSpace::new(Self::INACTIVE_HALF_SPACE),
-            ],
-        }
-    }
-
     #[inline]
     pub fn intersects_sphere(&self, sphere: &Sphere, intersect_far: bool) -> bool {
         let sphere_center = sphere.center.extend(1.0);
         let max = if intersect_far {
-            Self::FAR_PLANE_IDX
+            ViewFrustum::FAR_PLANE_IDX
         } else {
-            Self::NEAR_PLANE_IDX
+            ViewFrustum::NEAR_PLANE_IDX
         };
         for half_space in &self.half_spaces[..=max] {
             if half_space.normal_d().dot(sphere_center) + sphere.radius <= 0.0 {
@@ -252,8 +182,8 @@ impl Frustum {
         let aabb_center_world = world_from_local.transform_point3a(aabb.center).extend(1.0);
 
         for (idx, half_space) in self.half_spaces.into_iter().enumerate() {
-            if (idx == Self::NEAR_PLANE_IDX && !intersect_near)
-                || (idx == Self::FAR_PLANE_IDX && !intersect_far)
+            if (idx == ViewFrustum::NEAR_PLANE_IDX && !intersect_near)
+                || (idx == ViewFrustum::FAR_PLANE_IDX && !intersect_far)
             {
                 continue;
             }
@@ -347,7 +277,6 @@ pub fn face_index_to_name(face_index: usize) -> &'static str {
 #[derive(Component, Clone, Debug, Default, Reflect)]
 #[reflect(Component, Default, Debug, Clone)]
 pub struct CubemapFrusta {
-    #[reflect(ignore, clone)]
     pub frusta: [Frustum; 6],
 }
 
@@ -372,7 +301,6 @@ pub enum CubemapLayout {
 #[derive(Component, Debug, Default, Reflect, Clone)]
 #[reflect(Component, Default, Debug, Clone)]
 pub struct CascadesFrusta {
-    #[reflect(ignore, clone)]
     pub frusta: EntityHashMap<Vec<Frustum>>,
 }
 
@@ -380,7 +308,7 @@ pub struct CascadesFrusta {
 mod tests {
     use core::f32::consts::PI;
 
-    use bevy_math::{ops, Quat};
+    use bevy_math::{ops, Quat, Vec4};
     use bevy_transform::components::GlobalTransform;
 
     use crate::{CameraProjection, PerspectiveProjection};
@@ -388,7 +316,7 @@ mod tests {
     use super::*;
 
     fn big_frustum() -> Frustum {
-        Frustum {
+        Frustum(ViewFrustum {
             half_spaces: [
                 HalfSpace::new(Vec4::new(-0.9701, -0.2425, -0.0000, 7.7611)),
                 HalfSpace::new(Vec4::new(-0.0000, 1.0000, -0.0000, 4.0000)),
@@ -397,7 +325,7 @@ mod tests {
                 HalfSpace::new(Vec4::new(-0.0000, -0.2425, 0.9701, 2.9104)),
                 HalfSpace::new(Vec4::new(0.9701, -0.2425, -0.0000, -1.9403)),
             ],
-        }
+        })
     }
 
     #[test]
@@ -421,7 +349,7 @@ mod tests {
     }
 
     fn frustum() -> Frustum {
-        Frustum {
+        Frustum(ViewFrustum {
             half_spaces: [
                 HalfSpace::new(Vec4::new(-0.9701, -0.2425, -0.0000, 0.7276)),
                 HalfSpace::new(Vec4::new(-0.0000, 1.0000, -0.0000, 1.0000)),
@@ -430,7 +358,7 @@ mod tests {
                 HalfSpace::new(Vec4::new(-0.0000, -0.2425, 0.9701, 0.7276)),
                 HalfSpace::new(Vec4::new(0.9701, -0.2425, -0.0000, 0.7276)),
             ],
-        }
+        })
     }
 
     #[test]
@@ -494,7 +422,7 @@ mod tests {
     }
 
     fn long_frustum() -> Frustum {
-        Frustum {
+        Frustum(ViewFrustum {
             half_spaces: [
                 HalfSpace::new(Vec4::new(-0.9998, -0.0222, -0.0000, -1.9543)),
                 HalfSpace::new(Vec4::new(-0.0000, 1.0000, -0.0000, 45.1249)),
@@ -503,7 +431,7 @@ mod tests {
                 HalfSpace::new(Vec4::new(-0.0000, -0.0168, 0.9999, 2.2718)),
                 HalfSpace::new(Vec4::new(0.9998, -0.0222, -0.0000, 7.9528)),
             ],
-        }
+        })
     }
 
     #[test]
@@ -524,6 +452,76 @@ mod tests {
             radius: 4.4094,
         };
         assert!(frustum.intersects_sphere(&sphere, true));
+    }
+
+    #[test]
+    fn sphere_intersects_obb_identical_center() {
+        let sphere_at_origin = Sphere {
+            center: Vec3A::ZERO,
+            radius: 1.0,
+        };
+        let aabb_at_origin = Aabb {
+            center: Vec3A::ZERO,
+            half_extents: Vec3A::splat(0.5),
+        };
+        assert!(
+            sphere_at_origin.intersects_obb(&aabb_at_origin, &Affine3A::IDENTITY),
+            "Should intersect when centers are exactly identical"
+        );
+    }
+
+    #[test]
+    fn sphere_intersects_obb_at_edge() {
+        let point_sphere = Sphere {
+            center: Vec3A::new(1.0, 0.0, 0.0),
+            radius: 0.0,
+        };
+        let aabb = Aabb {
+            center: Vec3A::ZERO,
+            half_extents: Vec3A::X,
+        };
+        assert!(
+            point_sphere.intersects_obb(&aabb, &Affine3A::IDENTITY),
+            "Zero radius sphere (point) on the boundary should count as an intersection"
+        );
+    }
+
+    #[test]
+    fn sphere_intersects_obb_zero_extents_inside() {
+        let sphere = Sphere {
+            center: Vec3A::ZERO,
+            radius: 10.0,
+        };
+        let point_aabb = Aabb {
+            center: Vec3A::new(1.0, 1.0, 1.0),
+            half_extents: Vec3A::ZERO,
+        };
+        assert!(
+            sphere.intersects_obb(&point_aabb, &Affine3A::IDENTITY),
+            "Sphere should intersect an AABB with zero extents if the point is inside"
+        );
+    }
+
+    #[test]
+    fn sphere_intersects_obb_rotated_zeros() {
+        let sphere = Sphere {
+            center: Vec3A::new(5.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let point_aabb = Aabb {
+            center: Vec3A::ZERO,
+            half_extents: Vec3A::ZERO,
+        };
+
+        let transform = Affine3A::from_rotation_translation(
+            Quat::from_rotation_y(PI),
+            Vec3::new(5.0, 0.0, 0.0),
+        );
+
+        assert!(
+            sphere.intersects_obb(&point_aabb, &transform),
+            "Should intersect rotated point OBB"
+        );
     }
 
     #[test]

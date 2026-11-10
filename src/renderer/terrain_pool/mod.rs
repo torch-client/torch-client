@@ -40,6 +40,7 @@ pub const META_WATER: u32 = 2;
 
 pub const FACE_RUNS: u32 = 4;
 
+#[cfg(test)]
 pub const FACE_FILL_QUADS: u32 = 32;
 
 #[repr(C)]
@@ -75,6 +76,7 @@ impl SlotMeta {
         out
     }
 
+    #[cfg(test)]
     pub fn face_count(&self, stream: u32, group: usize) -> u32 {
         let k = stream as usize * FACE_GROUPS + group;
         (self.faces[k / 2] >> ((k % 2) * 16)) & 0xFFFF

@@ -15,7 +15,7 @@ use crate::gui::{GuiState, Screen, ScreenCtx};
 use crate::platform::time::Instant;
 use crate::resourcepacks::modrinth::{self, Hit, Query, Sort, Tags};
 use crate::resourcepacks::{self, Compat, Info};
-use crate::text::{LINE_HEIGHT, Span};
+use crate::text::{LINE_HEIGHT, Span, WHITE};
 use crate::util::bytes::Bytes;
 
 use super::options::{SCROLLBAR_W, draw_scrollbar, row_visible, scroll_input_in, scroll_masked};
@@ -61,7 +61,6 @@ const ICON_KEYS: usize = 12;
 const SELECTED_OUTLINE: u32 = 0xFF80_8080;
 const DOWNLOADED_FILL: u32 = 0x6020_8020;
 const BY_HAND_FILL: u32 = 0x6050_5050;
-const WHITE: u32 = 0xFF_FFFF;
 
 const PREVIEW_KEY: &str = "\u{0}modrinth/preview";
 

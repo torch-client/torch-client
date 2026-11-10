@@ -1,0 +1,8 @@
+{
+ "from": {"version": "26.1.1", "protocol": 775},
+ "to": {"version": "26.2", "protocol": 776},
+ "entity_types": {
+  "magma_cube": [[16, 2]],
+  "slime": [[16, 2]]
+ }
+}

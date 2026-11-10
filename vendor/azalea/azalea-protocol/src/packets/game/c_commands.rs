@@ -105,7 +105,7 @@ pub enum BrigadierParser {
     BlockPredicate,
     ItemStack,
     ItemPredicate,
-    Color,
+    TeamColor,
     HexColor,
     FormattedText,
     Style,

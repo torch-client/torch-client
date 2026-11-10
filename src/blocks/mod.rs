@@ -85,7 +85,7 @@ impl Blocks {
         let mut defs = HashMap::new();
         let dir = root.join("blockstates");
         let blockstates = crate::platform::assets::read_dir(&dir);
-        if blockstates.is_empty() {
+        if blockstates.is_empty() && crate::assets_present() {
             crate::log_warn!("blocks", "cannot read {}", dir.display());
         }
         for path in blockstates {

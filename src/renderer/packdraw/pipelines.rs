@@ -256,12 +256,13 @@ impl<'a> Builder<'a> {
     }
 
     fn layout(&self, label: &str, layouts: &[&BindGroupLayout]) -> wgpu::PipelineLayout {
-        let layouts: Vec<&wgpu::BindGroupLayout> = layouts.iter().map(|l| &***l).collect();
+        let layouts: Vec<Option<&wgpu::BindGroupLayout>> =
+            layouts.iter().map(|l| Some(&***l)).collect();
         self.device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: &layouts,
-                push_constant_ranges: &[],
+                immediate_size: 0,
             })
     }
 
@@ -295,8 +296,8 @@ impl<'a> Builder<'a> {
                 primitive: desc.primitive,
                 depth_stencil: desc.depth.map(|(write, compare)| DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: write,
-                    depth_compare: compare,
+                    depth_write_enabled: Some(write),
+                    depth_compare: Some(compare),
                     stencil: default(),
                     bias: default(),
                 }),
@@ -307,7 +308,7 @@ impl<'a> Builder<'a> {
                     compilation_options: options,
                     targets: &desc.targets,
                 }),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             })
     }

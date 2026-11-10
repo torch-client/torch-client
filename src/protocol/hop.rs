@@ -1,17 +1,22 @@
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use azalea_protocol::packets::ConnectionProtocol;
 
 use azalea::block::BlockState;
 use azalea_buf::AzBuf;
+use azalea_protocol::packets::config::c_registry_data::ClientboundRegistryData;
 use azalea_registry::Registry as _;
 use azalea_registry::builtin::{DataComponentKind, EntityKind, ParticleKind};
 use azalea_registry::data::Biome;
+use azalea_registry::identifier::Identifier;
 use azalea_world::palette::PalletedContainerKind;
 
+use super::fields::{self, Fields, Run};
 use super::packets::{Direction, PacketTable, Phase};
 use super::remap::{IdSpace, Remap};
+use super::version::NATIVE;
 use super::wire::{Reader, varint_len, write_varint, write_varlong};
 
 const ACTION_INTERACT: i32 = 0;
@@ -20,27 +25,60 @@ const ACTION_ATTACK: i32 = 1;
 pub(crate) struct Ids {
     to_native: &'static Remap,
     from_native: &'static Remap,
+    wire: i32,
+}
+
+impl Ids {
+    fn v774(&self) -> bool {
+        self.wire == 774
+    }
 }
 
 type Rewrite = fn(&Ids, &[u8]) -> Option<Box<[u8]>>;
 
 struct HopSpec {
-    wire: fn() -> &'static PacketTable,
-    to_native: fn() -> &'static Remap,
-    from_native: fn() -> &'static Remap,
+    protocol: i32,
+    login: &'static [(&'static str, Rewrite)],
+    configuration: &'static [(&'static str, Rewrite)],
+    layout_in: &'static [(&'static str, Rewrite)],
     inbound: &'static [(&'static str, Rewrite)],
     outbound: &'static [(&'static str, &'static str, Rewrite)],
+    layout_out: &'static [(&'static str, &'static str, Rewrite)],
 }
 
+const RENAMED: &[(&str, &str)] = &[("spectator_action", "spectate_entity")];
+
+fn older_name(native: &str) -> Option<&'static str> {
+    RENAMED
+        .iter()
+        .find(|(name, _)| *name == native)
+        .map(|(_, older)| *older)
+}
+
+fn newer_name(wire: &str) -> Option<&'static str> {
+    RENAMED
+        .iter()
+        .find(|(_, older)| *older == wire)
+        .map(|(name, _)| *name)
+}
+
+const LOGIN_LAYOUT: &[(&str, Rewrite)] = &[("login_finished", login_finished)];
+
+const CONFIGURATION: &[(&str, Rewrite)] = &[("update_tags", update_tags)];
+
+const LAYOUT_IN: &[(&str, Rewrite)] = &[("login", login), ("set_player_team", set_player_team)];
+
 const V774: HopSpec = HopSpec {
-    wire: PacketTable::v1_21_11,
-    to_native: Remap::to_native,
-    from_native: Remap::from_native,
+    protocol: 774,
+    login: LOGIN_LAYOUT,
+    configuration: CONFIGURATION,
+    layout_in: LAYOUT_IN,
     inbound: &[
         ("set_time", set_time),
         ("level_chunk_with_light", level_chunk),
         ("block_update", block_update),
         ("section_blocks_update", section_blocks_update),
+        ("block_entity_data", block_entity_data),
         ("set_entity_data", entity_data),
         ("container_set_content", container_set_content),
         ("container_set_slot", container_set_slot),
@@ -48,6 +86,7 @@ const V774: HopSpec = HopSpec {
         ("set_player_inventory", set_player_inventory),
         ("set_equipment", set_equipment),
         ("add_entity", add_entity),
+        ("update_attributes", update_attributes),
         ("block_event", block_event),
         ("award_stats", award_stats),
         ("level_event", level_event),
@@ -57,8 +96,10 @@ const V774: HopSpec = HopSpec {
         ("sound_entity", sound),
         ("update_recipes", update_recipes),
         ("recipe_book_add", recipe_book_add),
+        ("place_ghost_recipe", place_ghost_recipe),
         ("update_advancements", update_advancements),
         ("merchant_offers", merchant_offers),
+        ("update_tags", update_tags),
     ],
     outbound: &[
         ("attack", "interact", attack),
@@ -70,7 +111,78 @@ const V774: HopSpec = HopSpec {
             creative_slot,
         ),
     ],
+    layout_out: &[],
 };
+
+const V775: HopSpec = HopSpec {
+    protocol: 775,
+    login: LOGIN_LAYOUT,
+    configuration: CONFIGURATION,
+    layout_in: LAYOUT_IN,
+    inbound: &[
+        ("level_chunk_with_light", level_chunk),
+        ("block_update", block_update),
+        ("section_blocks_update", section_blocks_update),
+        ("block_entity_data", block_entity_data),
+        ("set_entity_data", entity_data),
+        ("container_set_content", container_set_content),
+        ("container_set_slot", container_set_slot),
+        ("set_cursor_item", set_cursor_item),
+        ("set_player_inventory", set_player_inventory),
+        ("set_equipment", set_equipment),
+        ("add_entity", add_entity),
+        ("update_attributes", update_attributes),
+        ("block_event", block_event),
+        ("award_stats", award_stats),
+        ("level_event", level_event),
+        ("level_particles", level_particles),
+        ("explode", explode),
+        ("sound", sound),
+        ("sound_entity", sound),
+        ("update_recipes", update_recipes),
+        ("recipe_book_add", recipe_book_add),
+        ("place_ghost_recipe", place_ghost_recipe),
+        ("update_advancements", update_advancements),
+        ("merchant_offers", merchant_offers),
+        ("update_tags", update_tags),
+    ],
+    outbound: &[
+        ("container_click", "container_click", container_click),
+        (
+            "set_creative_mode_slot",
+            "set_creative_mode_slot",
+            creative_slot,
+        ),
+    ],
+    layout_out: &[("spectator_action", "spectate_entity", spectator_action)],
+};
+
+#[derive(Clone, Copy, Default)]
+struct Stages {
+    layout: Option<Rewrite>,
+    ids: Option<Rewrite>,
+}
+
+#[derive(Clone, Copy)]
+struct Outbound {
+    wire: Option<u32>,
+    ids: Option<Rewrite>,
+    layout: Option<Rewrite>,
+}
+
+enum Rewritten {
+    Untouched,
+    Failed,
+    Body(Box<[u8]>),
+}
+
+struct Watched {
+    add_entity: u32,
+    remove_entities: u32,
+    set_entity_data: u32,
+    login: u32,
+    registry_data: u32,
+}
 
 pub(crate) struct Hop {
     ids: Ids,
@@ -78,8 +190,12 @@ pub(crate) struct Hop {
     native: &'static PacketTable,
     inbound_game: Box<[u32]>,
     outbound_game: Box<[Option<u32>]>,
-    inbound_rewrite: Box<[Option<Rewrite>]>,
-    outbound_rewrite: Box<[Option<(Option<u32>, Rewrite)>]>,
+    inbound_rewrite: Box<[Stages]>,
+    outbound_rewrite: Box<[Option<Outbound>]>,
+    login_rewrite: Box<[Option<Rewrite>]>,
+    config_rewrite: Box<[Option<Rewrite>]>,
+    watched: Watched,
+    fields: &'static Fields,
     trace: bool,
 }
 
@@ -89,12 +205,22 @@ impl Hop {
         HOP.get_or_init(|| Hop::build(&V774))
     }
 
+    pub(crate) fn v775() -> &'static Hop {
+        static HOP: OnceLock<Hop> = OnceLock::new();
+        HOP.get_or_init(|| Hop::build(&V775))
+    }
+
     fn build(spec: &HopSpec) -> Hop {
-        let old = (spec.wire)();
+        let old = PacketTable::for_protocol(spec.protocol)
+            .unwrap_or_else(|| panic!("no packet table for {}", spec.protocol));
         let new = PacketTable::native();
         let id = |dir, name: &str| {
             new.id(Phase::Game, dir, name)
-                .unwrap_or_else(|| panic!("775 has no game packet {name}"))
+                .unwrap_or_else(|| panic!("{} has no game packet {name}", NATIVE.name))
+        };
+        let wire_id = |dir, name: &str| {
+            old.id(Phase::Game, dir, name)
+                .or_else(|| older_name(name).and_then(|older| old.id(Phase::Game, dir, older)))
         };
 
         let inbound_game = (0..old.count(Phase::Game, Direction::Clientbound))
@@ -102,7 +228,14 @@ impl Hop {
                 let name = old
                     .name_of(Phase::Game, Direction::Clientbound, wire as u32)
                     .expect("in range");
-                id(Direction::Clientbound, name)
+                match (
+                    new.id(Phase::Game, Direction::Clientbound, name),
+                    newer_name(name),
+                ) {
+                    (Some(native), _) => native,
+                    (None, Some(newer)) => id(Direction::Clientbound, newer),
+                    (None, None) => id(Direction::Clientbound, name),
+                }
             })
             .collect();
         let outbound_game = (0..new.count(Phase::Game, Direction::Serverbound))
@@ -110,34 +243,92 @@ impl Hop {
                 let name = new
                     .name_of(Phase::Game, Direction::Serverbound, native as u32)
                     .expect("in range");
-                old.id(Phase::Game, Direction::Serverbound, name)
+                wire_id(Direction::Serverbound, name)
             })
             .collect();
 
-        let mut inbound_rewrite: Box<[Option<Rewrite>]> =
-            vec![None; new.count(Phase::Game, Direction::Clientbound)].into_boxed_slice();
-        for &(name, rewrite) in spec.inbound {
-            let native = id(Direction::Clientbound, name) as usize;
+        let mut inbound_rewrite: Box<[Stages]> =
+            vec![Stages::default(); new.count(Phase::Game, Direction::Clientbound)]
+                .into_boxed_slice();
+        for &(name, rewrite) in spec.layout_in {
+            let slot = &mut inbound_rewrite[id(Direction::Clientbound, name) as usize];
             assert!(
-                inbound_rewrite[native].replace(rewrite).is_none(),
+                slot.layout.replace(rewrite).is_none(),
+                "{name} has two inbound layout rewrites"
+            );
+        }
+        for &(name, rewrite) in spec.inbound {
+            let slot = &mut inbound_rewrite[id(Direction::Clientbound, name) as usize];
+            assert!(
+                slot.ids.replace(rewrite).is_none(),
                 "{name} is rewritten inbound twice"
             );
         }
-        let mut outbound_rewrite: Box<[Option<(Option<u32>, Rewrite)>]> =
+
+        let mut outbound_rewrite: Box<[Option<Outbound>]> =
             vec![None; new.count(Phase::Game, Direction::Serverbound)].into_boxed_slice();
-        for &(name, wire_name, rewrite) in spec.outbound {
-            let native = id(Direction::Serverbound, name) as usize;
-            let wire = old.id(Phase::Game, Direction::Serverbound, wire_name);
-            assert!(
-                outbound_rewrite[native].replace((wire, rewrite)).is_none(),
-                "{name} is rewritten outbound twice"
-            );
+        for (list, layout) in [(spec.outbound, false), (spec.layout_out, true)] {
+            for &(name, wire_name, rewrite) in list {
+                let wire = old.id(Phase::Game, Direction::Serverbound, wire_name);
+                let slot = outbound_rewrite[id(Direction::Serverbound, name) as usize]
+                    .get_or_insert(Outbound {
+                        wire,
+                        ids: None,
+                        layout: None,
+                    });
+                assert_eq!(slot.wire, wire, "{name} goes out under two names");
+                let stage = if layout {
+                    &mut slot.layout
+                } else {
+                    &mut slot.ids
+                };
+                assert!(
+                    stage.replace(rewrite).is_none(),
+                    "{name} is rewritten outbound twice"
+                );
+            }
         }
+
+        let fixed = |phase: Phase, list: &[(&str, Rewrite)]| {
+            let mut table: Box<[Option<Rewrite>]> =
+                vec![None; new.count(phase, Direction::Clientbound)].into_boxed_slice();
+            for &(name, rewrite) in list {
+                let native = new
+                    .id(phase, Direction::Clientbound, name)
+                    .unwrap_or_else(|| panic!("{} has no {phase:?} packet {name}", NATIVE.name));
+                assert_eq!(
+                    old.id(phase, Direction::Clientbound, name),
+                    Some(native),
+                    "{phase:?} packet {name} moved"
+                );
+                table[native as usize] = Some(rewrite);
+            }
+            table
+        };
+        let login_rewrite = fixed(Phase::Login, spec.login);
+        let config_rewrite = fixed(Phase::Configuration, spec.configuration);
+
+        let watched = Watched {
+            add_entity: id(Direction::Clientbound, "add_entity"),
+            remove_entities: id(Direction::Clientbound, "remove_entities"),
+            set_entity_data: id(Direction::Clientbound, "set_entity_data"),
+            login: id(Direction::Clientbound, "login"),
+            registry_data: new
+                .id(
+                    Phase::Configuration,
+                    Direction::Clientbound,
+                    "registry_data",
+                )
+                .unwrap_or_else(|| panic!("{} has no configuration registry_data", NATIVE.name)),
+        };
 
         Hop {
             ids: Ids {
-                to_native: (spec.to_native)(),
-                from_native: (spec.from_native)(),
+                to_native: Remap::to_native(spec.protocol)
+                    .unwrap_or_else(|| panic!("no remap from {}", spec.protocol)),
+                from_native: Remap::from_native(spec.protocol)
+                    .unwrap_or_else(|| panic!("no remap to {}", spec.protocol)),
+                wire: spec.protocol,
             },
             wire: old,
             native: new,
@@ -145,17 +336,74 @@ impl Hop {
             outbound_game,
             inbound_rewrite,
             outbound_rewrite,
+            login_rewrite,
+            config_rewrite,
+            watched,
+            fields: Fields::for_wire(spec.protocol)
+                .unwrap_or_else(|| panic!("no metadata table from {}", spec.protocol)),
             trace: crate::diag::debug_on("proto"),
         }
     }
 
     pub(crate) fn inbound(&self, phase: ConnectionProtocol, raw: Box<[u8]>) -> Box<[u8]> {
-        if phase != ConnectionProtocol::Game {
+        match phase {
+            ConnectionProtocol::Game => self.inbound_game(raw),
+            ConnectionProtocol::Login => {
+                self.inbound_fixed(Phase::Login, &self.login_rewrite, phase, raw)
+            }
+            ConnectionProtocol::Configuration => {
+                self.inbound_fixed(Phase::Configuration, &self.config_rewrite, phase, raw)
+            }
+            _ => {
+                if self.trace {
+                    passed_through("in", phase, &raw);
+                }
+                raw
+            }
+        }
+    }
+
+    fn inbound_fixed(
+        &self,
+        phase_key: Phase,
+        table: &[Option<Rewrite>],
+        phase: ConnectionProtocol,
+        raw: Box<[u8]>,
+    ) -> Box<[u8]> {
+        let mut r = Reader::new(&raw);
+        let id = r.varint().and_then(|id| u32::try_from(id).ok());
+        let rewrite = id.and_then(|id| table.get(id as usize).copied().flatten());
+        let (Some(id), Some(rewrite)) = (id, rewrite) else {
             if self.trace {
                 passed_through("in", phase, &raw);
             }
             return raw;
+        };
+        let head = r.pos();
+        let body = r.rest();
+        let name = self
+            .native
+            .name_of(phase_key, Direction::Clientbound, id)
+            .unwrap_or("?");
+        trail::reset();
+        let Some(rewritten) = rewrite(&self.ids, body) else {
+            crate::log_warn!(
+                "proto",
+                "{name}: could not translate the body; passed through as the wire sent it. {}",
+                trail::report(body)
+            );
+            return raw;
+        };
+        if self.trace {
+            crate::log_debug!("proto", "in {phase:?} {name}({id}) +body");
         }
+        let mut out = Vec::with_capacity(head + rewritten.len());
+        out.extend_from_slice(&raw[..head]);
+        out.extend_from_slice(&rewritten);
+        out.into_boxed_slice()
+    }
+
+    fn inbound_game(&self, raw: Box<[u8]>) -> Box<[u8]> {
         let mut r = Reader::new(&raw);
         let Some(wire_id) = r.varint().and_then(|id| u32::try_from(id).ok()) else {
             return raw;
@@ -165,26 +413,20 @@ impl Hop {
         };
         let body = r.rest();
 
-        let rewrite = self
+        let stages = self
             .inbound_rewrite
             .get(native_id as usize)
             .copied()
-            .flatten();
-        let rewritten = rewrite.and_then(|rewrite| {
-            trail::reset();
-            rewrite(&self.ids, body)
-        });
-        if rewrite.is_some() && rewritten.is_none() {
-            let name = self
-                .native
-                .name_of(Phase::Game, Direction::Clientbound, native_id)
-                .unwrap_or("?");
-            crate::log_warn!(
-                "proto",
-                "{name}: could not translate the body; passed through as the wire sent it. {}",
-                trail::report(body)
-            );
-        }
+            .unwrap_or_default();
+        let rewritten = match self.stages(
+            Direction::Clientbound,
+            native_id,
+            [stages.layout, stages.ids],
+            body,
+        ) {
+            Rewritten::Body(body) => Some(body),
+            Rewritten::Untouched | Rewritten::Failed => None,
+        };
 
         if self.trace {
             self.trace_frame(
@@ -202,6 +444,46 @@ impl Hop {
         }
     }
 
+    fn stages(
+        &self,
+        dir: Direction,
+        native_id: u32,
+        stages: [Option<Rewrite>; 2],
+        body: &[u8],
+    ) -> Rewritten {
+        let mut current: Option<Box<[u8]>> = None;
+        for rewrite in stages.into_iter().flatten() {
+            let input = current.as_deref().unwrap_or(body);
+            trail::reset();
+            match rewrite(&self.ids, input) {
+                Some(out) => current = Some(out),
+                None => {
+                    let name = self
+                        .native
+                        .name_of(Phase::Game, dir, native_id)
+                        .unwrap_or("?");
+                    match dir {
+                        Direction::Clientbound => crate::log_warn!(
+                            "proto",
+                            "{name}: could not translate the body; passed through as the wire sent it. {}",
+                            trail::report(input)
+                        ),
+                        Direction::Serverbound => crate::log_warn!(
+                            "proto",
+                            "{name}: could not rewrite the body for the wire; the frame was dropped. {}",
+                            trail::report(input)
+                        ),
+                    }
+                    return Rewritten::Failed;
+                }
+            }
+        }
+        match current {
+            Some(body) => Rewritten::Body(body),
+            None => Rewritten::Untouched,
+        }
+    }
+
     pub(crate) fn outbound(&self, phase: ConnectionProtocol, raw: Box<[u8]>) -> Box<[u8]> {
         if phase != ConnectionProtocol::Game {
             if self.trace {
@@ -215,31 +497,28 @@ impl Hop {
         };
         let body = r.rest();
 
-        if let Some(&Some((wire_id, rewrite))) = self.outbound_rewrite.get(native_id as usize) {
-            trail::reset();
-            let rewritten = rewrite(&self.ids, body);
-            if rewritten.is_none() {
-                let name = self
-                    .native
-                    .name_of(Phase::Game, Direction::Serverbound, native_id)
-                    .unwrap_or("?");
-                crate::log_warn!(
-                    "proto",
-                    "{name}: could not rewrite the body for the wire; the frame was dropped. {}",
-                    trail::report(body)
-                );
-            }
-            let body = rewritten;
+        if let Some(&Some(out)) = self.outbound_rewrite.get(native_id as usize) {
+            let body = match self.stages(
+                Direction::Serverbound,
+                native_id,
+                [out.ids, out.layout],
+                body,
+            ) {
+                Rewritten::Body(body) => Some(body),
+                Rewritten::Untouched => Some(Box::from(body)),
+                Rewritten::Failed => None,
+            };
+            let body = body.filter(|body| out.layout.is_none() || !body.is_empty());
             if self.trace {
                 self.trace_frame(
                     "out",
                     Direction::Serverbound,
                     native_id,
-                    wire_id.filter(|_| body.is_some()),
+                    out.wire.filter(|_| body.is_some()),
                     body.is_some(),
                 );
             }
-            return match (body, wire_id) {
+            return match (body, out.wire) {
                 (Some(body), Some(wire_id)) => frame(wire_id, &body),
                 _ => Box::new([]),
             };
@@ -279,6 +558,73 @@ impl Hop {
             if body { " +body" } else { "" }
         );
     }
+
+    fn field_indices(&self, moved: &mut HashMap<i32, &'static [Run]>, raw: Box<[u8]>) -> Box<[u8]> {
+        let mut r = Reader::new(&raw);
+        let Some(id) = r.varint().and_then(|id| u32::try_from(id).ok()) else {
+            return raw;
+        };
+        let watched = &self.watched;
+        if id == watched.add_entity {
+            if let Some((entity, kind)) = spawned(&mut r) {
+                let fields: &'static Fields = self.fields;
+                match fields.runs(kind) {
+                    Some(runs) => {
+                        moved.insert(entity, runs);
+                    }
+                    None => {
+                        moved.remove(&entity);
+                    }
+                }
+            }
+        } else if id == watched.remove_entities {
+            if let Some(n) = r.count() {
+                for _ in 0..n {
+                    let Some(entity) = r.varint() else {
+                        break;
+                    };
+                    moved.remove(&entity);
+                }
+            }
+        } else if id == watched.login {
+            moved.clear();
+        } else if id == watched.set_entity_data {
+            let head = r.pos();
+            let runs = r.varint().and_then(|entity| moved.get(&entity).copied());
+            if let Some(runs) = runs {
+                if let Some(body) = shifted_metadata(&raw[head..], runs) {
+                    return frame(id, &body);
+                }
+            }
+        }
+        raw
+    }
+}
+
+fn spawned(r: &mut Reader) -> Option<(i32, i32)> {
+    let entity = r.varint()?;
+    r.take(16)?;
+    Some((entity, r.varint()?))
+}
+
+fn shifted_metadata(body: &[u8], runs: &[Run]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    let mut out = Vec::with_capacity(body.len());
+    write_varint(&mut out, r.varint()?);
+    let mut probe = Vec::new();
+    loop {
+        let index = r.u8()?;
+        if index == fields::END {
+            out.push(index);
+            return Some(out.into_boxed_slice());
+        }
+        out.push(fields::map(runs, index)?);
+        let serializer = r.varint()?;
+        write_varint(&mut out, serializer);
+        copy_payload(&mut r, &mut out, &mut probe, serializer, |cursor| {
+            azalea::entity::EntityDataValue::azalea_read(cursor).is_ok()
+        })?;
+    }
 }
 
 fn passed_through(way: &str, phase: ConnectionProtocol, raw: &[u8]) {
@@ -304,24 +650,130 @@ fn passed_through(way: &str, phase: ConnectionProtocol, raw: &[u8]) {
 
 pub(crate) struct Translator {
     hop: &'static Hop,
+    moved: HashMap<i32, &'static [Run]>,
+    order: Option<Arc<EntryOrder>>,
 }
 
 impl Translator {
-    pub(crate) fn v774() -> Self {
-        Self { hop: Hop::v774() }
+    pub(crate) fn for_protocol(protocol: i32) -> Option<Self> {
+        let hop = match protocol {
+            774 => Hop::v774(),
+            775 => Hop::v775(),
+            _ => return None,
+        };
+        Some(Self {
+            hop,
+            moved: HashMap::new(),
+            order: None,
+        })
     }
 
-    pub(crate) fn for_protocol(protocol: i32) -> Option<Self> {
-        match protocol {
-            774 => Some(Self::v774()),
-            _ => None,
+    fn record_registry(&mut self, raw: &[u8]) {
+        let mut r = Reader::new(raw);
+        if r.varint() != Some(self.hop.watched.registry_data as i32) {
+            return;
         }
+        let mut cursor = std::io::Cursor::new(r.rest());
+        let Ok(packet) = ClientboundRegistryData::azalea_read(&mut cursor) else {
+            return;
+        };
+        if let Some(registry) = LazyRegistry::of(&packet.registry_id) {
+            let order = Arc::make_mut(self.order.get_or_insert_with(Default::default));
+            order.record(registry, &packet);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LazyRegistry {
+    Instrument,
+    JukeboxSong,
+    DamageType,
+    TrimMaterial,
+    ChickenVariant,
+    ZombieNautilusVariant,
+}
+
+impl LazyRegistry {
+    const ALL: [LazyRegistry; 6] = [
+        Self::Instrument,
+        Self::JukeboxSong,
+        Self::DamageType,
+        Self::TrimMaterial,
+        Self::ChickenVariant,
+        Self::ZombieNautilusVariant,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Instrument => "instrument",
+            Self::JukeboxSong => "jukebox_song",
+            Self::DamageType => "damage_type",
+            Self::TrimMaterial => "trim_material",
+            Self::ChickenVariant => "chicken_variant",
+            Self::ZombieNautilusVariant => "zombie_nautilus_variant",
+        }
+    }
+
+    fn of(registry: &Identifier) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| *registry == Identifier::new(candidate.name()))
+    }
+}
+
+#[derive(Clone, Default)]
+struct EntryOrder {
+    ids: [HashMap<Identifier, u32>; 6],
+}
+
+impl EntryOrder {
+    fn record(&mut self, registry: LazyRegistry, packet: &ClientboundRegistryData) {
+        self.ids[registry as usize] = packet
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(id, (key, _))| (key.clone(), id as u32))
+            .collect();
+    }
+
+    fn id(&self, registry: LazyRegistry, key: &Identifier) -> Option<u32> {
+        self.ids[registry as usize].get(key).copied()
+    }
+}
+
+thread_local! {
+    static ORDER: std::cell::RefCell<Option<Arc<EntryOrder>>> = const { std::cell::RefCell::new(None) };
+}
+
+struct OrderScope;
+
+impl OrderScope {
+    fn enter(order: &Option<Arc<EntryOrder>>) -> Option<Self> {
+        let order = order.as_ref()?;
+        ORDER.with(|slot| *slot.borrow_mut() = Some(order.clone()));
+        Some(Self)
+    }
+}
+
+impl Drop for OrderScope {
+    fn drop(&mut self) {
+        ORDER.with(|slot| *slot.borrow_mut() = None);
     }
 }
 
 impl azalea::connection::PacketTranslator for Translator {
     fn inbound(&mut self, phase: ConnectionProtocol, raw: Box<[u8]>) -> Box<[u8]> {
-        self.hop.inbound(phase, raw)
+        if phase == ConnectionProtocol::Configuration && self.hop.ids.v774() {
+            self.record_registry(&raw);
+        }
+        let _order = OrderScope::enter(&self.order);
+        let frame = self.hop.inbound(phase, raw);
+        if phase == ConnectionProtocol::Game {
+            self.hop.field_indices(&mut self.moved, frame)
+        } else {
+            frame
+        }
     }
 
     fn outbound(&mut self, phase: ConnectionProtocol, raw: Box<[u8]>) -> Box<[u8]> {
@@ -336,6 +788,7 @@ mod trail {
     use azalea_registry::builtin::DataComponentKind;
 
     use crate::protocol::remap::IdSpace;
+    use crate::protocol::version::NATIVE;
 
     #[derive(Clone, Copy)]
     pub(super) enum Step {
@@ -432,10 +885,10 @@ mod trail {
     fn describe(t: &Trail) -> String {
         match t.why {
             Some(Why::Unmapped { space, raw, to_native: true }) => {
-                format!("wire {space:?} id {raw} names nothing in 775")
+                format!("wire {space:?} id {raw} names nothing in {}", NATIVE.name)
             }
             Some(Why::Unmapped { space, raw, to_native: false }) => {
-                format!("775 {space:?} id {raw} names nothing on the wire")
+                format!("{} {space:?} id {raw} names nothing on the wire", NATIVE.name)
             }
             Some(Why::Decode(kind)) => format!("{kind:?} did not decode: {}", t.detail),
             Some(Why::Shape(what)) => what.to_owned(),
@@ -565,6 +1018,118 @@ fn interact_use(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     interact(body, false)
 }
 
+fn login_finished(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    r.take(16)?;
+    skip_string(&mut r)?;
+    let properties = r.count()?;
+    for _ in 0..properties {
+        skip_string(&mut r)?;
+        skip_string(&mut r)?;
+        if r.u8()? != 0 {
+            skip_string(&mut r)?;
+        }
+    }
+    if r.remaining() != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(body.len() + 16);
+    out.extend_from_slice(body);
+    out.extend_from_slice(&[0; 16]);
+    Some(out.into_boxed_slice())
+}
+
+fn skip_string(r: &mut Reader) -> Option<()> {
+    let len = r.count()?;
+    r.take(len)?;
+    Some(())
+}
+
+const ONLINE_MODE: u8 = 0;
+
+fn login(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    r.take(4 + 1)?;
+    let levels = r.count()?;
+    for _ in 0..levels {
+        skip_string(&mut r)?;
+    }
+    for _ in 0..3 {
+        r.varint()?;
+    }
+    r.take(3)?;
+    r.varint()?;
+    skip_string(&mut r)?;
+    r.take(8 + 1 + 1 + 1 + 1)?;
+    if r.u8()? != 0 {
+        skip_string(&mut r)?;
+        r.take(8)?;
+    }
+    r.varint()?;
+    r.varint()?;
+    let spawn_info_end = r.pos();
+    r.u8()?;
+    if r.remaining() != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(body.len() + 1);
+    out.extend_from_slice(&body[..spawn_info_end]);
+    out.push(ONLINE_MODE);
+    out.extend_from_slice(&body[spawn_info_end..]);
+    Some(out.into_boxed_slice())
+}
+
+const TEAM_COLORS: i32 = 16;
+
+fn set_player_team(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    skip_string(&mut r)?;
+    let method = r.u8()?;
+    let head = r.pos();
+    if !matches!(method, 0 | 2) {
+        return Some(body.into());
+    }
+
+    let mut display = Vec::new();
+    nbt_tag(&mut r, &mut display)?;
+    let options = r.u8()?;
+    let visibility = r.varint()?;
+    let collision = r.varint()?;
+    let color = r.varint()?;
+    let mut prefix_and_suffix = Vec::new();
+    nbt_tag(&mut r, &mut prefix_and_suffix)?;
+    nbt_tag(&mut r, &mut prefix_and_suffix)?;
+
+    let mut out = Vec::with_capacity(body.len() + 2);
+    out.extend_from_slice(&body[..head]);
+    out.extend_from_slice(&display);
+    out.extend_from_slice(&prefix_and_suffix);
+    write_varint(&mut out, visibility);
+    write_varint(&mut out, collision);
+    if (0..TEAM_COLORS).contains(&color) {
+        out.push(1);
+        write_varint(&mut out, color);
+    } else {
+        out.push(0);
+    }
+    out.push(options);
+    out.extend_from_slice(r.rest());
+    Some(out.into_boxed_slice())
+}
+
+fn spectator_action(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    let target = r.varint()?;
+    if r.remaining() != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(5);
+    if target != 0 {
+        write_varint(&mut out, target.checked_sub(1)?);
+    }
+    Some(out.into_boxed_slice())
+}
+
 fn state(ids: &Ids, id: i32) -> Option<i32> {
     ids.to_native.map(IdSpace::BlockState, id)
 }
@@ -619,7 +1184,7 @@ fn particle(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>, probe: &mut Vec<u8>) -
             let id = state(ids, r.varint()?)?;
             write_varint(out, id);
         }
-        ParticleKind::Item => item_stack(ids, r, out)?,
+        ParticleKind::Item => stack_template(ids, r, out)?,
         _ => copy_payload(r, out, probe, native, |cursor| {
             azalea::entity::particle::Particle::azalea_read(cursor).is_ok()
         })?,
@@ -643,7 +1208,7 @@ fn sound_holder_way(ids: &Ids, way: Way, r: &mut Reader, out: &mut Vec<u8>) -> O
         }
         return Some(());
     }
-    let moved = way.map(ids, IdSpace::SoundEvent, raw - 1)?;
+    let moved = way.map(ids, IdSpace::SoundEvent, raw.checked_sub(1)?)?;
     write_varint(out, moved + 1);
     Some(())
 }
@@ -789,6 +1354,15 @@ fn nested(
         1
     };
     for _ in 0..n {
+        if !ids.v774() {
+            if optional && !flag(r, out)? {
+                continue;
+            }
+            write_varint(out, way.map(ids, IdSpace::Item, r.varint()?)?);
+            write_varint(out, r.varint()?);
+            patch(ids, way, r, out)?;
+            continue;
+        }
         match way {
             Way::In => {
                 let count = r.varint()?;
@@ -832,7 +1406,7 @@ fn widened(
 ) -> Option<bool> {
     match kind {
         DataComponentKind::DamageResistant | DataComponentKind::ProvidesBannerPatterns => {
-            tag_or_holder_set(way, r, out)?;
+            tag_or_holder_set(ids, way, r, out)?;
         }
         DataComponentKind::BlocksAttacks => {
             out.extend_from_slice(r.take(8)?);
@@ -847,7 +1421,7 @@ fn widened(
             }
             out.extend_from_slice(r.take(12)?);
             if flag(r, out)? {
-                tag_or_holder_set(way, r, out)?;
+                tag_or_holder_set(ids, way, r, out)?;
             }
             for _ in 0..2 {
                 if flag(r, out)? {
@@ -886,8 +1460,38 @@ fn resound(
     match kind {
         DataComponentKind::Equippable => rewrite_value::<c::Equippable>(kind, r, out, |v| {
             sound_entry(ids, way, &mut v.equip_sound)?;
-            sound_entry(ids, way, &mut v.shearing_sound)
+            sound_entry(ids, way, &mut v.shearing_sound)?;
+            v.allowed_entities.as_mut().map_or(Some(()), |set| {
+                holder_set(ids, way, IdSpace::EntityType, set)
+            })
         })?,
+        DataComponentKind::Tool => rewrite_value::<c::Tool>(kind, r, out, |v| {
+            v.rules
+                .iter_mut()
+                .try_for_each(|rule| holder_set(ids, way, IdSpace::Block, &mut rule.blocks))
+        })?,
+        DataComponentKind::Instrument => {
+            if lazy_reference(ids, way, LazyRegistry::Instrument, r, out)? {
+                return Some(true);
+            }
+            rewrite_value::<c::Instrument>(kind, r, out, |v| match &mut v.value {
+                azalea_registry::Holder::Direct(inline) => {
+                    sound_entry(ids, way, &mut inline.sound_event)
+                }
+                azalea_registry::Holder::Reference(_) => Some(()),
+            })?
+        }
+        DataComponentKind::JukeboxPlayable => {
+            if lazy_reference(ids, way, LazyRegistry::JukeboxSong, r, out)? {
+                return Some(true);
+            }
+            rewrite_value::<c::JukeboxPlayable>(kind, r, out, |v| match &mut v.value {
+                azalea_registry::Holder::Direct(inline) => {
+                    sound_entry(ids, way, &mut inline.sound_event)
+                }
+                azalea_registry::Holder::Reference(_) => Some(()),
+            })?
+        }
         DataComponentKind::Consumable => rewrite_value::<c::Consumable>(kind, r, out, |v| {
             sound_entry(ids, way, &mut v.sound)?;
             effect_sounds(ids, way, &mut v.on_consume_effects)
@@ -918,20 +1522,47 @@ fn resound(
                 .as_mut()
                 .map_or(Some(()), |s| sound_entry(ids, way, s))
         })?,
-        DataComponentKind::Repairable => {
-            rewrite_value::<c::Repairable>(kind, r, out, |v| match &mut v.items {
-                azalea_registry::HolderSet::Direct { contents } => contents
-                    .iter_mut()
-                    .try_for_each(|item| registry_entry(ids, way, IdSpace::Item, item)),
-                azalea_registry::HolderSet::Named { .. } => Some(()),
-            })?
-        }
+        DataComponentKind::Repairable => rewrite_value::<c::Repairable>(kind, r, out, |v| {
+            holder_set(ids, way, IdSpace::Item, &mut v.items)
+        })?,
         DataComponentKind::PotDecorations => {
             rewrite_value::<c::PotDecorations>(kind, r, out, |v| {
                 v.items
                     .iter_mut()
                     .try_for_each(|item| registry_entry(ids, way, IdSpace::Item, item))
             })?
+        }
+        DataComponentKind::AttributeModifiers => {
+            rewrite_value::<c::AttributeModifiers>(kind, r, out, |v| {
+                v.modifiers.iter_mut().try_for_each(|entry| {
+                    registry_entry(ids, way, IdSpace::Attribute, &mut entry.kind)
+                })
+            })?
+        }
+        DataComponentKind::EntityData => rewrite_value::<c::EntityData>(kind, r, out, |v| {
+            registry_entry(ids, way, IdSpace::EntityType, &mut v.kind)
+        })?,
+        DataComponentKind::BlockEntityData => {
+            rewrite_value::<c::BlockEntityData>(kind, r, out, |v| {
+                registry_entry(ids, way, IdSpace::BlockEntityType, &mut v.kind)
+            })?
+        }
+        DataComponentKind::Bees => rewrite_value::<c::Bees>(kind, r, out, |v| {
+            v.occupants
+                .iter_mut()
+                .try_for_each(|bee| registry_entry(ids, way, IdSpace::EntityType, &mut bee.kind))
+        })?,
+        DataComponentKind::DamageType
+        | DataComponentKind::ProvidesTrimMaterial
+        | DataComponentKind::ChickenVariant
+        | DataComponentKind::ZombieNautilusVariant => {
+            let registry = match kind {
+                DataComponentKind::DamageType => LazyRegistry::DamageType,
+                DataComponentKind::ProvidesTrimMaterial => LazyRegistry::TrimMaterial,
+                DataComponentKind::ChickenVariant => LazyRegistry::ChickenVariant,
+                _ => LazyRegistry::ZombieNautilusVariant,
+            };
+            return Some(lazy_reference(ids, way, registry, r, out)?);
         }
         _ => return Some(false),
     }
@@ -967,6 +1598,58 @@ fn registry_entry<R: azalea_registry::Registry>(
     let moved = way.map(ids, space, i32::try_from(entry.to_u32()).ok()?)?;
     *entry = R::from_u32(u32::try_from(moved).ok()?)?;
     Some(())
+}
+
+fn holder_set<R: azalea_registry::Registry, K: AzBuf>(
+    ids: &Ids,
+    way: Way,
+    space: IdSpace,
+    set: &mut azalea_registry::HolderSet<R, K>,
+) -> Option<()> {
+    match set {
+        azalea_registry::HolderSet::Direct { contents } => contents
+            .iter_mut()
+            .try_for_each(|entry| registry_entry(ids, way, space, entry)),
+        azalea_registry::HolderSet::Named { .. } => Some(()),
+    }
+}
+
+fn lazy_reference(
+    ids: &Ids,
+    way: Way,
+    registry: LazyRegistry,
+    r: &mut Reader,
+    out: &mut Vec<u8>,
+) -> Option<bool> {
+    if !ids.v774() {
+        return Some(false);
+    }
+    match way {
+        Way::In => {
+            if r.u8()? != 0 {
+                return Some(false);
+            }
+            let len = usize::try_from(r.varint()?).ok()?;
+            let key = Identifier::new(std::str::from_utf8(r.take(len)?).ok()?);
+            let id = ORDER.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .and_then(|order| order.id(registry, &key))
+            });
+            let Some(id) = id else {
+                trail::fail(trail::Why::Shape(
+                    "a registry key the server's registry_data did not list",
+                ));
+                return None;
+            };
+            write_varint(out, i32::try_from(id).ok()?.checked_add(1)?);
+            Some(true)
+        }
+        Way::Out => {
+            out.push(1);
+            Some(false)
+        }
+    }
 }
 
 fn sound_entry(
@@ -1054,7 +1737,10 @@ fn block_predicate(ids: &Ids, way: Way, r: &mut Reader, out: &mut Vec<u8>) -> Op
     Some(())
 }
 
-fn tag_or_holder_set(way: Way, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+fn tag_or_holder_set(ids: &Ids, way: Way, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    if !ids.v774() {
+        return copy_holder_set(r, out);
+    }
     match way {
         Way::In => write_varint(out, 0),
         Way::Out => {
@@ -1171,12 +1857,15 @@ fn set_player_inventory(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
 
 const SLOT_DISPLAY_TO_NATIVE: [i32; 8] = [0, 1, 4, 5, 6, 8, 9, 10];
 
-const SLOT_DISPLAY_ITEM: i32 = 2;
-const SLOT_DISPLAY_ITEM_STACK: i32 = 3;
-const SLOT_DISPLAY_TAG: i32 = 4;
-const SLOT_DISPLAY_SMITHING_TRIM: i32 = 5;
-const SLOT_DISPLAY_WITH_REMAINDER: i32 = 6;
-const SLOT_DISPLAY_COMPOSITE: i32 = 7;
+const SLOT_DISPLAY_WITH_ANY_POTION: i32 = 2;
+const SLOT_DISPLAY_ONLY_WITH_COMPONENT: i32 = 3;
+const SLOT_DISPLAY_ITEM: i32 = 4;
+const SLOT_DISPLAY_ITEM_STACK: i32 = 5;
+const SLOT_DISPLAY_TAG: i32 = 6;
+const SLOT_DISPLAY_DYED: i32 = 7;
+const SLOT_DISPLAY_SMITHING_TRIM: i32 = 8;
+const SLOT_DISPLAY_WITH_REMAINDER: i32 = 9;
+const SLOT_DISPLAY_COMPOSITE: i32 = 10;
 
 fn update_recipes(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
@@ -1230,12 +1919,24 @@ fn ingredient(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
 
 fn slot_display(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
     let kind = r.varint()?;
-    let native = *SLOT_DISPLAY_TO_NATIVE.get(usize::try_from(kind).ok()?)?;
+    let native = if ids.v774() {
+        *SLOT_DISPLAY_TO_NATIVE.get(usize::try_from(kind).ok()?)?
+    } else {
+        kind
+    };
     write_varint(out, native);
-    match kind {
+    match native {
         SLOT_DISPLAY_ITEM => item(ids, r, out)?,
         SLOT_DISPLAY_ITEM_STACK => stack_template(ids, r, out)?,
         SLOT_DISPLAY_TAG => identifier(r, out)?,
+        SLOT_DISPLAY_WITH_ANY_POTION => slot_display(ids, r, out)?,
+        SLOT_DISPLAY_ONLY_WITH_COMPONENT => {
+            slot_display(ids, r, out)?;
+            write_varint(
+                out,
+                Way::In.map(ids, IdSpace::DataComponentType, r.varint()?)?,
+            );
+        }
         SLOT_DISPLAY_SMITHING_TRIM => {
             slot_display(ids, r, out)?;
             slot_display(ids, r, out)?;
@@ -1248,7 +1949,7 @@ fn slot_display(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
             }
             write_varint(out, pattern);
         }
-        SLOT_DISPLAY_WITH_REMAINDER => {
+        SLOT_DISPLAY_DYED | SLOT_DISPLAY_WITH_REMAINDER => {
             slot_display(ids, r, out)?;
             slot_display(ids, r, out)?;
         }
@@ -1265,6 +1966,11 @@ fn slot_display(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
 }
 
 fn stack_template(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    if !ids.v774() {
+        item(ids, r, out)?;
+        write_varint(out, r.varint()?);
+        return patch(ids, Way::In, r, out);
+    }
     let mut stack = Vec::new();
     item_stack(ids, r, &mut stack)?;
     let mut s = Reader::new(&stack);
@@ -1347,6 +2053,14 @@ fn recipe_book_add(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
         out.push(r.u8()?);
     }
     out.push(r.u8()?);
+    (r.remaining() == 0).then(|| out.into_boxed_slice())
+}
+
+fn place_ghost_recipe(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    let mut out = Vec::with_capacity(body.len() + 16);
+    write_varint(&mut out, r.varint()?);
+    recipe_display(ids, &mut r, &mut out)?;
     (r.remaining() == 0).then(|| out.into_boxed_slice())
 }
 
@@ -1590,6 +2304,40 @@ fn creative_slot(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     Some(out.into_boxed_slice())
 }
 
+fn update_tags(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    let mut out = Vec::with_capacity(body.len());
+    let registries = r.count()?;
+    write_varint(&mut out, registries as i32);
+    let mut moved = Vec::new();
+    for _ in 0..registries {
+        let at = r.pos();
+        let len = r.count()?;
+        let name = std::str::from_utf8(r.take(len)?).ok()?;
+        out.extend_from_slice(r.slice_from(at));
+        let space = IdSpace::of_registry(name.strip_prefix("minecraft:").unwrap_or(name));
+        let tags = r.count()?;
+        write_varint(&mut out, tags as i32);
+        for _ in 0..tags {
+            identifier(&mut r, &mut out)?;
+            let n = r.count()?;
+            moved.clear();
+            for _ in 0..n {
+                let id = r.varint()?;
+                match space {
+                    Some(space) => moved.extend(ids.to_native.map(space, id)),
+                    None => moved.push(id),
+                }
+            }
+            write_varint(&mut out, moved.len() as i32);
+            for id in &moved {
+                write_varint(&mut out, *id);
+            }
+        }
+    }
+    (r.remaining() == 0).then(|| out.into_boxed_slice())
+}
+
 fn level_particles(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     const HEADER: usize = 1 + 1 + 3 * 8 + 4 * 4 + 4;
     let mut r = Reader::new(body);
@@ -1640,11 +2388,13 @@ fn block_event(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
 
 const STAT_MINED: i32 = 0;
 const STAT_DROPPED: i32 = 5;
+const STAT_KILLED: i32 = 6;
+const STAT_KILLED_BY: i32 = 7;
 
 fn award_stats(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let count = r.count()?;
-    let mut out = Vec::with_capacity(body.len() + count);
+    let mut out = Vec::with_capacity(body.len() + count.min(body.len()));
     write_varint(&mut out, count as i32);
     for _ in 0..count {
         let kind = r.varint()?;
@@ -1655,6 +2405,7 @@ fn award_stats(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
             k if (STAT_MINED + 1..=STAT_DROPPED).contains(&k) => {
                 ids.to_native.map(IdSpace::Item, value)?
             }
+            STAT_KILLED | STAT_KILLED_BY => ids.to_native.map(IdSpace::EntityType, value)?,
             _ => value,
         };
         write_varint(&mut out, value);
@@ -1667,18 +2418,58 @@ fn add_entity(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     r.varint()?;
     r.take(16)?;
-    if r.varint()? != EntityKind::FallingBlock.to_u32() as i32 {
-        return Some(body.into());
+    let id_and_uuid = r.slice_from(0);
+    let kind = ids.to_native.map(IdSpace::EntityType, r.varint()?)?;
+    let mut out = Vec::with_capacity(body.len() + 1);
+    out.extend_from_slice(id_and_uuid);
+    write_varint(&mut out, kind);
+    if kind != EntityKind::FallingBlock.to_u32() as i32 {
+        out.extend_from_slice(r.rest());
+        return Some(out.into_boxed_slice());
     }
+    let before_data = r.pos();
     r.take(3 * 8)?;
     skip_lp_vec3(&mut r)?;
     r.take(3)?;
-
-    let head = r.slice_from(0);
+    out.extend_from_slice(&body[before_data..r.pos()]);
     let data = state(ids, r.varint()?)?;
-    let mut out = Vec::with_capacity(head.len() + varint_len(data));
-    out.extend_from_slice(head);
     write_varint(&mut out, data);
+    Some(out.into_boxed_slice())
+}
+
+fn update_attributes(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    let mut out = Vec::with_capacity(body.len());
+    write_varint(&mut out, r.varint()?);
+    let n = r.count()?;
+    write_varint(&mut out, n as i32);
+    for _ in 0..n {
+        write_varint(&mut out, Way::In.map(ids, IdSpace::Attribute, r.varint()?)?);
+        out.extend_from_slice(r.take(8)?);
+        let modifiers = r.count()?;
+        write_varint(&mut out, modifiers as i32);
+        for _ in 0..modifiers {
+            identifier(&mut r, &mut out)?;
+            out.extend_from_slice(r.take(8)?);
+            write_varint(&mut out, r.varint()?);
+        }
+    }
+    (r.remaining() == 0).then(|| out.into_boxed_slice())
+}
+
+const NO_BLOCK_ENTITY_TYPE: i32 = 49;
+
+fn block_entity_data(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut r = Reader::new(body);
+    let pos = r.take(8)?;
+    let kind = ids
+        .to_native
+        .map(IdSpace::BlockEntityType, r.varint()?)
+        .unwrap_or(NO_BLOCK_ENTITY_TYPE);
+    let mut out = Vec::with_capacity(body.len());
+    out.extend_from_slice(pos);
+    write_varint(&mut out, kind);
+    out.extend_from_slice(r.rest());
     Some(out.into_boxed_slice())
 }
 
@@ -1718,7 +2509,7 @@ fn section_blocks_update(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let section = r.take(8)?;
     let count = r.count()?;
 
-    let mut out = Vec::with_capacity(body.len() + count);
+    let mut out = Vec::with_capacity(body.len() + count.min(body.len()));
     out.extend_from_slice(section);
     write_varint(&mut out, count as i32);
     for _ in 0..count {
@@ -1743,8 +2534,9 @@ fn level_chunk(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
         Err(why) => {
             crate::log_error!(
                 "proto",
-                "{why}. The 774 body is passing through untranslated and will not \
-                 decode as 775; that column is lost"
+                "{why}. The wire's body is passing through untranslated and will not \
+                 decode as {}; that column is lost",
+                NATIVE.name
             );
             None
         }
@@ -1769,19 +2561,49 @@ fn rewrite_level_chunk(ids: &Ids, body: &[u8]) -> Result<Box<[u8]>, String> {
     let head = r.slice_from(0);
     let length = r.count().ok_or_else(|| short("the section blob length"))?;
     let blob = r.take(length).ok_or_else(|| short("the section blob"))?;
-    let tail = r.rest();
 
     let sections = sections(ids, blob).map_err(|why| {
         format!("chunk {x},{z} was not translated: {why} (the blob is {length} bytes)")
     })?;
-    let mut out = Vec::with_capacity(head.len() + 5 + sections.len() + tail.len());
+    let mut block_entities = Vec::new();
+    chunk_block_entities(ids, &mut r, &mut block_entities).ok_or_else(|| {
+        format!("chunk {x},{z} was not translated: its block entities did not walk")
+    })?;
+    let light = r.rest();
+
+    let mut out =
+        Vec::with_capacity(head.len() + 5 + sections.len() + block_entities.len() + light.len());
     out.extend_from_slice(head);
     let length = i32::try_from(sections.len())
         .map_err(|_| format!("chunk {x},{z} rewrote to a blob too long to length-prefix"))?;
     write_varint(&mut out, length);
     out.extend_from_slice(&sections);
-    out.extend_from_slice(tail);
+    out.extend_from_slice(&block_entities);
+    out.extend_from_slice(light);
     Ok(out.into_boxed_slice())
+}
+
+fn chunk_block_entities(ids: &Ids, r: &mut Reader, out: &mut Vec<u8>) -> Option<()> {
+    let n = r.count()?;
+    let mut kept = 0;
+    let mut entries = Vec::new();
+    for _ in 0..n {
+        let start = entries.len();
+        entries.extend_from_slice(r.take(1 + 2)?);
+        let kind = ids.to_native.map(IdSpace::BlockEntityType, r.varint()?);
+        if let Some(kind) = kind {
+            write_varint(&mut entries, kind);
+        }
+        nbt_tag(r, &mut entries)?;
+        if kind.is_some() {
+            kept += 1;
+        } else {
+            entries.truncate(start);
+        }
+    }
+    write_varint(out, kept);
+    out.extend_from_slice(&entries);
+    Some(())
 }
 
 #[derive(Debug)]
@@ -1810,11 +2632,11 @@ impl fmt::Display for Failure {
         match self.bail {
             Bail::Short => write!(f, "the blob ended early"),
             Bail::NoTarget(id) => {
-                write!(f, "774 block state {id} has no 775 id")
+                write!(f, "wire block state {id} has no {} id", NATIVE.name)
             }
             Bail::TooWide { id, bits } => write!(
                 f,
-                "774 block state {id} moved to an id too wide for the {bits}-bit \
+                "wire block state {id} moved to an id too wide for the {bits}-bit \
                  container the server packed"
             ),
             Bail::BadWidth(bits) => {
@@ -1839,7 +2661,20 @@ fn sections(ids: &Ids, blob: &[u8]) -> Result<Vec<u8>, Failure> {
             });
         };
         out.extend_from_slice(count);
-        out.extend_from_slice(&[0, 0]);
+        if ids.v774() {
+            out.extend_from_slice(&[0, 0]);
+        } else {
+            let Some(fluids) = r.take(2) else {
+                let bail = Bail::Short;
+                return Err(Failure {
+                    bail,
+                    section,
+                    part: "the fluid count",
+                    at: r.pos(),
+                });
+            };
+            out.extend_from_slice(fluids);
+        }
         if let Err(bail) = container(
             ids,
             &mut r,
@@ -1962,34 +2797,49 @@ mod tests {
         &hop().ids
     }
 
-    fn native_serverbound(name: &str) -> u32 {
+    fn hop775() -> &'static Hop {
+        Hop::v775()
+    }
+
+    fn ids775() -> &'static Ids {
+        &hop775().ids
+    }
+
+    fn native_id(dir: Direction, name: &str) -> u32 {
         PacketTable::native()
-            .id(Phase::Game, Direction::Serverbound, name)
-            .unwrap_or_else(|| panic!("775 has {name}"))
+            .id(Phase::Game, dir, name)
+            .unwrap_or_else(|| panic!("{} has {name}", NATIVE.name))
+    }
+
+    fn native_serverbound(name: &str) -> u32 {
+        native_id(Direction::Serverbound, name)
+    }
+
+    fn framed(id: u32, body: &[u8]) -> Box<[u8]> {
+        frame(id, body)
     }
 
     #[test]
     fn every_inbound_id_lands_on_the_same_name() {
-        let h = hop();
-        let old = PacketTable::v1_21_11();
-        let new = PacketTable::native();
-        for wire in 0..old.count(Phase::Game, Direction::Clientbound) {
-            let name = old
-                .name_of(Phase::Game, Direction::Clientbound, wire as u32)
-                .unwrap();
-            let native = h.inbound_game[wire];
-            assert_eq!(
-                new.name_of(Phase::Game, Direction::Clientbound, native),
-                Some(name),
-                "774 clientbound {wire} ({name}) landed wrong"
-            );
+        for (h, protocol) in [(hop(), 774), (hop775(), 775)] {
+            let old = PacketTable::for_protocol(protocol).unwrap();
+            let new = PacketTable::native();
+            for wire in 0..old.count(Phase::Game, Direction::Clientbound) {
+                let name = old
+                    .name_of(Phase::Game, Direction::Clientbound, wire as u32)
+                    .unwrap();
+                let native = h.inbound_game[wire];
+                assert_eq!(
+                    new.name_of(Phase::Game, Direction::Clientbound, native),
+                    Some(name),
+                    "{protocol} clientbound {wire} ({name}) landed wrong"
+                );
+            }
         }
     }
 
-    #[test]
-    fn every_outbound_id_lands_on_the_same_name_or_is_suppressed() {
-        let h = hop();
-        let old = PacketTable::v1_21_11();
+    fn suppressed(h: &Hop, protocol: i32) -> Vec<&'static str> {
+        let old = PacketTable::for_protocol(protocol).unwrap();
         let new = PacketTable::native();
         let mut suppressed = Vec::new();
         for native in 0..new.count(Phase::Game, Direction::Serverbound) {
@@ -1997,19 +2847,43 @@ mod tests {
                 .name_of(Phase::Game, Direction::Serverbound, native as u32)
                 .unwrap();
             match h.outbound_game[native] {
-                Some(wire) => assert_eq!(
-                    old.name_of(Phase::Game, Direction::Serverbound, wire),
-                    Some(name)
-                ),
+                Some(wire) => {
+                    let landed = old.name_of(Phase::Game, Direction::Serverbound, wire);
+                    assert!(
+                        landed == Some(name) || landed == older_name(name),
+                        "{protocol}: {name} landed on {landed:?}"
+                    );
+                }
                 None => suppressed.push(name),
             }
         }
         suppressed.sort_unstable();
+        suppressed
+    }
+
+    #[test]
+    fn every_outbound_id_lands_on_the_same_name_or_is_suppressed() {
         assert_eq!(
-            suppressed,
-            ["attack", "set_game_rule", "spectate_entity"],
+            suppressed(hop(), 774),
+            ["attack", "set_game_rule", "spectator_action"],
             "774 has no packet of any of these names"
         );
+        assert!(
+            suppressed(hop775(), 775).is_empty(),
+            "775 has every one of 26.2's serverbound packets, one under its older name"
+        );
+    }
+
+    #[test]
+    fn a_renamed_packet_lands_on_its_older_name() {
+        let native = native_serverbound("spectator_action") as usize;
+        let wire = hop775().outbound_game[native].expect("775 has it under its old name");
+        assert_eq!(
+            PacketTable::v26_1_1().name_of(Phase::Game, Direction::Serverbound, wire),
+            Some("spectate_entity")
+        );
+        assert_eq!(newer_name("spectate_entity"), Some("spectator_action"));
+        assert_eq!(older_name("attack"), None);
     }
 
     #[test]
@@ -2038,11 +2912,8 @@ mod tests {
     #[test]
     fn a_packet_774_never_had_is_dropped() {
         let h = hop();
-        let native = PacketTable::native();
-        for name in ["set_game_rule", "spectate_entity"] {
-            let id = native
-                .id(Phase::Game, Direction::Serverbound, name)
-                .unwrap_or_else(|| panic!("775 has {name}"));
+        for name in ["set_game_rule", "spectator_action"] {
+            let id = native_serverbound(name);
             let mut frame = Vec::new();
             write_varint(&mut frame, id as i32);
             frame.push(0);
@@ -2280,7 +3151,7 @@ mod tests {
     #[test]
     fn the_chunk_packet_keeps_its_head_and_tail() {
         let blob = section_bytes(&container_bytes(0, &[SECOND_RUN], &[]));
-        let tail = [0xDEu8, 0xAD, 0xBE, 0xEF];
+        let tail = [0x00u8, 0xDE, 0xAD, 0xBE, 0xEF];
 
         let mut body = Vec::new();
         body.extend_from_slice(&1i32.to_be_bytes());
@@ -2304,7 +3175,11 @@ mod tests {
             "the length prefix grew by the one fluid count"
         );
         r.take(blob.len() + 2);
-        assert_eq!(r.rest(), tail, "block entities and light are untouched");
+        assert_eq!(
+            r.rest(),
+            tail,
+            "no block entities, and the light is untouched"
+        );
     }
 
     #[test]
@@ -2367,7 +3242,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rewritten_column_decodes_as_775() {
+    fn a_rewritten_column_decodes_in_azalea() {
         let palette = [BELOW_FIRST_RUN, FIRST_RUN, SECOND_RUN, LAST_RUN];
         let one = section_bytes(&container_bytes(4, &palette, &[0x3210_3210_3210_3210; 256]));
         let mut blob = Vec::new();
@@ -2475,6 +3350,7 @@ mod tests {
 
     const ITEM_AT_THE_SEAM: i32 = 230;
     const COMPONENT_AT_THE_SEAM: i32 = 41;
+    const ITEM_AT_THE_SEAM_NATIVE: i32 = 258;
     const COW_VARIANT_774: i32 = 22;
     const COW_VARIANT_775: i32 = 23;
 
@@ -2518,7 +3394,7 @@ mod tests {
         let out = translated(|r, out| item_stack(ids(), r, out), &body);
         let mut r = Reader::new(&out);
         assert_eq!(r.varint(), Some(3), "the count is not an id");
-        assert_eq!(r.varint(), Some(ITEM_AT_THE_SEAM + 1));
+        assert_eq!(r.varint(), Some(ITEM_AT_THE_SEAM_NATIVE));
         assert_eq!(r.count(), Some(0));
         assert_eq!(r.count(), Some(2));
         assert_eq!(
@@ -2563,7 +3439,7 @@ mod tests {
 
         let out = update_advancements(ids(), &body).expect("rewrites");
         let mut want = head;
-        write_varint(&mut want, ITEM_AT_THE_SEAM + 1);
+        write_varint(&mut want, ITEM_AT_THE_SEAM_NATIVE);
         write_varint(&mut want, 1);
         write_varint(&mut want, 0);
         write_varint(&mut want, 0);
@@ -2576,7 +3452,7 @@ mod tests {
         let kind = DataComponentKind::DamageResistant;
         let id = kind.to_u32() as i32;
         assert_eq!(
-            Remap::from_native().map(IdSpace::DataComponentType, id),
+            ids().from_native.map(IdSpace::DataComponentType, id),
             Some(id),
             "below the seam, so only the payload moves"
         );
@@ -2619,9 +3495,10 @@ mod tests {
         use azalea_registry::Holder;
         use azalea_registry::builtin::SoundEvent;
 
-        let sound_775 = Remap::to_native()
+        let sound_native = ids()
+            .to_native
             .map(IdSpace::SoundEvent, SOUND_774)
-            .expect("774 sound 280 exists in 775");
+            .expect("774 sound 280 exists in 26.2");
         let wire = Equippable {
             slot: EquipmentSlot::Feet,
             equip_sound: Holder::Reference(SoundEvent::from_u32(SOUND_774 as u32).unwrap()),
@@ -2635,7 +3512,7 @@ mod tests {
         let kind = DataComponentKind::Equippable;
         let id = kind.to_u32() as i32;
         assert_eq!(
-            Remap::to_native().map(IdSpace::DataComponentType, id),
+            ids().to_native.map(IdSpace::DataComponentType, id),
             Some(id),
             "below the seam, so only the payload moves"
         );
@@ -2661,7 +3538,7 @@ mod tests {
         assert_eq!(got.slot, EquipmentSlot::Feet);
         assert_eq!(
             got.equip_sound,
-            Holder::Reference(SoundEvent::from_u32(sound_775 as u32).unwrap()),
+            Holder::Reference(SoundEvent::from_u32(sound_native as u32).unwrap()),
             "the reference moved"
         );
         assert_eq!(
@@ -2674,6 +3551,310 @@ mod tests {
             Some(7),
             "the component after it is intact"
         );
+    }
+
+    fn walked(ids: &Ids, way: Way, kind: DataComponentKind, payload: &[u8]) -> Vec<u8> {
+        translated(
+            |r, out| nested(ids, way, kind, r, out).filter(|&b| b).map(|_| ()),
+            payload,
+        )
+    }
+
+    fn encoded<T: AzBuf>(value: &T) -> Vec<u8> {
+        let mut out = Vec::new();
+        value.azalea_write(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_tools_direct_blocks_move() {
+        use azalea_inventory::components::{Tool, ToolRule};
+        use azalea_registry::HolderSet;
+        use azalea_registry::builtin::BlockKind;
+
+        let tool = |blocks: Vec<i32>| Tool {
+            rules: vec![
+                ToolRule {
+                    blocks: HolderSet::Direct {
+                        contents: blocks
+                            .iter()
+                            .map(|&b| BlockKind::from_u32(b as u32).unwrap())
+                            .collect(),
+                    },
+                    speed: Some(4.0),
+                    correct_for_drops: Some(true),
+                },
+                ToolRule {
+                    blocks: HolderSet::Named {
+                        key: "minecraft:mineable/pickaxe".into(),
+                        contents: vec![],
+                    },
+                    speed: None,
+                    correct_for_drops: None,
+                },
+            ],
+            damage_per_block: 2,
+            ..Tool::new()
+        };
+        let kind = DataComponentKind::Tool;
+        for (ids, wire, native) in [
+            (ids775(), vec![1, 998], vec![1, 1025]),
+            (ids(), vec![157, 158], vec![157, 159]),
+        ] {
+            for (w, n) in wire.iter().zip(&native) {
+                assert_eq!(
+                    ids.to_native.map(IdSpace::Block, *w),
+                    Some(*n),
+                    "the table says so"
+                );
+            }
+            assert_eq!(
+                walked(ids, Way::In, kind, &encoded(&tool(wire.clone()))),
+                encoded(&tool(native.clone()))
+            );
+            assert_eq!(
+                walked(ids, Way::Out, kind, &encoded(&tool(native))),
+                encoded(&tool(wire))
+            );
+        }
+    }
+
+    #[test]
+    fn an_equippables_allowed_entities_move() {
+        use azalea_inventory::components::{EquipmentSlot, Equippable};
+        use azalea_registry::HolderSet;
+
+        let saddle = |entities: [i32; 2]| Equippable {
+            slot: EquipmentSlot::Saddle,
+            allowed_entities: Some(HolderSet::Direct {
+                contents: entities
+                    .iter()
+                    .map(|&e| EntityKind::from_u32(e as u32).unwrap())
+                    .collect(),
+            }),
+            ..Equippable::new()
+        };
+        assert_eq!(ids775().to_native.map(IdSpace::EntityType, 130), Some(131));
+        let kind = DataComponentKind::Equippable;
+        assert_eq!(
+            walked(ids775(), Way::In, kind, &encoded(&saddle([5, 130]))),
+            encoded(&saddle([5, 131]))
+        );
+        assert_eq!(
+            walked(ids775(), Way::Out, kind, &encoded(&saddle([5, 131]))),
+            encoded(&saddle([5, 130]))
+        );
+    }
+
+    #[test]
+    fn an_inline_instrument_or_song_moves_its_sound() {
+        use azalea_inventory::components::{
+            Instrument, InstrumentData, JukeboxPlayable, JukeboxSongData,
+        };
+        use azalea_registry::Holder;
+        use azalea_registry::builtin::SoundEvent;
+
+        let native = ids775().to_native.map(IdSpace::SoundEvent, 300).unwrap();
+        assert_ne!(native, 300, "pick a sound that moved");
+        let sound = |id: i32| Holder::Reference(SoundEvent::from_u32(id as u32).unwrap());
+        let horn = |id| Instrument {
+            value: Holder::Direct(InstrumentData {
+                sound_event: sound(id),
+                use_duration: 7.0,
+                range: 256.0,
+                description: "horn".into(),
+            }),
+        };
+        let disc = |id| JukeboxPlayable {
+            value: Holder::Direct(JukeboxSongData {
+                sound_event: sound(id),
+                description: "song".into(),
+                length_in_seconds: 90.0,
+                comparator_output: 4,
+            }),
+        };
+        let horn_kind = DataComponentKind::Instrument;
+        let disc_kind = DataComponentKind::JukeboxPlayable;
+        assert_eq!(
+            walked(ids775(), Way::In, horn_kind, &encoded(&horn(300))),
+            encoded(&horn(native))
+        );
+        assert_eq!(
+            walked(ids775(), Way::Out, horn_kind, &encoded(&horn(native))),
+            encoded(&horn(300))
+        );
+        assert_eq!(
+            walked(ids775(), Way::In, disc_kind, &encoded(&disc(300))),
+            encoded(&disc(native))
+        );
+
+        let by_reference = Instrument {
+            value: Holder::Reference(
+                <azalea_registry::data::Instrument as azalea_registry::DataRegistry>::new_raw(3),
+            ),
+        };
+        assert_eq!(
+            walked(ids775(), Way::In, horn_kind, &encoded(&by_reference)),
+            encoded(&by_reference)
+        );
+    }
+
+    #[test]
+    fn a_774_lazy_reference_loses_and_regains_its_prefix() {
+        use azalea_inventory::components::{Instrument, InstrumentData};
+        use azalea_registry::Holder;
+
+        let horn = Instrument {
+            value: Holder::Direct(InstrumentData {
+                sound_event: Holder::Reference(
+                    azalea_registry::builtin::SoundEvent::from_u32(3).unwrap(),
+                ),
+                use_duration: 7.0,
+                range: 256.0,
+                description: "horn".into(),
+            }),
+        };
+        assert_eq!(
+            ids().to_native.map(IdSpace::SoundEvent, 3),
+            Some(3),
+            "below every sound run"
+        );
+        let kind = DataComponentKind::Instrument;
+        let mut wire = vec![1];
+        wire.extend(encoded(&horn));
+        assert_eq!(walked(ids(), Way::In, kind, &wire), encoded(&horn));
+        assert_eq!(walked(ids(), Way::Out, kind, &encoded(&horn)), wire);
+
+        let mut chicken = vec![1];
+        write_varint(&mut chicken, 2);
+        let out = translated(
+            |r, out| payload(ids(), Way::In, DataComponentKind::ChickenVariant, r, out),
+            &chicken,
+        );
+        let mut want = Vec::new();
+        write_varint(&mut want, 2);
+        assert_eq!(out, want);
+
+        let mut key = vec![0];
+        string(&mut key, "minecraft:ponder_goat_horn");
+        assert!(
+            nested(
+                ids(),
+                Way::In,
+                kind,
+                &mut Reader::new(&key),
+                &mut Vec::new()
+            )
+            .is_none()
+        );
+    }
+
+    fn registry_frame(registry: &str, keys: &[&str]) -> Box<[u8]> {
+        let packet = ClientboundRegistryData {
+            registry_id: Identifier::new(registry),
+            entries: keys
+                .iter()
+                .map(|key| (Identifier::new(*key), None))
+                .collect(),
+        };
+        let id = PacketTable::native()
+            .id(
+                Phase::Configuration,
+                Direction::Clientbound,
+                "registry_data",
+            )
+            .expect("registry_data");
+        let mut frame = Vec::new();
+        write_varint(&mut frame, id as i32);
+        packet.azalea_write(&mut frame).unwrap();
+        frame.into_boxed_slice()
+    }
+
+    fn key_form(key: &str) -> Vec<u8> {
+        let mut wire = vec![0];
+        string(&mut wire, key);
+        wire
+    }
+
+    #[test]
+    fn a_774_lazy_reference_by_key_resolves_through_registry_data() {
+        use azalea::connection::PacketTranslator as _;
+
+        let mut translator = Translator::for_protocol(774).expect("a 774 hop");
+        let frame = registry_frame(
+            "minecraft:instrument",
+            &[
+                "minecraft:ponder_goat_horn",
+                "minecraft:sing_goat_horn",
+                "minecraft:seek_goat_horn",
+            ],
+        );
+        assert_eq!(
+            translator.inbound(ConnectionProtocol::Configuration, frame.clone()),
+            frame
+        );
+        translator.inbound(
+            ConnectionProtocol::Configuration,
+            registry_frame(
+                "minecraft:chicken_variant",
+                &["minecraft:temperate", "minecraft:cold"],
+            ),
+        );
+        let _scope = OrderScope::enter(&translator.order).expect("recorded");
+
+        let mut holder = Vec::new();
+        write_varint(&mut holder, 3);
+        assert_eq!(
+            walked(
+                ids(),
+                Way::In,
+                DataComponentKind::Instrument,
+                &key_form("seek_goat_horn")
+            ),
+            holder
+        );
+
+        let mut cold = Vec::new();
+        write_varint(&mut cold, 2);
+        let out = translated(
+            |r, out| payload(ids(), Way::In, DataComponentKind::ChickenVariant, r, out),
+            &key_form("minecraft:cold"),
+        );
+        assert_eq!(out, cold);
+
+        for (kind, key) in [
+            (DataComponentKind::Instrument, "minecraft:cold"),
+            (DataComponentKind::Instrument, "minecraft:nope"),
+            (
+                DataComponentKind::JukeboxPlayable,
+                "minecraft:seek_goat_horn",
+            ),
+        ] {
+            let wire = key_form(key);
+            assert!(
+                nested(
+                    ids(),
+                    Way::In,
+                    kind,
+                    &mut Reader::new(&wire),
+                    &mut Vec::new()
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn a_775_translator_records_nothing() {
+        use azalea::connection::PacketTranslator as _;
+
+        let mut translator = Translator::for_protocol(775).expect("a 775 hop");
+        translator.inbound(
+            ConnectionProtocol::Configuration,
+            registry_frame("minecraft:instrument", &["minecraft:ponder_goat_horn"]),
+        );
+        assert!(translator.order.is_none());
+        assert!(OrderScope::enter(&translator.order).is_none());
     }
 
     #[test]
@@ -2693,7 +3874,7 @@ mod tests {
         assert!(item_stack(ids(), &mut Reader::new(&body), &mut Vec::new()).is_none());
         let report = trail::report(&body);
         assert!(
-            report.contains("wire DataComponentType id 9999 names nothing in 775"),
+            report.contains("wire DataComponentType id 9999 names nothing in 26.2"),
             "{report}"
         );
         assert!(
@@ -2742,9 +3923,10 @@ mod tests {
     #[test]
     fn a_component_past_the_seam_keeps_its_payload() {
         let native = DataComponentKind::MapId.to_u32() as i32;
-        let wire = Remap::from_native()
+        let wire = ids()
+            .from_native
             .map(IdSpace::DataComponentType, native)
-            .expect("775 map_id exists in 774");
+            .expect("26.2's map_id exists in 774");
         assert_ne!(wire, native, "pick a component that actually moved");
 
         let mut body = Vec::new();
@@ -2811,7 +3993,7 @@ mod tests {
         assert_eq!(r.varint(), Some(1));
         assert_eq!(
             r.varint(),
-            Some(ITEM_AT_THE_SEAM + 1),
+            Some(ITEM_AT_THE_SEAM_NATIVE),
             "the held item moved"
         );
     }
@@ -2823,7 +4005,7 @@ mod tests {
         write_varint(&mut body, 1);
         write_varint(&mut body, 2);
         write_varint(&mut body, 1);
-        write_varint(&mut body, SLOT_DISPLAY_ITEM_STACK);
+        write_varint(&mut body, 3);
         write_varint(&mut body, 2);
         write_varint(&mut body, 3);
         write_varint(&mut body, 0);
@@ -2835,7 +4017,7 @@ mod tests {
         write_varint(&mut expected, 1);
         write_varint(&mut expected, 2);
         write_varint(&mut expected, 1);
-        write_varint(&mut expected, 5);
+        write_varint(&mut expected, SLOT_DISPLAY_ITEM_STACK);
         write_varint(&mut expected, 3);
         write_varint(&mut expected, 2);
         write_varint(&mut expected, 0);
@@ -2901,7 +4083,8 @@ mod tests {
     #[test]
     fn a_particles_payload_shape_survives_the_remap() {
         for wire in 0..PARTICLES_774 {
-            let native = Remap::to_native()
+            let native = ids()
+                .to_native
                 .map(IdSpace::ParticleType, wire)
                 .unwrap_or_else(|| panic!("774 particle {wire} does not map"));
             let mut alone = Vec::new();
@@ -2911,13 +4094,13 @@ mod tests {
             assert_eq!(
                 payload_free,
                 !PAYLOAD_774.contains(&wire),
-                "774 particle {wire} lands on 775 {native}, which has the other shape"
+                "774 particle {wire} lands on 26.2's {native}, which has the other shape"
             );
         }
     }
 
     #[test]
-    fn without_the_remap_five_ids_would_change_shape() {
+    fn without_the_remap_24_ids_would_change_shape() {
         let mismatched: Vec<i32> = (0..PARTICLES_774)
             .filter(|wire| {
                 let mut alone = Vec::new();
@@ -2930,8 +4113,70 @@ mod tests {
             .collect();
         assert_eq!(
             mismatched,
-            [103, 105, 109, 111, 113],
-            "shriek, dust_plume, dust_pillar, raid_omen and block_crumble"
+            [
+                7, 9, 10, 14, 16, 22, 23, 28, 29, 38, 42, 43, 45, 46, 47, 48, 53, 54, 55, 56, 103,
+                109, 112, 113,
+            ]
+        );
+    }
+
+    #[test]
+    fn an_item_particle_is_a_template_on_both_wires() {
+        use azalea_registry::builtin::ParticleKind;
+        let native = ParticleKind::Item.to_u32() as i32;
+        let run = |ids: &Ids, wire: &[i32]| {
+            let mut body = Vec::new();
+            write_varint(
+                &mut body,
+                ids.from_native.map(IdSpace::ParticleType, native).unwrap(),
+            );
+            for value in wire {
+                write_varint(&mut body, *value);
+            }
+            let (mut r, mut out, mut probe) = (Reader::new(&body), Vec::new(), Vec::new());
+            particle(ids, &mut r, &mut out, &mut probe).expect("a whole particle");
+            assert_eq!(r.remaining(), 0);
+            out
+        };
+        let item_775 = 1000;
+        let moved = ids775().to_native.map(IdSpace::Item, item_775).unwrap();
+        assert_ne!(moved, item_775, "an id past 26.2's first item insertion");
+        let want = |item: i32| {
+            let mut out = Vec::new();
+            for value in [native, item, 1, 0, 0] {
+                write_varint(&mut out, value);
+            }
+            out
+        };
+        assert_eq!(run(ids775(), &[item_775, 1, 0, 0]), want(moved));
+        assert_eq!(
+            run(ids(), &[1, ITEM_AT_THE_SEAM, 0, 0]),
+            want(ITEM_AT_THE_SEAM_NATIVE)
+        );
+    }
+
+    #[test]
+    fn a_ghost_recipe_moves_its_slot_displays() {
+        let item_775 = 1000;
+        let moved = ids775().to_native.map(IdSpace::Item, item_775).unwrap();
+        let body = |item: i32| {
+            let mut out = Vec::new();
+            for value in [3, 3] {
+                write_varint(&mut out, value);
+            }
+            for _ in 0..3 {
+                write_varint(&mut out, SLOT_DISPLAY_ITEM);
+                write_varint(&mut out, item);
+            }
+            out
+        };
+        assert_eq!(
+            place_ghost_recipe(ids775(), &body(item_775)).as_deref(),
+            Some(&body(moved)[..])
+        );
+        assert!(
+            place_ghost_recipe(ids775(), &[3, 9]).is_none(),
+            "no such display"
         );
     }
 
@@ -2949,8 +4194,8 @@ mod tests {
         let mut r = Reader::new(&out);
         assert_eq!(
             r.varint(),
-            Some(111),
-            "dust_pillar moved by the two inserts"
+            Some(DUST_PILLAR_NATIVE),
+            "dust_pillar moved by both inserts"
         );
         assert_eq!(r.varint(), Some(moved(SECOND_RUN)));
         assert_eq!(r.remaining(), 0);
@@ -2968,7 +4213,7 @@ mod tests {
         assert_eq!(r.remaining(), 0, "the delay was consumed");
 
         let mut r = Reader::new(&out);
-        assert_eq!(r.varint(), Some(105));
+        assert_eq!(r.varint(), Some(112), "26.2's shriek");
         assert_eq!(r.varint(), Some(40));
     }
 
@@ -2998,17 +4243,19 @@ mod tests {
         let out = level_particles(ids(), &body).expect("a whole packet");
         assert_eq!(&out[..header], &body[..header]);
         let mut r = Reader::new(&out[header..]);
-        assert_eq!(r.varint(), Some(111));
+        assert_eq!(r.varint(), Some(DUST_PILLAR_NATIVE));
         assert_eq!(r.varint(), Some(moved(FIRST_RUN)));
     }
 
     const SOUND_774: i32 = 280;
+    const DUST_PILLAR_NATIVE: i32 = 118;
 
     #[test]
     fn a_sound_moves_through_the_holder() {
-        let native = Remap::to_native()
+        let native = ids()
+            .to_native
             .map(IdSpace::SoundEvent, SOUND_774)
-            .expect("774 sound 280 exists in 775");
+            .expect("774 sound 280 exists in 26.2");
         assert_ne!(native, SOUND_774, "pick a sound that actually moved");
 
         let mut body = Vec::new();
@@ -3058,14 +4305,9 @@ mod tests {
         let mut r = Reader::new(&out);
         assert_eq!(r.take(3 * 8 + 4 + 4), Some(&body[..32]));
         assert_eq!(r.u8(), Some(0));
-        assert_eq!(r.varint(), Some(111));
+        assert_eq!(r.varint(), Some(DUST_PILLAR_NATIVE));
         assert_eq!(r.varint(), Some(moved(FIRST_RUN)));
-        assert_eq!(
-            r.varint(),
-            Remap::to_native()
-                .map(IdSpace::SoundEvent, SOUND_774)
-                .map(|id| id + 1)
-        );
+        assert_eq!(r.varint(), Some(293 + 1));
         assert_eq!(r.count(), Some(1));
         assert_eq!(r.varint(), Some(3), "below the seam, so unmoved");
         assert_eq!(r.take(8), Some(&[0u8; 8][..]));
@@ -3126,7 +4368,7 @@ mod tests {
         r.u8();
         assert_eq!(r.varint(), Some(SERIALIZER_PARTICLES));
         assert_eq!(r.count(), Some(1));
-        assert_eq!(r.varint(), Some(111));
+        assert_eq!(r.varint(), Some(DUST_PILLAR_NATIVE));
         assert_eq!(r.varint(), Some(moved(FIRST_RUN)));
         assert_eq!(r.u8(), Some(0xFF));
         assert_eq!(r.remaining(), 0);
@@ -3157,7 +4399,7 @@ mod tests {
         write_varint(&mut body, STAT_DROPPED);
         write_varint(&mut body, ITEM_AT_THE_SEAM);
         write_varint(&mut body, 8);
-        write_varint(&mut body, 6);
+        write_varint(&mut body, STAT_KILLED);
         write_varint(&mut body, 40);
         write_varint(&mut body, 9);
 
@@ -3170,12 +4412,12 @@ mod tests {
         );
         assert_eq!(
             (r.varint(), r.varint(), r.varint()),
-            (Some(5), Some(ITEM_AT_THE_SEAM + 1), Some(8))
+            (Some(5), Some(ITEM_AT_THE_SEAM_NATIVE), Some(8))
         );
         assert_eq!(
             (r.varint(), r.varint(), r.varint()),
             (Some(6), Some(40), Some(9)),
-            "entity types are identity between these versions"
+            "an entity type below the seam keeps its id"
         );
     }
 
@@ -3240,7 +4482,7 @@ mod tests {
     #[test]
     fn a_hashed_stack_moves_its_ids_backwards() {
         let mut body = vec![1];
-        write_varint(&mut body, ITEM_AT_THE_SEAM + 1);
+        write_varint(&mut body, ITEM_AT_THE_SEAM_NATIVE);
         write_varint(&mut body, 2);
         write_varint(&mut body, 1);
         write_varint(&mut body, COMPONENT_AT_THE_SEAM + 1);
@@ -3289,9 +4531,9 @@ mod tests {
 
     #[test]
     fn a_775_only_item_empties_the_desync_check_rather_than_the_frame() {
-        const GOLDEN_DANDELION: i32 = 230;
+        const GOLDEN_DANDELION: i32 = 257;
         assert_eq!(
-            Remap::from_native().map(IdSpace::Item, GOLDEN_DANDELION),
+            ids().from_native.map(IdSpace::Item, GOLDEN_DANDELION),
             None,
             "775 inserted this one, so 774 has nothing to call it"
         );
@@ -3325,7 +4567,7 @@ mod tests {
     fn a_creative_slot_moves_its_item_and_copies_delimited_payloads() {
         let mut body = 9u16.to_be_bytes().to_vec();
         write_varint(&mut body, 1);
-        write_varint(&mut body, ITEM_AT_THE_SEAM + 1);
+        write_varint(&mut body, ITEM_AT_THE_SEAM_NATIVE);
         write_varint(&mut body, 1);
         write_varint(&mut body, 0);
         write_varint(&mut body, COMPONENT_AT_THE_SEAM + 1);
@@ -3394,7 +4636,7 @@ mod tests {
             2,
             0,
             1,
-            ITEM_AT_THE_SEAM + 1,
+            ITEM_AT_THE_SEAM_NATIVE,
             3,
             0,
             1,
@@ -3413,7 +4655,7 @@ mod tests {
     fn a_creative_shulker_box_goes_out_in_774s_layout() {
         let (native, wire) = container_ids();
         let mut payload = Vec::new();
-        for v in [1, 1, ITEM_AT_THE_SEAM + 1, 3, 0, 0] {
+        for v in [1, 1, ITEM_AT_THE_SEAM_NATIVE, 3, 0, 0] {
             write_varint(&mut payload, v);
         }
         let mut body = 9u16.to_be_bytes().to_vec();
@@ -3436,10 +4678,10 @@ mod tests {
     }
 
     #[test]
-    fn a_creative_slot_of_a_775_only_item_is_cleared() {
+    fn a_creative_slot_of_a_26_2_only_item_is_cleared() {
         let mut body = 9u16.to_be_bytes().to_vec();
         write_varint(&mut body, 1);
-        write_varint(&mut body, 230);
+        write_varint(&mut body, 26);
         write_varint(&mut body, 0);
         write_varint(&mut body, 0);
 
@@ -3448,5 +4690,669 @@ mod tests {
         assert_eq!(r.take(2), Some(&9u16.to_be_bytes()[..]));
         assert_eq!(r.varint(), Some(0), "an empty stack is a zero count");
         assert_eq!(r.remaining(), 0);
+    }
+
+    fn string(out: &mut Vec<u8>, s: &str) {
+        write_varint(out, s.len() as i32);
+        out.extend_from_slice(s.as_bytes());
+    }
+
+    fn profile_bytes() -> Vec<u8> {
+        let mut body = 7u128.to_be_bytes().to_vec();
+        string(&mut body, "Steve");
+        write_varint(&mut body, 1);
+        string(&mut body, "textures");
+        string(&mut body, "e30=");
+        body.push(1);
+        string(&mut body, "c2ln");
+        body
+    }
+
+    #[test]
+    fn login_finished_gains_a_nil_session_id() {
+        let body = profile_bytes();
+        let out = login_finished(ids775(), &body).expect("a whole profile");
+        assert_eq!(&out[..body.len()], &body[..]);
+        assert_eq!(&out[body.len()..], &[0u8; 16]);
+
+        let mut cursor = std::io::Cursor::new(&out[..]);
+        let packet =
+            azalea_protocol::packets::login::ClientboundLoginFinished::azalea_read(&mut cursor)
+                .expect("decodes as 26.2");
+        assert_eq!(cursor.position() as usize, out.len());
+        assert!(packet.session_id.is_nil());
+        assert_eq!(packet.game_profile.name, "Steve");
+
+        assert!(login_finished(ids775(), &out).is_none());
+    }
+
+    #[test]
+    fn the_login_phase_rewrites_login_finished() {
+        let id = PacketTable::native()
+            .id(Phase::Login, Direction::Clientbound, "login_finished")
+            .expect("26.2 has login_finished");
+        let body = profile_bytes();
+        for h in [hop(), hop775()] {
+            let out = h.inbound(ConnectionProtocol::Login, framed(id, &body));
+            let mut want = framed(id, &body).into_vec();
+            want.extend_from_slice(&[0; 16]);
+            assert_eq!(&*out, &want[..]);
+        }
+    }
+
+    fn login_head() -> Vec<u8> {
+        let mut body = 42i32.to_be_bytes().to_vec();
+        body.push(0);
+        write_varint(&mut body, 1);
+        string(&mut body, "minecraft:overworld");
+        write_varint(&mut body, 20);
+        write_varint(&mut body, 10);
+        write_varint(&mut body, 8);
+        body.extend_from_slice(&[0, 1, 0]);
+        write_varint(&mut body, 0);
+        string(&mut body, "minecraft:overworld");
+        body.extend_from_slice(&123i64.to_be_bytes());
+        body.push(0);
+        body.push(0xFF);
+        body.extend_from_slice(&[0, 0]);
+        body.push(1);
+        string(&mut body, "minecraft:the_nether");
+        body.extend_from_slice(&5u64.to_be_bytes());
+        write_varint(&mut body, 0);
+        write_varint(&mut body, 63);
+        body
+    }
+
+    #[test]
+    fn login_gains_online_mode_before_secure_chat() {
+        let head = login_head();
+        let mut body = head.clone();
+        body.push(1);
+        let out = login(ids775(), &body).expect("a whole login");
+        assert_eq!(&out[..head.len()], &head[..]);
+        assert_eq!(&out[head.len()..], &[ONLINE_MODE, 1]);
+
+        let mut cursor = std::io::Cursor::new(&out[..]);
+        let packet =
+            azalea_protocol::packets::game::c_login::ClientboundLogin::azalea_read(&mut cursor)
+                .expect("decodes as 26.2");
+        assert_eq!(cursor.position() as usize, out.len());
+        assert!(!packet.online_mode);
+        assert!(
+            packet.enforces_secure_chat,
+            "the old last byte is still last"
+        );
+        assert_eq!(packet.common.sea_level, 63);
+
+        assert!(login(ids775(), &head).is_none());
+        let mut long = body.clone();
+        long.push(0);
+        assert!(login(ids775(), &long).is_none());
+    }
+
+    struct Team {
+        name: Vec<u8>,
+        display: Vec<u8>,
+        prefix: Vec<u8>,
+        suffix: Vec<u8>,
+        players: Vec<u8>,
+    }
+
+    fn team() -> Team {
+        let text = |out: &mut Vec<u8>, extra: &[u8], value: &[u8]| {
+            out.push(10);
+            out.extend_from_slice(extra);
+            out.extend_from_slice(&[8, 0, 4]);
+            out.extend_from_slice(b"text");
+            out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            out.extend_from_slice(value);
+            out.push(0);
+        };
+        let mut name = Vec::new();
+        string(&mut name, "a818536d2b44");
+        let mut display = Vec::new();
+        text(
+            &mut display,
+            &[
+                8, 0, 5, b'c', b'o', b'l', b'o', b'r', 0, 5, b'w', b'h', b'i', b't', b'e',
+            ],
+            b"a818536d2b44",
+        );
+        let mut prefix = Vec::new();
+        text(&mut prefix, &[], "\u{a7}a[VIP\u{a7}6+\u{a7}a] ".as_bytes());
+        let mut suffix = Vec::new();
+        text(&mut suffix, &[], b"");
+        let mut players = Vec::new();
+        write_varint(&mut players, 3);
+        for player in ["HamaKiller", "Zxy1oN", "tamalesfam"] {
+            string(&mut players, player);
+        }
+        Team {
+            name,
+            display,
+            prefix,
+            suffix,
+            players,
+        }
+    }
+
+    fn team_775(t: &Team, method: u8, color: i32) -> Vec<u8> {
+        let mut body = t.name.clone();
+        body.push(method);
+        body.extend_from_slice(&t.display);
+        body.extend_from_slice(&[3, 0, 1]);
+        write_varint(&mut body, color);
+        body.extend_from_slice(&t.prefix);
+        body.extend_from_slice(&t.suffix);
+        body.extend_from_slice(&t.players);
+        body
+    }
+
+    #[test]
+    fn a_team_is_reordered_and_its_colour_becomes_optional() {
+        let t = team();
+        let out = set_player_team(ids775(), &team_775(&t, 0, 10)).expect("a whole team");
+        let mut want = t.name.clone();
+        want.push(0);
+        want.extend_from_slice(&t.display);
+        want.extend_from_slice(&t.prefix);
+        want.extend_from_slice(&t.suffix);
+        want.extend_from_slice(&[0, 1, 1, 10, 3]);
+        want.extend_from_slice(&t.players);
+        assert_eq!(&*out, &want[..]);
+
+        let mut cursor = std::io::Cursor::new(&out[..]);
+        let packet = azalea_protocol::packets::game::c_set_player_team::ClientboundSetPlayerTeam::azalea_read(
+            &mut cursor,
+        )
+        .expect("decodes as 26.2");
+        assert_eq!(cursor.position() as usize, out.len());
+        let azalea_protocol::packets::game::c_set_player_team::Method::Add((parameters, players)) =
+            packet.method
+        else {
+            panic!("method 0 is add");
+        };
+        assert_eq!(format!("{:?}", parameters.color), "Some(Green)");
+        assert_eq!(parameters.options, 3);
+        assert_eq!(players.len(), 3);
+    }
+
+    #[test]
+    fn a_team_without_a_colour_and_the_other_methods() {
+        let t = team();
+        let mut change = team_775(&t, 2, 21);
+        change.truncate(change.len() - t.players.len());
+        let out = set_player_team(ids775(), &change).expect("a whole change");
+        let mut want = t.name.clone();
+        want.push(2);
+        want.extend_from_slice(&t.display);
+        want.extend_from_slice(&t.prefix);
+        want.extend_from_slice(&t.suffix);
+        want.extend_from_slice(&[0, 1, 0, 3]);
+        assert_eq!(&*out, &want[..]);
+
+        let mut join = t.name.clone();
+        join.push(3);
+        join.extend_from_slice(&t.players);
+        assert_eq!(set_player_team(ids775(), &join).as_deref(), Some(&join[..]));
+    }
+
+    #[test]
+    fn a_spectator_action_goes_out_as_spectate_entity() {
+        let id = native_serverbound("spectator_action");
+        let wire = PacketTable::v26_1_1()
+            .id(Phase::Game, Direction::Serverbound, "spectate_entity")
+            .expect("26.1.1 has spectate_entity");
+
+        let out = hop775().outbound(ConnectionProtocol::Game, framed(id, &[43]));
+        assert_eq!(&*out, &framed(wire, &[42])[..], "entity 42, sent as itself");
+
+        let mut big = Vec::new();
+        write_varint(&mut big, 300 + 1);
+        let mut want = Vec::new();
+        write_varint(&mut want, 300);
+        let out = hop775().outbound(ConnectionProtocol::Game, framed(id, &big));
+        assert_eq!(&*out, &framed(wire, &want)[..]);
+
+        assert!(
+            hop775()
+                .outbound(ConnectionProtocol::Game, framed(id, &[0]))
+                .is_empty()
+        );
+        assert!(
+            hop()
+                .outbound(ConnectionProtocol::Game, framed(id, &[43]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn attributes_move_and_their_modifiers_are_copied() {
+        let mut body = Vec::new();
+        write_varint(&mut body, 5);
+        write_varint(&mut body, 2);
+        write_varint(&mut body, 0);
+        body.extend_from_slice(&2f64.to_be_bytes());
+        write_varint(&mut body, 1);
+        string(&mut body, "minecraft:test");
+        body.extend_from_slice(&1.5f64.to_be_bytes());
+        write_varint(&mut body, 2);
+        write_varint(&mut body, 14);
+        body.extend_from_slice(&0.08f64.to_be_bytes());
+        write_varint(&mut body, 0);
+
+        let mut want = body.clone();
+        want[2] = 1;
+        let gravity_at = want.len() - 1 - 8 - 1;
+        assert_eq!(want[gravity_at], 14);
+        want[gravity_at] = 18;
+
+        for ids in [ids(), ids775()] {
+            assert_eq!(update_attributes(ids, &body).as_deref(), Some(&want[..]));
+        }
+        assert!(update_attributes(ids775(), &body[..body.len() - 1]).is_none());
+    }
+
+    #[test]
+    fn a_block_entity_update_moves_its_type_and_a_beds_goes_nowhere() {
+        use azalea_registry::builtin::BlockEntityKind;
+        assert!(!BlockEntityKind::is_valid_id(NO_BLOCK_ENTITY_TYPE as u32));
+        assert!(BlockEntityKind::is_valid_id(
+            NO_BLOCK_ENTITY_TYPE as u32 - 1
+        ));
+
+        let update = |kind: i32| {
+            let mut body = 0x0123_4567_89AB_CDEFu64.to_be_bytes().to_vec();
+            write_varint(&mut body, kind);
+            body.extend_from_slice(&[10, 0]);
+            body
+        };
+        let conduit = BlockEntityKind::Conduit.to_u32() as i32;
+        for ids in [ids(), ids775()] {
+            assert_eq!(
+                block_entity_data(ids, &update(26)).as_deref(),
+                Some(&update(conduit)[..])
+            );
+            assert_eq!(
+                block_entity_data(ids, &update(25)).as_deref(),
+                Some(&update(NO_BLOCK_ENTITY_TYPE)[..])
+            );
+        }
+    }
+
+    #[test]
+    fn a_775_section_keeps_its_length_and_moves_its_states() {
+        let mut one = vec![0x01, 0x00, 0x00, 0x02];
+        one.extend_from_slice(&container_bytes(0, &[24_687], &[]));
+        one.extend_from_slice(&empty_biomes());
+        let out = sections(ids775(), &one).expect("a whole section");
+        assert_eq!(
+            out.len(),
+            one.len(),
+            "no fluid count added; both ids take three bytes"
+        );
+        let mut r = Reader::new(&out);
+        assert_eq!(
+            r.take(4),
+            Some(&[0x01, 0x00, 0x00, 0x02][..]),
+            "both counts as sent"
+        );
+        assert_eq!(r.u8(), Some(0));
+        assert_eq!(r.varint(), Some(27_160));
+    }
+
+    #[test]
+    fn chunk_block_entities_move_and_beds_are_left_out() {
+        let entry = |kind: i32, tag: &[u8]| {
+            let mut out = vec![0x12, 0x00, 0x40];
+            write_varint(&mut out, kind);
+            out.extend_from_slice(tag);
+            out
+        };
+        let empty_compound = [10u8, 0];
+        let no_tag = [0u8];
+        let mut wire = Vec::new();
+        write_varint(&mut wire, 3);
+        wire.extend_from_slice(&entry(26, &empty_compound));
+        wire.extend_from_slice(&entry(25, &empty_compound));
+        wire.extend_from_slice(&entry(27, &no_tag));
+        let light = [0xAA, 0xBB];
+        wire.extend_from_slice(&light);
+
+        for ids in [ids(), ids775()] {
+            let mut r = Reader::new(&wire);
+            let mut out = Vec::new();
+            chunk_block_entities(ids, &mut r, &mut out).expect("a whole list");
+            assert_eq!(r.rest(), light, "the light is not walked");
+
+            let mut want = Vec::new();
+            write_varint(&mut want, 2);
+            want.extend_from_slice(&entry(25, &empty_compound));
+            want.extend_from_slice(&entry(26, &no_tag));
+            assert_eq!(out, want);
+        }
+    }
+
+    #[test]
+    fn an_entity_type_past_the_seam_moves() {
+        let out = add_entity(ids775(), &add_entity_bytes(130, 77)).expect("a whole packet");
+        assert_eq!(
+            &*out,
+            &add_entity_bytes(131, 77)[..],
+            "the data is not a state here"
+        );
+
+        let falling = EntityKind::FallingBlock.to_u32() as i32;
+        let out = add_entity(ids775(), &add_entity_bytes(falling, 24_687)).unwrap();
+        assert_eq!(&*out, &add_entity_bytes(falling, 27_160)[..]);
+    }
+
+    #[test]
+    fn a_kill_stat_moves_its_entity_type() {
+        let mut body = Vec::new();
+        write_varint(&mut body, 1);
+        write_varint(&mut body, STAT_KILLED_BY);
+        write_varint(&mut body, 130);
+        write_varint(&mut body, 2);
+        let out = award_stats(ids775(), &body).unwrap();
+        let mut r = Reader::new(&out);
+        assert_eq!(r.count(), Some(1));
+        assert_eq!(
+            (r.varint(), r.varint(), r.varint()),
+            (Some(STAT_KILLED_BY), Some(131), Some(2))
+        );
+    }
+
+    #[test]
+    fn a_775_container_keeps_its_layout_and_moves_its_ids() {
+        let container = DataComponentKind::Container.to_u32() as i32;
+        let stack = |item: i32| {
+            let mut body = Vec::new();
+            for v in [1, 1, 1, 0, container, 2, 1, item, 3, 0, 0, 0] {
+                write_varint(&mut body, v);
+            }
+            body
+        };
+        let wire = stack(26);
+        let out = translated(|r, out| item_stack(ids775(), r, out), &wire);
+        assert_eq!(out, stack(53));
+
+        let mut cursor = std::io::Cursor::new(&out[..]);
+        azalea_inventory::ItemStack::azalea_read(&mut cursor).expect("decodes as 26.2");
+        assert_eq!(cursor.position() as usize, out.len());
+    }
+
+    #[test]
+    fn a_775_slot_display_keeps_its_type_and_moves_its_ids() {
+        let mut wire = Vec::new();
+        for v in [SLOT_DISPLAY_ONLY_WITH_COMPONENT, SLOT_DISPLAY_ITEM, 26, 78] {
+            write_varint(&mut wire, v);
+        }
+        let out = translated(|r, out| slot_display(ids775(), r, out), &wire);
+        let mut want = Vec::new();
+        for v in [SLOT_DISPLAY_ONLY_WITH_COMPONENT, SLOT_DISPLAY_ITEM, 53, 79] {
+            write_varint(&mut want, v);
+        }
+        assert_eq!(out, want);
+    }
+
+    #[test]
+    fn an_attribute_modifier_component_moves_its_attribute() {
+        use azalea_inventory::components::{
+            AttributeModifier, AttributeModifierDisplay, AttributeModifiers,
+            AttributeModifiersEntry, EquipmentSlotGroup,
+        };
+        use azalea_registry::builtin::Attribute;
+
+        let wire_value = AttributeModifiers {
+            modifiers: vec![AttributeModifiersEntry {
+                kind: Attribute::from_u32(0).unwrap(),
+                modifier: AttributeModifier {
+                    id: "minecraft:test".into(),
+                    amount: 2.0,
+                    operation: azalea_core::attribute_modifier_operation::AttributeModifierOperation::AddValue,
+                },
+                slot: EquipmentSlotGroup::Any,
+                display: AttributeModifierDisplay::Default,
+            }],
+        };
+        let kind = DataComponentKind::AttributeModifiers.to_u32() as i32;
+        let mut body = Vec::new();
+        for v in [1, 1, 1, 0, kind] {
+            write_varint(&mut body, v);
+        }
+        wire_value.azalea_write(&mut body).unwrap();
+
+        let out = translated(|r, out| item_stack(ids775(), r, out), &body);
+        let mut cursor = std::io::Cursor::new(&out[..]);
+        let stack = azalea_inventory::ItemStack::azalea_read(&mut cursor).expect("decodes as 26.2");
+        assert_eq!(cursor.position() as usize, out.len());
+        let azalea_inventory::ItemStack::Present(data) = stack else {
+            panic!("a present stack");
+        };
+        let got = data
+            .component_patch
+            .get::<AttributeModifiers>()
+            .expect("kept");
+        assert_eq!(got.modifiers[0].kind, Attribute::Armor);
+        assert_eq!(got.modifiers[0].modifier.amount, 2.0);
+    }
+
+    fn cube_data(entity: i32, size_at: u8) -> Box<[u8]> {
+        let mut body = Vec::new();
+        write_varint(&mut body, entity);
+        body.extend_from_slice(&[0, 0, 0x01]);
+        body.push(size_at);
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 3);
+        body.push(0xFF);
+        framed(native_id(Direction::Clientbound, "set_entity_data"), &body)
+    }
+
+    #[test]
+    fn a_slimes_size_moves_past_ageable_mobs_fields() {
+        use azalea::connection::PacketTranslator as _;
+        let mut t = Translator::for_protocol(775).expect("775 has a hop");
+        let add_entity = native_id(Direction::Clientbound, "add_entity");
+        let slime = EntityKind::Slime.to_u32() as i32;
+        let creeper = EntityKind::Creeper.to_u32() as i32;
+
+        let _ = t.inbound(
+            ConnectionProtocol::Game,
+            framed(add_entity, &add_entity_bytes(slime, 0)),
+        );
+        assert_eq!(
+            &*t.inbound(ConnectionProtocol::Game, cube_data(11, 16)),
+            &*cube_data(11, 18),
+            "the size is where 26.2's Slime reads it"
+        );
+        assert_eq!(
+            &*t.inbound(ConnectionProtocol::Game, cube_data(11, 18)),
+            &*cube_data(11, 20),
+            "anything past 16 moves too"
+        );
+
+        let mut creeper_spawn = add_entity_bytes(creeper, 0);
+        creeper_spawn[0] = 12;
+        let _ = t.inbound(ConnectionProtocol::Game, framed(add_entity, &creeper_spawn));
+        assert_eq!(
+            &*t.inbound(ConnectionProtocol::Game, cube_data(12, 16)),
+            &*cube_data(12, 16)
+        );
+
+        let mut removal = Vec::new();
+        write_varint(&mut removal, 1);
+        write_varint(&mut removal, 11);
+        let _ = t.inbound(
+            ConnectionProtocol::Game,
+            framed(
+                native_id(Direction::Clientbound, "remove_entities"),
+                &removal,
+            ),
+        );
+        assert_eq!(
+            &*t.inbound(ConnectionProtocol::Game, cube_data(11, 16)),
+            &*cube_data(11, 16)
+        );
+    }
+
+    #[test]
+    fn a_short_metadata_frame_is_left_alone() {
+        let runs = [Run {
+            from: 16,
+            offset: 2,
+        }];
+        assert!(shifted_metadata(&[0x0B, 16], &runs).is_none());
+        let mut body = vec![0x0B, 16];
+        write_varint(&mut body, 1);
+        assert!(
+            shifted_metadata(&body, &runs).is_none(),
+            "an int with no value"
+        );
+    }
+
+    fn byte_field(index: u8, value: u8) -> Vec<u8> {
+        let mut body = Vec::new();
+        write_varint(&mut body, 11);
+        body.extend_from_slice(&[index, 0, value]);
+        body.push(0xFF);
+        body
+    }
+
+    #[test]
+    fn a_774_sheeps_colour_moves_past_age_locked() {
+        use azalea::connection::PacketTranslator as _;
+        let wire = PacketTable::v1_21_11();
+        let wire_id = |name| wire.id(Phase::Game, Direction::Clientbound, name).unwrap();
+        let sheep_native = EntityKind::Sheep.to_u32() as i32;
+        let sheep_774 = ids()
+            .from_native
+            .map(IdSpace::EntityType, sheep_native)
+            .expect("774 has sheep");
+        let mut t = Translator::for_protocol(774).expect("774 has a hop");
+
+        let _ = t.inbound(
+            ConnectionProtocol::Game,
+            framed(wire_id("add_entity"), &add_entity_bytes(sheep_774, 0)),
+        );
+        let set_entity_data = native_id(Direction::Clientbound, "set_entity_data");
+        assert_eq!(
+            &*t.inbound(
+                ConnectionProtocol::Game,
+                framed(wire_id("set_entity_data"), &byte_field(17, 14))
+            ),
+            &*framed(set_entity_data, &byte_field(18, 14)),
+            "red wool, where 26.2's Sheep reads it"
+        );
+        assert_eq!(
+            &*t.inbound(
+                ConnectionProtocol::Game,
+                framed(wire_id("set_entity_data"), &byte_field(0, 1))
+            ),
+            &*framed(set_entity_data, &byte_field(0, 1)),
+            "Entity's own flags do not move"
+        );
+
+        let zombie_774 = ids()
+            .from_native
+            .map(IdSpace::EntityType, EntityKind::Zombie.to_u32() as i32)
+            .unwrap();
+        let _ = t.inbound(
+            ConnectionProtocol::Game,
+            framed(wire_id("add_entity"), &add_entity_bytes(zombie_774, 0)),
+        );
+        assert_eq!(
+            &*t.inbound(
+                ConnectionProtocol::Game,
+                framed(wire_id("set_entity_data"), &byte_field(17, 1))
+            ),
+            &*framed(set_entity_data, &byte_field(17, 1))
+        );
+    }
+
+    #[test]
+    fn a_774_slimes_size_moves_two() {
+        use azalea::connection::PacketTranslator as _;
+        let wire = PacketTable::v1_21_11();
+        let wire_id = |name| wire.id(Phase::Game, Direction::Clientbound, name).unwrap();
+        let slime_774 = ids()
+            .from_native
+            .map(IdSpace::EntityType, EntityKind::Slime.to_u32() as i32)
+            .unwrap();
+        let mut t = Translator::for_protocol(774).unwrap();
+        let _ = t.inbound(
+            ConnectionProtocol::Game,
+            framed(wire_id("add_entity"), &add_entity_bytes(slime_774, 0)),
+        );
+        let mut body = Vec::new();
+        write_varint(&mut body, 11);
+        body.push(16);
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 3);
+        body.push(0xFF);
+        assert_eq!(
+            &*t.inbound(
+                ConnectionProtocol::Game,
+                framed(wire_id("set_entity_data"), &body)
+            ),
+            &*cube_data(11, 18)
+        );
+    }
+
+    fn tags_body(registries: &[(&str, &str, Vec<i32>)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        write_varint(&mut body, registries.len() as i32);
+        for (registry, tag, entries) in registries {
+            string(&mut body, registry);
+            write_varint(&mut body, 1);
+            string(&mut body, tag);
+            write_varint(&mut body, entries.len() as i32);
+            for id in entries {
+                write_varint(&mut body, *id);
+            }
+        }
+        body
+    }
+
+    #[test]
+    fn tags_move_with_their_registries() {
+        let wire = tags_body(&[
+            ("minecraft:item", "minecraft:logs", vec![1, 26]),
+            ("minecraft:worldgen/biome", "minecraft:is_ocean", vec![26]),
+            (
+                "minecraft:block_entity_type",
+                "minecraft:beds",
+                vec![25, 26],
+            ),
+        ]);
+        let want = tags_body(&[
+            ("minecraft:item", "minecraft:logs", vec![1, 53]),
+            ("minecraft:worldgen/biome", "minecraft:is_ocean", vec![26]),
+            ("minecraft:block_entity_type", "minecraft:beds", vec![25]),
+        ]);
+        assert_eq!(update_tags(ids775(), &wire).as_deref(), Some(&want[..]));
+        assert!(update_tags(ids775(), &wire[..wire.len() - 1]).is_none());
+    }
+
+    #[test]
+    fn configuration_tags_are_rewritten_in_place() {
+        let id = PacketTable::native()
+            .id(Phase::Configuration, Direction::Clientbound, "update_tags")
+            .expect("26.2 has update_tags");
+        let wire = tags_body(&[("minecraft:item", "minecraft:logs", vec![26])]);
+        let want = tags_body(&[("minecraft:item", "minecraft:logs", vec![53])]);
+        let out = hop775().inbound(ConnectionProtocol::Configuration, framed(id, &wire));
+        assert_eq!(&*out, &framed(id, &want)[..]);
+    }
+
+    #[test]
+    fn a_registry_name_finds_its_space() {
+        assert_eq!(IdSpace::of_registry("item"), Some(IdSpace::Item));
+        assert_eq!(
+            IdSpace::of_registry("entity_type"),
+            Some(IdSpace::EntityType)
+        );
+        assert_eq!(IdSpace::of_registry("worldgen/biome"), None);
+        assert_eq!(IdSpace::of_registry("block_state"), None, "not a registry");
     }
 }

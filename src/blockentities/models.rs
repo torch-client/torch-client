@@ -112,114 +112,6 @@ pub fn conduit_eye() -> LayerDef {
     LayerDef::create(mesh, 16, 16)
 }
 
-pub fn standing_sign() -> LayerDef {
-    sign_layer(true)
-}
-
-pub fn wall_sign() -> LayerDef {
-    sign_layer(false)
-}
-
-fn sign_layer(standing: bool) -> LayerDef {
-    let mut mesh = MeshDef::new();
-    {
-        let root = mesh.root();
-        root.child(
-            "sign",
-            CubeList::new()
-                .tex_offs(0, 0)
-                .add_box(-12.0, -14.0, -1.0, 24.0, 12.0, 2.0),
-            PartPose::ZERO,
-        );
-        if standing {
-            root.child(
-                "stick",
-                CubeList::new()
-                    .tex_offs(0, 14)
-                    .add_box(-1.0, -2.0, -1.0, 2.0, 14.0, 2.0),
-                PartPose::ZERO,
-            );
-        }
-    }
-    LayerDef::create(mesh, 64, 32)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum HangingAttachment {
-    Ceiling,
-    CeilingMiddle,
-    Wall,
-}
-
-pub fn hanging_sign(attachment: HangingAttachment) -> LayerDef {
-    const CHAIN_ROT: f32 = 0.785_398_2;
-
-    let mut mesh = MeshDef::new();
-    {
-        let root = mesh.root();
-        root.child(
-            "board",
-            CubeList::new()
-                .tex_offs(0, 12)
-                .add_box(-7.0, 0.0, -1.0, 14.0, 10.0, 2.0),
-            PartPose::ZERO,
-        );
-        if attachment == HangingAttachment::Wall {
-            root.child(
-                "plank",
-                CubeList::new()
-                    .tex_offs(0, 0)
-                    .add_box(-8.0, -6.0, -2.0, 16.0, 2.0, 4.0),
-                PartPose::ZERO,
-            );
-        }
-        if matches!(
-            attachment,
-            HangingAttachment::Wall | HangingAttachment::Ceiling
-        ) {
-            let chains = root.child("normalChains", CubeList::new(), PartPose::ZERO);
-            chains.child(
-                "chainL1",
-                CubeList::new()
-                    .tex_offs(0, 6)
-                    .add_box(-1.5, 0.0, 0.0, 3.0, 6.0, 0.0),
-                PartPose::offset_rotation(-5.0, -6.0, 0.0, 0.0, -CHAIN_ROT, 0.0),
-            );
-            chains.child(
-                "chainL2",
-                CubeList::new()
-                    .tex_offs(6, 6)
-                    .add_box(-1.5, 0.0, 0.0, 3.0, 6.0, 0.0),
-                PartPose::offset_rotation(-5.0, -6.0, 0.0, 0.0, CHAIN_ROT, 0.0),
-            );
-            chains.child(
-                "chainR1",
-                CubeList::new()
-                    .tex_offs(0, 6)
-                    .add_box(-1.5, 0.0, 0.0, 3.0, 6.0, 0.0),
-                PartPose::offset_rotation(5.0, -6.0, 0.0, 0.0, -CHAIN_ROT, 0.0),
-            );
-            chains.child(
-                "chainR2",
-                CubeList::new()
-                    .tex_offs(6, 6)
-                    .add_box(-1.5, 0.0, 0.0, 3.0, 6.0, 0.0),
-                PartPose::offset_rotation(5.0, -6.0, 0.0, 0.0, CHAIN_ROT, 0.0),
-            );
-        }
-        if attachment == HangingAttachment::CeilingMiddle {
-            root.child(
-                "vChains",
-                CubeList::new()
-                    .tex_offs(14, 6)
-                    .add_box(-6.0, -6.0, 0.0, 12.0, 6.0, 0.0),
-                PartPose::ZERO,
-            );
-        }
-    }
-    LayerDef::create(mesh, 64, 32)
-}
-
 pub fn banner_body_standing() -> LayerDef {
     banner_body(true)
 }
@@ -278,62 +170,6 @@ fn banner_flag(standing: bool) -> LayerDef {
                 if standing { -44.0 } else { -20.5 },
                 if standing { 0.0 } else { 10.5 },
             ),
-        );
-    }
-    LayerDef::create(mesh, 64, 64)
-}
-
-pub fn bed_half(head: bool) -> LayerDef {
-    use Direction::{Down, East, North, South, Up, West};
-    let body_face = if head { Down } else { Up };
-    let visible_body = Faces::of(&[body_face, North, South, West, East]);
-    let visible_legs = Faces::of(&[Up, North, South, West, East]);
-    let (main_v, left_v, right_v, leg_z, left_roll, right_roll) = if head {
-        (0, 6, 18, 0.0, FRAC_PI_2, PI)
-    } else {
-        (22, 0, 12, -16.0, 0.0, 1.5 * PI)
-    };
-    let mut mesh = MeshDef::new();
-    {
-        let root = mesh.root();
-        root.child(
-            "main",
-            CubeList::new().tex_offs(0, main_v).add_box_faces(
-                0.0,
-                0.0,
-                0.0,
-                16.0,
-                16.0,
-                6.0,
-                visible_body,
-            ),
-            PartPose::ZERO,
-        );
-        root.child(
-            "left_leg",
-            CubeList::new().tex_offs(50, left_v).add_box_faces(
-                0.0,
-                6.0,
-                leg_z,
-                3.0,
-                3.0,
-                3.0,
-                visible_legs,
-            ),
-            PartPose::rotation(FRAC_PI_2, 0.0, left_roll),
-        );
-        root.child(
-            "right_leg",
-            CubeList::new().tex_offs(50, right_v).add_box_faces(
-                -16.0,
-                6.0,
-                leg_z,
-                3.0,
-                3.0,
-                3.0,
-                visible_legs,
-            ),
-            PartPose::rotation(FRAC_PI_2, 0.0, right_roll),
         );
     }
     LayerDef::create(mesh, 64, 64)
@@ -860,30 +696,6 @@ mod tests {
             let bottom = baked.parts[baked.id("bottom")].mesh.as_ref().unwrap();
             assert_eq!(bottom.count_vertices(), 5 * 4);
         }
-    }
-
-    #[test]
-    fn only_the_standing_sign_has_a_post() {
-        assert!(bake(&standing_sign()).find("stick").is_some());
-        assert!(bake(&wall_sign()).find("stick").is_none());
-    }
-
-    #[test]
-    fn the_hanging_sign_layers_carry_their_own_hardware() {
-        let wall = bake(&hanging_sign(HangingAttachment::Wall));
-        assert!(wall.find("plank").is_some());
-        assert!(wall.find("chainL1").is_some());
-        assert!(wall.find("vChains").is_none());
-
-        let ceiling = bake(&hanging_sign(HangingAttachment::Ceiling));
-        assert!(ceiling.find("plank").is_none());
-        assert!(ceiling.find("chainR2").is_some());
-        assert!(ceiling.find("vChains").is_none());
-
-        let middle = bake(&hanging_sign(HangingAttachment::CeilingMiddle));
-        assert!(middle.find("plank").is_none());
-        assert!(middle.find("normalChains").is_none());
-        assert!(middle.find("vChains").is_some());
     }
 
     #[test]

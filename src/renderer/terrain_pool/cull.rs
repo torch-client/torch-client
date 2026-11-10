@@ -4,14 +4,12 @@ use std::sync::atomic::Ordering;
 
 use bevy::app::App;
 use bevy::asset::embedded_asset;
-use bevy::camera::primitives::Frustum;
-use bevy::ecs::query::{Has, QueryItem};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
+use bevy::ecs::query::Has;
+use bevy::math::primitives::ViewFrustum;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::diagnostic::RecordDiagnostics;
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-};
 use bevy::render::render_resource::binding_types::{
     storage_buffer_read_only_sized, storage_buffer_sized, uniform_buffer_sized,
 };
@@ -20,7 +18,7 @@ use bevy::render::render_resource::{
     BufferBinding, BufferDescriptor, BufferUsages, CachedComputePipelineId, ComputePassDescriptor,
     ComputePipelineDescriptor, PipelineCache, ShaderStages,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::view::ExtractedView;
 use bevy::render::{Render, RenderApp, RenderSystems};
 use bytemuck::{Pod, Zeroable};
@@ -192,6 +190,8 @@ fn fog_cull(fog: Option<&DistanceFog>, eye: Vec3) -> Option<[f32; 4]> {
     let FogFalloff::Linear { end, .. } = fog.falloff else {
         return None;
     };
+    let edge = fog.directional_light_color.to_linear().blue;
+    let end = if edge > 0.0 { edge.min(end) } else { end };
     (fog.color.alpha() >= 1.0 && end > 0.0).then_some([eye.x, eye.y, eye.z, end + FOG_CULL_MARGIN])
 }
 
@@ -609,9 +609,6 @@ impl CullBindGroup {
     }
 }
 
-#[derive(RenderLabel, Debug, Hash, PartialEq, Eq, Clone)]
-pub struct TerrainCullLabel;
-
 pub fn build(app: &mut App) {
     embedded_asset!(app, "cull.wgsl");
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -633,23 +630,10 @@ pub fn build(app: &mut App) {
             ),
         );
 
-    render_app
-        .add_render_graph_node::<ViewNodeRunner<TerrainCullNode>>(
-            bevy::core_pipeline::core_3d::graph::Core3d,
-            TerrainCullLabel,
-        )
-        .add_render_graph_edges(
-            bevy::core_pipeline::core_3d::graph::Core3d,
-            (
-                TerrainCullLabel,
-                bevy::core_pipeline::core_3d::graph::Node3d::StartMainPass,
-            ),
-        );
+    let cull = terrain_cull.before(Core3dSystems::MainPass);
     #[cfg(feature = "builtin_shaders")]
-    render_app.add_render_graph_edges(
-        bevy::core_pipeline::core_3d::graph::Core3d,
-        (TerrainCullLabel, bevy::pbr::graph::NodePbr::EarlyShadowPass),
-    );
+    let cull = cull.before(bevy::pbr::per_view_shadow_pass::<{ bevy::pbr::EARLY_SHADOW_PASS }>);
+    render_app.add_systems(Core3d, cull);
 }
 
 pub fn finish(app: &mut App) {
@@ -696,7 +680,7 @@ pub fn finish(app: &mut App) {
     let id = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("terrain_cull".into()),
         layout: vec![layout.clone()],
-        push_constant_ranges: vec![],
+        immediate_size: 0,
         shader,
         shader_defs: if cfg!(feature = "render_lod") {
             vec!["LOD_REAL_CUT".into()]
@@ -910,7 +894,7 @@ fn frustum_planes(view: &ExtractedView) -> [[f32; 4]; 6] {
 }
 
 fn planes_of(clip_from_world: &Mat4) -> [[f32; 4]; 6] {
-    let frustum = Frustum::from_clip_from_world(clip_from_world);
+    let frustum = ViewFrustum::from_clip_from_world(clip_from_world);
     let mut planes = [[0.0f32; 4]; 6];
     for i in 0..6 {
         planes[i] = frustum.half_spaces[i].normal_d().into();
@@ -959,65 +943,53 @@ pub fn prepare_cull_bind_group(
     bind_group.key = Some(key);
 }
 
-#[derive(Default)]
-pub struct TerrainCullNode;
-
-impl ViewNode for TerrainCullNode {
-    type ViewQuery = (Entity, &'static ExtractedView, Has<TerrainView>);
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (_entity, view, is_terrain): QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        if !is_terrain || !world.resource::<TerrainTier>().indirect {
-            return Ok(());
-        }
-        let terrain_views = world.resource::<TerrainViews>();
-        if !terrain_views.index.contains_key(&view.retained_view_entity) {
-            return Ok(());
-        }
-        let cull = world.resource::<CullBuffers>();
-        render_context.command_encoder().clear_buffer(
-            &cull.counts,
-            0,
-            Some(cull.regions as u64 * 4),
-        );
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(cull_pipeline) = world.get_resource::<CullPipeline>() else {
-            return Ok(());
-        };
-        let Some(pipeline) = pipeline_cache.get_compute_pipeline(cull_pipeline.id) else {
-            return Ok(());
-        };
-        let Some(bind_group) = world.resource::<CullBindGroup>().group.as_ref() else {
-            return Ok(());
-        };
-
-        let draw_end = world.resource::<TerrainPools>().draw_end.min(cull.slot_cap);
-        if draw_end == 0 {
-            return Ok(());
-        }
-        let workgroups = draw_end.div_ceil(64);
-        let recorder = render_context.diagnostic_recorder();
-        let mut pass =
-            render_context
-                .command_encoder()
-                .begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("terrain_cull"),
-                    timestamp_writes: None,
-                });
-        let span = recorder.pass_span(&mut pass, "terrain_cull");
-        pass.set_pipeline(pipeline);
-        for view_index in 0..terrain_views.count {
-            pass.set_bind_group(0, bind_group, &[view_index * (CULL_VIEW_STRIDE as u32)]);
-            pass.dispatch_workgroups(workgroups, 1, 1);
-        }
-        span.end(&mut pass);
-        Ok(())
+pub fn terrain_cull(
+    world: &World,
+    view: ViewQuery<(&ExtractedView, Has<TerrainView>)>,
+    mut ctx: RenderContext,
+) {
+    let (view, is_terrain) = view.into_inner();
+    if !is_terrain || !world.resource::<TerrainTier>().indirect {
+        return;
     }
+    let terrain_views = world.resource::<TerrainViews>();
+    if !terrain_views.index.contains_key(&view.retained_view_entity) {
+        return;
+    }
+    let cull = world.resource::<CullBuffers>();
+    ctx.command_encoder()
+        .clear_buffer(&cull.counts, 0, Some(cull.regions as u64 * 4));
+    let pipeline_cache = world.resource::<PipelineCache>();
+    let Some(cull_pipeline) = world.get_resource::<CullPipeline>() else {
+        return;
+    };
+    let Some(pipeline) = pipeline_cache.get_compute_pipeline(cull_pipeline.id) else {
+        return;
+    };
+    let Some(bind_group) = world.resource::<CullBindGroup>().group.as_ref() else {
+        return;
+    };
+
+    let draw_end = world.resource::<TerrainPools>().draw_end.min(cull.slot_cap);
+    if draw_end == 0 {
+        return;
+    }
+    let workgroups = draw_end.div_ceil(64);
+    let recorder = ctx.diagnostic_recorder();
+    let recorder = recorder.as_deref();
+    let mut pass = ctx
+        .command_encoder()
+        .begin_compute_pass(&ComputePassDescriptor {
+            label: Some("terrain_cull"),
+            timestamp_writes: None,
+        });
+    let span = recorder.pass_span(&mut pass, "terrain_cull");
+    pass.set_pipeline(pipeline);
+    for view_index in 0..terrain_views.count {
+        pass.set_bind_group(0, bind_group, &[view_index * (CULL_VIEW_STRIDE as u32)]);
+        pass.dispatch_workgroups(workgroups, 1, 1);
+    }
+    span.end(&mut pass);
 }
 
 #[cfg(all(test, feature = "shader_support"))]

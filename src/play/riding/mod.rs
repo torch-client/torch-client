@@ -17,9 +17,10 @@ use azalea::entity::metadata::{
     Sprinting, StaysStill, StriderBoostTime, Suffocating,
 };
 use azalea::entity::{
-    ActiveEffects, Attributes, EntityKindComponent, Jumping, LocalEntity, LookDirection,
-    OnClimbable, Physics, Position, view_vector,
+    ActiveEffects, Attributes, EntityKindComponent, HasClientLoaded, Jumping, LastSentPosition,
+    LocalEntity, LookDirection, OnClimbable, Physics, Position, view_vector,
 };
+use azalea::movement::LastSentLookDirection;
 use azalea::packet::game::SendGamePacketEvent;
 use azalea::physics::PhysicsSystems;
 use azalea::physics::client_movement::ClientMovementState;
@@ -40,6 +41,8 @@ use azalea_core::math;
 use azalea_core::position::Vec3;
 use azalea_core::tick::GameTick;
 use azalea_inventory::components::EquipmentSlot;
+use azalea_protocol::common::movements::MoveFlags;
+use azalea_protocol::packets::game::s_move_player_rot::ServerboundMovePlayerRot;
 use azalea_protocol::packets::game::s_move_vehicle::ServerboundMoveVehicle;
 use azalea_protocol::packets::game::s_paddle_boat::ServerboundPaddleBoat;
 use azalea_registry::builtin::{Attribute, EntityKind, ItemKind};
@@ -329,8 +332,54 @@ impl Plugin for RidingPlugin {
                 ride_post_travel
                     .after(PhysicsSystems)
                     .before(azalea::movement::send_position),
+                send_rider_rotation
+                    .after(ride_post_travel)
+                    .before(azalea::movement::send_position),
             ),
         );
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn send_rider_rotation(
+    mut local: Query<
+        (
+            Entity,
+            &Position,
+            &LookDirection,
+            &mut Physics,
+            &mut ClientMovementState,
+            &mut LastSentPosition,
+            &mut LastSentLookDirection,
+        ),
+        (With<LocalEntity>, With<HasClientLoaded>),
+    >,
+    mut commands: Commands,
+) {
+    if crate::client::tracking::local_vehicle_id().is_none() {
+        return;
+    }
+    for (entity, position, direction, mut physics, mut movement, mut last_pos, mut last_look) in
+        &mut local
+    {
+        let on_ground = physics.on_ground();
+        let horizontal_collision = physics.horizontal_collision;
+        commands.trigger(SendGamePacketEvent::new(
+            entity,
+            ServerboundMovePlayerRot {
+                look_direction: *direction,
+                flags: MoveFlags {
+                    on_ground,
+                    horizontal_collision,
+                },
+            },
+        ));
+        **last_pos = **position;
+        last_look.y_rot = direction.y_rot();
+        last_look.x_rot = direction.x_rot();
+        movement.position_remainder = 0;
+        movement.last_horizontal_collision = horizontal_collision;
+        physics.set_last_on_ground(on_ground);
     }
 }
 
@@ -609,6 +658,7 @@ fn ride_pre_travel(
         }
     }
 
+    physics.base_tick_powder_snow();
     let mut ctx = MoveCtx {
         mover_type: MoverType::Own,
         world: &world,

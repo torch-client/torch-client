@@ -1,5 +1,6 @@
 use bevy::math::Vec2;
 
+use super::bedrock::{self, Key};
 use crate::gui::hud_layout::{Area, ElementId, Transforms};
 use crate::gui::screens::HotbarGeom;
 
@@ -54,6 +55,8 @@ pub use crate::gui::TouchMovement as Movement;
 pub enum Control {
     Pad(Cell),
     Stick,
+    DPad,
+    Key(Key),
     Use,
     Hotbar(u8),
     Chat,
@@ -136,12 +139,20 @@ pub fn top_controls_bottom(vw: f32, vh: f32) -> f32 {
     close.y + close.h
 }
 
+pub fn movement_right(vw: f32, vh: f32) -> f32 {
+    let l = Layout::new(vw, vh, 0.0, Movement::Joystick);
+    let grid = l.pad.x + l.cell * 3.0;
+    let round = l.pad.x + l.cell * (1.5 + ROUND_CELL_OFFSET + 0.5);
+    grid.max(round)
+}
+
 pub struct Layout {
     pub cell: f32,
     pub pad: Vec2,
     pub movement: Movement,
     pub stick: Option<Stick>,
     pub jump_button: Option<Rect>,
+    pub bedrock: Option<bedrock::Layout>,
     pub round_cells: Option<[(Cell, Vec2); 4]>,
     pub use_button: Rect,
     pub close_button: Rect,
@@ -162,6 +173,7 @@ const STICK_TRAVEL_ROUND: f32 = STICK_RADIUS;
 const STICK_TRAVEL_PAD: f32 = 1.0;
 const STICK_DEADZONE: f32 = 0.3;
 const ROUND_CELL_OFFSET: f32 = 1.25;
+const DPAD_DOUBLE_TAP: f32 = 0.3;
 
 impl Layout {
     pub fn new(vw: f32, vh: f32, safe_inset: f32, movement: Movement) -> Self {
@@ -191,14 +203,42 @@ impl Layout {
                 radius: cell * 0.5,
                 travel: cell * STICK_TRAVEL_PAD,
             }),
+            Movement::Bedrock => None,
         };
 
-        let jump_button = movement.has_stick().then(|| Rect {
+        let has_stick = matches!(movement, Movement::Joystick | Movement::PadStick);
+        let jump_button = has_stick.then(|| Rect {
             x: use_button.x - cell * 1.2,
             y: bottom - cell,
             w: cell,
             h: cell,
         });
+
+        let bedrock = (movement == Movement::Bedrock).then(|| bedrock::Layout::new(vw, vh));
+        let close_button = match bedrock {
+            Some(b) => {
+                let (c, r) = b.close();
+                let half = r * 1.2;
+                Rect {
+                    x: c.x - half,
+                    y: c.y - half,
+                    w: half * 2.0,
+                    h: half * 2.0,
+                }
+            }
+            None => Rect {
+                x: vw - margin - cell,
+                y: margin,
+                w: cell,
+                h: cell,
+            },
+        };
+        let texting_button = Rect {
+            x: vw - margin - cell * 2.0 - margin,
+            y: margin,
+            w: cell,
+            h: cell,
+        };
 
         let round_cells = (movement == Movement::Joystick).then(|| {
             let d = cell * ROUND_CELL_OFFSET;
@@ -216,20 +256,11 @@ impl Layout {
             movement,
             stick,
             jump_button,
+            bedrock,
             round_cells,
             use_button,
-            close_button: Rect {
-                x: vw - margin - cell,
-                y: margin,
-                w: cell,
-                h: cell,
-            },
-            texting_button: Rect {
-                x: vw - margin - cell * 2.0 - margin,
-                y: margin,
-                w: cell,
-                h: cell,
-            },
+            close_button,
+            texting_button,
             hotbar: HotbarGeom::new(vw, vh),
             vw,
             vh,
@@ -261,12 +292,24 @@ impl Layout {
     }
 
     pub fn hit_in(&self, screen: Vec2, xf: &Transforms, areas: &[Area]) -> Control {
+        if let Some(b) = &self.bedrock {
+            if let Some(key) = b.button_at(screen, xf) {
+                return Control::Key(key);
+            }
+            if let Some(slot) = self.hotbar_at(screen, xf) {
+                return Control::Hotbar(slot);
+            }
+            if b.dpad_cell(xf.to_local(ElementId::Pad, screen)).is_some() {
+                return Control::DPad;
+            }
+            return self.area_at(screen, areas);
+        }
+        let p = xf.to_local(ElementId::Pad, screen);
         if let Some(jump) = self.jump_button
             && jump.contains(xf.to_local(ElementId::JumpButton, screen))
         {
             return Control::Pad(Cell::Jump);
         }
-        let p = xf.to_local(ElementId::Pad, screen);
         if let Some(round) = self.round_cells {
             for (cell, at) in round {
                 if p.distance(at) <= self.cell * 0.5 {
@@ -315,12 +358,21 @@ impl Layout {
         {
             return Control::Modules;
         }
-        let p = xf.to_local(ElementId::Hotbar, screen);
-        for i in (0..9).filter(|_| xf.drawn(ElementId::Hotbar)) {
-            if self.hotbar_rect(i).contains(p) {
-                return Control::Hotbar(i as u8);
-            }
+        if let Some(slot) = self.hotbar_at(screen, xf) {
+            return Control::Hotbar(slot);
         }
+        self.area_at(screen, areas)
+    }
+
+    fn hotbar_at(&self, screen: Vec2, xf: &Transforms) -> Option<u8> {
+        if !xf.drawn(ElementId::Hotbar) {
+            return None;
+        }
+        let p = xf.to_local(ElementId::Hotbar, screen);
+        (0..9u8).find(|&i| self.hotbar_rect(i as usize).contains(p))
+    }
+
+    fn area_at(&self, screen: Vec2, areas: &[Area]) -> Control {
         match areas
             .iter()
             .filter(|a| a.rect(self.vw, self.vh).contains(screen))
@@ -341,6 +393,7 @@ pub struct PadState {
     pub auto_walk: bool,
     last_forward: Option<f32>,
     last_jump: Option<f32>,
+    last_dpad_up: Option<f32>,
 }
 
 impl PadState {
@@ -370,6 +423,14 @@ impl PadState {
         let doubled = self.last_jump.is_some_and(|t| now - t <= double_tap_secs);
         self.last_jump = if doubled { None } else { Some(now) };
         doubled
+    }
+
+    pub fn dpad_sprints(&self, now: f32) -> bool {
+        self.last_dpad_up.is_some_and(|t| now - t < DPAD_DOUBLE_TAP)
+    }
+
+    pub fn dpad_up_lifted(&mut self, now: f32) {
+        self.last_dpad_up = Some(now);
     }
 
     pub fn latched(&self, cell: Cell) -> bool {

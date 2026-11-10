@@ -23,8 +23,22 @@ pub struct PreviousGameMode(pub Option<GameMode>);
 #[derive(Clone, Component, Default, Deref, DerefMut)]
 pub struct PermissionLevel(pub u8);
 
-#[derive(Clone, Component, Debug, Default, Deref, DerefMut, Resource)]
+#[derive(Clone, Debug, Default, Deref, DerefMut, Component)]
 pub struct TabList(HashMap<Uuid, PlayerInfo>);
+
+#[derive(Clone, Debug, Default, Deref, DerefMut, Resource)]
+pub struct TabListResource(HashMap<Uuid, PlayerInfo>);
+
+impl From<TabList> for TabListResource {
+    fn from(t: TabList) -> Self {
+        TabListResource(t.0)
+    }
+}
+impl From<TabListResource> for TabList {
+    fn from(t: TabListResource) -> Self {
+        TabList(t.0)
+    }
+}
 
 #[derive(Clone, Component, Debug)]
 pub struct Hunger {
@@ -42,7 +56,20 @@ impl Default for Hunger {
 }
 impl Hunger {
     pub fn is_enough_to_sprint(&self) -> bool {
-        self.food >= 6
+        self.food > 6
+    }
+}
+
+#[cfg(test)]
+mod hunger_tests {
+    use super::Hunger;
+
+    #[test]
+    fn sprint_requires_more_than_six_food_points() {
+        for food in 0..=20 {
+            let hunger = Hunger { food, saturation: 0.0 };
+            assert_eq!(hunger.is_enough_to_sprint(), food > 6, "food={food}");
+        }
     }
 }
 

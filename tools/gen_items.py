@@ -2,8 +2,8 @@
 """Generate Rust item metadata and creative-tab tables from vanilla Minecraft data.
 
     python3 gen_items.py [--assets PATH] [--source PATH] [--azalea PATH] [--output PATH]
-    --assets <crate>/reference/minecraft-26.1.1/assets/minecraft
-    --source <crate>/reference/minecraft-26.1.1/net/minecraft
+    --assets <crate>/reference/minecraft-26.2/assets/minecraft
+    --source <crate>/reference/minecraft-26.2/net/minecraft
     --azalea <crate>/vendor/azalea
     --output <crate>/src/generated_items.rs
     item id list      <assets>/items/*.json
@@ -12,7 +12,7 @@
     max_stack         <azalea>/azalea-inventory/src/default_components/generated.rs
     max_damage        same
     rarity            <source>/world/item/Items.java  (.rarity(Rarity.X))
-    rarity colours    <source>/world/item/Rarity.java + <source>/ChatFormatting.java
+    rarity colours    <source>/world/item/Rarity.java + <source>/network/chat/TextColor.java
     creative tabs     <source>/world/item/CreativeModeTabs.java
 """
 
@@ -125,7 +125,46 @@ def load_constant_ids(source: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
             r'^\s{6}([A-Z][A-Z0-9_]*) = registerBlock\(Blocks\.([A-Z][A-Z0-9_]*)', items_src, re.M):
         if block_const in blocks:
             items[const] = blocks[block_const]
+
+    id_of: Dict[str, str] = {}
+    for name in ('BlockItemIds.java', 'ItemIds.java'):
+        path = source / 'references' / name
+        if path.exists():
+            for const, first, second in re.findall(
+                    r'^\s*public static final [^=]+? ([A-Z][A-Z0-9_]*) = '
+                    r'(?:BlockItemId\.create|create)\("([a-z0-9_]+)"(?:, "([a-z0-9_]+)")?\);',
+                    path.read_text(), re.M):
+                id_of[const] = second or first
+    for const, ref in re.findall(
+            r'^\s{6}([A-Z][A-Z0-9_]*) = register(?:Item|Block)\((?:BlockItemIds|ItemIds)\.'
+            r'([A-Z][A-Z0-9_]*)\b', items_src, re.M):
+        if ref in id_of:
+            items[const] = id_of[ref]
     return blocks, items
+
+COLOR_ORDER = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink',
+               'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black']
+COPPER_STATES = ['', 'exposed_', 'weathered_', 'oxidized_']
+COPPER_PARTS = {'weathering': ('', COPPER_STATES),
+                'waxed': ('waxed_', COPPER_STATES)}
+
+def load_collections(source: Path) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
+    colors: Dict[str, str] = {}
+    copper: Dict[str, List[str]] = {}
+    for name in ('BlockItemIds.java', 'ItemIds.java'):
+        path = source / 'references' / name
+        if not path.exists():
+            continue
+        text = path.read_text()
+        for const, base in re.findall(r'\b([A-Z][A-Z0-9_]*) = createSimpleColored\("(\w+)"\)', text):
+            colors[const] = base
+        for const, base in re.findall(r'\b([A-Z][A-Z0-9_]*) = createSimpleCopper\("(\w+)"\)', text):
+            copper[const] = [base] * 4
+        m = re.search(r'COPPER_BLOCK_SPECIAL_NAMES = new WeatheringCopperCollection\.ByState'
+                      r'\("(\w+)", "(\w+)", "(\w+)", "(\w+)"\)', text)
+        if m:
+            copper['COPPER_BLOCK'] = list(m.groups())
+    return colors, copper
 
 RARITIES = ['common', 'uncommon', 'rare', 'epic']
 
@@ -136,9 +175,9 @@ def load_rarity_colors(source: Path) -> Dict[str, int]:
                                 rarity_src):
         fmt_of[name.lower()] = fmt
 
-    fmt_src = (source / 'ChatFormatting.java').read_text()
     rgb_of = {}
-    for fmt, rgb in re.findall(r'^\s*(\w+)\("\w+", \'.\', \d+, (\d+)\),', fmt_src, re.M):
+    color_src = (source / 'network' / 'chat' / 'TextColor.java').read_text()
+    for fmt, rgb in re.findall(r'^\s*(\w+) = named\("\w+", (\d+)\);', color_src, re.M):
         rgb_of[fmt] = int(rgb)
 
     colors = {}
@@ -218,6 +257,28 @@ def parse_creative_tabs(source: Path, item_ids: set, blocks_map: Dict[str, str],
         table = blocks_map if holder == 'Blocks' else items_map
         return table.get(const, const.lower())
 
+    colors, copper = load_collections(source)
+    full_text = '\n'.join(lines)
+    order = re.search(r'gameplayColorOrder = List\.of\(([^;]*)\);', full_text)
+    gameplay = [c.lower() for c in re.findall(r'DyeColor\.([A-Z_]+)', order.group(1))] if order else COLOR_ORDER
+    families = re.findall(r'output\.accept\(Items\.([A-Z][A-Z0-9_]*)\);', full_text)
+
+    def copper_ids(const: str, part: str) -> List[str]:
+        prefix, states = COPPER_PARTS[part]
+        names = copper[const]
+        return [prefix + st + names[i] for i, st in enumerate(states)]
+
+    def collection_ids(const: str, part: Optional[str] = None) -> Optional[List[str]]:
+        if const in colors:
+            return [f"{c}_{colors[const]}" for c in COLOR_ORDER]
+        if const in copper:
+            parts = [part] if part else ['weathering', 'waxed']
+            return [i for pt in parts for i in copper_ids(const, pt)]
+        return None
+
+    def camel_to_color(name: str) -> str:
+        return re.sub(r'([A-Z])', lambda m: '_' + m.group(1).lower(), name)
+
     key_of_const = dict(re.findall(
         r'ResourceKey<CreativeModeTab> (\w+) = createKey\("(\w+)"\);', '\n'.join(lines)))
 
@@ -228,7 +289,8 @@ def parse_creative_tabs(source: Path, item_ids: set, blocks_map: Dict[str, str],
 
     tabs: List[Tab] = []
     current: Optional[Tab] = None
-    pending_weathering: Optional[str] = None
+    pending: Optional[List[str]] = None
+    pending_family: Optional[str] = None
 
     for raw in lines:
         line = raw.strip()
@@ -249,28 +311,76 @@ def parse_creative_tabs(source: Path, item_ids: set, blocks_map: Dict[str, str],
             continue
 
         if not current.icon:
-            m = re.search(r'return new ItemStack\((Items|Blocks)\.([A-Z][A-Z0-9_]*)\);', line)
+            m = re.search(r'return new ItemStack\((?:\(ItemLike\))?(Items|Blocks)\.([A-Z][A-Z0-9_]*)'
+                          r'(?:\.(\w+)\(\))?\);', line)
             if m:
-                current.icon = resolve(*m.groups())
+                holder, const, accessor = m.groups()
+                if accessor and const in colors:
+                    current.icon = f"{camel_to_color(accessor)}_{colors[const]}"
+                else:
+                    current.icon = resolve(holder, const)
                 continue
 
-        m = re.match(r'(?:WeatheringCopperItems )?var\d+ = Items\.([A-Z][A-Z0-9_]*);$', line)
+        m = re.match(r'registerColoredItems\(\w+, \w+, Items\.([A-Z][A-Z0-9_]*)\);', line)
         if m:
-            pending_weathering = m.group(1).lower()
+            if m.group(1) in colors:
+                for color in gameplay:
+                    current.add(f"{color}_{colors[m.group(1)]}")
+            else:
+                warnings.append(f"registerColoredItems on unknown {m.group(1)} in {current.id}")
+            continue
+
+        m = re.match(r'Items\.([A-Z][A-Z0-9_]*)\.forEach\(', line)
+        if m:
+            ids = collection_ids(m.group(1))
+            if ids is None:
+                warnings.append(f"forEach on unknown collection {m.group(1)} in {current.id}")
+            else:
+                for i in ids:
+                    current.add(i)
+            continue
+
+        m = re.match(r'(?:[\w.]+ )?var\d+ = Items\.([A-Z][A-Z0-9_]*)(?:\.(waxed|weathering)\(\))?;$', line)
+        if m:
+            pending = collection_ids(m.group(1), m.group(2))
+            if pending is None:
+                warnings.append(f"unknown collection {m.group(1)} in {current.id}")
+            continue
+        m = re.match(r'(?:[\w.]+ )?var\d+ = family\.(waxed|weathering)\(\);$', line)
+        if m:
+            pending_family = m.group(1)
             continue
         if re.match(r'var\d+\.forEach\(', line):
-            if pending_weathering is None:
-                warnings.append(f"forEach with no pending WeatheringCopperItems in {current.id}")
+            if pending_family is not None:
+                for const in families:
+                    if const in copper:
+                        for i in copper_ids(const, pending_family):
+                            current.add(i)
+                pending_family = None
+            elif pending is None:
+                warnings.append(f"forEach with no pending collection in {current.id}")
             else:
-                for state in WEATHER_ORDER:
-                    current.add(WEATHER_PREFIX[state] + pending_weathering)
-                pending_weathering = None
+                for i in pending:
+                    current.add(i)
+                pending = None
+            continue
+
+        m = re.search(r'\.accept\(\(ItemLike\)Items\.([A-Z][A-Z0-9_]*)\.(waxed|weathering)\(\)\.(\w+)\(\)\)', line)
+        if m:
+            const, part, state = m.groups()
+            if const in copper and state in ('unaffected', 'exposed', 'weathered', 'oxidized'):
+                current.add(copper_ids(const, part)[COPPER_STATES.index(
+                    '' if state == 'unaffected' else state + '_')])
+            else:
+                warnings.append(f"unknown accessor {const}.{part}().{state}() in {current.id}")
             continue
 
         m = re.search(r'\.accept\(\(ItemLike\)(?:Items|Blocks)\.([A-Z][A-Z0-9_]*)\.(\w+)\(\)\)', line)
         if m:
             base, state = m.groups()
-            if state not in WEATHER_PREFIX:
+            if base in colors:
+                current.add(f"{camel_to_color(state)}_{colors[base]}")
+            elif state not in WEATHER_PREFIX:
                 warnings.append(f"unknown weathering accessor {base}.{state}() in {current.id}")
             else:
                 current.add(WEATHER_PREFIX[state] + base.lower())
@@ -324,7 +434,7 @@ def generate_rust(defs: List[dict], tabs: List[Tab], titles: Dict[str, str],
     out.append("// @generated by tools/gen_items.py — do not edit\n")
     out.append("//\n")
     out.append("// Item metadata and creative-tab contents extracted from the vanilla\n")
-    out.append("// assets and Java source under reference/minecraft-26.1.1/.\n")
+    out.append("// assets and Java source under reference/minecraft-26.2/.\n")
     out.append("// Regenerate with `python3 tools/gen_items.py`.\n")
     out.append("#![allow(dead_code)]\n\n")
 
@@ -499,8 +609,8 @@ mod tests {
 CRATE_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_ROOT = Path(os.environ.get(
     'MINECRAFT_ASSETS',
-    CRATE_ROOT / 'reference' / 'minecraft-26.1.1' / 'assets' / 'minecraft'))
-SOURCE_ROOT = CRATE_ROOT / 'reference' / 'minecraft-26.1.1' / 'net' / 'minecraft'
+    CRATE_ROOT / 'reference' / 'minecraft-26.2' / 'assets' / 'minecraft'))
+SOURCE_ROOT = CRATE_ROOT / 'reference' / 'minecraft-26.2' / 'net' / 'minecraft'
 
 EXPECTED_UNCOVERED = {
     'air', 'barrier', 'chain_command_block', 'command_block', 'command_block_minecart',

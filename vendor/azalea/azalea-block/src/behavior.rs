@@ -6,7 +6,7 @@ pub struct BlockBehavior {
     pub requires_correct_tool_for_drops: bool,
 
     pub force_solid: Option<bool>,
-    pub bounce_multiplier: Option<f32>,
+    pub bounce_restitution: f32,
 }
 
 impl Default for BlockBehavior {
@@ -18,7 +18,7 @@ impl Default for BlockBehavior {
             explosion_resistance: 0.,
             requires_correct_tool_for_drops: false,
             force_solid: None,
-            bounce_multiplier: None,
+            bounce_restitution: 0.,
         }
     }
 }
@@ -63,8 +63,8 @@ impl BlockBehavior {
         self
     }
 
-    pub fn bounce_multiplier(mut self, bounce_multiplier: f32) -> Self {
-        self.bounce_multiplier = Some(bounce_multiplier);
+    pub fn bounce_restitution(mut self, bounce_restitution: f32) -> Self {
+        self.bounce_restitution = bounce_restitution;
         self
     }
 }

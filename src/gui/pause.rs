@@ -45,6 +45,11 @@ const BUTTON_TOPS: [f32; 4] = [
 
 const GRID_H: f32 = BUTTON_TOPS[3] + WIDGET_HEIGHT;
 
+#[cfg(all(target_arch = "wasm32", feature = "screen_record"))]
+const DISCONNECT_SHIFT: f32 = WIDGET_HEIGHT + BUTTON_PADDING;
+#[cfg(not(all(target_arch = "wasm32", feature = "screen_record")))]
+const DISCONNECT_SHIFT: f32 = 0.0;
+
 fn grid_origin(vw: f32, vh: f32) -> (f32, f32) {
     (
         ((vw - GRID_W) * 0.5).floor(),
@@ -65,7 +70,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let mut button = |row: usize, column: usize, width: f32, label: &'static str| {
         Button::new(
             gx + column as f32 * COLUMN_W + BUTTON_PADDING,
-            gy + BUTTON_TOPS[row],
+            gy + BUTTON_TOPS[row] + if row == 3 { DISCONNECT_SHIFT } else { 0.0 },
             width,
             WIDGET_HEIGHT,
             label,
@@ -94,6 +99,47 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     if button(3, 0, BUTTON_WIDTH_FULL, tr::disconnect()) {
         state.disconnect = true;
         state.nav = Some(Screen::Title);
+        #[cfg(all(target_arch = "wasm32", feature = "screen_record"))]
+        crate::platform::record::stop();
+    }
+    #[cfg(all(target_arch = "wasm32", feature = "screen_record"))]
+    record_button(p, ctx, gx, gy);
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "screen_record"))]
+fn record_button(p: &mut Painter, ctx: &ScreenCtx, gx: f32, gy: f32) {
+    use crate::platform::record::{self, Status};
+
+    let y = gy + BUTTON_TOPS[3];
+    let status = record::status();
+    let label = match status {
+        Status::Idle => "Record".to_string(),
+        Status::Recording { secs } => format!("Stop Recording ({}:{:02})", secs / 60, secs % 60),
+        Status::Saving => "Saving Recording...".to_string(),
+    };
+    let mut button = Button::new(
+        gx + BUTTON_PADDING,
+        y,
+        BUTTON_WIDTH_FULL,
+        WIDGET_HEIGHT,
+        &label,
+    );
+    button.active = !matches!(status, Status::Saving);
+    if button.draw(p, ctx) {
+        match status {
+            Status::Idle => record::start(),
+            Status::Recording { .. } => record::stop(),
+            Status::Saving => {}
+        }
+    }
+    if let Some(e) = record::last_error() {
+        p.text_centered(
+            &e,
+            ctx.vw / 2.0,
+            y + DISCONNECT_SHIFT + WIDGET_HEIGHT + BUTTON_PADDING,
+            0xFF5555,
+            true,
+        );
     }
 }
 

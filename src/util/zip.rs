@@ -105,9 +105,79 @@ pub fn read(jar: &[u8], entry: &Entry) -> Result<Vec<u8>, String> {
     }
 }
 
+#[cfg(any(test, all(target_arch = "wasm32", feature = "asset_download")))]
+pub fn write(files: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+
+    const VERSION: u16 = 20;
+    const FLAG_UTF8: u16 = 1 << 11;
+    const DEFLATE: u16 = 8;
+    const DOS_DATE: u16 = (1 << 5) | 1;
+
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in files {
+        let mut enc =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(data).expect("deflate into a Vec");
+        let packed = enc.finish().expect("deflate into a Vec");
+        let mut crc = flate2::Crc::new();
+        crc.update(data);
+        let crc = crc.sum();
+        let offset = out.len() as u32;
+
+        let mut common = Vec::with_capacity(26);
+        common.extend_from_slice(&VERSION.to_le_bytes());
+        common.extend_from_slice(&FLAG_UTF8.to_le_bytes());
+        common.extend_from_slice(&DEFLATE.to_le_bytes());
+        common.extend_from_slice(&0u16.to_le_bytes());
+        common.extend_from_slice(&DOS_DATE.to_le_bytes());
+        common.extend_from_slice(&crc.to_le_bytes());
+        common.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+        common.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        common.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        common.extend_from_slice(&0u16.to_le_bytes());
+
+        out.extend_from_slice(&LOCAL_SIG.to_le_bytes());
+        out.extend_from_slice(&common);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&packed);
+
+        central.extend_from_slice(&CENTRAL_SIG.to_le_bytes());
+        central.extend_from_slice(&VERSION.to_le_bytes());
+        central.extend_from_slice(&common);
+        central.extend_from_slice(&[0u8; 2 + 2 + 2 + 4]);
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+
+    let cd_offset = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&EOCD_SIG.to_le_bytes());
+    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&cd_offset.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_written_archive_reads_back() {
+        let files: [(&str, &[u8]); 2] = [("options.json", b"{\"fov\":70}"), ("mods/a b.txt", b"")];
+        let zip = write(&files);
+        let found = entries(&zip).unwrap();
+        assert_eq!(found.len(), 2);
+        for ((name, data), entry) in files.iter().zip(&found) {
+            assert_eq!(&entry.name, name);
+            assert_eq!(read(&zip, entry).unwrap(), *data);
+        }
+    }
 
     #[test]
     fn a_file_too_short_to_be_an_archive_is_an_error() {

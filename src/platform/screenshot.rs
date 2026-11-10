@@ -4,7 +4,14 @@ pub(crate) fn dir() -> std::path::PathBuf {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn save(image: &image::RgbImage) -> Result<String, String> {
+pub(crate) fn store(
+    image: &image::RgbImage,
+    report: impl FnOnce(Result<String, String>) + 'static,
+) {
+    report(save(image).map(|name| format!("Captured screenshot as {name}")));
+}
+
+fn encode_png(image: &image::RgbImage) -> Result<Vec<u8>, String> {
     use image::ImageEncoder;
 
     let mut png = Vec::new();
@@ -16,6 +23,12 @@ pub(crate) fn save(image: &image::RgbImage) -> Result<String, String> {
             image::ExtendedColorType::Rgb8,
         )
         .map_err(|e| format!("could not encode the image: {e}"))?;
+    Ok(png)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save(image: &image::RgbImage) -> Result<String, String> {
+    let png = encode_png(image)?;
 
     let dir = dir();
     std::fs::create_dir_all(&dir)
@@ -44,7 +57,7 @@ fn free_name(dir: &std::path::Path) -> (String, std::path::PathBuf) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "screen_record"))]
 pub(crate) fn epoch_secs() -> i64 {
     crate::platform::time::SystemTime::now()
         .duration_since(crate::platform::time::UNIX_EPOCH)
@@ -52,7 +65,7 @@ pub(crate) fn epoch_secs() -> i64 {
         .unwrap_or(0)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "screen_record"))]
 pub(crate) fn timestamp(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
@@ -64,8 +77,50 @@ pub(crate) fn timestamp(secs: i64) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn save(_image: &image::RgbImage) -> Result<String, String> {
-    Err("the web build cannot copy screenshots to the clipboard yet".to_string())
+pub(crate) fn store(
+    image: &image::RgbImage,
+    report: impl FnOnce(Result<String, String>) + 'static,
+) {
+    let promise = match clipboard_write(image) {
+        Ok(promise) => promise,
+        Err(e) => return report(Err(e)),
+    };
+    wasm_bindgen_futures::spawn_local(async move {
+        report(
+            wasm_bindgen_futures::JsFuture::from(promise)
+                .await
+                .map(|_| "Copied screenshot to the clipboard".to_string())
+                .map_err(|e| {
+                    format!(
+                        "the browser refused the clipboard write: {}",
+                        super::describe_js(&e)
+                    )
+                }),
+        );
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn clipboard_write(image: &image::RgbImage) -> Result<js_sys::Promise, String> {
+    let js = |e: wasm_bindgen::JsValue| super::describe_js(&e);
+    let png = encode_png(image)?;
+
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type("image/png");
+    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(png.as_slice()));
+    let blob =
+        web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options).map_err(js)?;
+
+    let record = js_sys::Object::new();
+    js_sys::Reflect::set(&record, &"image/png".into(), &blob).map_err(js)?;
+    let item = web_sys::ClipboardItem::new_with_record_from_str_to_blob_promise(&record)
+        .map_err(|e| format!("this browser cannot copy images: {}", js(e)))?;
+
+    let window = web_sys::window().ok_or("no window")?;
+    Ok(window
+        .navigator()
+        .clipboard()
+        .write(&js_sys::Array::of1(&item)))
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

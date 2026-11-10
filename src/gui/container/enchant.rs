@@ -284,9 +284,7 @@ fn draw_clue_tooltip(
     infinite_materials: bool,
     xp_level: i32,
 ) {
-    const WHITE: u32 = 0xFFFFFF;
-    const GRAY: u32 = 0xAAAAAA;
-    const RED: u32 = 0xFF5555;
+    use crate::text::{GRAY, RED, WHITE};
 
     let mut full_name = String::new();
     match clue_name {

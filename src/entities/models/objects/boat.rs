@@ -127,10 +127,6 @@ pub fn chest_raft_layer() -> LayerDef {
     LayerDef::create(mesh, 128, 128)
 }
 
-#[allow(
-    dead_code,
-    reason = "the water patch cannot be drawn as a textured layer; see the doc comment"
-)]
 pub fn water_patch_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
     mesh.root().part(

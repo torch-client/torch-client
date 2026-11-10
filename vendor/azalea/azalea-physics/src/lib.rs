@@ -11,16 +11,23 @@ use std::collections::HashSet;
 
 use azalea_block::BlockState;
 use azalea_core::{
+    game_type::GameMode,
     math,
     position::{BlockPos, Vec3},
     tick::GameTick,
 };
 use azalea_entity::{
     ActiveEffects, Attributes, EntityKindComponent, HasClientLoaded, Jumping, LocalEntity,
-    LookDirection, OnClimbable, Physics, PlayerAbilities, Pose, Position,
-    dimensions::EntityDimensions, metadata::Sprinting, move_relative,
+    LookDirection, OnClimbable, Physics, PlayerAbilities, Position,
+    dimensions::EntityDimensions,
+    inventory::Inventory,
+    metadata::{Sprinting, TicksFrozen},
+    move_relative,
 };
-use azalea_registry::builtin::{BlockKind, EntityKind, MobEffect};
+use azalea_registry::{
+    builtin::{BlockKind, EntityKind, MobEffect},
+    tags::items::FREEZE_IMMUNE_WEARABLES,
+};
 use azalea_world::{World, WorldName, Worlds};
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
@@ -87,6 +94,8 @@ pub fn ai_step(
         entity_kind,
     ) in &mut query
     {
+        physics.base_tick_powder_snow();
+
         let is_player = **entity_kind == EntityKind::Player;
 
         if physics.no_jump_delay > 0 {
@@ -181,16 +190,39 @@ pub fn apply_effects_from_blocks(
             &WorldName,
             &ActiveEffects,
             Option<&PlayerAbilities>,
+            Option<&client_movement::ClientMovementState>,
+            (Option<&GameMode>, Option<&Inventory>, Option<&mut TicksFrozen>),
         ),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
     worlds: Res<Worlds>,
 ) {
-    for (mut physics, position, dimensions, world_name, active_effects, abilities) in &mut query {
+    for (
+        mut physics,
+        position,
+        dimensions,
+        world_name,
+        active_effects,
+        abilities,
+        movement_state,
+        (gamemode, inventory, ticks_frozen),
+    ) in &mut query
+    {
         let Some(world_lock) = worlds.get(world_name) else {
             continue;
         };
         let world = world_lock.read();
+
+        if matches!(gamemode, Some(GameMode::Spectator)) {
+            continue;
+        }
+
+        step_on(
+            &mut physics,
+            &world,
+            **position,
+            movement_state.is_some_and(|s| s.trying_to_crouch),
+        );
 
         let movement_this_tick = [EntityMovement {
             from: physics.old_position,
@@ -210,6 +242,48 @@ pub fn apply_effects_from_blocks(
                 kind: InsideKind::Living,
             },
         );
+
+        if physics.is_in_powder_snow
+            && can_freeze(inventory)
+            && let Some(mut ticks_frozen) = ticks_frozen
+        {
+            ticks_frozen.0 = (ticks_frozen.0 + 1).min(TICKS_REQUIRED_TO_FREEZE);
+        }
+    }
+}
+
+pub const TICKS_REQUIRED_TO_FREEZE: i32 = 140;
+
+fn can_freeze(inventory: Option<&Inventory>) -> bool {
+    use azalea_inventory::components::EquipmentSlot;
+    let Some(inventory) = inventory else {
+        return true;
+    };
+    ![
+        EquipmentSlot::Head,
+        EquipmentSlot::Chest,
+        EquipmentSlot::Legs,
+        EquipmentSlot::Feet,
+    ]
+    .into_iter()
+    .filter_map(|slot| inventory.get_equipment(slot))
+    .any(|item| FREEZE_IMMUNE_WEARABLES.contains(&item.kind()))
+}
+
+fn step_on(physics: &mut Physics, world: &World, position: Vec3, shift_key_down: bool) {
+    if !physics.on_ground() {
+        return;
+    }
+    let pos = azalea_entity::on_pos_legacy(&world.chunks, Position::new(position));
+    let state = world.get_block_state(pos).unwrap_or_default();
+    if BlockKind::from(state) != BlockKind::SlimeBlock {
+        return;
+    }
+    let abs_delta_y = physics.velocity.y.abs();
+    if abs_delta_y < 0.1 && !shift_key_down {
+        let scale = 0.4 + abs_delta_y * 0.2;
+        physics.velocity.x *= scale;
+        physics.velocity.z *= scale;
     }
 }
 
@@ -221,6 +295,7 @@ pub fn apply_effects_from_blocks_for(
     kind: InsideKind,
     active_effects: &ActiveEffects,
 ) {
+    step_on(physics, world, movement.to, false);
     check_inside_blocks(
         physics,
         dimensions,
@@ -379,27 +454,17 @@ fn handle_relative_friction_and_calculate_movement(ctx: &mut MoveCtx, block_fric
         ),
     );
 
-    ctx.physics.velocity = handle_on_climbable(
-        ctx.physics.velocity,
-        ctx.on_climbable,
-        *ctx.position,
-        ctx.world,
-        ctx.pose,
-    );
+    ctx.physics.velocity = handle_on_climbable(ctx);
 
     move_colliding(ctx, ctx.physics.velocity);
 
     if ctx.physics.horizontal_collision || *ctx.jumping {
-        let block_at_feet: BlockKind = ctx
-            .world
-            .chunks
-            .get_block_state(BlockPos::from(*ctx.position))
-            .unwrap_or_default()
-            .into();
+        let feet = BlockPos::from(*ctx.position);
 
-        if *ctx.on_climbable
-            || (block_at_feet == BlockKind::PowderSnow && ctx.powder_snow_walkable)
-        {
+        let on_climbable_now = !ctx.no_physics
+            && azalea_entity::climbable_at(ctx.world, feet, ctx.fall_flying);
+
+        if on_climbable_now || (ctx.physics.was_in_powder_snow && ctx.powder_snow_walkable) {
             ctx.physics.velocity.y = 0.2;
         }
     }
@@ -407,16 +472,13 @@ fn handle_relative_friction_and_calculate_movement(ctx: &mut MoveCtx, block_fric
     ctx.physics.velocity
 }
 
-fn handle_on_climbable(
-    velocity: Vec3,
-    on_climbable: OnClimbable,
-    position: Position,
-    world: &World,
-    pose: Option<Pose>,
-) -> Vec3 {
-    if !*on_climbable {
+fn handle_on_climbable(ctx: &mut MoveCtx) -> Vec3 {
+    let velocity = ctx.physics.velocity;
+    if !*ctx.on_climbable {
         return velocity;
     }
+
+    ctx.physics.reset_fall_distance();
 
     const CLIMBING_SPEED: f64 = 0.15_f32 as f64;
 
@@ -425,11 +487,12 @@ fn handle_on_climbable(
     let mut y = f64::max(velocity.y, -CLIMBING_SPEED);
 
     if y < 0.0
-        && pose == Some(Pose::Crouching)
+        && collision::is_shift_key_down(ctx)
+        && !ctx.abilities.is_some_and(|abilities| abilities.flying)
         && BlockKind::from(
-            world
+            ctx.world
                 .chunks
-                .get_block_state(position.into())
+                .get_block_state((*ctx.position).into())
                 .unwrap_or_default(),
         ) != BlockKind::Scaffolding
     {
@@ -437,6 +500,10 @@ fn handle_on_climbable(
     }
 
     Vec3 { x, y, z }
+}
+
+pub fn compute_modified_friction(friction: f32, modifier: f32) -> f32 {
+    (1.0 - (1.0 - friction) * modifier).clamp(0.0, 1.0)
 }
 
 fn get_friction_influenced_speed(
@@ -447,7 +514,11 @@ fn get_friction_influenced_speed(
 ) -> f32 {
     if physics.on_ground() {
         let speed = attributes.movement_speed.calculate() as f32;
-        speed * (0.21600002f32 / (friction * friction * friction))
+        if f64::from(friction) > 0.6 {
+            speed * (0.21600002f32 / (friction * friction * friction))
+        } else {
+            speed
+        }
     } else {
         if *sprinting { 0.025999999f32 } else { 0.02 }
     }

@@ -1,6 +1,8 @@
 use super::registry::{Id, nametags as setting, options};
 use super::store;
 
+pub use super::extra_hud::Durability;
+
 options! {
     pub enum Sizing {
         Perspective = "Perspective",
@@ -34,6 +36,9 @@ pub struct Config {
     pub health: Health,
     pub gamemode: bool,
     pub distance: bool,
+    pub armor: bool,
+    pub durability: Durability,
+    pub enchants: bool,
 }
 
 pub fn config() -> Option<Config> {
@@ -47,6 +52,9 @@ pub fn config() -> Option<Config> {
         health: s.choice(setting::HEALTH),
         gamemode: s.flag(setting::GAMEMODE),
         distance: s.flag(setting::DISTANCE),
+        armor: s.flag(setting::ARMOR),
+        durability: s.choice(setting::DURABILITY),
+        enchants: s.flag(setting::ENCHANTS),
     })
 }
 
@@ -67,6 +75,8 @@ mod tests {
         assert_eq!(cfg.health, Health::Number);
         assert!(cfg.health.number() && !cfg.health.bar());
         assert!(cfg.gamemode && cfg.distance);
+        assert!(cfg.armor && cfg.enchants);
+        assert_eq!(cfg.durability, Durability::Percent);
         s.set_enabled(Id::Nametags, false);
     }
 }

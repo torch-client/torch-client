@@ -10,6 +10,7 @@ pub(crate) mod entity_feed;
 pub(crate) mod entity_sounds;
 pub(crate) mod event_particles;
 pub(crate) mod flight;
+pub(crate) mod geyser;
 pub(crate) mod interaction;
 pub(crate) mod inventory_bridge;
 pub(crate) mod item_pickup;
@@ -20,7 +21,9 @@ pub(crate) mod pick_box;
 pub(crate) mod placement;
 #[cfg(feature = "audio")]
 pub(crate) mod player_sounds;
+pub(crate) mod powder_snow;
 pub(crate) mod redstone;
+pub(crate) mod render_range;
 pub(crate) mod riding;
 pub(crate) mod riptide;
 pub(crate) mod spear;

@@ -104,10 +104,10 @@ impl From<BlockState> for FluidState {
                 return Self::from_liquid_block(FluidKind::Lava, level as u8);
             }
             BlockKind::BubbleColumn
-            | BlockKind::Kelp
-            | BlockKind::KelpPlant
             | BlockKind::Seagrass
-            | BlockKind::TallSeagrass => {
+            | BlockKind::TallSeagrass
+            | BlockKind::Kelp
+            | BlockKind::KelpPlant => {
                 return Self::new_source_block(FluidKind::Water, false);
             }
             _ => {}

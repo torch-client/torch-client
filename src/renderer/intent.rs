@@ -2,6 +2,12 @@ use bevy::prelude::*;
 
 use crate::renderer::systems::Shared;
 
+static PUBLISHES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub(crate) fn publishes() -> u32 {
+    PUBLISHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Resource, Default)]
 pub struct Intent {
     move_flags: u8,
@@ -38,6 +44,7 @@ pub(crate) fn publish(mut intent: ResMut<Intent>, shared: Res<Shared>) {
     #[cfg(lua_mods)]
     crate::modules::script::note_input(intent.move_flags, intent.attack_held, intent.use_held);
     let mut s = shared.0.lock().unwrap();
+    s.hand_move_keys = intent.move_flags;
     s.move_keys = intent.move_flags;
     if crate::modules::hooks::shapes_movement() {
         s.move_keys = crate::modules::hooks::move_flags(&s, s.move_keys);
@@ -51,6 +58,7 @@ pub(crate) fn publish(mut intent: ResMut<Intent>, shared: Res<Shared>) {
         s.session.pick_clicked = true;
         s.session.pick_include_data = intent.pick_include_data;
     }
+    PUBLISHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     drop(s);
     *intent = Intent::default();
 }
@@ -66,6 +74,7 @@ pub(crate) fn release_on_suspend(
         let mut s = shared.0.lock().unwrap();
         s.move_flags = 0;
         s.move_keys = 0;
+        s.hand_move_keys = 0;
         s.session.attack_held = false;
         s.session.use_held = false;
     }

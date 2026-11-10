@@ -170,7 +170,7 @@ fn sync_portals(
             });
         }
         if let Some(handle) = &batch.material
-            && let Some(material) = materials.get_mut(handle)
+            && let Some(mut material) = materials.get_mut(handle)
         {
             material.params.x = game_time;
         }
@@ -249,7 +249,7 @@ impl Batch {
 
 fn load_tiled(path: &str, images: &mut Assets<Image>) -> Option<Handle<Image>> {
     let handle = crate::entities::load_entity_image(path, images)?;
-    let image = images.get_mut(&handle)?;
+    let mut image = images.get_mut(&handle)?;
     image.texture_descriptor.format = TextureFormat::Rgba8Unorm;
     image.sampler = crate::entities::repeating_nearest();
     Some(handle)

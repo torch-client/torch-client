@@ -19,7 +19,7 @@ pub const PLAYER_SLOTS: usize = 36;
 
 pub const SLOT_PITCH: f32 = 18.0;
 
-const CAPPED_COUNT_COLOR: u32 = 0xFFFF55;
+const CAPPED_COUNT_COLOR: u32 = crate::text::YELLOW;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layout {
@@ -1987,20 +1987,47 @@ pub fn draw_slot(p: &mut Painter, layout: Layout, i: usize, stack: &SlotStack, x
 }
 
 pub fn draw_stack(p: &mut Painter, stack: &SlotStack, x: f32, y: f32) {
-    draw_stack_held(p, stack, x, y, None);
+    draw_stack_held(p, stack, x, y, None, None, 0.0);
 }
 
-pub fn draw_stack_held(p: &mut Painter, stack: &SlotStack, x: f32, y: f32, use_ticks: Option<f32>) {
+pub fn draw_stack_held(
+    p: &mut Painter,
+    stack: &SlotStack,
+    x: f32,
+    y: f32,
+    use_ticks: Option<f32>,
+    hand: Option<bool>,
+    pop: f32,
+) {
     if stack.is_empty() {
         return;
     }
     let use_ = crate::items::dispatch::ItemUse {
         using: use_ticks.is_some(),
         use_ticks: use_ticks.unwrap_or(0.0),
+        use_max: if use_ticks.is_some() {
+            p.item_use_max
+        } else {
+            0
+        },
+        fishing_cast: hand.is_some_and(|offhand| p.fishing_cast[usize::from(offhand)]),
         owner: p.owner_at(x, y),
         ..stack.item_use()
     };
-    p.stack_icon_as(stack, x, y, use_);
+    if pop > 0.0 {
+        let squeeze = 1.0 + pop / f32::from(crate::client::hotbar_pop::POP_TIME);
+        p.squashed(
+            x + 8.0,
+            y + 12.0,
+            1.0 / squeeze,
+            (squeeze + 1.0) / 2.0,
+            |p| {
+                p.stack_icon_as(stack, x, y, use_);
+            },
+        );
+    } else {
+        p.stack_icon_as(stack, x, y, use_);
+    }
     if let Some(bundle) = &stack.bundle
         && let Some((width, color)) =
             azalea_inventory::bundle::bar(azalea_inventory::bundle::weight_safe(bundle.weight))

@@ -202,7 +202,7 @@ fn drive_glow_cameras(
         commands
             .entity(glow_entity)
             .insert(RenderTarget::Image(handle.clone().into()));
-        if let Some(material) = composites.get_mut(&state.composite) {
+        if let Some(mut material) = composites.get_mut(&state.composite) {
             material.glow = handle.clone();
         }
         state.image = Some(handle);
@@ -286,7 +286,10 @@ fn sync_glow_twins(
                     continue;
                 };
                 let mode = source_material.params.mode;
-                if mode == LightMode::Emissive as u32 || mode == LightMode::Text as u32 {
+                if mode == LightMode::Emissive as u32
+                    || mode == LightMode::Text as u32
+                    || mode == LightMode::WaterMask as u32
+                {
                     continue;
                 }
                 let texture = source_material.texture.clone();
@@ -415,8 +418,8 @@ impl Material for GlowCompositeMaterial {
         descriptor.vertex.buffers = vec![vertex_layout];
         descriptor.primitive.cull_mode = None;
         if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
-            depth_stencil.depth_compare = CompareFunction::Always;
-            depth_stencil.depth_write_enabled = false;
+            depth_stencil.depth_compare = Some(CompareFunction::Always);
+            depth_stencil.depth_write_enabled = Some(false);
         }
         if let Some(fragment) = descriptor.fragment.as_mut()
             && let Some(Some(target)) = fragment.targets.first_mut()

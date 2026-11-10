@@ -6,9 +6,6 @@ use std::time::Duration;
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
-use bevy::render::render_graph::{
-    Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
-};
 use bevy::render::render_resource::binding_types::uniform_buffer_sized;
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendState,
@@ -21,8 +18,10 @@ use bevy::render::render_resource::{
     TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, VertexState,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
-use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
+use bevy::render::renderer::{
+    RenderContext, RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue,
+};
+use bevy::render::{ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::{Shader, ShaderDefVal};
 use bytemuck::{Pod, Zeroable};
 
@@ -321,7 +320,7 @@ fn covered(capture: &Capture, index: &super::systems::ChunkIndex) -> Option<bool
     if (x1 - x0 + 1) * (z1 - z0 + 1) > MAX_WAIT_COLUMNS {
         return None;
     }
-    Some((x0..=x1).all(|x| (z0..=z1).all(|z| index.has_column(x as i32, z as i32))))
+    Some((x0..=x1).all(|x| (z0..=z1).all(|z| index.column_complete(x as i32, z as i32))))
 }
 
 fn route_ops(mut router: ResMut<Router>, index: Option<Res<super::systems::ChunkIndex>>) {
@@ -547,12 +546,12 @@ impl SpecializedRenderPipeline for CapturePipeline {
             },
             depth_stencil: Some(DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: drawn,
-                depth_compare: if drawn {
+                depth_write_enabled: Some(drawn),
+                depth_compare: Some(if drawn {
                     CompareFunction::GreaterEqual
                 } else {
                     CompareFunction::Always
-                },
+                }),
                 stencil: default(),
                 bias: default(),
             }),
@@ -612,6 +611,10 @@ struct Frame<'a> {
     render_origin: IVec3,
 }
 
+fn extract_routed(mut store: ResMut<ModImages>) {
+    ROUTED.drain(|op| store.pending.push_back((0, op)));
+}
+
 #[allow(clippy::too_many_arguments, reason = "one system, flat arguments")]
 pub fn prepare_mod_images(
     mut store: ResMut<ModImages>,
@@ -631,7 +634,6 @@ pub fn prepare_mod_images(
     store.reads.clear();
     store.answers.clear();
     finish_reads(store);
-    ROUTED.drain(|op| store.pending.push_back((0, op)));
     if !store.pending.is_empty() {
         if store.uniforms.is_none()
             && let Some(pipeline) = pipeline.as_deref()
@@ -644,7 +646,10 @@ pub fn prepare_mod_images(
             cache: &cache,
             pipeline: pipeline.as_deref(),
             pools: pools.as_deref(),
-            ready: pools.is_some() && terrain_group.group.is_some() && store.uniforms.is_some(),
+            ready: pools.is_some()
+                && tier.is_some()
+                && terrain_group.group.is_some()
+                && store.uniforms.is_some(),
             direct: tier.as_deref().is_none_or(|t| !t.indirect),
             origin: origin.world(),
             render_origin: origin.block(),
@@ -1096,49 +1101,36 @@ fn submit_frame(mut store: ResMut<ModImages>) {
     }
 }
 
-#[derive(RenderLabel, Debug, Hash, PartialEq, Eq, Clone)]
-struct CaptureLabel;
-
-struct CaptureNode;
-
-impl Node for CaptureNode {
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let store = world.resource::<ModImages>();
-        for work in &store.work {
-            match work {
-                Work::Read(i) => {
-                    let r = &store.reads[*i];
-                    render_context.command_encoder().copy_texture_to_buffer(
-                        r.texture.as_image_copy(),
-                        TexelCopyBufferInfo {
-                            buffer: &r.buffer,
-                            layout: TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(r.padded as u32),
-                                rows_per_image: Some(r.h),
-                            },
+fn record_captures(world: &World, mut ctx: RenderContext) {
+    let store = world.resource::<ModImages>();
+    for work in &store.work {
+        match work {
+            Work::Read(i) => {
+                let r = &store.reads[*i];
+                ctx.command_encoder().copy_texture_to_buffer(
+                    r.texture.as_image_copy(),
+                    TexelCopyBufferInfo {
+                        buffer: &r.buffer,
+                        layout: TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(r.padded as u32),
+                            rows_per_image: Some(r.h),
                         },
-                        Extent3d {
-                            width: r.w,
-                            height: r.h,
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                }
-                Work::Capture(p) => draw_capture(render_context, world, store, p),
+                    },
+                    Extent3d {
+                        width: r.w,
+                        height: r.h,
+                        depth_or_array_layers: 1,
+                    },
+                );
             }
+            Work::Capture(p) => draw_capture(&mut ctx, world, store, p),
         }
-        Ok(())
     }
 }
 
 fn draw_capture<'w>(
-    render_context: &mut RenderContext<'w>,
+    ctx: &mut RenderContext,
     world: &'w World,
     store: &'w ModImages,
     p: &'w Planned,
@@ -1150,6 +1142,10 @@ fn draw_capture<'w>(
         world.get_resource::<TerrainPools>(),
         world.get_resource::<TerrainTier>(),
     ) else {
+        crate::log_warn!(
+            "mods",
+            "a capture was planned without the terrain to draw it"
+        );
         return;
     };
     let target = |view: &'w TextureView| {
@@ -1165,7 +1161,7 @@ fn draw_capture<'w>(
     };
     let colors = [target(&p.into), p.depth_image.as_ref().and_then(target)];
     let count = if p.depth_image.is_some() { 2 } else { 1 };
-    let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+    let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("mod_capture"),
         color_attachments: &colors[..count],
         depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
@@ -1178,6 +1174,7 @@ fn draw_capture<'w>(
         }),
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
     let [x, y, w, h] = p.rect;
     pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
@@ -1220,6 +1217,7 @@ pub fn build(app: &mut App) {
             RenderStartup,
             init_capture_pipeline.after(super::terrain_pool::draw::init_terrain_pipeline),
         )
+        .add_systems(ExtractSchedule, extract_routed)
         .add_systems(
             Render,
             (
@@ -1231,10 +1229,13 @@ pub fn build(app: &mut App) {
                     .after(bevy::render::renderer::render_system),
             ),
         );
-    let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
-    graph.add_node(CaptureLabel, CaptureNode);
-    graph.add_node_edge(bevy::render::graph::CameraDriverLabel, CaptureLabel);
-    graph.add_node_edge(CaptureLabel, crate::gui::draw::GuiLabel);
+    render_app.add_systems(
+        RenderGraph,
+        record_captures
+            .in_set(RenderGraphSystems::Render)
+            .after(bevy::core_pipeline::schedule::camera_driver)
+            .before(crate::gui::draw::gui_pass),
+    );
 }
 
 pub fn finish(app: &mut App) {

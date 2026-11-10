@@ -178,22 +178,45 @@ pub fn baby_layer() -> LayerDef {
 }
 
 pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
-    setup(model, parts, st, &adult_anim::HOP);
+    setup(
+        model,
+        parts,
+        st,
+        &adult_anim::HOP,
+        &adult_anim::IDLE_HEAD_TILT,
+    );
 }
 
 pub fn baby_setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
-    setup(model, parts, st, &baby_anim::HOP);
-}
-
-fn setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState, hop: &AnimationDefinition) {
-    let head = model.id("head");
-    parts[head].y_rot = st.y_rot * DEG_TO_RAD;
-    parts[head].x_rot = st.x_rot * DEG_TO_RAD;
-    keyframe::apply(
-        hop,
+    setup(
         model,
         parts,
-        st.extras.jump_completion * hop.length_seconds,
-        1.0,
+        st,
+        &baby_anim::HOP,
+        &baby_anim::IDLE_HEAD_TILT,
+    );
+}
+
+fn setup(
+    model: &BakedModel,
+    parts: &mut [PartState],
+    st: &EntityState,
+    hop: &AnimationDefinition,
+    idle_head_tilt: &AnimationDefinition,
+) {
+    use crate::entities::state::anim_slot::rabbit as slot;
+    let states = &st.extras.anim;
+    if !states[slot::IDLE_HEAD_TILT].is_started() {
+        let head = model.id("head");
+        parts[head].y_rot = st.y_rot * DEG_TO_RAD;
+        parts[head].x_rot = st.x_rot * DEG_TO_RAD;
+    }
+    keyframe::apply_state(hop, model, parts, states[slot::HOP], st.age_ticks);
+    keyframe::apply_state(
+        idle_head_tilt,
+        model,
+        parts,
+        states[slot::IDLE_HEAD_TILT],
+        st.age_ticks,
     );
 }

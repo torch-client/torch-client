@@ -21,7 +21,7 @@ use azalea_entity::{
     ActiveEffects, Attributes, Jumping, LookDirection, OnClimbable, Physics, PlayerAbilities, Pose,
     Position, metadata::Sprinting,
 };
-use azalea_registry::builtin::BlockKind;
+use azalea_registry::{builtin::BlockKind, tags::blocks::SUPPRESSES_BOUNCE};
 use azalea_world::{ChunkStorage, World, WorldBorder};
 use bevy_ecs::{entity::Entity, world::Mut};
 pub use blocks::BlockWithShape;
@@ -37,8 +37,9 @@ use tracing::warn;
 use self::world_collisions::{PowderSnowCollision, get_block_collisions_for};
 use crate::{
     block_speed_factor, client_movement::ClientMovementState,
-    collision::entity_collisions::AabbQuery, get_block_pos_below_that_affects_movement,
-    travel::no_collision,
+    collision::entity_collisions::AabbQuery, compute_modified_friction,
+    get_block_pos_below_that_affects_movement,
+    travel::{effective_gravity, no_collision},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -256,6 +257,17 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
     movement = maybe_back_off_from_edge(ctx, movement);
     let collide_result = collide(ctx, movement);
 
+    let shift_key_down = is_shift_key_down(ctx);
+    let x_collision = !math::equal(movement.x, collide_result.x);
+    let z_collision = !math::equal(movement.z, collide_result.z);
+    let horizontal_collision = x_collision || z_collision;
+    let vertical_collision = movement.y != collide_result.y;
+    let restitution = if (movement.y.abs() > 0. && vertical_collision) || horizontal_collision {
+        Some(Restitution::of(ctx, shift_key_down))
+    } else {
+        None
+    };
+
     let move_distance_sqr = collide_result.length_squared();
 
     let position = &mut ctx.position;
@@ -277,12 +289,7 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
         }
     }
 
-    let x_collision = !math::equal(movement.x, collide_result.x);
-    let z_collision = !math::equal(movement.z, collide_result.z);
-    let horizontal_collision = x_collision || z_collision;
     physics.horizontal_collision = horizontal_collision;
-
-    let vertical_collision = movement.y != collide_result.y;
     physics.vertical_collision = vertical_collision;
     let on_ground = vertical_collision && movement.y < 0.;
     physics.set_on_ground(on_ground);
@@ -300,38 +307,17 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
         block_pos_below,
     );
 
-    if horizontal_collision {
-        let delta_movement = &physics.velocity;
-        physics.velocity = Vec3 {
-            x: if x_collision { 0. } else { delta_movement.x },
-            y: delta_movement.y,
-            z: if z_collision { 0. } else { delta_movement.z },
-        }
-    }
-
-    if vertical_collision {
-        let bounce_multiplier = Box::<dyn BlockTrait>::from(block_state_below)
-            .behavior()
-            .bounce_multiplier;
-        match bounce_multiplier {
-            Some(bounce_multiplier)
-                if physics.velocity.y < 0. && ctx.pose != Some(Pose::Crouching) =>
-            {
-                physics.velocity.y = -physics.velocity.y * bounce_multiplier as f64;
-            }
-            _ => physics.velocity.y = 0.,
-        }
-    }
-
-    if on_ground {
-        if BlockKind::from(block_state_below) == BlockKind::SlimeBlock
-            && physics.velocity.y.abs() < 0.1
-            && ctx.pose != Some(Pose::Crouching)
-        {
-            let scale = 0.4 + physics.velocity.y.abs() * 0.2;
-            physics.velocity.x *= scale;
-            physics.velocity.z *= scale;
-        }
+    if let Some(restitution) = restitution {
+        restitute_movement_after_collisions(
+            physics,
+            &restitution,
+            block_state_below,
+            x_collision,
+            z_collision,
+            vertical_collision,
+            on_ground,
+            collide_result,
+        );
     }
 
     let flying = ctx.fall_flying || ctx.abilities.is_some_and(|a| a.flying);
@@ -345,6 +331,107 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
         physics.velocity.z *= f64::from(speed_factor);
     }
 
+}
+
+pub(crate) fn is_shift_key_down(ctx: &MoveCtx) -> bool {
+    ctx.physics_state
+        .map_or(ctx.pose == Some(Pose::Crouching), |state| state.trying_to_crouch)
+}
+
+struct Restitution {
+    suppressing_bounce: bool,
+    entity_bounciness: f64,
+    gravity: f64,
+    air_drag: f64,
+    living: bool,
+}
+
+impl Restitution {
+    fn of(ctx: &MoveCtx, shift_key_down: bool) -> Self {
+        if ctx.vehicle_collisions.is_none() {
+            Self {
+                suppressing_bounce: shift_key_down,
+                entity_bounciness: ctx.attributes.bounciness_value(),
+                gravity: effective_gravity(ctx),
+                air_drag: f64::from(compute_modified_friction(
+                    0.98,
+                    ctx.attributes.air_drag_modifier_value() as f32,
+                )),
+                living: true,
+            }
+        } else {
+            Self {
+                suppressing_bounce: shift_key_down,
+                entity_bounciness: 0.,
+                gravity: 0.04,
+                air_drag: 1.0,
+                living: false,
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restitute_movement_after_collisions(
+    physics: &mut Physics,
+    mover: &Restitution,
+    effect_state: BlockState,
+    x_collision: bool,
+    z_collision: bool,
+    vertical_collision: bool,
+    vertical_collision_below: bool,
+    movement: Vec3,
+) {
+    let mut restitution = if mover.suppressing_bounce {
+        0.
+    } else {
+        mover.entity_bounciness
+    };
+    let current = physics.velocity;
+    let mut after = current;
+    if x_collision {
+        after.x = -current.x * restitution;
+    }
+    if z_collision {
+        after.z = -current.z * restitution;
+    }
+
+    if vertical_collision {
+        if vertical_collision_below {
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
+            let bounces = !(-current.y < mover.gravity)
+                && !mover.suppressing_bounce
+                && !SUPPRESSES_BOUNCE.contains(&BlockKind::from(effect_state));
+            restitution = if bounces {
+                f64::max(restitution, block_bounciness(effect_state, mover.living))
+            } else {
+                0.
+            };
+        }
+
+        let (gravity_compensation, effective_drag) = if restitution > 0. {
+            let portion_with_movement = movement.y / current.y;
+            (
+                portion_with_movement * mover.gravity,
+                math::lerp(portion_with_movement, 1., mover.air_drag),
+            )
+        } else {
+            (0., 1.)
+        };
+        after.y = (gravity_compensation - current.y) * effective_drag * restitution;
+    }
+
+    physics.velocity = after;
+}
+
+fn block_bounciness(state: BlockState, living: bool) -> f64 {
+    let mut bounciness = Box::<dyn BlockTrait>::from(state)
+        .behavior()
+        .bounce_restitution;
+    if !living {
+        bounciness *= 0.8;
+    }
+    f64::from(bounciness)
 }
 
 fn is_horizontal_collision_minor(

@@ -1,3 +1,4 @@
+use azalea::entity::particle::Particle;
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
 use simdnbt::owned::{Nbt, NbtCompound};
 
@@ -57,6 +58,46 @@ fn spawn_data(tag: &NbtCompound, key: &str) -> Option<EntityKind> {
         .ok()
 }
 
+fn trial_particles(ctx: &TickCtx, state: &str, ominous: bool) {
+    match state {
+        "waiting_for_players" | "waiting_for_reward_ejection" | "ejecting_reward" => {
+            if ctx.random(|r| r.next_int(2) == 0) {
+                let at = super::center_offset_random(ctx, 0.9);
+                let flame = if ominous {
+                    Particle::SoulFireFlame
+                } else {
+                    Particle::SmallFlame
+                };
+                ctx.add_particle(flame, at, [0.0; 3]);
+            }
+        }
+        "active" => {
+            let at = super::center_offset_random(ctx, 1.0);
+            ctx.add_particle(Particle::Smoke, at, [0.0; 3]);
+            let flame = if ominous {
+                Particle::SoulFireFlame
+            } else {
+                Particle::Flame
+            };
+            ctx.add_particle(flame, at, [0.0; 3]);
+        }
+        "cooldown" => {
+            let at = super::center_offset_random(ctx, 0.9);
+            if ctx.random(|r| r.next_int(3) == 0) {
+                ctx.add_particle(Particle::Smoke, at, [0.0; 3]);
+            }
+            if ctx.game_time % 20 == 0 {
+                let c = ctx.center();
+                let top = [c[0], c[1] + 0.5, c[2]];
+                for _ in 0..ctx.random(|r| r.next_int(4) + 20) {
+                    ctx.add_particle(Particle::Smoke, top, [0.0; 3]);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn trial_spin_speed(state: &str) -> Option<f64> {
     match state {
         "waiting_for_players" => Some(200.0),
@@ -93,6 +134,7 @@ impl Spin {
         };
         if data.trial {
             let state = ctx.state.prop("trial_spawner_state");
+            trial_particles(ctx, state, ctx.state.prop("ominous") == "true");
             if let Some(speed) = trial_spin_speed(state) {
                 self.advance(speed / 200.0);
             }
@@ -107,6 +149,10 @@ impl Spin {
         } else if !ctx.player_within(ctx.center(), f64::from(data.range)) {
             self.o_spin = self.spin;
         } else if data.display.is_some() {
+            let [x, y, z] = ctx.pos.map(f64::from);
+            let at = ctx.random(|r| [x + r.next_f64(), y + r.next_f64(), z + r.next_f64()]);
+            ctx.add_particle(Particle::Smoke, at, [0.0; 3]);
+            ctx.add_particle(Particle::Flame, at, [0.0; 3]);
             self.delay = (self.delay - 1).max(0);
             self.advance(f64::from(1000.0_f32 / (self.delay as f32 + 200.0)));
         }

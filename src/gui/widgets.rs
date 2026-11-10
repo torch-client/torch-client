@@ -1170,7 +1170,7 @@ pub const WIDGET_WIDTH_BIG: f32 = 200.0;
 
 const TEXT_MARGIN: f32 = 2.0;
 
-const LABEL_ACTIVE: u32 = 0xFFFFFF;
+const LABEL_ACTIVE: u32 = crate::text::WHITE;
 
 const LABEL_INACTIVE: u32 = 0xA0A0A0;
 

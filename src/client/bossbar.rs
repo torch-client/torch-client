@@ -22,10 +22,6 @@ pub struct BossBar {
     pub darken: bool,
     #[cfg_attr(not(feature = "audio"), allow(dead_code))]
     pub music: bool,
-    #[allow(
-        dead_code,
-        reason = "published boss-bar state the renderer does not consume yet"
-    )]
     pub fog: bool,
 }
 

@@ -5,6 +5,7 @@ use crate::renderer::{HumanoidAnim, PendingSection};
 pub struct SessionState {
     pub pending_chunks: std::collections::VecDeque<PendingSection>,
     pub pending_edits: std::collections::VecDeque<PendingSection>,
+    pub meshed_columns: ColumnMarkers,
     pub unloaded_chunks: Vec<(i32, i32)>,
     pub clear_chunks: bool,
     pub player_pos: [f64; 3],
@@ -18,6 +19,9 @@ pub struct SessionState {
     pub camera_eye: CameraEye,
     pub portal_effect: PortalEffect,
     pub spinning_effect: SpinningEffect,
+    pub sky_flash_time: i32,
+    pub lightning: Vec<crate::client::sky_flash::Bolt>,
+    pub hotbar_pop: [u8; 10],
     pub other_players: Vec<OtherPlayerInfo>,
     pub menu_slots: std::sync::Arc<[SlotStack]>,
     pub hotbar: std::sync::Arc<[SlotStack]>,
@@ -117,6 +121,7 @@ pub struct SessionState {
     pub auto_mace: Option<MaceAim>,
     pub attack_strength: f32,
     pub attack_delay: f32,
+    pub item_swap: f32,
     pub breaking: Vec<BreakingBlock>,
     pub remote_breaking: std::collections::HashMap<i32, RemoteBreak>,
     pub item_pickups: Vec<crate::play::item_pickup::ItemPickup>,
@@ -160,6 +165,7 @@ pub struct SessionState {
     pub custom_completions: Vec<String>,
     pub entities: std::sync::Arc<Vec<crate::entities::feed::EntityAnim>>,
     pub day_clock: WorldClock,
+    pub end_clock: crate::renderer::endflash::EndClock,
     pub env: Option<crate::renderer::environment::BiomeLayer>,
     pub env_prev: Option<crate::renderer::environment::BiomeLayer>,
     pub block_entities: std::sync::Arc<crate::blockentities::feed::BlockEntityMap>,
@@ -179,6 +185,14 @@ pub struct SessionState {
 }
 
 impl SessionState {
+    pub fn chunk_pos(&self) -> (i32, i32) {
+        let p = self.player_pos;
+        (
+            (p[0].floor() as i32).div_euclid(16),
+            (p[2].floor() as i32).div_euclid(16),
+        )
+    }
+
     pub fn clear_clicks(&mut self) {
         self.attack_held = false;
         self.use_held = false;
@@ -393,5 +407,113 @@ impl WorldClock {
         }
         self.rate = server.rate;
         self.drift = drift;
+    }
+}
+
+#[derive(Default)]
+pub struct ColumnMarkers {
+    #[cfg(lua_mods)]
+    pushed: u64,
+    #[cfg(lua_mods)]
+    taken: u64,
+    #[cfg(lua_mods)]
+    waiting: std::collections::VecDeque<((i32, i32), u64)>,
+}
+
+#[cfg_attr(not(lua_mods), allow(unused_variables, unused_mut))]
+impl ColumnMarkers {
+    #[inline]
+    pub fn appended(&mut self, n: usize) {
+        #[cfg(lua_mods)]
+        {
+            self.pushed += n as u64;
+        }
+    }
+
+    #[inline]
+    pub fn taken(&mut self, n: usize) {
+        #[cfg(lua_mods)]
+        {
+            self.taken += n as u64;
+        }
+    }
+
+    #[inline]
+    pub fn mark(&mut self, key: (i32, i32)) {
+        #[cfg(lua_mods)]
+        self.waiting.push_back((key, self.pushed));
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        #[cfg(lua_mods)]
+        let empty = self.waiting.is_empty();
+        #[cfg(not(lua_mods))]
+        let empty = true;
+        empty
+    }
+
+    pub fn cleared(&mut self) {
+        #[cfg(lua_mods)]
+        {
+            self.waiting.clear();
+            self.taken = self.pushed;
+        }
+    }
+
+    pub fn take_keys(&mut self) -> Vec<(i32, i32)> {
+        #[cfg(lua_mods)]
+        let keys = {
+            self.taken = self.pushed;
+            self.waiting.drain(..).map(|(key, _)| key).collect()
+        };
+        #[cfg(not(lua_mods))]
+        let keys = Vec::new();
+        keys
+    }
+
+    pub fn resolve(&mut self, edits_empty: bool, out: &mut Vec<(i32, i32)>) {
+        #[cfg(lua_mods)]
+        if edits_empty {
+            while let Some(&(key, at)) = self.waiting.front()
+                && at <= self.taken
+            {
+                out.push(key);
+                self.waiting.pop_front();
+            }
+        }
+    }
+
+    pub fn retain_chunks(
+        &mut self,
+        queue: &mut std::collections::VecDeque<PendingSection>,
+        mut keep: impl FnMut(&PendingSection) -> bool,
+    ) {
+        #[cfg(lua_mods)]
+        {
+            let mut at = self.taken;
+            let mut gone = 0u64;
+            let mut next = 0;
+            queue.retain(|sec| {
+                while let Some(marker) = self.waiting.get_mut(next)
+                    && marker.1 <= at
+                {
+                    marker.1 -= gone;
+                    next += 1;
+                }
+                at += 1;
+                let kept = keep(sec);
+                if !kept {
+                    gone += 1;
+                }
+                kept
+            });
+            for marker in self.waiting.iter_mut().skip(next) {
+                marker.1 -= gone;
+            }
+            self.pushed -= gone;
+        }
+        #[cfg(not(lua_mods))]
+        queue.retain(keep);
     }
 }

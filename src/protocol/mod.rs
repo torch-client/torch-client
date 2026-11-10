@@ -3,6 +3,7 @@
     reason = "the tables carry lookups no hop written yet reads"
 )]
 
+pub(crate) mod fields;
 pub(crate) mod hop;
 pub(crate) mod packets;
 pub(crate) mod remap;
@@ -128,7 +129,8 @@ pub(crate) fn session() -> i32 {
 }
 
 pub(crate) fn entity_metadata_is_native() -> bool {
-    session() == version::NATIVE.protocol
+    let session = session();
+    session == version::NATIVE.protocol || fields::Fields::for_wire(session).is_some()
 }
 
 pub(crate) fn translator() -> Option<Box<dyn azalea::connection::PacketTranslator>> {

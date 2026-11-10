@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -24,7 +23,6 @@ const PROMPT_MAX: usize = 256;
 const FOOT_H: f32 = 13.0;
 const DETAIL_GAP: f32 = 8.0;
 const GLYPH_H: f32 = 8.0;
-const ELLIPSIS: &str = "...";
 
 #[derive(Default)]
 pub struct LuaListState {
@@ -157,24 +155,6 @@ fn over_click_gui(state: &GuiState) -> bool {
     }
 }
 
-fn fit<'a>(p: &Painter, s: &'a str, w: f32) -> Cow<'a, str> {
-    let font = &p.atlas.font;
-    if font.width_str(s) <= w {
-        return Cow::Borrowed(s);
-    }
-    let room = w - font.width_str(ELLIPSIS);
-    let mut used = 0.0;
-    let mut end = 0;
-    for (i, c) in s.char_indices() {
-        used += font.advance(c, false);
-        if used > room {
-            break;
-        }
-        end = i + c.len_utf8();
-    }
-    Cow::Owned(format!("{}{ELLIPSIS}", &s[..end]))
-}
-
 #[allow(clippy::too_many_arguments)]
 fn draw_prompt(
     p: &mut Painter,
@@ -207,7 +187,7 @@ fn draw_prompt(
         look.header(),
     );
     p.fill(x, y + HEAD_H - 1.0, panel_w, 1.0, look.accent());
-    let title = fit(p, title, panel_w - 2.0 * PAD);
+    let title = p.fit(title, panel_w - 2.0 * PAD);
     p.text_centered(
         &title,
         x + panel_w / 2.0,
@@ -345,7 +325,7 @@ fn draw_file(
         look.header(),
     );
     p.fill(x, y + HEAD_H - 1.0, panel_w, 1.0, look.accent());
-    let title = fit(p, &list.title, panel_w - 2.0 * PAD);
+    let title = p.fit(&list.title, panel_w - 2.0 * PAD);
     p.text_centered(
         &title,
         x + panel_w / 2.0,
@@ -356,7 +336,7 @@ fn draw_file(
 
     let mut ly = y + HEAD_H + PAD;
     for (text, rgb) in &lines {
-        let text = fit(p, text, panel_w - 2.0 * PAD);
+        let text = p.fit(text, panel_w - 2.0 * PAD);
         p.text_plain(
             &text,
             x + PAD,
@@ -473,7 +453,7 @@ fn draw_canvas(
     script::draw_canvas_overlay(p);
     p.fill(0.0, 0.0, ctx.vw, HEAD_H, look.header());
     p.fill(0.0, HEAD_H - 1.0, ctx.vw, 1.0, look.accent());
-    let title = fit(p, &list.title, ctx.vw - 2.0 * PAD);
+    let title = p.fit(&list.title, ctx.vw - 2.0 * PAD);
     p.text_centered(
         &title,
         ctx.vw / 2.0,
@@ -551,7 +531,7 @@ pub fn draw(p: &mut Painter, st: &mut LuaListState, look: Look, ctx: &ScreenCtx)
         look.header(),
     );
     p.fill(x, y + HEAD_H - 1.0, panel_w, 1.0, look.accent());
-    let title = fit(p, &list.title, panel_w - 2.0 * PAD);
+    let title = p.fit(&list.title, panel_w - 2.0 * PAD);
     p.text_centered(
         &title,
         x + panel_w / 2.0,
@@ -648,19 +628,19 @@ pub fn draw(p: &mut Painter, st: &mut LuaListState, look: Look, ctx: &ScreenCtx)
         let ty = ry + ((row_h - GLYPH_H) / 2.0).floor();
         let mut left_w = text_w;
         if !row.detail.is_empty() {
-            let detail = fit(p, &row.detail, text_w / 2.0);
+            let detail = p.fit(&row.detail, text_w / 2.0);
             let dw = p.atlas.font.width_str(&detail);
             p.text_plain(&detail, tx + text_w - dw, ty, look.text_dim(), look.shadow);
             left_w = text_w - dw - DETAIL_GAP;
         }
-        let text = fit(p, &row.text, left_w.max(0.0));
+        let text = p.fit(&row.text, left_w.max(0.0));
         p.text_plain(&text, tx, ty, row.rgb & 0xFF_FFFF, look.shadow);
     }
     p.pop_clip(clip);
     options::draw_scrollbar(p, st.scroll, list_x, row_w, list_y, list_h, content_h);
 
     if foot_h > 0.0 {
-        let footer = fit(p, &list.footer, panel_w - 2.0 * PAD);
+        let footer = p.fit(&list.footer, panel_w - 2.0 * PAD);
         let fy = y + panel_h - foot_h + ((foot_h - GLYPH_H) / 2.0).floor() - 1.0;
         p.text_centered(&footer, x + panel_w / 2.0, fy, look.text_dim(), look.shadow);
     }

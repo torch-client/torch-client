@@ -125,6 +125,7 @@ pub(crate) fn sync_elder_guardian(
                         lit,
                         0,
                     ));
+                    #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_mut))]
                     let mut node = commands.spawn((
                         Mesh3d(mesh.clone()),
                         MeshMaterial3d(material.clone()),

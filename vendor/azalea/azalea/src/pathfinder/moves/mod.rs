@@ -15,8 +15,12 @@ use azalea_client::{
 use azalea_core::position::{BlockPos, Vec3};
 use azalea_inventory::Menu;
 use azalea_registry::builtin::BlockKind;
+use azalea_entity::LookDirection;
 use azalea_world::World;
-use bevy_ecs::{entity::Entity, message::MessageWriter, system::Commands, world::EntityWorldMut};
+use bevy_ecs::{
+    component::Component, entity::Entity, message::MessageWriter, system::Commands,
+    world::EntityWorldMut,
+};
 use parking_lot::RwLock;
 use tracing::trace;
 
@@ -29,7 +33,7 @@ use super::{
 };
 use crate::{
     auto_tool::best_tool_in_hotbar_for_block,
-    bot::{JumpEvent, LookAtEvent},
+    bot::{JumpEvent, LookAtEvent, direction_looking_at},
     pathfinder::player_pos_to_block_pos,
 };
 
@@ -74,6 +78,46 @@ pub struct ExecuteCtx<'s, 'w1, 'w2, 'w3, 'w4, 'w5, 'w6, 'a> {
     pub walk_events: &'a mut MessageWriter<'w4, StartWalkEvent>,
     pub jump_events: &'a mut MessageWriter<'w5, JumpEvent>,
     pub start_mining_events: &'a mut MessageWriter<'w6, StartMiningBlockEvent>,
+    pub intent: Option<&'a mut ExecutorIntent>,
+}
+
+#[derive(Clone, Copy, Component, Debug, Default, PartialEq)]
+pub struct ExecutorIntent {
+    pub look_target: Option<Vec3>,
+    pub world_dir: Option<(f64, f64)>,
+    pub sprint: bool,
+    pub jump: bool,
+    pub sneak: bool,
+    walk: WalkDirection,
+}
+
+impl ExecutorIntent {
+    pub fn resolve(&mut self, position: Vec3, look: Option<&LookDirection>) {
+        let offset = match self.walk {
+            WalkDirection::None => {
+                self.world_dir = None;
+                return;
+            }
+            WalkDirection::Forward => 0.0,
+            WalkDirection::ForwardRight => 45.0,
+            WalkDirection::Right => 90.0,
+            WalkDirection::BackwardRight => 135.0,
+            WalkDirection::Backward => 180.0,
+            WalkDirection::BackwardLeft => -135.0,
+            WalkDirection::Left => -90.0,
+            WalkDirection::ForwardLeft => -45.0,
+        };
+        let target_yaw = self.look_target.and_then(|t| {
+            let (dx, dz) = (t.x - position.x, t.z - position.z);
+            (dx * dx + dz * dz > 1e-8).then(|| direction_looking_at(position, t).y_rot() as f64)
+        });
+        let Some(yaw) = target_yaw.or_else(|| look.map(|l| l.y_rot() as f64)) else {
+            self.world_dir = None;
+            return;
+        };
+        let heading = (yaw + offset).to_radians();
+        self.world_dir = Some((-heading.sin(), heading.cos()));
+    }
 }
 
 impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
@@ -82,17 +126,26 @@ impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
     }
 
     pub fn look_at(&mut self, position: Vec3) {
+        let position = Vec3 {
+            x: position.x,
+            y: self.position.up(1.53).y,
+            z: position.z,
+        };
+        if let Some(intent) = self.intent.as_deref_mut() {
+            intent.look_target = Some(position);
+            return;
+        }
         self.look_at_events.write(LookAtEvent {
             entity: self.entity,
-            position: Vec3 {
-                x: position.x,
-                y: self.position.up(1.53).y,
-                z: position.z,
-            },
+            position,
         });
     }
 
     pub fn look_at_exact(&mut self, position: Vec3) {
+        if let Some(intent) = self.intent.as_deref_mut() {
+            intent.look_target = Some(position);
+            return;
+        }
         self.look_at_events.write(LookAtEvent {
             entity: self.entity,
             position,
@@ -100,6 +153,11 @@ impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
     }
 
     pub fn sprint(&mut self, direction: SprintDirection) {
+        if let Some(intent) = self.intent.as_deref_mut() {
+            intent.walk = WalkDirection::from(direction);
+            intent.sprint = true;
+            return;
+        }
         self.sprint_events.write(StartSprintEvent {
             entity: self.entity,
             direction,
@@ -107,6 +165,11 @@ impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
     }
 
     pub fn walk(&mut self, direction: WalkDirection) {
+        if let Some(intent) = self.intent.as_deref_mut() {
+            intent.walk = direction;
+            intent.sprint = false;
+            return;
+        }
         self.walk_events.write(StartWalkEvent {
             entity: self.entity,
             direction,
@@ -114,12 +177,20 @@ impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
     }
 
     pub fn jump(&mut self) {
+        if let Some(intent) = self.intent.as_deref_mut() {
+            intent.jump = true;
+            return;
+        }
         self.jump_events.write(JumpEvent {
             entity: self.entity,
         });
     }
 
     fn set_sneaking(&mut self, sneaking: bool) {
+        if let Some(intent) = self.intent.as_deref_mut() {
+            intent.sneak = sneaking;
+            return;
+        }
         self.commands
             .entity(self.entity)
             .queue(move |mut entity: EntityWorldMut<'_>| {
@@ -169,6 +240,7 @@ impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
             entity: self.entity,
             position: block,
             force: true,
+            continuing: false,
         });
 
         true

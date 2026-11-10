@@ -1,7 +1,10 @@
 #import bevy_pbr::mesh_functions
-#import bevy_pbr::mesh_view_bindings::{view, fog, globals}
+#import bevy_pbr::mesh_view_bindings::{view, globals}
 #import bevy_pbr::view_transformations::position_world_to_clip
+#ifdef DISTANCE_FOG
+#import bevy_pbr::mesh_view_bindings::fog
 #import client::vanilla_fog::vanilla_fog
+#endif
 
 #ifdef TONEMAP_IN_SHADER
 #import bevy_core_pipeline::tonemapping::tone_mapping
@@ -85,9 +88,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if color.a < 0.1 {
         discard;
     }
+#ifdef DISTANCE_FOG
     if fog.mode != 0u {
         color = vanilla_fog(color, in.world_position - view.world_position);
     }
+#endif
 #ifdef TONEMAP_IN_SHADER
 #ifndef TONEMAP_METHOD_NONE
     color = tone_mapping(color, view.color_grading);

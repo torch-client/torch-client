@@ -7,6 +7,7 @@ use azalea_core::{
 use azalea_entity::{
     Attributes, Dead, LocalEntity, LookDirection, Physics, Position,
     dimensions::EntityDimensions,
+    inventory::Inventory,
     metadata::{
         AbstractArrow, AbstractBoat, AbstractLiving, AbstractMinecart, ArmorStand,
         ArmorStandMarker, EndCrystal, FallingBlock, InGround, Interaction, ItemFrame,
@@ -18,6 +19,7 @@ use azalea_physics::{
     clip::{BlockShapeType, ClipContext, FluidPickType},
     collision::entity_collisions::{AabbQuery, get_entities},
 };
+use azalea_registry::builtin::ItemKind;
 use azalea_world::{World, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 use derive_more::{Deref, DerefMut};
@@ -44,6 +46,7 @@ pub fn update_hit_result_component(
             &WorldName,
             &Physics,
             &Attributes,
+            Option<&Inventory>,
         ),
         With<LocalEntity>,
     >,
@@ -61,6 +64,7 @@ pub fn update_hit_result_component(
         world_name,
         physics,
         attributes,
+        inventory,
     ) in &mut query
     {
         let block_pick_range = attributes.block_interaction_range.calculate();
@@ -84,6 +88,7 @@ pub fn update_hit_result_component(
             aabb_query: &aabb_query,
             pickable_query: &pickable_query,
             pick_box_query: &pick_box_query,
+            held_item: inventory.map_or(ItemKind::Air, |inv| inv.held_item().kind()),
         });
         if let Some(mut hit_result_ref) = hit_result_ref {
             **hit_result_ref = hit_result;
@@ -127,6 +132,7 @@ pub struct PickOpts<'world, 'state, 'a, 'b, 'c, 'd> {
     aabb_query: &'a AabbQuery<'world, 'state, 'b>,
     pickable_query: &'a MaybePickableEntityQuery<'world, 'state, 'c>,
     pick_box_query: &'a PickBoxQuery<'world, 'state, 'd>,
+    held_item: ItemKind,
 }
 
 pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_, '_>) -> HitResult {
@@ -139,6 +145,7 @@ pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_, '_>) -> HitResult {
         opts.eye_position,
         &opts.world.chunks,
         max_range,
+        opts.held_item,
     );
     let block_hit_result_dist_squared = block_hit_result
         .location
@@ -215,6 +222,7 @@ pub fn pick_block(
     eye_position: Vec3,
     chunks: &azalea_world::ChunkStorage,
     pick_range: f64,
+    held_item: ItemKind,
 ) -> BlockHitResult {
     let view_vector = view_vector(look_direction);
     let end_position = eye_position + (view_vector * pick_range);
@@ -226,6 +234,8 @@ pub fn pick_block(
             to: end_position,
             block_shape_type: BlockShapeType::Outline,
             fluid_pick_type: FluidPickType::None,
+            held_item,
+            entity: None,
         },
     )
 }

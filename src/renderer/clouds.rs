@@ -486,14 +486,14 @@ fn update_clouds(
             Some(texture) => build_mesh(texture, cell_x, cell_z, relative, status),
             None => return,
         };
-        if let Some(mesh) = meshes.get_mut(&assets.mesh) {
+        if let Some(mut mesh) = meshes.get_mut(&assets.mesh) {
             *mesh = rebuilt;
         }
     }
 
     if assets.painted != Some((color, status)) {
         assets.painted = Some((color, status));
-        if let Some(material) = materials.get_mut(&assets.material) {
+        if let Some(mut material) = materials.get_mut(&assets.material) {
             material.base_color = color.to_color();
             material.cull_mode = match status {
                 CloudStatus::Fancy => Some(bevy::render::render_resource::Face::Back),

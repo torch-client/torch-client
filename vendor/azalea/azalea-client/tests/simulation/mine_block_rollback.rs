@@ -29,6 +29,7 @@ fn test_mine_block_rollback() {
         entity: simulation.entity,
         position: pos,
         force: true,
+        continuing: false,
     });
     simulation.tick();
     assert_eq!(simulation.get_block_state(pos), Some(BlockKind::Air.into()));

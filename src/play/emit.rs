@@ -52,12 +52,12 @@ pub(crate) fn random_point(
     [x, y, z]
 }
 
-pub(crate) fn box_scale(attributes: &HashMap<i32, EntityAttributes>, id: i32, local: bool) -> f32 {
-    if local {
-        1.0
-    } else {
-        EntityAttributes::of(attributes, id).scale()
-    }
+pub(crate) fn box_scale(
+    _attributes: &HashMap<i32, EntityAttributes>,
+    _id: i32,
+    _local: bool,
+) -> f32 {
+    1.0
 }
 
 pub(crate) fn entity_effect(argb: u32) -> Particle {

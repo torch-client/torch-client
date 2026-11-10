@@ -1,6 +1,5 @@
 pub mod banner;
 pub mod beam;
-pub mod bed;
 pub mod bell;
 pub mod bounds;
 pub mod brushable;
@@ -25,7 +24,6 @@ use super::BeRegistry;
 pub fn register_all(registry: &mut BeRegistry) {
     banner::register(registry);
     beam::register(registry);
-    bed::register(registry);
     bell::register(registry);
     brushable::register(registry);
     campfire::register(registry);
@@ -211,16 +209,6 @@ mod test_support {
                     "lectern",
                     &[("facing", facing), ("has_book", has_book)],
                 ));
-            }
-        }
-        for color in DYES.map(|dye| dye.name) {
-            for part in ["head", "foot"] {
-                for facing in ["north", "south", "east", "west"] {
-                    out.push(test_state(
-                        &format!("{color}_bed"),
-                        &[("facing", facing), ("part", part)],
-                    ));
-                }
             }
         }
         super::beam::test_states(&mut out);

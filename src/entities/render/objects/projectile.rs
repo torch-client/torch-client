@@ -37,7 +37,8 @@ pub fn register(registry: &mut Registry) {
             trident_texture,
             projectile::no_anim,
         )
-        .with_root(trident_root),
+        .with_root(trident_root)
+        .with_entity_glint(trident_foil),
     );
     registry.add(
         EntityKind::LlamaSpit,
@@ -110,6 +111,10 @@ fn spectral_arrow_texture(_st: &EntityState) -> TexturePath {
 
 fn trident_texture(_st: &EntityState) -> TexturePath {
     "entity/trident/trident".into()
+}
+
+fn trident_foil(st: &EntityState) -> bool {
+    st.extras.trident_foil
 }
 
 fn llama_spit_texture(_st: &EntityState) -> TexturePath {

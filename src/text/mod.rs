@@ -121,6 +121,15 @@ pub const FORMAT_COLORS: [u32; 16] = [
     0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
 ];
 
+pub const GOLD: u32 = FORMAT_COLORS[6];
+pub const GRAY: u32 = FORMAT_COLORS[7];
+pub const DARK_GRAY: u32 = FORMAT_COLORS[8];
+pub const GREEN: u32 = FORMAT_COLORS[10];
+pub const AQUA: u32 = FORMAT_COLORS[11];
+pub const RED: u32 = FORMAT_COLORS[12];
+pub const YELLOW: u32 = FORMAT_COLORS[14];
+pub const WHITE: u32 = FORMAT_COLORS[15];
+
 const COLOR_NAMES: [&str; 16] = [
     "black",
     "dark_blue",
@@ -1011,8 +1020,7 @@ mod tests {
     }
 
     fn assets() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("reference/minecraft-26.1.1/assets/minecraft")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("reference/minecraft-26.2/assets/minecraft")
     }
 
     fn font() -> Font {

@@ -53,6 +53,10 @@ impl CameraView {
     pub fn free_eye(&self) -> bevy::math::DVec3 {
         self.free_eye
     }
+
+    pub fn cycle_perspective(&mut self) {
+        self.perspective = self.perspective.cycle();
+    }
 }
 
 #[derive(Resource, Default)]
@@ -98,6 +102,7 @@ fn save_on_session_end() {
     #[cfg(lua_mods)]
     crate::modules::script::leave();
     crate::modules::pathfinder::reset();
+    crate::modules::auto_mine::reset();
     crate::modules::save();
     crate::gui::command_history::save();
 }
@@ -138,6 +143,7 @@ struct NavPoll {
 }
 
 pub(super) fn apply_gui_nav(
+    buttons: Res<ButtonInput<MouseButton>>,
     shared: Res<Shared>,
     mut state: ResMut<crate::gui::GuiState>,
     mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
@@ -394,7 +400,7 @@ pub(super) fn apply_gui_nav(
         s.session.sign_update = Some(state.sign_edit.close(rev));
         s.session.sign_edit_open_pos = None;
     }
-    enter_screen(next, &mut state, &shared, &mut windows);
+    enter_screen(next, &mut state, &shared, &mut windows, &buttons);
 }
 
 pub(super) fn mouse_look(
@@ -634,6 +640,7 @@ pub(super) fn window_focus_cursor(
 }
 
 pub(super) fn pause_on_lost_focus(
+    buttons: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
     view: Res<super::FrameView>,
     shared: Res<Shared>,
@@ -654,7 +661,13 @@ pub(super) fn pause_on_lost_focus(
     }
     if now - *last_active > 0.5 && !state.screen.is_open() {
         crate::log_info!("input", "pausing: window lost focus");
-        enter_screen(crate::gui::Screen::Pause, &mut state, &shared, &mut windows);
+        enter_screen(
+            crate::gui::Screen::Pause,
+            &mut state,
+            &shared,
+            &mut windows,
+            &buttons,
+        );
     }
 }
 
@@ -714,7 +727,7 @@ pub(super) fn web_pointer_lock(
             buttons.just_pressed(MouseButton::Left) || buttons.just_pressed(MouseButton::Right);
         if crate::platform::pointer::is_locked() {
             if claimed && pressed {
-                state.suppress_click = true;
+                state.claim_buttons(&buttons);
             }
             *held_frames = held_frames.saturating_add(1);
             return;
@@ -723,12 +736,18 @@ pub(super) fn web_pointer_lock(
         const CLOSE_GRACE: f32 = 0.6;
         if std::mem::take(&mut *held_frames) >= SETTLED && now - *screen_seen > CLOSE_GRACE {
             crate::log_info!("input", "pausing: pointer lock lost");
-            enter_screen(crate::gui::Screen::Pause, &mut state, &shared, &mut windows);
+            enter_screen(
+                crate::gui::Screen::Pause,
+                &mut state,
+                &shared,
+                &mut windows,
+                &buttons,
+            );
             return;
         }
         if pressed {
             crate::platform::pointer::lock();
-            state.suppress_click = true;
+            state.claim_buttons(&buttons);
         }
     }
 }
@@ -835,7 +854,7 @@ pub(super) fn toggle_third_person(
         .keybinds
         .just(Action::TogglePerspective, &keys, &buttons)
     {
-        camera.perspective = camera.perspective.cycle();
+        camera.cycle_perspective();
     }
 }
 
@@ -919,10 +938,8 @@ pub(crate) fn handle_mouse_input(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     shared: Res<Shared>,
-    #[cfg_attr(feature = "mobile_ui", allow(unused_mut))] mut state: ResMut<crate::gui::GuiState>,
-    #[cfg_attr(feature = "mobile_ui", allow(unused_mut))] mut intent: ResMut<
-        crate::renderer::intent::Intent,
-    >,
+    state: ResMut<crate::gui::GuiState>,
+    intent: ResMut<crate::renderer::intent::Intent>,
 ) {
     #[cfg(feature = "mobile_ui")]
     {
@@ -942,23 +959,18 @@ fn handle_mouse_input_desktop(
     mut intent: ResMut<crate::renderer::intent::Intent>,
 ) {
     if state.screen.is_open() {
+        state.claim_buttons(&buttons);
         shared.0.lock().unwrap().session.clear_clicks();
         return;
     }
-    if std::mem::take(&mut state.suppress_click) {
-        shared.0.lock().unwrap().session.clear_clicks();
-        return;
-    }
+    state.screen_buttons.retain(|b| buttons.pressed(*b));
     let binds = &state.keybinds;
-    intent.hold(
-        binds.down(Action::Attack, &keys, &buttons),
-        binds.down(Action::Use, &keys, &buttons),
-    );
-    intent.click(
-        binds.just(Action::Attack, &keys, &buttons),
-        binds.just(Action::Use, &keys, &buttons),
-    );
-    if binds.just(Action::PickItem, &keys, &buttons) {
+    let owned = state.screen_buttons.as_slice();
+    let down = |a| binds.down(a, &keys, &buttons) && !binds.screen_owned(a, owned);
+    let just = |a| binds.just(a, &keys, &buttons) && !binds.screen_owned(a, owned);
+    intent.hold(down(Action::Attack), down(Action::Use));
+    intent.click(just(Action::Attack), just(Action::Use));
+    if just(Action::PickItem) {
         intent.pick(keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight));
     }
 }
@@ -1193,13 +1205,19 @@ pub(super) fn toggle_screen(
                 (keys.just_pressed(KeyCode::Escape) || field_escape) && !state.clickgui.escape();
             if click_gui || escape {
                 let back = state.clickgui_parent;
-                enter_screen(back, &mut state, &shared, &mut windows);
+                enter_screen(back, &mut state, &shared, &mut windows, &buttons);
             }
             return;
         }
         if click_gui && (state.screen == Screen::None || state.screen_is_menu()) {
             state.clickgui_parent = state.screen;
-            enter_screen(Screen::ClickGui, &mut state, &shared, &mut windows);
+            enter_screen(
+                Screen::ClickGui,
+                &mut state,
+                &shared,
+                &mut windows,
+                &buttons,
+            );
             return;
         }
     }
@@ -1212,14 +1230,20 @@ pub(super) fn toggle_screen(
                 (keys.just_pressed(KeyCode::Escape) || field_escape) && !state.hud_state.escape();
             if hud_key || escape {
                 let back = state.hud_state.parent;
-                enter_screen(back, &mut state, &shared, &mut windows);
+                enter_screen(back, &mut state, &shared, &mut windows, &buttons);
             }
             return;
         }
         if hud_key && (state.screen == Screen::None || state.screen_is_menu()) {
             state.hud_state.parent = state.screen;
             state.hud_state.over_menu = state.screen_is_menu();
-            enter_screen(Screen::HudEditor, &mut state, &shared, &mut windows);
+            enter_screen(
+                Screen::HudEditor,
+                &mut state,
+                &shared,
+                &mut windows,
+                &buttons,
+            );
             return;
         }
     }
@@ -1290,6 +1314,8 @@ pub(super) fn toggle_screen(
                     Screen::ShaderOptions => Screen::ShaderPacks,
                     #[cfg(explore_modrinth)]
                     Screen::ExplorePacks => Screen::ResourcePacks,
+                    #[cfg(feature = "mobile_ui")]
+                    Screen::TouchLayout => Screen::Controls,
                     s if s.is_options() => Screen::Options,
                     _ => Screen::None,
                 })
@@ -1452,7 +1478,7 @@ pub(super) fn toggle_screen(
             .inv_actions
             .push(InvAction::Close);
     }
-    enter_screen(next, &mut state, &shared, &mut windows);
+    enter_screen(next, &mut state, &shared, &mut windows, &buttons);
 }
 
 fn debug_combo(

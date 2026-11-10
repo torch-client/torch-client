@@ -4,7 +4,7 @@ use core::ops::{Deref, DerefMut};
 use crate::{primitives::Frustum, visibility::VisibilitySystems};
 use bevy_app::{App, Plugin, PostUpdate};
 use bevy_ecs::prelude::*;
-use bevy_math::{ops, vec4, AspectRatio, Mat4, Rect, Vec2, Vec3A, Vec4};
+use bevy_math::{ops, primitives::ViewFrustum, vec4, AspectRatio, Mat4, Rect, Vec2, Vec3A, Vec4};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect, ReflectDeserialize, ReflectSerialize};
 use bevy_transform::{components::GlobalTransform, TransformSystems};
 use derive_more::derive::From;
@@ -37,12 +37,12 @@ pub trait CameraProjection {
 
     fn compute_frustum(&self, camera_transform: &GlobalTransform) -> Frustum {
         let clip_from_world = self.get_clip_from_view() * camera_transform.affine().inverse();
-        Frustum::from_clip_from_world_custom_far(
+        Frustum(ViewFrustum::from_clip_from_world_custom_far(
             &clip_from_world,
             &camera_transform.translation(),
             &camera_transform.back(),
             self.far(),
-        )
+        ))
     }
 }
 
@@ -281,7 +281,10 @@ impl Default for PerspectiveProjection {
 
 impl PerspectiveProjection {
     fn adjust_perspective_matrix_for_clip_plane(&self, matrix: &mut Mat4) {
-        if self.near_clip_plane == vec4(0.0, 0.0, -1.0, -self.near) {
+        if self.near_clip_plane.x == 0.0
+            && self.near_clip_plane.y == 0.0
+            && self.near_clip_plane.z == -1.0
+        {
             return;
         }
 
@@ -459,5 +462,29 @@ impl OrthographicProjection {
             scaling_mode: ScalingMode::WindowSize,
             area: Rect::new(-1.0, -1.0, 1.0, 1.0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_near_plane_is_respected() {
+        let default_proj = PerspectiveProjection::default();
+        let custom_proj = PerspectiveProjection {
+            near: 0.01,
+            ..Default::default()
+        };
+
+        let default_matrix = default_proj.get_clip_from_view();
+        let custom_matrix = custom_proj.get_clip_from_view();
+
+        assert_ne!(
+            default_matrix, custom_matrix,
+            "A near plane of 0.01 should produce a different projection matrix than the default 0.1"
+        );
+
+        assert_eq!(custom_matrix.w_axis.z, 0.01);
     }
 }

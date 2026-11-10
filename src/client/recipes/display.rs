@@ -103,6 +103,7 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    #[cfg(test)]
     pub fn first_item(&mut self, display: &SlotDisplayData) -> Option<&'static str> {
         self.resolve(display).first().map(|s| s.item)
     }

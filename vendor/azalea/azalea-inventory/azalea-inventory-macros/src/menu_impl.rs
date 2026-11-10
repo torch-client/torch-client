@@ -250,6 +250,7 @@ pub fn generate_match_variant_for_contents(menu: &Menu) -> TokenStream {
     for field in &menu.fields {
         let field_name = &field.name;
         if field_name == "player" {
+            instructions.extend(quote! { let _ = #field_name; });
             continue;
         }
         instructions.extend(if field.length == 1 {

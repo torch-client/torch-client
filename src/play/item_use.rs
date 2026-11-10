@@ -89,7 +89,7 @@ pub(crate) fn emit_local(
 fn play_sound(consume: &Consumption, at: [f64; 3]) {
     use crate::audio::{SoundCategory, random_f32};
 
-    let event = crate::client::server_sounds::event_name(&consume.sound);
+    let event = crate::items::kinetic::event_name(&consume.sound);
     let (volume, pitch) = if consume.drink {
         (0.5, 0.9 + random_f32() * 0.1)
     } else {

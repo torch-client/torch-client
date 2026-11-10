@@ -128,6 +128,9 @@ pub(crate) fn extract_entity_draws(
             continue;
         };
         use crate::renderer::entity_material::LightMode;
+        if material.params.mode == LightMode::WaterMask as u32 {
+            continue;
+        }
         let blend = blended(material.alpha_mode);
         let glowing = material.params.mode == LightMode::Emissive as u32;
         let drawn_as = match kind {
@@ -295,6 +298,7 @@ pub(crate) fn extract_standard_draws(
                 SkyPart::Stars => (EntityKind::SkyBasic, "STARS", 4, parts.stars),
                 SkyPart::DarkDisc => (EntityKind::SkyBasic, "VOID", 5, parts.sky),
                 SkyPart::EndSky => (EntityKind::SkyTextured, "SKY", 0, parts.sky),
+                SkyPart::EndFlash => (EntityKind::SkyTextured, "SKY", 1, parts.sky),
             };
             if !visible.get() || !wanted || !has(kind) {
                 continue;

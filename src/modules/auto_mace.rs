@@ -7,7 +7,7 @@ use azalea::entity::Physics;
 use azalea::entity::metadata::FallFlying;
 
 use super::registry::{Id, auto_mace as setting, options};
-use super::sent::{Look, look_at, move_fix, sent_ray, view_vector};
+use super::sent::{Look, box_distance, look_at, move_fix, ray_hits, sent_ray, view_vector};
 use super::{Edge, MS_PER_TICK, Phase, roll, store, turn};
 use crate::session::{Gamemode, MaceAim, SharedMutex, SharedState, SlotStack};
 use crate::util::mth::wrap_degrees;
@@ -399,30 +399,6 @@ fn aim_point(min: [f64; 3], max: [f64; 3], eye: [f64; 3], at: AimPoint) -> [f64;
             ]
         }
     }
-}
-
-fn box_distance(p: [f64; 3], min: [f64; 3], max: [f64; 3]) -> f64 {
-    let d = |i: usize| (min[i] - p[i]).max(0.0).max(p[i] - max[i]);
-    (d(0) * d(0) + d(1) * d(1) + d(2) * d(2)).sqrt()
-}
-
-fn ray_hits(origin: [f64; 3], dir: [f64; 3], len: f64, min: [f64; 3], max: [f64; 3]) -> bool {
-    let (mut near, mut far) = (0.0_f64, len);
-    for i in 0..3 {
-        if dir[i].abs() < 1e-12 {
-            if origin[i] < min[i] || origin[i] > max[i] {
-                return false;
-            }
-            continue;
-        }
-        let (a, b) = ((min[i] - origin[i]) / dir[i], (max[i] - origin[i]) / dir[i]);
-        near = near.max(a.min(b));
-        far = far.min(a.max(b));
-        if near > far {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]

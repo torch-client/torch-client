@@ -19,6 +19,7 @@ pub(crate) struct UniformLayout {
 }
 
 impl UniformLayout {
+    #[cfg(test)]
     pub(crate) fn offset(&self, name: &str) -> Option<u32> {
         self.members
             .iter()
@@ -86,6 +87,7 @@ pub(crate) struct Layout {
     pub(crate) bindings: Vec<Binding>,
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) uniforms: UniformLayout,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) targets: u32,
 }
 

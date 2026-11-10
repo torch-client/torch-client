@@ -1,5 +1,5 @@
 Torch is a Minecraft client rebuilt in Rust.
-It supports 26.1.1 and 1.21.11 servers.
+It supports 26.2, 26.1 and 1.21.11 servers.
 
 Requirements:
 - 64-bit ARM device

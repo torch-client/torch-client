@@ -1,8 +1,10 @@
 #[cfg(feature = "builtin_shaders")]
+use bevy::camera::Hdr;
+#[cfg(feature = "builtin_shaders")]
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 #[cfg(feature = "builtin_shaders")]
-use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection, Hdr};
+use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 
 #[cfg(feature = "builtin_shaders")]
 use super::systems::WorldCamera;

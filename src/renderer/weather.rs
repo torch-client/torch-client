@@ -93,8 +93,8 @@ impl Plugin for WeatherPlugin {
                 Update,
                 setup.run_if(
                     resource_exists::<super::systems::AssetsReady>
-                        .and(resource_exists::<super::terrain::LightmapPixels>)
-                        .and(not(resource_exists::<WeatherAssets>)),
+                        .and_then(resource_exists::<super::terrain::LightmapPixels>)
+                        .and_then(not(resource_exists::<WeatherAssets>)),
                 ),
             )
             .add_systems(
@@ -217,7 +217,7 @@ fn reload_textures(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<WeatherMaterial>>,
 ) {
-    if let Some(material) = materials.get_mut(&assets.material) {
+    if let Some(mut material) = materials.get_mut(&assets.material) {
         material.rain = images.add(load_texture("rain.png"));
         material.snow = images.add(load_texture("snow.png"));
     }
@@ -238,7 +238,7 @@ fn update_weather(
         return;
     };
     let intensity = env.rain;
-    if intensity <= 0.0 {
+    if intensity <= 0.0 || view.no_render.has(crate::modules::no_render::Part::Weather) {
         visibility.set_if_neq(Visibility::Hidden);
         if assets.scanned.is_some() {
             assets.scanned = None;
@@ -259,7 +259,7 @@ fn update_weather(
         let moved = assets.built_at != Some(camera);
         if moved || columns != assets.columns {
             let rebuilt = write_mesh(&columns, camera, &assets.size_x, &assets.size_z);
-            if let Some(mesh) = meshes.get_mut(&assets.mesh) {
+            if let Some(mut mesh) = meshes.get_mut(&assets.mesh) {
                 *mesh = rebuilt;
             }
             assets.built_at = Some(camera);
@@ -282,7 +282,7 @@ fn update_weather(
     if materials
         .get(&assets.material)
         .is_some_and(|m| m.params != params)
-        && let Some(material) = materials.get_mut(&assets.material)
+        && let Some(mut material) = materials.get_mut(&assets.material)
     {
         material.params = params;
     }
@@ -522,12 +522,19 @@ fn write_mesh(
     mesh
 }
 
-pub(crate) fn tick_rain_particles(ctx: &mut Emitter, rain: f32, tick: u64, sound_time: &mut i32) {
+pub(crate) fn tick_rain_particles(
+    ctx: &mut Emitter,
+    rain: f32,
+    tick: u64,
+    sound_time: &mut i32,
+    splashes: bool,
+) {
     use azalea::entity::particle::Particle as P;
 
     if rain <= 0.0 {
         return;
     }
+    let minimal = ctx.status == ParticleStatus::Minimal || !splashes;
     let mut random = JavaRandom::new((tick as i64).wrapping_mul(312_987_231));
     let camera = IVec3::new(
         ctx.eye.x.floor() as i32,
@@ -557,7 +564,7 @@ pub(crate) fn tick_rain_particles(ctx: &mut Emitter, rain: f32, tick: u64, sound
         }
         let pos = IVec3::new(x, height - 1, z);
         landed = Some(pos);
-        if ctx.status == ParticleStatus::Minimal {
+        if minimal {
             break;
         }
         let block_x = random.next_f64();

@@ -677,15 +677,18 @@ pub fn watchdog() {
             "mesh",
             "{} chunk columns arrived {:.0}s ago and not one section has reached the \
              GPU: {} columns lit, {} mesh jobs queued, {} sections meshed, {} worker \
-             panics, {} light jobs dropped. The first of those that is zero is the \
-             stage that stopped.",
+             panics, {} light jobs dropped, {} columns queued again and {} left unbuilt \
+             after their jobs built nothing. The first of the first three that is zero is \
+             the stage that stopped.",
             c[Stat::ChunksReceived],
             since_first.as_secs_f32(),
             c[Stat::ColumnsLit],
             c[Stat::MeshJobs],
             c[Stat::SectionsMeshed],
             c[Stat::MeshPanics],
-            c[Stat::LightJobsDropped]
+            c[Stat::LightJobsDropped],
+            c[Stat::MeshRequeued],
+            c[Stat::MeshGaveUp]
         );
     }
 

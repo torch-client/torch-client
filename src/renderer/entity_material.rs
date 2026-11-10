@@ -6,7 +6,7 @@ use bevy::mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+    AsBindGroup, ColorWrites, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
 use bevy::shader::ShaderRef;
 
@@ -19,6 +19,7 @@ pub enum LightMode {
     Emissive = 2,
     Text = 3,
     Outline = 4,
+    WaterMask = 5,
 }
 
 const DIFFUSE_LIGHT: [Vec3; 2] = [Vec3::new(0.2, 1.0, -0.7), Vec3::new(-0.2, 1.0, 0.7)];
@@ -153,6 +154,7 @@ pub struct EntityMaterial {
     pub glint_texture: Option<Handle<Image>>,
     pub alpha_mode: AlphaMode,
     pub depth_bias: i32,
+    pub sort_bias: f32,
     pub see_through: bool,
 }
 
@@ -162,6 +164,7 @@ pub struct EntityMaterialKey {
     see_through: bool,
     glint: bool,
     fancy: bool,
+    water_mask: bool,
 }
 
 impl From<&EntityMaterial> for EntityMaterialKey {
@@ -171,6 +174,7 @@ impl From<&EntityMaterial> for EntityMaterialKey {
             see_through: material.see_through,
             glint: material.params.glint.z > 0.0 && material.glint_texture.is_some(),
             fancy: crate::renderer::terrain::builtin_shaders_enabled(),
+            water_mask: material.params.mode == LightMode::WaterMask as u32,
         }
     }
 }
@@ -192,6 +196,7 @@ impl EntityMaterial {
             glint_texture: None,
             alpha_mode,
             depth_bias,
+            sort_bias: 0.0,
             see_through: false,
         }
     }
@@ -233,7 +238,7 @@ impl EntityMaterial {
         let mut params = material.params;
         params.set(lit);
         if params != material.params
-            && let Some(material) = materials.get_mut(handle)
+            && let Some(mut material) = materials.get_mut(handle)
         {
             material.params = params;
         }
@@ -289,6 +294,14 @@ impl Material for EntityMaterial {
         self.alpha_mode
     }
 
+    fn depth_bias(&self) -> f32 {
+        if self.params.mode == LightMode::WaterMask as u32 {
+            f32::NEG_INFINITY
+        } else {
+            self.sort_bias
+        }
+    }
+
     fn enable_prepass() -> bool {
         false
     }
@@ -325,7 +338,7 @@ impl Material for EntityMaterial {
             depth_stencil.bias.constant = key.bind_group_data.depth_bias;
             if key.bind_group_data.see_through {
                 depth_stencil.depth_compare =
-                    bevy::render::render_resource::CompareFunction::GreaterEqual;
+                    Some(bevy::render::render_resource::CompareFunction::GreaterEqual);
                 descriptor.vertex.shader_defs.push("SEE_THROUGH".into());
                 descriptor
                     .vertex
@@ -344,6 +357,16 @@ impl Material for EntityMaterial {
         {
             fragment.shader_defs.push("ENTITY_GLINT".into());
             fragment.shader_defs.extend(super::glint::shader_defs());
+        }
+        if key.bind_group_data.water_mask {
+            if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
+                depth_stencil.depth_write_enabled = Some(true);
+            }
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                for target in fragment.targets.iter_mut().flatten() {
+                    target.write_mask = ColorWrites::empty();
+                }
+            }
         }
         Ok(())
     }

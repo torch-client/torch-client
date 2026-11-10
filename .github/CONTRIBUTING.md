@@ -12,6 +12,8 @@ tools/build_web.sh             # browser
 tools/build_android.sh         # Android APK
 ```
 
+The release files go into `dist/` under the names the releases page uses: `tools/build_desktop.sh` (add `--windows` to cross-build) zips the desktop executable, `tools/build_android.sh` writes the APK, and `tools/pack_single_html.py` turns a browser build into one HTML page.
+
 Optional features are listed under [Feature system](#feature-system). If your change touches code behind a feature, build with that feature on (for example `--features builtin_shaders`), since code behind a feature that is off is not compiled at all.
 
 ## Pull requests

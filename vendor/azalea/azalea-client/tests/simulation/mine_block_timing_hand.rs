@@ -65,6 +65,7 @@ fn test_mine_block_timing_hand() {
         entity: simulation.entity,
         position: pos,
         force: false,
+        continuing: false,
     });
     sent_packets.clear();
     simulation.tick();
@@ -136,6 +137,7 @@ fn test_mine_block_timing_hand() {
         entity: simulation.entity,
         position: pos2,
         force: false,
+        continuing: false,
     });
     for _ in 0..150 {
         simulation.tick();

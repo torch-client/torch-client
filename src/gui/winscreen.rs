@@ -1,7 +1,7 @@
 use crate::gui::painter::Painter;
 use crate::gui::{Screen, ScreenCtx};
 use crate::session::SharedMutex;
-use crate::text::{Span, Style, texts};
+use crate::text::{GRAY, Span, Style, WHITE, YELLOW, texts};
 
 const SECTION_HEADING: &str = "============";
 const NAME_PREFIX: &str = "           ";
@@ -12,10 +12,6 @@ const LINE_PITCH: f32 = 12.0;
 const SCROLL_SPEED: f32 = 0.5;
 const SPEEDUP: f32 = 5.0;
 const SPEEDUP_FAST: f32 = 15.0;
-
-const YELLOW: u32 = 0xFFFF55;
-const GRAY: u32 = 0xAAAAAA;
-const WHITE: u32 = 0xFFFFFF;
 
 struct Line {
     spans: Vec<Span>,
@@ -36,6 +32,7 @@ impl WinState {
         *self = WinState::default();
     }
 
+    #[cfg(feature = "mobile_ui")]
     pub fn skip(&mut self) {
         self.skip = true;
     }

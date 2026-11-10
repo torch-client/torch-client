@@ -382,7 +382,7 @@ fn base_color(
 ) -> BaseColor {
     let sprites = blocks.sprites();
     let colors = sprites.tile_colors();
-    let rows = sprites.rows().max(1);
+    let grid = sprites.grid();
     let mode = if name.ends_with("_leaves") {
         ColorMode::Leaves
     } else if FLOWERS.contains(&name) {
@@ -400,7 +400,7 @@ fn base_color(
             TintKind::Water
         };
         return BaseColor {
-            argb: colors.get(still, mode),
+            argb: colors.get(still.tile, mode),
             tint,
         };
     }
@@ -433,7 +433,7 @@ fn base_color(
             .flat_map(|m| m.quads.iter())
             .find(|q| q.cull.map(|c| c as usize) == dir);
         if let Some(q) = quad {
-            let tile = tile_of_uv(&q.uv, rows);
+            let tile = tile_of_uv(&q.uv, grid);
             if tile == 0 {
                 break;
             }
@@ -450,7 +450,7 @@ fn base_color(
     }
     if let Some(uv) = models.iter().find_map(|m| m.particle_uv) {
         let centre = [[(uv[0] + uv[2]) / 2.0, (uv[1] + uv[3]) / 2.0]; 4];
-        let tile = tile_of_uv(&centre, rows);
+        let tile = tile_of_uv(&centre, grid);
         if tile != 0 {
             return BaseColor {
                 argb: colors.get(tile, mode),

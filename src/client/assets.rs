@@ -53,6 +53,10 @@ pub(crate) fn root() -> PathBuf {
     not(target_os = "android")
 ))]
 fn default_root() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    if let Some(cache) = crate::platform::storage::xdg_cache_home() {
+        return cache.join("torch-client/assets");
+    }
     std::env::temp_dir().join("torch-client/assets")
 }
 
@@ -178,17 +182,22 @@ mod store {
 
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
 pub(crate) fn clear_web_cache() -> Result<(), String> {
+    call_page("clearStoredAssets")?;
+    log_info!("assets", "asked the page to clear the stored archive");
+    Ok(())
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+fn call_page(name: &str) -> Result<(), String> {
     use wasm_bindgen::{JsCast, JsValue};
 
     let window = web_sys::window().ok_or_else(|| "no window".to_owned())?;
-    let f = js_sys::Reflect::get(&window, &JsValue::from_str("clearStoredAssets"))
-        .map_err(|_| "the page defines no clearStoredAssets".to_owned())?;
+    let f = js_sys::Reflect::get(&window, &JsValue::from_str(name))
+        .map_err(|_| format!("the page defines no {name}"))?;
     let f = f
         .dyn_ref::<js_sys::Function>()
-        .ok_or_else(|| "clearStoredAssets is not a function".to_owned())?;
-    f.call0(&window)
-        .map_err(|_| "clearStoredAssets threw".to_owned())?;
-    log_info!("assets", "asked the page to clear the stored archive");
+        .ok_or_else(|| format!("{name} is not a function"))?;
+    f.call0(&window).map_err(|_| format!("{name} threw"))?;
     Ok(())
 }
 
@@ -289,7 +298,7 @@ pub(crate) fn mount() -> bool {
                 MISSING.fetch_or(WANTED.load(Ordering::Relaxed), Ordering::Relaxed);
             }
         }
-        #[cfg(feature = "audio")]
+        #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
         crate::audio::init(id);
     }
     log_info!("assets", "jar layer {version}: {} entries", jar_layer.len());
@@ -299,6 +308,8 @@ pub(crate) fn mount() -> bool {
         log_warn!("assets", "could not mount the assets: {e}");
         return false;
     }
+    #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+    crate::audio::init_from_archive();
     #[cfg(not(target_arch = "wasm32"))]
     RESTART_PENDING.store(false, Ordering::Relaxed);
     true
@@ -543,7 +554,7 @@ impl Stage {
     }
 }
 
-pub(crate) const FETCHES_SOUNDS: bool = cfg!(all(feature = "audio", not(target_arch = "wasm32")));
+pub(crate) const FETCHES_SOUNDS: bool = cfg!(feature = "audio");
 
 pub(crate) fn offers_assets() -> bool {
     missing() == 0 || missing() & piece::OBJECTS != 0
@@ -580,17 +591,10 @@ pub(crate) fn download() -> &'static Download {
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 static MISSING: AtomicU8 = AtomicU8::new(0);
 
-#[cfg(not(target_arch = "wasm32"))]
 fn missing() -> u8 {
     MISSING.load(Ordering::Relaxed)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn missing() -> u8 {
-    0
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -599,7 +603,6 @@ static WANTED: AtomicU8 = AtomicU8::new(0);
 #[cfg(not(target_arch = "wasm32"))]
 static MOUNTED_INDEX: Mutex<Option<String>> = Mutex::new(None);
 
-#[cfg(not(target_arch = "wasm32"))]
 static RESTART_PENDING: AtomicBool = AtomicBool::new(false);
 
 #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
@@ -633,7 +636,27 @@ pub(crate) fn check_missing() -> bool {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn check_missing() -> bool {
-    false
+    use crate::platform::assets::archive;
+
+    if !archive::active() || RESTART_PENDING.load(Ordering::Relaxed) {
+        return false;
+    }
+    #[cfg_attr(not(feature = "audio"), allow(unused_mut))]
+    let mut missing = wanted_objects(archive::get);
+    #[cfg(feature = "audio")]
+    if !crate::audio::installed() {
+        missing |= piece::SOUNDS;
+    }
+    if missing == 0 {
+        return false;
+    }
+    log_info!(
+        "assets",
+        "the archive lacks pieces ({missing:#b}); offering them"
+    );
+    MISSING.store(missing, Ordering::Relaxed);
+    download().rewind();
+    true
 }
 
 #[cfg(feature = "asset_download")]
@@ -650,14 +673,8 @@ pub(crate) fn adopt_sounds() {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn needs_restart() -> bool {
     RESTART_PENDING.load(Ordering::Relaxed)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn needs_restart() -> bool {
-    false
 }
 
 impl Download {
@@ -741,7 +758,7 @@ impl Download {
             .ok();
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(all(target_arch = "wasm32", not(feature = "audio")), allow(dead_code))]
     fn rewind(&self) {
         if matches!(self.stage(), Stage::Done | Stage::Cancelled | Stage::Failed) {
             self.set(Stage::Idle);
@@ -765,6 +782,20 @@ impl Download {
                 self.settle(result, "the missing pieces");
                 return;
             }
+        }
+        #[cfg(target_arch = "wasm32")]
+        if missing() & piece::OBJECTS != 0 {
+            let result = self
+                .repair_web_objects(version, missing() & piece::OBJECTS)
+                .await;
+            self.settle(result, "the missing objects");
+            return;
+        }
+        #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+        if missing() & piece::SOUNDS != 0 {
+            let result = self.repair_web_sounds(version).await;
+            self.settle(result, "the sounds");
+            return;
         }
         let result = self.install(version).await;
         self.settle(result, version);
@@ -860,6 +891,8 @@ impl Download {
             .as_str()
             .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
         let index = get_json(index_url).await?;
+        #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+        let web_sounds = WebSounds::spawn(self, index.clone());
         let expected = expected_objects(id);
         let objects_size =
             listed_size(&listed_objects(&index, |key| object_wanted(expected, key))?);
@@ -928,6 +961,16 @@ impl Download {
                     }
                 }
             }
+            #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+            match web_sounds.finish().await {
+                Ok(Some(sounds)) => entries.extend(sounds),
+                Ok(None) if self.cancelled() => return Ok(false),
+                Ok(None) => log_info!("assets", "installing without sounds"),
+                Err(e) => {
+                    log_warn!("assets", "no sounds: {}", e.detail);
+                    self.skip_sounds();
+                }
+            }
             index_id = (!cfg!(target_arch = "wasm32")).then(|| id.to_owned());
         }
         self.total
@@ -942,6 +985,10 @@ impl Download {
         let packed = pack(entries);
         store::save_version(version, &packed)
             .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+        #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+        if let Err(e) = call_page("keepStoredAssets") {
+            log_warn!("assets", "{e}; the assets last until the tab closes");
+        }
         Ok(true)
     }
 
@@ -1109,33 +1156,13 @@ impl Download {
         self.sound_done.store(0, Ordering::Relaxed);
         self.sound_total.store(0, Ordering::Relaxed);
         let index = get_json(index_url).await?;
-        let objects = index["objects"]
-            .as_object()
-            .ok_or_else(|| Failure::plain("Mojang sent something unreadable"))?;
-        let object = |name: &str| -> Option<(String, u64)> {
-            let info = objects.get(name)?;
-            let hash = info["hash"].as_str().filter(|h| h.len() >= 2)?.to_owned();
-            Some((hash, info["size"].as_u64().unwrap_or(0)))
-        };
 
-        let (defs_hash, _) = object("minecraft/sounds.json")
-            .ok_or_else(|| Failure::plain("The asset index lists no sounds.json"))?;
-        let Some(defs_bytes) = self.fetch_object(&defs_hash).await? else {
+        let Some(defs_text) = self.fetch_sound_defs(&index).await? else {
             return Ok(false);
         };
-        let defs_text = String::from_utf8(defs_bytes)
-            .map_err(|e| Failure::new("sounds.json is not text", e))?;
         let defs = crate::audio::defs::Defs::parse(&defs_text)
             .map_err(|e| Failure::new("sounds.json will not parse", e))?;
-
-        let wanted: Vec<Listed> = defs
-            .object_keys()
-            .into_iter()
-            .filter_map(|key| {
-                let (hash, size) = object(&format!("{NAMESPACE_PREFIX}{key}"))?;
-                Some((key, hash, size))
-            })
-            .collect();
+        let wanted = sound_files(&index, &defs);
         let total = listed_size(&wanted);
         self.sound_total.store(total, Ordering::Relaxed);
         log_info!(
@@ -1208,10 +1235,230 @@ impl Download {
         Ok(true)
     }
 
-    #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
-    async fn fetch_object(&self, hash: &str) -> Result<Option<Vec<u8>>, Failure> {
-        get_object(hash, &|| self.cancelled()).await
+    #[cfg(feature = "audio")]
+    async fn fetch_sound_defs(&self, index: &serde_json::Value) -> Result<Option<String>, Failure> {
+        let (hash, _) = index_object(index, "minecraft/sounds.json")
+            .ok_or_else(|| Failure::plain("The asset index lists no sounds.json"))?;
+        let Some(bytes) = get_object(&hash, &|| self.cancelled()).await? else {
+            return Ok(None);
+        };
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|e| Failure::new("sounds.json is not text", e))
     }
+
+    #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+    async fn web_sound_run(
+        &self,
+        index: &serde_json::Value,
+    ) -> Result<Option<Vec<(String, Vec<u8>)>>, Failure> {
+        if self.sound_skip.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        self.sound_active.store(true, Ordering::Relaxed);
+        let result = self.fetch_web_sounds(index).await;
+        self.sound_active.store(false, Ordering::Relaxed);
+        result
+    }
+
+    #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+    async fn fetch_web_sounds(
+        &self,
+        index: &serde_json::Value,
+    ) -> Result<Option<Vec<(String, Vec<u8>)>>, Failure> {
+        use crate::audio::{compact, store, subset};
+
+        self.sound_done.store(0, Ordering::Relaxed);
+        self.sound_total.store(0, Ordering::Relaxed);
+        let Some(full) = self.fetch_sound_defs(index).await? else {
+            return Ok(None);
+        };
+        let trimmed =
+            subset::trim(&full).map_err(|e| Failure::new("sounds.json will not parse", e))?;
+        let defs = crate::audio::defs::Defs::parse(&trimmed)
+            .map_err(|e| Failure::new("sounds.json will not parse", e))?;
+        let wanted = sound_files(index, &defs);
+        let total = listed_size(&wanted);
+        self.sound_total.store(total, Ordering::Relaxed);
+        log_info!(
+            "assets",
+            "{} sound events, {} files, {total} bytes",
+            defs.len(),
+            wanted.len()
+        );
+
+        let stopped = || self.cancelled() || self.sound_skip.load(Ordering::Relaxed);
+        let mut out = Vec::with_capacity(wanted.len() + 1);
+        let (mut done, mut stored) = (0u64, 0u64);
+        for batch in wanted.chunks(SOUND_BATCH) {
+            let Some(arrived) = fetch_zip(batch, &stopped).await? else {
+                return Ok(None);
+            };
+            for (key, hash, _) in batch {
+                let bytes = match arrived.get(hash) {
+                    Some(bytes) => bytes.clone(),
+                    None => match get_object(hash, &stopped).await? {
+                        Some(bytes) => bytes,
+                        None => return Ok(None),
+                    },
+                };
+                done += bytes.len() as u64;
+                self.sound_done.store(done, Ordering::Relaxed);
+                let compacted = compact::compact(key, &bytes).await;
+                let kept = compacted.unwrap_or(bytes);
+                stored += kept.len() as u64;
+                out.push((store::archive_key(key), kept));
+            }
+        }
+        log_info!(
+            "assets",
+            "sounds: {done} bytes fetched, {stored} bytes stored"
+        );
+        out.push((store::DEFS_KEY.to_owned(), trimmed.into_bytes()));
+        Ok(Some(out))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn repair_web_objects(
+        &'static self,
+        version: &str,
+        missing: u8,
+    ) -> Result<bool, Failure> {
+        self.done.store(0, Ordering::Relaxed);
+        self.total.store(0, Ordering::Relaxed);
+        self.set(Stage::Asking);
+        let manifest = get_json(VERSION_MANIFEST).await?;
+        let meta = get_json(&pick_version(&manifest, version)?).await?;
+        let index_url = meta["assetIndex"]["url"]
+            .as_str()
+            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+        let index = get_json(index_url).await?;
+        let Some(objects) = self
+            .fetch_objects(&index, |key| object_wanted(missing, key))
+            .await?
+        else {
+            return Ok(false);
+        };
+        if objects.is_empty() {
+            return Err(Failure::plain("Mojang lists none of the missing assets"));
+        }
+
+        let mut entries: Vec<(String, Vec<u8>)> = crate::platform::assets::archive::entries()
+            .into_iter()
+            .map(|(key, bytes)| (key.to_owned(), bytes.to_vec()))
+            .collect();
+        for (key, bytes) in objects {
+            match entries.iter().position(|(k, _)| *k == key) {
+                Some(at) => entries[at].1 = bytes,
+                None => entries.push((key, bytes)),
+            }
+        }
+        store::save_version(version, &pack(entries))
+            .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+        if let Err(e) = call_page("keepStoredAssets") {
+            log_warn!("assets", "{e}; the assets last until the tab closes");
+        }
+        MISSING.store(0, Ordering::Relaxed);
+        RESTART_PENDING.store(true, Ordering::Relaxed);
+        Ok(true)
+    }
+
+    #[cfg(all(feature = "audio", target_arch = "wasm32"))]
+    async fn repair_web_sounds(&'static self, version: &str) -> Result<bool, Failure> {
+        use crate::audio::store as sounds_store;
+
+        self.set(Stage::Asking);
+        let manifest = get_json(VERSION_MANIFEST).await?;
+        let meta = get_json(&pick_version(&manifest, version)?).await?;
+        let index_url = meta["assetIndex"]["url"]
+            .as_str()
+            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+        let index = get_json(index_url).await?;
+        self.set(Stage::Sounds);
+        let Some(sounds) = self.web_sound_run(&index).await? else {
+            return Ok(!self.cancelled());
+        };
+
+        let mut entries: Vec<(String, Vec<u8>)> = crate::platform::assets::archive::entries()
+            .into_iter()
+            .filter(|(key, _)| {
+                *key != sounds_store::DEFS_KEY && !key.starts_with(sounds_store::PREFIX)
+            })
+            .map(|(key, bytes)| (key.to_owned(), bytes.to_vec()))
+            .collect();
+        entries.extend(sounds.iter().cloned());
+        store::save_version(version, &pack(entries))
+            .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+        if let Err(e) = call_page("keepStoredAssets") {
+            log_warn!("assets", "{e}; the sounds last until the tab closes");
+        }
+        MISSING.store(0, Ordering::Relaxed);
+        if let Some(sounds) = sounds_store::Sounds::from_entries(sounds) {
+            crate::audio::adopt(sounds);
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(all(feature = "audio", target_arch = "wasm32"))]
+const SOUND_BATCH: usize = 50;
+
+#[cfg(all(feature = "audio", target_arch = "wasm32"))]
+async fn fetch_zip(
+    batch: &[Listed],
+    stopped: &dyn Fn() -> bool,
+) -> Result<Option<std::collections::HashMap<String, Vec<u8>>>, Failure> {
+    let mut out = std::collections::HashMap::new();
+    if stopped() {
+        return Ok(None);
+    }
+    let hashes: Vec<&str> = batch.iter().map(|(_, hash, _)| hash.as_str()).collect();
+    let url = format!("{OBJECT_PROXY}zip?h={}", hashes.join(","));
+    let body = match crate::platform::http::get_bytes(&url, 0, &mut |_, _| !stopped()).await {
+        Ok(crate::platform::http::Fetched::Body(body)) => body,
+        Ok(crate::platform::http::Fetched::Cancelled) => return Ok(None),
+        Err(e) => {
+            log_warn!("assets", "zip batch: {e}; fetching one at a time");
+            return Ok(Some(out));
+        }
+    };
+    let entries = match zip::entries(&body) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log_warn!(
+                "assets",
+                "zip batch unreadable: {e}; fetching one at a time"
+            );
+            return Ok(Some(out));
+        }
+    };
+    for entry in &entries {
+        match zip::read(&body, entry) {
+            Ok(bytes) if sha1_hex(&bytes) == entry.name => {
+                out.insert(entry.name.clone(), bytes);
+            }
+            _ => log_warn!("assets", "zip batch: {} arrived damaged", entry.name),
+        }
+    }
+    Ok(Some(out))
+}
+
+#[cfg(feature = "audio")]
+fn index_object(index: &serde_json::Value, name: &str) -> Option<(String, u64)> {
+    let info = &index["objects"][name];
+    let hash = info["hash"].as_str().filter(|h| h.len() >= 2)?.to_owned();
+    Some((hash, info["size"].as_u64().unwrap_or(0)))
+}
+
+#[cfg(feature = "audio")]
+fn sound_files(index: &serde_json::Value, defs: &crate::audio::defs::Defs) -> Vec<Listed> {
+    defs.object_keys()
+        .into_iter()
+        .filter_map(|key| {
+            let (hash, size) = index_object(index, &format!("{NAMESPACE_PREFIX}{key}"))?;
+            Some((key, hash, size))
+        })
+        .collect()
 }
 
 type Listed = (String, String, u64);
@@ -1273,6 +1520,78 @@ pub(super) async fn get_object(
         ));
     }
     Ok(Some(bytes))
+}
+
+#[cfg(all(feature = "audio", target_arch = "wasm32"))]
+type WebSoundResult = Result<Option<Vec<(String, Vec<u8>)>>, Failure>;
+
+#[cfg(all(feature = "audio", target_arch = "wasm32"))]
+struct WebSounds {
+    dl: &'static Download,
+    slot: std::rc::Rc<std::cell::RefCell<WebSlot>>,
+    finished: bool,
+}
+
+#[cfg(all(feature = "audio", target_arch = "wasm32"))]
+#[derive(Default)]
+struct WebSlot {
+    result: Option<WebSoundResult>,
+    waker: Option<std::task::Waker>,
+}
+
+#[cfg(all(feature = "audio", target_arch = "wasm32"))]
+impl WebSounds {
+    fn spawn(dl: &'static Download, index: serde_json::Value) -> Self {
+        if !dl.sound_skip.load(Ordering::Relaxed) {
+            dl.sound_active.store(true, Ordering::Relaxed);
+        }
+        let slot = std::rc::Rc::new(std::cell::RefCell::new(WebSlot::default()));
+        let shared = slot.clone();
+        crate::platform::executor::spawn(async move {
+            let result = dl.web_sound_run(&index).await;
+            let waker = {
+                let mut slot = shared.borrow_mut();
+                slot.result = Some(result);
+                slot.waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        });
+        WebSounds {
+            dl,
+            slot,
+            finished: false,
+        }
+    }
+
+    async fn finish(mut self) -> WebSoundResult {
+        if self.slot.borrow().result.is_none() {
+            self.dl.set(Stage::Sounds);
+        }
+        let result = std::future::poll_fn(|cx| {
+            let mut slot = self.slot.borrow_mut();
+            match slot.result.take() {
+                Some(result) => std::task::Poll::Ready(result),
+                None => {
+                    slot.waker = Some(cx.waker().clone());
+                    std::task::Poll::Pending
+                }
+            }
+        })
+        .await;
+        self.finished = true;
+        result
+    }
+}
+
+#[cfg(all(feature = "audio", target_arch = "wasm32"))]
+impl Drop for WebSounds {
+    fn drop(&mut self) {
+        if !self.finished && self.slot.borrow().result.is_none() {
+            self.dl.skip_sounds();
+        }
+    }
 }
 
 #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]

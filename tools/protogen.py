@@ -3,11 +3,12 @@
 
     python3 protogen.py packets [--source PATH] [--version NAME] [--output PATH]
     python3 protogen.py remap --from NAME --to NAME [--output PATH]
+    python3 protogen.py metadata --from NAME --to NAME [--output PATH]
     mkdir -p /tmp/gen && cd /tmp/gen
     java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar          --reports --output /tmp/gen
     cp /tmp/gen/reports/{registries,blocks}.json        <crate>/reference/minecraft-<version>/generated/reports/
     python3 protogen.py packets [--source PATH] [--version NAME] [--output PATH]
-    --version 26.1.1
+    --version 26.2
     --source  <crate>/reference/minecraft-<version>
     --output  <crate>/src/protocol/data/packets-<version>.json
     protocol number   <source>/version.json  ("protocol_version")
@@ -23,10 +24,20 @@
     registry ids     <source>/generated/reports/registries.json
     block state ids  <source>/generated/reports/blocks.json
     serializer ids   <source>/net/minecraft/network/syncher/EntityDataSerializers.java
+    protocol number   <source>/version.json  ("protocol_version")
+    synched fields    every `SynchedEntityData.defineId(X.class, S)` (Mojang
+                      names) or `DataTracker.registerData(X.class, S)` (Yarn
+                      names) under <source>/net/minecraft
+    entity types      the `EntityType<X> NAME;` fields of `EntityType.java`
+                      (Mojang) or `EntityTypes.java` (Yarn)
+    python3 tools/protogen.py metadata --from 1.21.11 --to 26.1.1
+    python3 tools/protogen.py metadata --from 26.1.1 --to 26.2
 """
 
 import argparse
+import difflib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -207,14 +218,15 @@ def runs(source, target, what):
             previous = (offset,)
     return out
 
-def generate_remap(old_source, old_version, new_source, new_version, out):
-    def meta(source, version):
-        info = json.loads(read(source / "version.json"))
-        if info.get("id") != version:
-            raise Fail(f"{source}/version.json is {info.get('id')!r}, asked for {version!r}")
-        return {"version": version, "protocol": info["protocol_version"]}
+def version_meta(source, version):
+    info = json.loads(read(source / "version.json"))
+    if info.get("id") != version:
+        raise Fail(f"{source}/version.json is {info.get('id')!r}, asked for {version!r}")
+    return {"version": version, "protocol": info["protocol_version"]}
 
-    old_meta, new_meta = meta(old_source, old_version), meta(new_source, new_version)
+def generate_remap(old_source, old_version, new_source, new_version, out):
+    old_meta = version_meta(old_source, old_version)
+    new_meta = version_meta(new_source, new_version)
     if old_meta["protocol"] == new_meta["protocol"]:
         raise Fail("both versions speak the same protocol; there is nothing to remap")
 
@@ -248,6 +260,167 @@ def generate_remap(old_source, old_version, new_source, new_version, out):
         holes = sum(1 for _, offset in table["back"][name]["runs"] if offset is None)
         holes = f", {holes} back with no counterpart" if holes else ""
         print(f"  {name:<24} {forward['count']:>6} ids  {note}{holes}")
+
+DEFINE = re.compile(
+    r"(?:DataTracker\.registerData|SynchedEntityData\.defineId)"
+    r"\(\s*(\w+)\.class\s*,\s*([\w.]+)\s*\)"
+)
+CLASS = re.compile(
+    r"^\s*(?:public |protected |private )?(?:static )?"
+    r"(?:abstract |final |sealed |non-sealed )*(?:class|record)\s+(\w+)"
+    r"(?:<[^{]*?>)?(?:\s+extends\s+([\w.]+))?",
+    re.M,
+)
+PACKAGE = re.compile(r"^package\s+([\w.]+);", re.M)
+IMPORT = re.compile(r"^import\s+([\w.]+);", re.M)
+ENTITY_TYPE = re.compile(r"public static final EntityType<([\w.]+)>\s+(\w+);")
+
+SERIALIZER_NAMES = {
+    "INTEGER": "INT",
+    "TEXT_COMPONENT": "COMPONENT",
+    "OPTIONAL_TEXT_COMPONENT": "OPTIONAL_COMPONENT",
+    "ROTATION": "ROTATIONS",
+    "FACING": "DIRECTION",
+    "LAZY_ENTITY_REFERENCE": "OPTIONAL_LIVING_ENTITY_REFERENCE",
+    "NBT_COMPONENT": "COMPOUND_TAG",
+    "ENTITY_POSE": "POSE",
+    "OPTIONAL_INT": "OPTIONAL_UNSIGNED_INT",
+    "PARTICLE_LIST": "PARTICLES",
+    "ARM": "HUMANOID_ARM",
+    "PROFILE": "RESOLVABLE_PROFILE",
+    "OXIDATION_LEVEL": "WEATHERING_COPPER_STATE",
+    "QUATERNION_F": "QUATERNION",
+    "VECTOR_3F": "VECTOR3",
+}
+
+def class_index(root):
+    raw = {}
+    by_simple = {}
+    fields = {}
+    for path in sorted(root.rglob("*.java")):
+        source = read(path)
+        package = PACKAGE.search(source)
+        package = package.group(1) if package else ""
+        imports = {i.rsplit(".", 1)[1]: i for i in IMPORT.findall(source)}
+        top = path.stem
+        for match in CLASS.finditer(source):
+            name, extends = match.group(1), match.group(2)
+            full = package + "." + (name if name == top else f"{top}${name}")
+            raw[full] = (package, imports, extends)
+            by_simple.setdefault(name, []).append(full)
+        found = {}
+        for owner, serializer in DEFINE.findall(source):
+            serializer = serializer.rsplit(".", 1)[-1]
+            found.setdefault(owner, []).append(SERIALIZER_NAMES.get(serializer, serializer))
+        for owner, serializers in found.items():
+            key = package + "." + (owner if owner == top else f"{top}${owner}")
+            raw.setdefault(key, (package, imports, None))
+            fields[key] = serializers
+
+    def resolve(package, imports, extends):
+        if extends is None:
+            return None
+        extends = extends.rsplit(".", 1)[-1]
+        if extends in imports:
+            return imports[extends]
+        if f"{package}.{extends}" in raw:
+            return f"{package}.{extends}"
+        candidates = by_simple.get(extends, [])
+        same = [c for c in candidates if c.startswith(package + ".")]
+        if same:
+            return same[0]
+        return candidates[0] if len(candidates) == 1 else None
+
+    return {k: resolve(*v) for k, v in raw.items()}, fields
+
+def entity_chains(root):
+    parent, fields = class_index(root)
+    text = ""
+    package = ""
+    for path in sorted(root.rglob("entity")):
+        for name in ("EntityType.java", "EntityTypes.java"):
+            if (path / name).is_file():
+                body = read(path / name)
+                text += body
+                package = PACKAGE.search(body).group(1)
+    if not text:
+        raise Fail(f"no EntityType.java or EntityTypes.java under {root}")
+    imports = {i.rsplit(".", 1)[1]: i for i in IMPORT.findall(text)}
+    out = {}
+    for cls, field in ENTITY_TYPE.findall(text):
+        outer, _, inner = cls.partition(".")
+        full = imports.get(outer) or f"{package}.{outer}"
+        if inner:
+            full += "$" + inner
+        if full not in parent:
+            raise Fail(f"entity type {field}: class {full} not found under {root}")
+        chain = []
+        while full:
+            chain.append((full.rsplit(".", 1)[1], fields.get(full, [])))
+            full = parent.get(full)
+        chain.reverse()
+        out[field.lower()] = chain
+    return out
+
+def field_map(old, new):
+    if len(old) == len(new):
+        out, old_at, new_at = {}, 0, 0
+        for (_, olds), (_, news) in zip(old, new):
+            for k, serializer in enumerate(olds):
+                same = k < len(news) and serializer == news[k]
+                out[old_at + k] = new_at + k if same else None
+            old_at += len(olds)
+            new_at += len(news)
+        return out, False
+    old_flat = [s for _, ss in old for s in ss]
+    new_flat = [s for _, ss in new for s in ss]
+    out = {i: None for i in range(len(old_flat))}
+    matcher = difflib.SequenceMatcher(None, old_flat, new_flat, autojunk=False)
+    for a, b, n in matcher.get_matching_blocks():
+        for k in range(n):
+            out[a + k] = b + k
+    return out, True
+
+def generate_metadata(old_source, old_version, new_source, new_version, out):
+    old_meta = version_meta(old_source, old_version)
+    new_meta = version_meta(new_source, new_version)
+    old_chains = entity_chains(old_source / "net" / "minecraft")
+    new_chains = entity_chains(new_source / "net" / "minecraft")
+
+    types = {}
+    for name in sorted(set(old_chains) & set(new_chains)):
+        moved, guessed = field_map(old_chains[name], new_chains[name])
+        table = runs(
+            {i: i for i in moved},
+            {i: n for i, n in moved.items() if n is not None},
+            f"metadata {name}",
+        )
+        if table[:1] == [[0, 0]]:
+            table = table[1:]
+        if not table:
+            continue
+        types[name] = table
+        if guessed:
+            print(f"{name}: aligned by serializer, check: {table}", file=sys.stderr)
+        if any(offset is None for _, offset in table):
+            print(f"{name}: a field has no new index: {table}", file=sys.stderr)
+
+    lines = [f"{json.dumps(name)}: {json.dumps(table)}" for name, table in types.items()]
+    body = ",\n".join("  " + line for line in lines)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        "{\n"
+        f' "from": {json.dumps(old_meta)},\n'
+        f' "to": {json.dumps(new_meta)},\n'
+        ' "entity_types": {\n'
+        f"{body}\n"
+        " }\n}\n",
+        encoding="utf-8",
+    )
+    print(
+        f"protogen: {old_meta['version']} ({old_meta['protocol']})"
+        f" -> {new_meta['version']} ({new_meta['protocol']}), {len(types)} entity types -> {out}"
+    )
 
 def generate(source, version, out):
     meta = json.loads(read(source / "version.json"))
@@ -299,7 +472,7 @@ def main():
     modes = ap.add_subparsers(dest="mode", required=True)
 
     packets = modes.add_parser("packets", help="packet-id tables from decompiled source")
-    packets.add_argument("--version", default="26.1.1")
+    packets.add_argument("--version", default="26.2")
     packets.add_argument("--source")
     packets.add_argument("--output")
 
@@ -309,6 +482,13 @@ def main():
     remap.add_argument("--source-from", dest="old_source")
     remap.add_argument("--source-to", dest="new_source")
     remap.add_argument("--output")
+
+    metadata = modes.add_parser("metadata", help="entity metadata index moves between versions")
+    metadata.add_argument("--from", dest="old", required=True)
+    metadata.add_argument("--to", dest="new", required=True)
+    metadata.add_argument("--source-from", dest="old_source")
+    metadata.add_argument("--source-to", dest="new_source")
+    metadata.add_argument("--output")
 
     args = ap.parse_args()
     tree = lambda version: CRATE / "reference" / f"minecraft-{version}"
@@ -329,8 +509,11 @@ def main():
                     json.loads((s / "version.json").read_text())["protocol_version"]
                     for s in (old_source, new_source)
                 ]
-                out = data / f"remap-{numbers[0]}-{numbers[1]}.json"
-            generate_remap(old_source, args.old, new_source, args.new, out)
+                out = data / f"{args.mode}-{numbers[0]}-{numbers[1]}.json"
+            if args.mode == "remap":
+                generate_remap(old_source, args.old, new_source, args.new, out)
+            else:
+                generate_metadata(old_source, args.old, new_source, args.new, out)
     except Fail as e:
         print(f"protogen: {e}", file=sys.stderr)
         return 1

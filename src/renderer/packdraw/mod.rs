@@ -30,10 +30,9 @@ mod usage;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::image::Image;
 use bevy::prelude::*;
-use bevy::render::render_graph::{RenderGraphExt, ViewNodeRunner};
 use bevy::render::render_resource::TextureFormat;
 use bevy::render::renderer::RenderDevice;
 use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSystems};
@@ -234,9 +233,8 @@ impl Plugin for ShaderPackPlugin {
         render_app.add_systems(
             Render,
             frame::hide_world_shadows
-                .in_set(RenderSystems::ManageViews)
-                .after(bevy::pbr::prepare_lights)
-                .before(bevy::pbr::specialize_shadows),
+                .in_set(RenderSystems::CreateViews)
+                .after(bevy::pbr::prepare_lights),
         );
         render_app
             .add_systems(
@@ -272,17 +270,11 @@ impl Plugin for ShaderPackPlugin {
                         .after(plan::prepare_plan),
                 ),
             )
-            .add_render_graph_node::<ViewNodeRunner<node::PackFrameNode>>(
+            .add_systems(
                 Core3d,
-                node::PackFrameLabel,
-            )
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::EndMainPass,
-                    node::PackFrameLabel,
-                    Node3d::StartMainPassPostProcessing,
-                ),
+                node::pack_frame
+                    .after(Core3dSystems::MainPass)
+                    .before(Core3dSystems::EarlyPostProcess),
             );
     }
 

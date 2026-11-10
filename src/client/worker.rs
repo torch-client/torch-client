@@ -120,6 +120,21 @@ struct Job {
     scope: JobScope,
     seq: u64,
     sec_from: i32,
+    attempt: u8,
+    epoch: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Finished {
+    Done,
+    Redone,
+    Stale,
+}
+
+enum Pass {
+    Done,
+    Rest(Job),
+    Lost,
 }
 
 struct QueueInner {
@@ -130,6 +145,7 @@ struct QueueInner {
     latest_seq: HashMap<(i32, i32), ColumnSeq>,
     next_seq: u64,
     loads_first: bool,
+    epoch: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -145,6 +161,7 @@ struct ColumnSeq {
     base: i32,
     seqs: Vec<u64>,
     queued_column: u64,
+    column: u64,
 }
 
 impl ColumnSeq {
@@ -201,6 +218,7 @@ impl JobQueue {
                 latest_seq: HashMap::new(),
                 next_seq: 0,
                 loads_first: false,
+                epoch: 0,
             }),
             ready: parking_lot::Condvar::new(),
             backlog: AtomicUsize::new(0),
@@ -221,11 +239,15 @@ impl JobQueue {
     }
 
     pub fn push(&self, world: Arc<RwLock<World>>, chunk_x: i32, chunk_z: i32, scope: JobScope) {
-        self.push_in(world, chunk_x, chunk_z, scope, false);
+        self.push_in(world, chunk_x, chunk_z, scope, false, 0);
+    }
+
+    pub fn push_retry(&self, world: Arc<RwLock<World>>, chunk_x: i32, chunk_z: i32, attempt: u8) {
+        self.push_in(world, chunk_x, chunk_z, JobScope::Column, false, attempt);
     }
 
     pub fn push_relight(&self, world: Arc<RwLock<World>>, chunk_x: i32, chunk_z: i32, sy: i32) {
-        self.push_in(world, chunk_x, chunk_z, JobScope::Section(sy), true);
+        self.push_in(world, chunk_x, chunk_z, JobScope::Section(sy), true, 0);
     }
 
     fn push_in(
@@ -235,6 +257,7 @@ impl JobQueue {
         chunk_z: i32,
         scope: JobScope,
         relight: bool,
+        attempt: u8,
     ) {
         let column_geometry = match scope {
             JobScope::Section(_) => None,
@@ -303,6 +326,7 @@ impl JobQueue {
                     column.set(sec_y, seq);
                 }
                 column.queued_column = seq;
+                column.column = seq;
             }
             (JobScope::Column, None) => {}
         }
@@ -313,6 +337,8 @@ impl JobQueue {
             scope,
             seq,
             sec_from: 0,
+            attempt,
+            epoch: inner.epoch,
         };
         match scope {
             JobScope::Section(_) if relight => inner.relights.push_back(job),
@@ -322,9 +348,12 @@ impl JobQueue {
         self.ready.notify_one();
     }
 
-    fn finish(&self, job_key: JobKey, world: Arc<RwLock<World>>) -> bool {
+    fn finish(&self, job_key: JobKey, world: &Arc<RwLock<World>>, epoch: u32) -> Finished {
         let redo = {
             let mut inner = self.inner.lock().unwrap();
+            if inner.epoch != epoch {
+                return Finished::Stale;
+            }
             match inner.keys.get(&job_key) {
                 Some(&KeyState::InFlight {
                     dirty_again,
@@ -336,11 +365,19 @@ impl JobQueue {
                 _ => None,
             }
         };
-        if let Some(by_edit) = redo {
-            let (cx, cz, scope) = job_key;
-            self.push_in(world, cx, cz, scope, !by_edit);
+        match redo {
+            Some(by_edit) => {
+                let (cx, cz, scope) = job_key;
+                self.push_in(world.clone(), cx, cz, scope, !by_edit, 0);
+                Finished::Redone
+            }
+            None => Finished::Done,
         }
-        redo.is_some()
+    }
+
+    pub fn next_level(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.epoch = inner.epoch.wrapping_add(1);
     }
 
     fn resume(&self, job: Job) {
@@ -355,6 +392,40 @@ impl JobQueue {
             .get(&(chunk_x, chunk_z))
             .and_then(|column| column.get(sec_y))
             == Some(seq)
+    }
+
+    fn first_current(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        min_y: i32,
+        from: i32,
+        to: i32,
+        seq: u64,
+    ) -> (Option<i32>, bool) {
+        let inner = self.inner.lock().unwrap();
+        let Some(column) = inner.latest_seq.get(&(chunk_x, chunk_z)) else {
+            return (None, false);
+        };
+        let first = (from..to).find(|si| column.get(min_y + si * 16) == Some(seq));
+        (first, column.column == seq)
+    }
+
+    pub(crate) fn owns_any(&self, chunk_x: i32, chunk_z: i32, seq: u64, epoch: u32) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.epoch == epoch
+            && inner
+                .latest_seq
+                .get(&(chunk_x, chunk_z))
+                .is_some_and(|column| column.seqs.contains(&seq))
+    }
+
+    fn is_current_column(&self, chunk_x: i32, chunk_z: i32, sec_y: i32, seq: u64) -> (bool, bool) {
+        let inner = self.inner.lock().unwrap();
+        match inner.latest_seq.get(&(chunk_x, chunk_z)) {
+            Some(column) => (column.get(sec_y) == Some(seq), column.column == seq),
+            None => (false, false),
+        }
     }
 
     pub fn forget_chunk(&self, chunk_x: i32, chunk_z: i32) {
@@ -379,20 +450,11 @@ impl JobQueue {
 
     pub fn reset(&self) {
         let mut inner = self.inner.lock().unwrap();
+        inner.epoch = inner.epoch.wrapping_add(1);
         inner.edits.clear();
         inner.relights.clear();
         inner.loads.clear();
-        inner.keys.retain(|_, state| match state {
-            KeyState::Queued => false,
-            KeyState::InFlight {
-                dirty_again,
-                by_edit,
-            } => {
-                *dirty_again = false;
-                *by_edit = false;
-                true
-            }
-        });
+        inner.keys.clear();
         inner.latest_seq.clear();
     }
 
@@ -516,6 +578,7 @@ fn run_job(
     let (cx, cz) = (job.chunk_x, job.chunk_z);
     let key = (job.chunk_x, job.chunk_z, job.scope);
     let world = job.world.clone();
+    let (attempt, epoch, seq) = (job.attempt, job.epoch, job.seq);
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         process_job(
             job,
@@ -527,15 +590,16 @@ fn run_job(
             deadline,
         )
     }));
-    let redo = queue.finish(key, world);
-    match result {
-        Ok(rest) => {
-            if let Some(rest) = rest
-                && !redo
-            {
+    let finished = queue.finish(key, &world, epoch);
+    let lost = match result {
+        Ok(Pass::Done) => false,
+        Ok(Pass::Rest(rest)) => {
+            if finished == Finished::Done {
                 queue.resume(rest);
             }
+            false
         }
+        Ok(Pass::Lost) => true,
         Err(payload) => {
             let msg = payload
                 .downcast_ref::<&str>()
@@ -546,9 +610,27 @@ fn run_job(
             crate::log_error!(
                 "mesh",
                 "job for chunk {cx},{cz} panicked: {msg}\n\
-                 the worker continues, but that chunk will render as air"
+                 the worker continues and the column is queued again"
             );
+            true
         }
+    };
+    if lost && finished == Finished::Done {
+        #[cfg(target_arch = "wasm32")]
+        if crate::client::mesh_worker::mirror::note_lost(cx, cz) {
+            return;
+        }
+        crate::client::worldsync::mesh_job_lost(
+            queue,
+            &world,
+            crate::client::worldsync::LostJob {
+                cx,
+                cz,
+                seq,
+                epoch,
+                attempt,
+            },
+        );
     }
 }
 
@@ -621,7 +703,7 @@ fn process_job(
     occ: &mut Occupancy,
     states: &mut Vec<BlockState>,
     deadline: Option<Instant>,
-) -> Option<Job> {
+) -> Pass {
     crate::prof_span!("mesh:process_job");
     let job_start = Instant::now();
     cache.use_registry(crate::blocks::registry());
@@ -630,7 +712,7 @@ fn process_job(
         && !queue.is_current(job.chunk_x, job.chunk_z, sy * 16, job.seq)
     {
         crate::diag::bump(crate::diag::Stat::MeshJobsSuperseded);
-        return None;
+        return Pass::Done;
     }
 
     let (min_y, height, chunk_arc, neighbors, biomes) = {
@@ -642,9 +724,8 @@ fn process_job(
             x: job.chunk_x,
             z: job.chunk_z,
         };
-        let arc = match world.chunks.get(&pos) {
-            Some(a) => a,
-            None => return None,
+        let Some(arc) = world.chunks.get(&pos) else {
+            return Pass::Lost;
         };
         let neighbors = [
             (-1i32, 0i32),
@@ -683,7 +764,7 @@ fn process_job(
         JobScope::Section(sy) => {
             let i = sy - base_sec;
             if i < 0 || i >= sec_count {
-                return None;
+                return Pass::Done;
             }
             (i, i + 1)
         }
@@ -748,6 +829,7 @@ fn process_job(
     let mut blocks: Vec<(i32, i32, i32, BlockState)> = Vec::with_capacity(4096);
     let mut stopped_at = sec_hi;
     let mut any_current = false;
+    let mut owner = false;
     {
         for (i, si) in (sec_lo..sec_hi).enumerate() {
             if let Some(deadline) = deadline
@@ -758,7 +840,16 @@ fn process_job(
                 break;
             }
             let sec_y = min_y + si * 16;
-            if !queue.is_current(job.chunk_x, job.chunk_z, sec_y, job.seq) {
+            let current = match job.scope {
+                JobScope::Column => {
+                    let (current, owns) =
+                        queue.is_current_column(job.chunk_x, job.chunk_z, sec_y, job.seq);
+                    owner = owns;
+                    current
+                }
+                JobScope::Section(_) => queue.is_current(job.chunk_x, job.chunk_z, sec_y, job.seq),
+            };
+            if !current {
                 continue;
             }
             any_current = true;
@@ -821,26 +912,58 @@ fn process_job(
         crate::diag::bump(crate::diag::Stat::MeshJobsSuperseded);
     }
 
+    let rest_from = match job.scope {
+        JobScope::Column if stopped_at < sec_count => {
+            if any_current {
+                Some(stopped_at)
+            } else {
+                let (first, owns) = queue.first_current(
+                    job.chunk_x,
+                    job.chunk_z,
+                    min_y,
+                    stopped_at,
+                    sec_count,
+                    job.seq,
+                );
+                owner = owns;
+                first
+            }
+        }
+        _ => None,
+    };
+
     let elapsed_ms = job_start.elapsed().as_secs_f32() * 1000.0;
 
     {
         let mut s = shared.lock().unwrap();
         s.profiling.record_mesh(elapsed_ms);
         crate::diag::add(crate::diag::Stat::SectionsMeshed, results.len() as u64);
+        let session = &mut s.session;
         match job.scope {
-            JobScope::Section(_) => s.session.pending_edits.extend(results),
-            JobScope::Column => s.session.pending_chunks.extend(results),
+            JobScope::Section(_) => session.pending_edits.extend(results),
+            JobScope::Column => {
+                session.meshed_columns.appended(results.len());
+                session.pending_chunks.extend(results);
+                if rest_from.is_none() && owner {
+                    session.meshed_columns.mark((job.chunk_x, job.chunk_z));
+                }
+            }
         }
     }
 
-    (job.scope == JobScope::Column && stopped_at < sec_count && any_current).then(|| Job {
-        world: job.world,
-        chunk_x: job.chunk_x,
-        chunk_z: job.chunk_z,
-        scope: job.scope,
-        seq: job.seq,
-        sec_from: stopped_at,
-    })
+    match rest_from {
+        Some(sec_from) => Pass::Rest(Job {
+            world: job.world,
+            chunk_x: job.chunk_x,
+            chunk_z: job.chunk_z,
+            scope: job.scope,
+            seq: job.seq,
+            sec_from,
+            attempt: job.attempt,
+            epoch: job.epoch,
+        }),
+        None => Pass::Done,
+    }
 }
 
 fn fill_light(occ: &mut Occupancy, light: &crate::lighting::LightMap) {
@@ -910,14 +1033,9 @@ pub(crate) fn biome_table(registries: &RegistryHolder) -> Arc<Vec<u8>> {
     if let Some(table) = BIOME_TABLE.read().as_ref() {
         return table.clone();
     }
-    let registry = azalea::Identifier::from("worldgen/biome");
-    let mut table = Vec::new();
-    while let Some(ident) =
-        registries.protocol_id_to_identifier(registry.clone(), table.len() as u32)
-    {
-        table.push(crate::util::biome_color::biome_index(ident.path()).unwrap_or(u8::MAX));
-    }
-    let table = Arc::new(table);
+    let table = Arc::new(crate::util::biome_color::map_biomes(registries, |name| {
+        crate::util::biome_color::biome_index(name).unwrap_or(u8::MAX)
+    }));
     if !table.is_empty() {
         *BIOME_TABLE.write() = Some(table.clone());
     }

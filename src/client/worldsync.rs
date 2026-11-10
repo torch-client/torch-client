@@ -1,5 +1,5 @@
 use crate::util::global;
-use crate::{log_debug, log_error};
+use crate::{log_debug, log_error, log_warn};
 use azalea::Client;
 use azalea_core::position::BlockPos as AzBlockPos;
 use std::collections::{HashMap, HashSet};
@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::client::tracking::{
     current_world, meshed_chunks, received_chunks, reset_chunk_tracking, reset_maps,
+    set_current_world,
 };
 use crate::client::worker::JobScope;
 use crate::session::SharedMutex;
@@ -20,6 +21,7 @@ pub(crate) fn install_block_change_hook() {
             if crate::modules::esp::any_enabled() {
                 crate::modules::esp::mark_dirty();
             }
+            crate::modules::auto_mine::block_changed(pos, old, new);
             #[cfg(lua_mods)]
             {
                 crate::modules::script::ghost::block_changed(pos.x, pos.y, pos.z);
@@ -40,7 +42,7 @@ pub(crate) fn install_block_change_hook() {
                         }
                     }
                 }
-                send_light(lighting::LightJob::Block { world, pos });
+                send_light(lighting::LightJob::Block { pos });
             }
 
             if !old.is_air()
@@ -84,7 +86,7 @@ static LIGHT_THREAD: OnceLock<lighting::LightThread> = OnceLock::new();
 
 pub(crate) fn start_light_thread() {
     let _ = LIGHT_THREAD.get_or_init(|| {
-        lighting::level::spawn(light_map().clone(), |dirty, to_mesh| {
+        lighting::level::spawn(light_map().clone(), |lit_in, dirty, to_mesh| {
             let Some(q) = CHUNK_Q.get() else {
                 crate::diag::add(crate::diag::Stat::LightJobsDropped, to_mesh.len() as u64);
                 return;
@@ -92,33 +94,34 @@ pub(crate) fn start_light_thread() {
             log_debug!("light", "queueing {} column meshes", to_mesh.len());
             let mut jobs = Vec::new();
             let mut whole = HashSet::new();
-            let mut whole_world = None;
             {
                 let received = received_chunks().lock().unwrap();
                 let mut meshed = meshed_chunks().lock().unwrap();
-                for (world, col) in to_mesh {
+                let current = current_world().lock().unwrap().clone();
+                let Some(current) = current.filter(|w| Arc::ptr_eq(w, lit_in)) else {
+                    log_debug!(
+                        "light",
+                        "a light pass for a level already left queued nothing"
+                    );
+                    return;
+                };
+                for col in to_mesh.iter().map(|(_, col)| col) {
                     if !received.contains(&(col.x, col.z))
                         || !surrounded(|c| received.contains(&c), col.x, col.z)
                     {
                         continue;
                     }
-                    if meshed.insert((col.x, col.z)) {
-                        whole.insert((col.x, col.z));
-                        whole_world.get_or_insert_with(|| world.clone());
-                        jobs.push((world.clone(), col.x, col.z, JobScope::Column));
+                    if whole.insert((col.x, col.z)) {
+                        meshed.insert((col.x, col.z));
+                        jobs.push((current.clone(), col.x, col.z, JobScope::Column));
                     }
                 }
-            }
-            let current = current_world().lock().unwrap().clone();
-            if let Some(world) = current {
-                let covered = whole_world.is_some_and(|w| Arc::ptr_eq(&w, &world));
-                let meshed = meshed_chunks().lock().unwrap();
                 for sec in dirty {
-                    if covered && whole.contains(&(sec.x, sec.z)) {
+                    if whole.contains(&(sec.x, sec.z)) {
                         continue;
                     }
                     if meshed.contains(&(sec.x, sec.z)) {
-                        jobs.push((world.clone(), sec.x, sec.z, JobScope::Section(sec.y)));
+                        jobs.push((current.clone(), sec.x, sec.z, JobScope::Section(sec.y)));
                     }
                 }
             }
@@ -202,8 +205,32 @@ fn ready_after_arrival(
         .collect()
 }
 
+global! {
+fn resent_waiting() -> crate::session::SideMutex<HashSet<(i32, i32)>>
+}
+
+static RESENT_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn forget_resent(cx: i32, cz: i32) {
+    if RESENT_WAITING.load(Ordering::Relaxed) {
+        let mut waiting = resent_waiting().lock().unwrap();
+        waiting.remove(&(cx, cz));
+        RESENT_WAITING.store(!waiting.is_empty(), Ordering::Relaxed);
+    }
+}
+
+fn clear_resent() {
+    if RESENT_WAITING.load(Ordering::Relaxed) {
+        resent_waiting().lock().unwrap().clear();
+        RESENT_WAITING.store(false, Ordering::Relaxed);
+    }
+}
+
 pub(crate) fn note_chunk_received(bot: &Client, cx: i32, cz: i32) {
     crate::diag::on_chunk_received();
+    crate::modules::seed_xray::chunk_arrived();
+    #[cfg(feature = "seed_cracker")]
+    crate::modules::seed_cracker::chunk_arrived();
     bump_chunk_generation();
     #[cfg(lua_mods)]
     {
@@ -227,13 +254,39 @@ pub(crate) fn note_chunk_received(bot: &Client, cx: i32, cz: i32) {
     #[cfg(feature = "render_lod")]
     crate::client::lod::note_column(cx, cz);
     let mut received = received_chunks().lock().unwrap();
-    received.insert((cx, cz));
+    let resent = !received.insert((cx, cz));
     let mut meshed = meshed_chunks().lock().unwrap();
     #[cfg(feature = "render_lod")]
     if crate::client::lod::cache::reclaim(cx, cz) {
         meshed.remove(&(cx, cz));
     }
-    let ready = ready_after_arrival(|c| received.contains(&c), |c| meshed.contains(&c), cx, cz);
+    let resend = resent && meshed.contains(&(cx, cz));
+    let resend_ready = resend && surrounded(|c| received.contains(&c), cx, cz);
+    let mut waiting = (resend || RESENT_WAITING.load(Ordering::Relaxed))
+        .then(|| resent_waiting().lock().unwrap());
+    if resend && let Some(waiting) = waiting.as_mut() {
+        if resend_ready {
+            waiting.remove(&(cx, cz));
+        } else {
+            waiting.insert((cx, cz));
+        }
+    }
+    let mut ready = ready_after_arrival(
+        |c| received.contains(&c),
+        |c| meshed.contains(&c) && !waiting.as_ref().is_some_and(|w| w.contains(&c)),
+        cx,
+        cz,
+    );
+    if resend_ready {
+        ready.push(lighting::ColumnPos { x: cx, z: cz });
+    }
+    if let Some(waiting) = waiting.as_mut() {
+        for col in &ready {
+            waiting.remove(&(col.x, col.z));
+        }
+        RESENT_WAITING.store(!waiting.is_empty(), Ordering::Relaxed);
+    }
+    drop(waiting);
     let to_worker = crate::client::mesh_worker::active();
     if to_worker {
         for col in &ready {
@@ -279,8 +332,13 @@ pub(crate) fn drop_server_light(cx: i32, cz: i32) {
 }
 
 pub(crate) fn reload_all_chunks(bot: &Client, shared: &SharedMutex) {
-    let cols: Vec<(i32, i32)> = received_chunks().lock().unwrap().iter().copied().collect();
+    let mut cols: Vec<(i32, i32)> = received_chunks().lock().unwrap().iter().copied().collect();
+    sort_nearest_first(bot, &mut cols);
+    if let Some(q) = CHUNK_Q.get() {
+        q.next_level();
+    }
     reset_chunk_tracking();
+    clear_resent();
     if let Some(q) = CHUNK_Q.get() {
         q.reset();
     }
@@ -289,6 +347,7 @@ pub(crate) fn reload_all_chunks(bot: &Client, shared: &SharedMutex) {
         s.session.clear_chunks = true;
         s.session.pending_chunks.clear();
         s.session.pending_edits.clear();
+        s.session.meshed_columns.cleared();
         s.session.unloaded_chunks.clear();
     }
     if !crate::client::mesh_worker::forward_reset_light() {
@@ -309,13 +368,16 @@ pub(crate) fn remesh_all_chunks(bot: &Client) {
         return;
     };
     let mut cols: Vec<(i32, i32)> = meshed_chunks().lock().unwrap().iter().copied().collect();
-    if let Ok(pos) = bot.position() {
-        let (px, pz) = ((pos.x as i32) >> 4, (pos.z as i32) >> 4);
-        cols.sort_unstable_by_key(|&(x, z)| (x - px).pow(2) + (z - pz).pow(2));
-    }
+    sort_nearest_first(bot, &mut cols);
     for (cx, cz) in cols {
         q.push(world.clone(), cx, cz, JobScope::Column);
     }
+}
+
+fn sort_nearest_first(bot: &Client, cols: &mut [(i32, i32)]) {
+    let Ok(pos) = bot.position() else { return };
+    let (px, pz) = ((pos.x.floor() as i32) >> 4, (pos.z.floor() as i32) >> 4);
+    cols.sort_unstable_by_key(|&(x, z)| (x - px).pow(2) + (z - pz).pow(2));
 }
 
 const COMPACT_INTERVAL: u32 = 256;
@@ -331,6 +393,7 @@ pub(crate) fn forget_chunk(
     bump_chunk_generation();
     received_chunks().lock().unwrap().remove(&(cx, cz));
     meshed_chunks().lock().unwrap().remove(&(cx, cz));
+    forget_resent(cx, cz);
     if let Some(q) = CHUNK_Q.get() {
         q.forget_chunk(cx, cz);
     }
@@ -353,8 +416,175 @@ pub(crate) fn forget_chunk(
     }
 }
 
-pub(crate) fn reset_level(shared: &SharedMutex) {
+const MESH_RETRIES: u8 = 2;
+
+pub(crate) struct LostJob {
+    pub cx: i32,
+    pub cz: i32,
+    pub seq: u64,
+    pub epoch: u32,
+    pub attempt: u8,
+}
+
+enum LostOutcome {
+    Requeue,
+    GaveUp,
+    NoBlocks,
+}
+
+pub(crate) fn mesh_job_lost(
+    q: &crate::client::worker::JobQueue,
+    world: &Arc<parking_lot::RwLock<azalea_world::World>>,
+    job: LostJob,
+) {
+    let LostJob {
+        cx,
+        cz,
+        seq,
+        epoch,
+        attempt,
+    } = job;
+    if column_kept_by_lod(cx, cz) {
+        return;
+    }
+    let present = world
+        .read()
+        .chunks
+        .get(&azalea_core::position::ChunkPos::new(cx, cz))
+        .is_some();
+    let outcome = {
+        let received = received_chunks().lock().unwrap();
+        let meshed = meshed_chunks().lock().unwrap();
+        if !meshed.contains(&(cx, cz)) || !q.owns_any(cx, cz, seq, epoch) {
+            log_debug!(
+                "mesh",
+                "a job for {cx},{cz} built nothing; a newer one owns the column"
+            );
+            return;
+        }
+        let ready = received.contains(&(cx, cz)) && surrounded(|c| received.contains(&c), cx, cz);
+        if present && ready && attempt < MESH_RETRIES {
+            LostOutcome::Requeue
+        } else {
+            let mut waiting = resent_waiting().lock().unwrap();
+            waiting.insert((cx, cz));
+            RESENT_WAITING.store(true, Ordering::Relaxed);
+            if present {
+                LostOutcome::GaveUp
+            } else {
+                LostOutcome::NoBlocks
+            }
+        }
+    };
+    match outcome {
+        LostOutcome::Requeue => {
+            crate::diag::bump(crate::diag::Stat::MeshRequeued);
+            log_warn!(
+                "mesh",
+                "column {cx},{cz} ended its mesh job with nothing built; queued again ({} of \
+                 {MESH_RETRIES})",
+                attempt + 1
+            );
+            q.push_retry(world.clone(), cx, cz, attempt + 1);
+        }
+        LostOutcome::GaveUp => {
+            crate::diag::bump(crate::diag::Stat::MeshGaveUp);
+            log_error!(
+                "mesh",
+                "column {cx},{cz} ended its mesh job with nothing built {} times; left unbuilt \
+                 until it next arrives or a neighbour does",
+                attempt + 1
+            );
+        }
+        LostOutcome::NoBlocks => {
+            log_debug!(
+                "mesh",
+                "column {cx},{cz} has no blocks in azalea's storage; left for the next arrival \
+                 beside it"
+            );
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn mesh_worker_lost(cx: i32, cz: i32) {
+    let Some(world) = current_world().lock().unwrap().clone() else {
+        return;
+    };
+    if column_kept_by_lod(cx, cz) {
+        return;
+    }
+    let present = world
+        .read()
+        .chunks
+        .get(&azalea_core::position::ChunkPos::new(cx, cz))
+        .is_some();
+    let (outcome, attempt) = {
+        let received = received_chunks().lock().unwrap();
+        let mut meshed = meshed_chunks().lock().unwrap();
+        if !meshed.contains(&(cx, cz)) {
+            return;
+        }
+        if !present {
+            meshed.remove(&(cx, cz));
+            (LostOutcome::NoBlocks, 0)
+        } else {
+            let attempt = crate::client::mesh_worker::note_retry(cx, cz);
+            let ready =
+                received.contains(&(cx, cz)) && surrounded(|c| received.contains(&c), cx, cz);
+            if ready && attempt <= MESH_RETRIES {
+                (LostOutcome::Requeue, attempt)
+            } else {
+                meshed.remove(&(cx, cz));
+                (LostOutcome::GaveUp, attempt)
+            }
+        }
+    };
+    match outcome {
+        LostOutcome::Requeue => {
+            crate::diag::bump(crate::diag::Stat::MeshRequeued);
+            log_warn!(
+                "mesh",
+                "the mesh worker had no blocks for column {cx},{cz}; asked again ({attempt} of \
+                 {MESH_RETRIES})"
+            );
+            let col = lighting::ColumnPos { x: cx, z: cz };
+            crate::client::mesh_worker::forward_chunk(&world, cx, cz, &[col]);
+        }
+        LostOutcome::GaveUp => {
+            crate::diag::bump(crate::diag::Stat::MeshGaveUp);
+            log_error!(
+                "mesh",
+                "the mesh worker has no blocks for column {cx},{cz}; left unbuilt until the \
+                 server sends it again"
+            );
+        }
+        LostOutcome::NoBlocks => {
+            log_debug!(
+                "mesh",
+                "column {cx},{cz} has no blocks in azalea's storage; unmarked"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "render_lod")]
+fn column_kept_by_lod(cx: i32, cz: i32) -> bool {
+    crate::client::lod::cache::is_cached(cx, cz)
+}
+
+#[cfg(not(feature = "render_lod"))]
+fn column_kept_by_lod(_cx: i32, _cz: i32) -> bool {
+    false
+}
+
+pub(crate) fn reset_level(world: &azalea::local_player::WorldHolder, shared: &SharedMutex) {
+    set_current_world(&world.shared);
+    if let Some(q) = CHUNK_Q.get() {
+        q.next_level();
+    }
     reset_chunk_tracking();
+    clear_resent();
     bump_chunk_generation();
     crate::renderer::environment::reset_weather();
     crate::client::envprobe::reset();
@@ -379,6 +609,7 @@ pub(crate) fn reset_level(shared: &SharedMutex) {
     s.session.clear_chunks = true;
     s.session.pending_chunks.clear();
     s.session.pending_edits.clear();
+    s.session.meshed_columns.cleared();
     s.session.unloaded_chunks.clear();
 }
 
@@ -398,6 +629,7 @@ pub(crate) fn set_dimension(
     crate::renderer::dimension::set_current(Dimension::from_path(&path));
     crate::renderer::dimension::set_level(&common.dimension);
     crate::renderer::dimension::set_sea_level(common.sea_level);
+    crate::modules::seed_xray::spawned(common.seed);
 }
 
 #[cfg(test)]

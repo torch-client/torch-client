@@ -50,8 +50,8 @@ pub(super) fn pipeline_layout(
 ) -> wgpu::PipelineLayout {
     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
-        bind_group_layouts: &[layout],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(&**layout)],
+        immediate_size: 0,
     })
 }
 
@@ -82,7 +82,7 @@ pub(super) fn fullscreen_pipeline(
                 compilation_options: Default::default(),
                 targets: &[opaque_target(format)],
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         })
 }
@@ -109,6 +109,7 @@ pub(super) fn fullscreen_pass(
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, &**group, &[]);

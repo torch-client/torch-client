@@ -28,7 +28,7 @@ const SLOT_PITCH: f32 = 20.0;
 const WARN: f32 = 8.0;
 const LINE: f32 = 9.0;
 const HOTBAR_W: f32 = 182.0;
-const WARN_RGB: u32 = 0xFF5555;
+const WARN_RGB: u32 = crate::text::RED;
 
 pub fn enabled() -> bool {
     store().enabled(Id::ExtraHud)

@@ -921,7 +921,7 @@ pub(crate) fn goat_horn(bot: &Client, hand: InteractionHand) {
     };
     let (event, range) = match value {
         Holder::Direct(data) => (
-            crate::client::server_sounds::event_name(&data.sound_event).into_owned(),
+            crate::items::kinetic::event_name(&data.sound_event).into_owned(),
             data.range,
         ),
         Holder::Reference(instrument) => {

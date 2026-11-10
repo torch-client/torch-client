@@ -31,7 +31,7 @@ pub(crate) mod atlas_anim;
 mod atlas_meta;
 pub mod clouds;
 pub mod dimension;
-#[cfg(any(feature = "audio", feature = "shader_support"))]
+mod empty_mesh;
 pub(crate) mod endflash;
 pub mod entity_material;
 pub mod environment;
@@ -85,7 +85,8 @@ pub mod world_text;
 
 pub use anim::{AnimInput, Armor, HeldItem, HumanoidAnim};
 pub use atlas::{
-    AtlasTables, BlockAtlas, MeshTiles, Sprites, Textures, build_block_atlas, placeholder_atlas,
+    AtlasGrid, AtlasTables, MeshTiles, SpriteTile, Sprites, Textures, build_block_atlas,
+    placeholder_atlas,
 };
 pub use frame_view::{FrameView, FrameViewSystems};
 pub use mesh::{
@@ -101,7 +102,6 @@ use bevy::render::render_resource::{BlendComponent, BlendFactor, BlendOperation,
 #[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CameraPinnedMeshes;
 
-pub const ATLAS_COLS: u32 = 16;
 pub const TILE_PX: u32 = 16;
 
 pub fn embedded_path(path: &str) -> String {
@@ -132,10 +132,6 @@ pub(crate) const fn blend(
     }
 }
 
-pub fn atlas_rows(atlas: &bevy::image::Image) -> u32 {
-    (atlas.height() * ATLAS_COLS / atlas.width().max(1)).max(1)
-}
-
 pub(crate) fn rgba_image(
     width: u32,
     height: u32,
@@ -164,8 +160,8 @@ pub enum BlockGeom {
     Model(std::sync::Arc<crate::blocks::BakedBlock>),
     Fluid {
         amount: u8,
-        still: u32,
-        flow: u32,
+        still: SpriteTile,
+        flow: SpriteTile,
         lava: bool,
     },
 }

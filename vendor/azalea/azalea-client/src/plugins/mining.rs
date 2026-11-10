@@ -46,7 +46,7 @@ fn has_aqua_affinity(inventory: &Inventory, registries: &azalea_core::registry_h
     };
     enchantments
         .levels
-        .get(&azalea_registry::Enchantment::new_raw(id as u32))
+        .get(&azalea_registry::data::Enchantment::new_raw(id as u32))
         .is_some_and(|&lvl| lvl > 0)
 }
 
@@ -138,6 +138,7 @@ fn handle_auto_mine(
                 entity,
                 position: block_pos,
                 force: true,
+                continuing: mining.is_some(),
             });
         } else if mining.is_some() && hit_result_component.miss() {
             stop_mining_block_event.write(StopMiningBlockEvent { entity });
@@ -151,6 +152,7 @@ pub struct Mining {
     pub pos: BlockPos,
     pub dir: Direction,
     pub force: bool,
+    pub continuing: bool,
 }
 
 #[derive(Debug, Message)]
@@ -158,7 +160,10 @@ pub struct StartMiningBlockEvent {
     pub entity: Entity,
     pub position: BlockPos,
     pub force: bool,
+    pub continuing: bool,
 }
+pub static FORCED_FACE: std::sync::Mutex<Option<(BlockPos, Direction)>> = std::sync::Mutex::new(None);
+
 fn handle_start_mining_block_event(
     mut commands: Commands,
     mut events: MessageReader<StartMiningBlockEvent>,
@@ -168,7 +173,15 @@ fn handle_start_mining_block_event(
         trace!("{event:?}");
         let hit_result = query.get_mut(event.entity).unwrap();
         if event.force {
-            let direction = if let Some(block_hit_result) =
+            let forced = FORCED_FACE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .filter(|(pos, _)| *pos == event.position)
+                .map(|(_, face)| face);
+            let direction = if let Some(face) = forced {
+                face
+            } else if let Some(block_hit_result) =
                 hit_result.as_block_hit_result_if_not_miss()
                 && block_hit_result.block_pos == event.position
             {
@@ -184,6 +197,7 @@ fn handle_start_mining_block_event(
                 position: event.position,
                 direction,
                 force: true,
+                continuing: event.continuing,
             });
         } else {
             if let Some(block_hit_result) = hit_result.as_block_hit_result_if_not_miss()
@@ -193,6 +207,7 @@ fn handle_start_mining_block_event(
                     position: event.position,
                     direction: block_hit_result.direction,
                     force: false,
+                    continuing: event.continuing,
                 });
             } else {
                 warn!(
@@ -209,6 +224,7 @@ pub struct MiningQueued {
     pub position: BlockPos,
     pub direction: Direction,
     pub force: bool,
+    pub continuing: bool,
 }
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn handle_mining_queued(
@@ -352,6 +368,7 @@ pub fn handle_mining_queued(
                     pos: mining_queued.position,
                     dir: mining_queued.direction,
                     force: mining_queued.force,
+                    continuing: mining_queued.continuing,
                 };
                 trace!("inserting mining component {mining:?} for entity {entity:?}");
                 commands.entity(entity).insert(mining);
@@ -562,7 +579,7 @@ pub fn continue_mining_block(
         &FluidOnEyes,
         &Physics,
         &Attributes,
-        &Mining,
+        &mut Mining,
         &mut MineDelay,
         &mut MineProgress,
         &mut MineTicks,
@@ -584,7 +601,7 @@ pub fn continue_mining_block(
         fluid_on_eyes,
         physics,
         attributes,
-        mining,
+        mut mining,
         mut mine_delay,
         mut mine_progress,
         mut mine_ticks,
@@ -627,6 +644,15 @@ pub fn continue_mining_block(
 
             if target_block_state.is_air() {
                 commands.entity(entity).remove::<Mining>();
+                continue;
+            }
+            if mining.continuing {
+                mining.continuing = false;
+                mine_block_progress_events.write(MineBlockProgressEvent {
+                    entity,
+                    position: mining.pos,
+                    destroy_stage: mine_progress.destroy_stage(),
+                });
                 continue;
             }
             let block = Box::<dyn BlockTrait>::from(target_block_state);
@@ -677,6 +703,7 @@ pub fn continue_mining_block(
                 position: mining.pos,
                 direction: mining.dir,
                 force: false,
+                continuing: true,
             });
         }
     }

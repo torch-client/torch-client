@@ -49,7 +49,7 @@ const BACKDROP: bool = true;
 const PANEL: u32 = 0xFF10_1010;
 const PANEL_HOT: u32 = 0xFF30_3030;
 const LABEL_BG: u32 = 0xC000_0000;
-const HINT: u32 = 0xAAAAAA;
+const HINT: u32 = crate::text::GRAY;
 
 const TOOLBAR_W: f32 = 384.0;
 const TOOLBAR_H: f32 = if TOUCH { 20.0 } else { 14.0 };

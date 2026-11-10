@@ -271,12 +271,6 @@ impl GuiAtlas {
             .take()
     }
 
-    pub fn pixels(&self) -> std::sync::MutexGuard<'_, Option<AtlasPixels>> {
-        self.pixels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     pub fn unihex_uv(&self, px: f32, py: f32) -> [f32; 2] {
         let (w, h) = self.font.unihex_dims;
         [px / w.max(1) as f32, py / h.max(1) as f32]
@@ -565,6 +559,33 @@ const EXTRAS: &[Extra] = &[
         size: (256, 256),
         crop_h: None,
         nearest: false,
+        scaling: Scaling::Stretch,
+    },
+    Extra {
+        key: "underwater",
+        path: "misc/underwater.png",
+        alt_path: None,
+        size: (16, 16),
+        crop_h: None,
+        nearest: true,
+        scaling: Scaling::Stretch,
+    },
+    Extra {
+        key: "pumpkin_blur",
+        path: "misc/pumpkinblur.png",
+        alt_path: None,
+        size: (256, 256),
+        crop_h: None,
+        nearest: false,
+        scaling: Scaling::Stretch,
+    },
+    Extra {
+        key: "spyglass_scope",
+        path: "misc/spyglass_scope.png",
+        alt_path: None,
+        size: (256, 256),
+        crop_h: None,
+        nearest: true,
         scaling: Scaling::Stretch,
     },
     Extra {
@@ -894,33 +915,27 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
             }),
             Err(_) => crate::log_warn!("atlas", "gui: missing {}", hanging.display()),
         }
-        let plain = textures.join(format!("entity/signs/{wood}.png"));
-        let Ok(img) = crate::platform::assets::open_image(&plain) else {
+        let plain = textures.join(format!("gui/signs/{wood}.png"));
+        let Ok(img) = crate::platform::assets::open_gui_image(&plain) else {
             crate::log_warn!("atlas", "gui: missing {}", plain.display());
             continue;
         };
-        let mut img = img.to_rgba8();
-        let k = (img.width() / crate::gui::sign_edit::SIGN_TEXTURE_WIDTH).max(1);
-        for (key, [u, v, w, h]) in [
-            (
-                crate::gui::sign_edit::board_sprite(wood),
-                crate::gui::sign_edit::BOARD_UV,
-            ),
-            (
-                crate::gui::sign_edit::stick_sprite(wood),
-                crate::gui::sign_edit::STICK_UV,
-            ),
-        ] {
-            if img.width() < (u + w) * k || img.height() < (v + h) * k {
-                continue;
-            }
-            entries.push(Entry {
-                kind: Kind::Sprite,
-                key,
-                image: image::imageops::crop(&mut img, u * k, v * k, w * k, h * k).to_image(),
-                scaling: Scaling::Stretch,
-            });
-        }
+        let [width, _] = crate::gui::sign_edit::SIGN_TEXTURE_SIZE;
+        let k = (img.width() / width).max(1);
+        let rows = (crate::gui::sign_edit::WALL_SIGN_ROWS * k).min(img.height());
+        let wall = image::imageops::crop_imm(&img, 0, 0, img.width(), rows).to_image();
+        entries.push(Entry {
+            kind: Kind::Sprite,
+            key: crate::gui::sign_edit::standing_sprite(wood),
+            image: img,
+            scaling: Scaling::Stretch,
+        });
+        entries.push(Entry {
+            kind: Kind::Sprite,
+            key: crate::gui::sign_edit::wall_sprite(wood),
+            image: wall,
+            scaling: Scaling::Stretch,
+        });
     }
 
     for sheet in SHEETS {

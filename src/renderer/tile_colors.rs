@@ -14,17 +14,27 @@ pub struct TileColors {
 const FLOWER_COLOR_SCALE: u32 = 5;
 
 impl TileColors {
-    pub fn from_atlas(data: &[u8], width: u32, height: u32) -> Self {
-        let cols = crate::renderer::ATLAS_COLS;
+    pub(crate) fn from_atlas(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        cells: &crate::renderer::atlas::CellSpans,
+    ) -> Self {
+        let cols = cells.cols();
         let tile_px = (width / cols).max(1);
         let rows = height / tile_px;
         let lut = srgb_to_linear_table();
-        let mut tiles = Vec::with_capacity((rows * cols) as usize);
+        let mut tiles = vec![[0x00FF_FFFF; 3]; (rows * cols) as usize];
         for tile in 0..rows * cols {
+            let span = cells.starts(tile);
+            if span == 0 {
+                continue;
+            }
+            let side = span * tile_px;
             let (tx, ty) = ((tile % cols) * tile_px, (tile / cols) * tile_px);
             let mut acc = [Acc::default(), Acc::default(), Acc::default()];
-            for y in ty..ty + tile_px {
-                for x in tx..tx + tile_px {
+            for y in ty..(ty + side).min(height) {
+                for x in tx..(tx + side).min(width) {
                     let o = ((y * width + x) * 4) as usize;
                     let (r, g, b, a) = (data[o], data[o + 1], data[o + 2], data[o + 3]);
                     acc[2].add(&lut, r, g, b, a, 1);
@@ -40,7 +50,12 @@ impl TileColors {
                     acc[1].add(&lut, r, g, b, a, flower);
                 }
             }
-            tiles.push([acc[0].finish(), acc[1].finish(), acc[2].finish()]);
+            let colour = [acc[0].finish(), acc[1].finish(), acc[2].finish()];
+            for cell in crate::renderer::atlas::block_cells(tile, span, cols) {
+                if let Some(slot) = tiles.get_mut(cell as usize) {
+                    *slot = colour;
+                }
+            }
         }
         Self { tiles }
     }
@@ -97,8 +112,8 @@ fn linear_to_srgb(c: f32) -> f32 {
     crate::util::mth::linear_to_srgb(c.clamp(0.0, 1.0))
 }
 
-pub(crate) fn tile_of_uv(uv: &[[f32; 2]; 4], rows: u32) -> u32 {
-    let cols = crate::renderer::ATLAS_COLS;
+pub(crate) fn tile_of_uv(uv: &[[f32; 2]; 4], grid: crate::renderer::AtlasGrid) -> u32 {
+    let (cols, rows) = (grid.cols.max(1), grid.rows.max(1));
     let u = uv.iter().map(|c| c[0]).sum::<f32>() / 4.0;
     let v = uv.iter().map(|c| c[1]).sum::<f32>() / 4.0;
     let col = ((u * cols as f32).floor() as i64).clamp(0, cols as i64 - 1) as u32;

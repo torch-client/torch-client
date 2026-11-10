@@ -24,6 +24,7 @@ pub(crate) fn is_websocket(address: &str) -> bool {
     websocket(address).is_some()
 }
 
+#[cfg(any(feature = "eagler", target_arch = "wasm32", test))]
 pub(crate) fn is_java_tunnel(address: &str) -> bool {
     websocket(address).is_some_and(|(scheme, _)| scheme == JAVA_TUNNEL)
 }

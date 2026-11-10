@@ -55,6 +55,8 @@ pub(crate) struct PaintingVariant {
     pub(crate) asset_id: String,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    pub(crate) title: Option<azalea_chat::FormattedText>,
+    pub(crate) author: Option<azalea_chat::FormattedText>,
 }
 
 struct Variants {
@@ -65,20 +67,47 @@ struct Variants {
     frog: HashMap<String, MobVariant>,
     wolf: HashMap<String, WolfVariant>,
     painting: HashMap<String, PaintingVariant>,
+    unplaceable_paintings: Vec<String>,
 }
 
 static VARIANTS: OnceLock<Variants> = OnceLock::new();
 
 fn variants() -> &'static Variants {
-    VARIANTS.get_or_init(|| Variants {
-        cat: mob_registry("cat_variant"),
-        cow: mob_registry("cow_variant"),
-        pig: mob_registry("pig_variant"),
-        chicken: mob_registry("chicken_variant"),
-        frog: mob_registry("frog_variant"),
-        wolf: wolf_registry(),
-        painting: painting_registry(),
+    VARIANTS.get_or_init(|| {
+        let painting = painting_registry();
+        let unplaceable_paintings = read_unplaceable_paintings(&painting);
+        Variants {
+            cat: mob_registry("cat_variant"),
+            cow: mob_registry("cow_variant"),
+            pig: mob_registry("pig_variant"),
+            chicken: mob_registry("chicken_variant"),
+            frog: mob_registry("frog_variant"),
+            wolf: wolf_registry(),
+            painting,
+            unplaceable_paintings,
+        }
     })
+}
+
+fn read_unplaceable_paintings(paintings: &HashMap<String, PaintingVariant>) -> Vec<String> {
+    let placeable: Vec<String> = datapack::entry("tags/painting_variant", "placeable")
+        .and_then(|tag| {
+            let values = tag.get("values")?.as_array()?;
+            Some(
+                values
+                    .iter()
+                    .filter_map(datapack::bare_id)
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    let mut out: Vec<(&String, &PaintingVariant)> = paintings
+        .iter()
+        .filter(|(id, _)| !placeable.contains(id))
+        .collect();
+    out.sort_by_key(|&(id, v)| (v.width * v.height, v.width, id));
+    out.into_iter().map(|(id, _)| id.clone()).collect()
 }
 
 fn painting_registry() -> HashMap<String, PaintingVariant> {
@@ -86,10 +115,16 @@ fn painting_registry() -> HashMap<String, PaintingVariant> {
         .into_iter()
         .filter_map(|(id, json)| {
             let size = |key: &str| json.get(key).and_then(Value::as_u64).map(|v| v as u32);
+            let text = |key: &str| {
+                json.get(key)
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+            };
             let variant = PaintingVariant {
                 asset_id: datapack::bare_id(json.get("asset_id")?)?.to_owned(),
                 width: size("width")?,
                 height: size("height")?,
+                title: text("title"),
+                author: text("author"),
             };
             Some((id, variant))
         })
@@ -173,6 +208,10 @@ pub(crate) fn wolf(id: &str) -> Option<&'static WolfVariant> {
 
 pub(crate) fn painting(id: &str) -> Option<&'static PaintingVariant> {
     variants().painting.get(key(id))
+}
+
+pub(crate) fn unplaceable_paintings() -> &'static [String] {
+    &variants().unplaceable_paintings
 }
 
 #[cfg(test)]

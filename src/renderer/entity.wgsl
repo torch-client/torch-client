@@ -1,5 +1,8 @@
 #import bevy_pbr::mesh_functions
-#import bevy_pbr::mesh_view_bindings::{view, fog}
+#import bevy_pbr::mesh_view_bindings::view
+#ifdef DISTANCE_FOG
+#import bevy_pbr::mesh_view_bindings::fog
+#endif
 #import bevy_pbr::view_transformations::position_world_to_clip
 
 #ifdef FANCY_SHADERS
@@ -12,7 +15,10 @@
 #import bevy_core_pipeline::tonemapping::tone_mapping
 #endif
 
-#import client::vanilla_fog::{vanilla_fog, srgb_encode, srgb_decode}
+#import client::vanilla_fog::{srgb_encode, srgb_decode}
+#ifdef DISTANCE_FOG
+#import client::vanilla_fog::vanilla_fog
+#endif
 
 const MINECRAFT_LIGHT_POWER: f32 = 0.6;
 const MINECRAFT_AMBIENT_LIGHT: f32 = 0.4;
@@ -130,7 +136,7 @@ fn lighting(in: VertexOutput, is_front: bool, shade: f32) -> vec3<f32> {
                     view.view_from_world[3].z,
                 ), in.world_position);
                 shadow = shadows::fetch_directional_shadow(
-                    0u, in.world_position, n, view_z);
+                    0u, in.world_position, n, view_z, in.clip_position.xy);
             }
             sun_visibility = n_o_l * shadow;
         }
@@ -181,9 +187,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
         color.a,
     );
 #endif
+#ifdef DISTANCE_FOG
     if fog.mode != 0u {
         color = vanilla_fog(color, in.world_position.xyz - view.world_position);
     }
+#endif
 #ifdef TONEMAP_IN_SHADER
 #ifndef TONEMAP_METHOD_NONE
     color = tone_mapping(color, view.color_grading);

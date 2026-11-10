@@ -1,6 +1,8 @@
 #define_import_path client::vanilla_fog
 
+#ifdef DISTANCE_FOG
 #import bevy_pbr::mesh_view_bindings::fog
+#endif
 
 fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
     let low = c * 12.92;
@@ -23,6 +25,7 @@ fn vanilla_fog_ramp(distance: f32, start: f32, end: f32) -> f32 {
     return (distance - start) / (end - start);
 }
 
+#ifdef DISTANCE_FOG
 fn vanilla_fog(color: vec4<f32>, rel: vec3<f32>) -> vec4<f32> {
     let spherical = length(rel);
     let cylindrical = max(length(rel.xz), abs(rel.y));
@@ -34,3 +37,4 @@ fn vanilla_fog(color: vec4<f32>, rel: vec3<f32>) -> vec4<f32> {
     let mixed = mix(srgb_encode(color.rgb), srgb_encode(fog.base_color.rgb), value * fog.base_color.a);
     return vec4(srgb_decode(mixed), color.a);
 }
+#endif

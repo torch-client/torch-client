@@ -92,7 +92,7 @@ impl Plugin for WorldBorderPlugin {
                 Update,
                 setup.run_if(
                     resource_exists::<super::systems::AssetsReady>
-                        .and(not(resource_exists::<BorderAssets>)),
+                        .and_then(not(resource_exists::<BorderAssets>)),
                 ),
             )
             .add_systems(
@@ -116,7 +116,7 @@ struct BuildKey {
 
 #[derive(Resource)]
 struct BorderAssets {
-    mesh: Handle<Mesh>,
+    mesh: Option<Handle<Mesh>>,
     material: Handle<WorldBorderMaterial>,
     built: Option<BuildKey>,
     last_min: DVec3,
@@ -124,7 +124,6 @@ struct BorderAssets {
 
 fn setup(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<WorldBorderMaterial>>,
 ) {
@@ -134,12 +133,7 @@ fn setup(
         texture,
         params: BorderParams::default(),
     });
-    let mesh = meshes.add(Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    ));
     commands.spawn((
-        Mesh3d(mesh.clone()),
         MeshMaterial3d(material.clone()),
         Transform::default(),
         Visibility::Hidden,
@@ -147,7 +141,7 @@ fn setup(
         BorderLayer,
     ));
     commands.insert_resource(BorderAssets {
-        mesh,
+        mesh: None,
         material,
         built: None,
         last_min: DVec3::ZERO,
@@ -163,15 +157,16 @@ fn in_range(cam: DVec3, [min_x, max_x, min_z, max_z]: [f64; 4], rd: f64) -> bool
 }
 
 fn update_border(
+    mut commands: Commands,
     view: Res<super::FrameView>,
     gui: Res<GuiState>,
     origin: Res<super::RenderOrigin>,
     mut assets: ResMut<BorderAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<WorldBorderMaterial>>,
-    mut layer: Query<(&mut Transform, &mut Visibility), With<BorderLayer>>,
+    mut layer: Query<(Entity, &mut Transform, &mut Visibility), With<BorderLayer>>,
 ) {
-    let Ok((mut transform, mut visibility)) = layer.single_mut() else {
+    let Ok((layer, mut transform, mut visibility)) = layer.single_mut() else {
         return;
     };
     let border = &view.border;
@@ -198,8 +193,17 @@ fn update_border(
     let key = BuildKey { bounds, section };
     if assets.built != Some(key) {
         let (mesh, last_min) = write_mesh(bounds, cam, rd);
-        if let Some(slot) = meshes.get_mut(&assets.mesh) {
-            *slot = mesh;
+        match &assets.mesh {
+            Some(handle) => {
+                if let Some(mut slot) = meshes.get_mut(handle) {
+                    *slot = mesh;
+                }
+            }
+            None => {
+                let handle = meshes.add(mesh);
+                commands.entity(layer).insert(Mesh3d(handle.clone()));
+                assets.mesh = Some(handle);
+            }
         }
         assets.built = Some(key);
         assets.last_min = last_min;
@@ -220,7 +224,7 @@ fn update_border(
     if materials
         .get(&assets.material)
         .is_some_and(|m| m.params != params)
-        && let Some(material) = materials.get_mut(&assets.material)
+        && let Some(mut material) = materials.get_mut(&assets.material)
     {
         material.params = params;
     }

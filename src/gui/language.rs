@@ -26,7 +26,7 @@ const LIST_PAD: f32 = 2.0;
 
 const WARNING: u32 = 0xBA_BABA;
 const ERROR: u32 = 0xFF_5555;
-const PROGRESS: u32 = 0xAA_AAAA;
+const PROGRESS: u32 = crate::text::GRAY;
 
 const APPLY: &str = "Apply";
 const DOWNLOADING: &str = "Downloading...";

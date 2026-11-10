@@ -16,14 +16,18 @@ pub(super) fn request(commands: &mut Commands) {
 }
 
 fn store(captured: On<ScreenshotCaptured>, shared: Res<Shared>) {
-    let result = match captured.image.clone().try_into_dynamic() {
-        Ok(image) => crate::platform::screenshot::save(&image.to_rgb8()),
-        Err(e) => Err(format!("could not read the frame back: {e}")),
-    };
+    let shared = shared.0.clone();
+    let report = move |result| announce(&shared, result);
+    match captured.image.clone().try_into_dynamic() {
+        Ok(image) => crate::platform::screenshot::store(&image.to_rgb8(), report),
+        Err(e) => report(Err(format!("could not read the frame back: {e}"))),
+    }
+}
 
+fn announce(shared: &crate::session::SharedMutex, result: Result<String, String>) {
     let (text, tag, style) = match result {
-        Ok(name) => (
-            format!("Captured screenshot as {name}"),
+        Ok(text) => (
+            text,
             crate::session::ChatTag::System,
             crate::text::Style::default(),
         ),
@@ -39,7 +43,6 @@ fn store(captured: On<ScreenshotCaptured>, shared: Res<Shared>) {
     crate::log_info!("render", "{text}");
 
     shared
-        .0
         .lock()
         .unwrap()
         .session

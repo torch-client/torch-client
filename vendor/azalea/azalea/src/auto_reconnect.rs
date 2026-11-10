@@ -87,7 +87,7 @@ pub fn rejoin_after_delay(
     }
 }
 
-#[derive(Clone, Component, Debug, Resource)]
+#[derive(Clone, Debug, Resource)]
 pub struct AutoReconnectDelay {
     pub delay: Duration,
 }

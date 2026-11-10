@@ -2,15 +2,9 @@ pub(crate) mod biome_color;
 pub(crate) mod block_model;
 pub(crate) mod bytes;
 pub(crate) mod calendar;
+pub(crate) mod combat;
 pub(crate) mod datapack;
 pub(crate) mod dye;
-#[cfg(any(
-    feature = "asset_download",
-    feature = "skins",
-    feature = "update_checker",
-    resource_packs,
-    lua_mods
-))]
 pub(crate) mod hash;
 pub(crate) mod interp;
 pub(crate) mod javarandom;
@@ -36,6 +30,16 @@ pub(crate) mod wire;
 pub(crate) mod zip;
 
 use bevy::math::DVec3;
+
+#[cfg(feature = "multiversion")]
+pub(crate) fn session_protocol() -> i32 {
+    crate::protocol::session()
+}
+
+#[cfg(not(feature = "multiversion"))]
+pub(crate) fn session_protocol() -> i32 {
+    azalea_protocol::packets::PROTOCOL_VERSION
+}
 
 macro_rules! global {
     ($(#[$meta:meta])* $vis:vis fn $name:ident() -> $ty:ty) => {
@@ -88,7 +92,6 @@ pub(crate) fn same_bits<T: bytemuck::Pod>(a: &[T], b: &[T]) -> bool {
     bytemuck::cast_slice::<T, u8>(a) == bytemuck::cast_slice::<T, u8>(b)
 }
 
-#[cfg(any(feature = "audio", lua_mods))]
 pub(crate) fn intern(s: String) -> &'static str {
     use std::collections::HashSet;
     use std::sync::{Mutex, PoisonError};

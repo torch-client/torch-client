@@ -13,7 +13,9 @@ pub fn register(registry: &mut Registry) {
     );
     registry.add(
         EntityKind::Tnt,
-        RenderSpec::block("tnt", tnt_block).with_root(tnt_root),
+        RenderSpec::block("tnt", tnt_block)
+            .with_root(tnt_root)
+            .with_fuse_flash(tnt_lit),
     );
     registry.add(
         EntityKind::BlockDisplay,
@@ -50,10 +52,7 @@ fn tnt_block(st: &EntityState) -> Option<BlockRef> {
 fn tnt_root(st: &EntityState) -> RootPose {
     let fuse = st.extras.fuse as f32;
     let scale = if fuse < 10.0 {
-        let mut g = (1.0 - fuse / 10.0).clamp(0.0, 1.0);
-        g *= g;
-        g *= g;
-        1.0 + g * 0.3
+        1.0 + swell_amount(fuse)
     } else {
         1.0
     };
@@ -66,6 +65,21 @@ fn tnt_root(st: &EntityState) -> RootPose {
         },
         ..RootPose::default()
     }
+}
+
+pub(crate) fn swell_amount(fuse: f32) -> f32 {
+    let mut g = (1.0 - fuse / 10.0).clamp(0.0, 1.0);
+    g *= g;
+    g *= g;
+    g * 0.3
+}
+
+pub(crate) fn is_lit(fuse: f32) -> bool {
+    fuse >= 0.0 && (fuse / 5.0) as i32 % 2 == 0
+}
+
+fn tnt_lit(st: &EntityState) -> bool {
+    is_lit(st.extras.fuse as f32)
 }
 
 fn display_block(st: &EntityState) -> Option<BlockRef> {

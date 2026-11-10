@@ -40,7 +40,7 @@ pub(crate) fn stab(bot: &Client, shared: &SharedMutex, sound: Option<SoundEvent>
         direction: Direction::Down,
         seq: 0,
     });
-    crate::client::tick::request_attack_ticker_reset();
+    crate::client::tick::request_attack_strength_only_reset();
     play_at_player(shared, sound);
     crate::play::interaction::swing_hand(bot, shared, crate::session::InteractionHand::Main);
 }

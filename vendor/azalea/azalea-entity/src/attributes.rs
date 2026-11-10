@@ -23,6 +23,28 @@ pub struct Attributes {
 
     pub step_height: AttributeInstance,
     pub scale: AttributeInstance,
+
+    pub air_drag_modifier: AttributeInstance,
+    pub friction_modifier: AttributeInstance,
+    pub bounciness: AttributeInstance,
+}
+
+fn sanitize(value: f64, min: f64, max: f64) -> f64 {
+    if value.is_nan() { min } else { value.clamp(min, max) }
+}
+
+impl Attributes {
+    pub fn air_drag_modifier_value(&self) -> f64 {
+        sanitize(self.air_drag_modifier.calculate(), 0.0, 2048.0)
+    }
+
+    pub fn friction_modifier_value(&self) -> f64 {
+        sanitize(self.friction_modifier.calculate(), 0.0, 2048.0)
+    }
+
+    pub fn bounciness_value(&self) -> f64 {
+        sanitize(self.bounciness.calculate(), 0.0, 1.0)
+    }
 }
 
 impl Attributes {
@@ -41,6 +63,9 @@ impl Attributes {
             Attribute::BlockBreakSpeed => &mut self.block_break_speed,
             Attribute::SubmergedMiningSpeed => &mut self.submerged_mining_speed,
             Attribute::Scale => &mut self.scale,
+            Attribute::AirDragModifier => &mut self.air_drag_modifier,
+            Attribute::FrictionModifier => &mut self.friction_modifier,
+            Attribute::Bounciness => &mut self.bounciness,
             _ => return None,
         };
         Some(value)

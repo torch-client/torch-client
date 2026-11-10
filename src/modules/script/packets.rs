@@ -128,6 +128,14 @@ impl std::fmt::Write for Capped {
     }
 }
 
+type SoundHolder =
+    azalea_registry::Holder<azalea_registry::builtin::SoundEvent, azalea_core::sound::CustomSound>;
+
+const SOUND_SOURCES: [&str; 11] = [
+    "master", "music", "record", "weather", "block", "hostile", "neutral", "player", "ambient",
+    "voice", "ui",
+];
+
 pub(super) enum Fields {
     Title(String),
     Subtitle(String),
@@ -146,6 +154,26 @@ pub(super) enum Fields {
         op: &'static str,
         key: WaypointKey,
         info: Option<WaypointInfo>,
+    },
+    Sound {
+        sound: SoundHolder,
+        source: &'static str,
+        pos: [f64; 3],
+        volume: f32,
+        pitch: f32,
+    },
+    SoundEntity {
+        sound: SoundHolder,
+        source: &'static str,
+        entity: i32,
+        volume: f32,
+        pitch: f32,
+    },
+    LevelEvent {
+        event: u32,
+        pos: [i32; 3],
+        data: u32,
+        global: bool,
     },
     Debug,
 }
@@ -196,6 +224,47 @@ impl Packet {
             Fields::Waypoint { op, key, info } => {
                 e.raw_set("op", *op)?;
                 waypoint_fields(e, key, info.as_ref())
+            }
+            Fields::Sound {
+                sound,
+                source,
+                pos,
+                volume,
+                pitch,
+            } => {
+                e.raw_set("sound", crate::items::kinetic::event_name(sound))?;
+                e.raw_set("source", *source)?;
+                e.raw_set("x", pos[0])?;
+                e.raw_set("y", pos[1])?;
+                e.raw_set("z", pos[2])?;
+                e.raw_set("volume", *volume as f64)?;
+                e.raw_set("pitch", *pitch as f64)
+            }
+            Fields::SoundEntity {
+                sound,
+                source,
+                entity,
+                volume,
+                pitch,
+            } => {
+                e.raw_set("sound", crate::items::kinetic::event_name(sound))?;
+                e.raw_set("source", *source)?;
+                e.raw_set("entity", *entity)?;
+                e.raw_set("volume", *volume as f64)?;
+                e.raw_set("pitch", *pitch as f64)
+            }
+            Fields::LevelEvent {
+                event,
+                pos,
+                data,
+                global,
+            } => {
+                e.raw_set("event", *event)?;
+                e.raw_set("x", pos[0])?;
+                e.raw_set("y", pos[1])?;
+                e.raw_set("z", pos[2])?;
+                e.raw_set("data", *data)?;
+                e.raw_set("global", *global)
             }
             Fields::Debug => Ok(()),
         }
@@ -273,6 +342,26 @@ pub(super) fn convert(packet: &ClientboundGamePacket) -> Option<Packet> {
             };
             Fields::Waypoint { op, key, info }
         }
+        P::Sound(p) => Fields::Sound {
+            sound: p.sound.clone(),
+            source: SOUND_SOURCES[p.source as usize],
+            pos: [p.x, p.y, p.z].map(|v| f64::from(v) / 8.0),
+            volume: p.volume,
+            pitch: p.pitch,
+        },
+        P::SoundEntity(p) => Fields::SoundEntity {
+            sound: p.sound.clone(),
+            source: SOUND_SOURCES[p.source as usize],
+            entity: p.id.0,
+            volume: p.volume,
+            pitch: p.pitch,
+        },
+        P::LevelEvent(p) => Fields::LevelEvent {
+            event: p.event_type,
+            pos: [p.pos.x, p.pos.y, p.pos.z],
+            data: p.data,
+            global: p.global_event,
+        },
         _ => Fields::Debug,
     };
     let mut bytes = Vec::new();

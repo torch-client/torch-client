@@ -147,10 +147,15 @@ pub(super) fn animate_pack_atlas(
         label: Some(gpu_label!("atlas frames")),
     });
     if sync {
-        for (atlas_tile, pack_tile) in animator.pack_tiles() {
-            frames
-                .layout
-                .copy_tile(&mut encoder, buffer, &pack.texture, pack_tile, atlas_tile);
+        for (atlas_tile, pack_tile, span) in animator.pack_tiles() {
+            frames.layout.copy_tile(
+                &mut encoder,
+                buffer,
+                &pack.texture,
+                pack_tile,
+                atlas_tile,
+                span,
+            );
         }
         pack.synced = Some(frames.generation);
     }
@@ -161,6 +166,7 @@ pub(super) fn animate_pack_atlas(
             &pack.texture,
             copy.pack_tile,
             copy.atlas_tile,
+            copy.span,
         );
     }
     queue.submit([encoder.finish()]);
@@ -173,13 +179,10 @@ fn write_tiles(
     levels: u32,
     tiles: &crate::renderer::atlas::UntintedTiles,
 ) {
-    for (tile, tile_levels) in tiles.iter() {
-        let (tx, ty) = (
-            tile % crate::renderer::ATLAS_COLS,
-            tile / crate::renderer::ATLAS_COLS,
-        );
+    for (tile, tile_levels) in tiles.tiles.iter() {
+        let (tx, ty) = (tile % tiles.cols, tile / tiles.cols);
         for (level, bytes) in tile_levels.iter().enumerate().take(levels as usize) {
-            let side = (width / crate::renderer::ATLAS_COLS) >> level;
+            let side = (width / tiles.cols) >> level;
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture,

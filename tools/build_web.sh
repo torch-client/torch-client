@@ -6,12 +6,14 @@ cd "$(dirname "$0")/.."
 HARDEN=0
 OPT=0
 CHROMEBOOK=0
+APPLE=0
 kept=()
 for arg in "$@"; do
   case "$arg" in
     --harden) HARDEN=1 ;;
     --opt) OPT=1 ;;
     --chromebook) CHROMEBOOK=1 ;;
+    --apple) APPLE=1 ;;
     *) kept+=("$arg") ;;
   esac
 done
@@ -39,6 +41,8 @@ else
 fi
 SITE="$OUT/$NAME/site"
 SYMBOLS="$OUT/$NAME/symbols.txt"
+RELEASE_NAME="$OUT/$NAME/release-name.txt"
+RELEASE="$(python3 tools/artifact_name.py name web "$@")"
 
 DIST="$OUT/$NAME/.build"
 STAGED_SYMBOLS="$OUT/$NAME/.symbols.txt"
@@ -62,21 +66,31 @@ echo "==> cargo rustc --lib --crate-type cdylib --profile $PROFILE --target $TAR
 cargo rustc --lib --crate-type cdylib --profile "$PROFILE" --target "$TARGET" "$@"
 mark "cargo"
 
+SEED=0
+if python3 tools/artifact_name.py has seed_cracker "$@"; then
+  SEED=1
+  SEED_LIB=$(cargo metadata --format-version 1 --all-features | python3 -c '
+import json, os, sys
+pkgs = [p for p in json.load(sys.stdin)["packages"] if p["name"] == "seedcrack"]
+if len(pkgs) != 1:
+    sys.exit("expected one seedcrack package in cargo metadata, found %d" % len(pkgs))
+print(os.path.dirname(pkgs[0]["manifest_path"]))
+')
+  SEED_CRATE="$SEED_LIB/seedcrack-wasm"
+  [ -f "$SEED_CRATE/Cargo.toml" ] || { echo "no seedcrack-wasm in $SEED_LIB" >&2; exit 1; }
+  SEED_TARGET="$PWD/target/seedcrack-wasm"
+  echo "==> seedcrack-wasm ($SEED_CRATE)"
+  cargo build --release --target "$TARGET" --manifest-path "$SEED_CRATE/Cargo.toml" --target-dir "$SEED_TARGET"
+  SEED_WASM_OUT="$DIST/seedcrack_wasm.wasm"
+  cp "$SEED_TARGET/$TARGET/release/seedcrack_wasm.wasm" "$SEED_WASM_OUT"
+  mark "seedcrack-wasm"
+fi
+
 echo "==> wasm-bindgen"
 wasm-bindgen --target web --out-dir "$DIST" --out-name torch-client --no-typescript "$WASM"
 mark "wasm-bindgen"
 
-defaults=on
-features=""
-args=("$@")
-for ((i = 0; i < ${#args[@]}; i++)); do
-  case "${args[i]}" in
-    --no-default-features) defaults=off ;;
-    --features|-F) features+=" ${args[i + 1]-}" ;;
-    --features=*|-F=*) features+=" ${args[i]#*=}" ;;
-  esac
-done
-if [[ "$defaults" == on || " ${features//,/ } " == *" asset_download "* ]]; then
+if python3 tools/artifact_name.py has asset_download "$@"; then
   echo "==> assets: skipped, this build downloads its own"
 else
   echo "==> assets"
@@ -99,6 +113,14 @@ else
     rm -f "$WASM_OUT.opt"
     echo "    wasm-opt failed; shipping the module as cargo left it"
   fi
+  if (( SEED )); then
+    if "$WASM_OPT" -O3 "$SEED_WASM_OUT" -o "$SEED_WASM_OUT.opt"; then
+      mv "$SEED_WASM_OUT.opt" "$SEED_WASM_OUT"
+    else
+      rm -f "$SEED_WASM_OUT.opt"
+      echo "    wasm-opt failed on seedcrack-wasm; shipping it as cargo left it"
+    fi
+  fi
 fi
 mark "wasm-opt"
 
@@ -109,6 +131,9 @@ mark "shaders"
 echo "==> symbols"
 python3 tools/wasm_symbols.py dump "$WASM_OUT" "$STAGED_SYMBOLS"
 python3 tools/wasm_symbols.py strip "$WASM_OUT"
+if (( SEED )); then
+  python3 tools/wasm_symbols.py strip "$SEED_WASM_OUT"
+fi
 mark "symbols + strip"
 
 if (( HARDEN )); then
@@ -153,6 +178,9 @@ page_args=()
 if (( CHROMEBOOK )); then
   page_args+=(--chromebook)
 fi
+if (( APPLE )); then
+  page_args+=(--apple)
+fi
 python3 tools/minify_page.py ${page_args[@]+"${page_args[@]}"} web/index.html "$DIST/index.html"
 
 sed -i "s/torch-client_bg\.wasm\.gz/$MODULE/" "$DIST/index.html"
@@ -185,11 +213,29 @@ if grep -q '\./worker\.js' "$DIST/index.html" || ! grep -q "$WORKER" "$DIST/inde
   exit 1
 fi
 
-if (( CHROMEBOOK )); then
+if (( SEED )); then
+  SEED_WASM="seedcrack_wasm.$(sha256sum "$SEED_WASM_OUT" | cut -c1-12).wasm"
+  mv "$SEED_WASM_OUT" "$DIST/$SEED_WASM"
+  SEED_WORKER="seed_worker.$(sha256sum web/seed_worker.js | cut -c1-12).js"
+  cp web/seed_worker.js "$DIST/$SEED_WORKER"
+  sed -i -e "s|\./seedcrack_wasm\.wasm|./$SEED_WASM|g" -e "s|\./seed_worker\.js|./$SEED_WORKER|g" "$DIST/index.html"
+  if ! grep -q "$SEED_WASM" "$DIST/index.html" || ! grep -q "$SEED_WORKER" "$DIST/index.html"; then
+    echo "the page does not name $SEED_WASM and $SEED_WORKER; the torchSeed lines in web/index.html changed" >&2
+    exit 1
+  fi
+  echo "    $SEED_WORKER, $SEED_WASM"
+fi
+
+if (( CHROMEBOOK || APPLE )); then
   cp web/chromebook/manifest.webmanifest web/chromebook/icon-*.png "$DIST/"
+fi
+if (( CHROMEBOOK )); then
   cached=(index.html "$GLUE" "$MODULE" "$WORKER" manifest.webmanifest icon-192.png icon-512.png icon-maskable-512.png)
   if [[ -f "$DIST/assets.bin" ]]; then
     cached+=(assets.bin)
+  fi
+  if (( SEED )); then
+    cached+=("$SEED_WORKER" "$SEED_WASM")
   fi
   while IFS= read -r f; do
     cached+=("${f#"$DIST/"}")
@@ -230,11 +276,25 @@ cat > "$DIST/_headers" <<HEADERS
 /
   Cache-Control: no-cache
 HEADERS
+if (( SEED )); then
+  cat >> "$DIST/_headers" <<HEADERS
+
+/$SEED_WORKER
+  Cache-Control: public, max-age=31536000, immutable
+
+/$SEED_WASM
+  Cache-Control: public, max-age=31536000, immutable
+HEADERS
+fi
 if (( CHROMEBOOK )); then
   cat >> "$DIST/_headers" <<'HEADERS'
 
 /sw.js
   Cache-Control: no-cache
+HEADERS
+fi
+if (( CHROMEBOOK || APPLE )); then
+  cat >> "$DIST/_headers" <<'HEADERS'
 
 /manifest.webmanifest
   Cache-Control: no-cache
@@ -248,6 +308,7 @@ if [[ -d "$SITE" ]]; then
 fi
 mv "$DIST" "$SITE"
 mv "$STAGED_SYMBOLS" "$SYMBOLS"
+echo "$RELEASE" > "$RELEASE_NAME"
 rm -rf "$SITE.previous"
 DIST="$SITE"
 
@@ -273,6 +334,7 @@ echo
 echo "symbols:   $SYMBOLS   (keep it, do not upload it)"
 echo "serve it:  python3 -m http.server 8080 --directory $DIST"
 echo "deploy it: upload $DIST as the site root; index.html needs nothing else"
+echo "pack it:   python3 tools/pack_single_html.py $DIST   (writes dist/$RELEASE)"
 if (( ! HARDEN )); then
   echo "publish:   rebuild with --harden first"
 fi

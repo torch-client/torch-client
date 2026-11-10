@@ -1,5 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 mod host;
+#[cfg(all(target_arch = "wasm32", feature = "seed_cracker"))]
+pub(crate) use host::{error_text, page_url, to_buffer};
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod mirror;
 #[cfg(target_arch = "wasm32")]
@@ -12,10 +14,6 @@ mod seam {
     use super::*;
 
     pub(crate) fn active() -> bool {
-        false
-    }
-
-    pub(crate) fn spawn(_assets: &[u8]) -> bool {
         false
     }
 
@@ -56,7 +54,7 @@ mod seam {
 
     pub(crate) fn note_backlog(_sections: usize) {}
 
-    pub(crate) fn sweep_parked(_partial: &crate::client::viewwindow::PartialWorldRef) {}
+    pub(crate) fn sweep_parked(_world: &WorldRef) {}
 
     pub(crate) fn take_died() -> bool {
         false
@@ -97,6 +95,7 @@ mod seam {
         static RECEIVED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         static BLOCKS: RefCell<(Vec<(i32, i32, i32, u32)>, HashMap<(i32, i32, i32), usize>)> =
             RefCell::new((Vec::new(), HashMap::new()));
+        static RETRIES: RefCell<HashMap<(i32, i32), u8>> = RefCell::new(HashMap::new());
         #[cfg(resource_packs)]
         static SENT_PACKS: RefCell<Vec<std::sync::Arc<crate::platform::assets::archive::OwnedLayer>>> =
             const { RefCell::new(Vec::new()) };
@@ -152,6 +151,9 @@ mod seam {
             .with(|parked| parked.borrow_mut().remove(&(cx, cz)))
             .map(|(bytes, _)| bytes)
             .unwrap_or_default();
+        if !packet.is_empty() {
+            forget_retries(cx, cz);
+        }
         send(&ToWorker::Chunk {
             cx,
             cz,
@@ -230,10 +232,29 @@ mod seam {
         host::send(msg);
     }
 
+    pub(crate) fn note_retry(cx: i32, cz: i32) -> u8 {
+        RETRIES.with(|retries| {
+            let mut retries = retries.borrow_mut();
+            let n = retries.entry((cx, cz)).or_insert(0);
+            *n = n.saturating_add(1);
+            *n
+        })
+    }
+
+    fn forget_retries(cx: i32, cz: i32) {
+        RETRIES.with(|retries| {
+            let mut retries = retries.borrow_mut();
+            if !retries.is_empty() {
+                retries.remove(&(cx, cz));
+            }
+        });
+    }
+
     pub(crate) fn forward_unload(cx: i32, cz: i32) -> bool {
         if !active() {
             return false;
         }
+        forget_retries(cx, cz);
         drop_chunk_packet(cx, cz);
         send(&ToWorker::Unload { cx, cz });
         true
@@ -267,6 +288,7 @@ mod seam {
 
     fn clear_light() {
         *crate::client::worldsync::light_map().write() = Default::default();
+        RETRIES.with(|retries| retries.borrow_mut().clear());
     }
 
     pub(crate) fn note_backlog(sections: usize) {
@@ -285,7 +307,7 @@ mod seam {
         });
     }
 
-    pub(crate) fn sweep_parked(partial: &crate::client::viewwindow::PartialWorldRef) {
+    pub(crate) fn sweep_parked(world: &WorldRef) {
         const PARK_TTL: u32 = 40;
         let now = PARK_TICK.with(|t| {
             let now = t.get().wrapping_add(1);
@@ -297,13 +319,15 @@ mod seam {
             if parked.is_empty() {
                 return;
             }
-            let partial = partial.read();
+            let world = world.read();
             parked.retain(|&(x, z), (_, at)| {
                 if now.wrapping_sub(*at) < PARK_TTL {
                     return true;
                 }
-                let pos = azalea_core::position::ChunkPos::new(x, z);
-                partial.chunks.in_range(&pos) && partial.chunks.limited_get(&pos).is_some()
+                world
+                    .chunks
+                    .get(&azalea_core::position::ChunkPos::new(x, z))
+                    .is_some()
             });
         });
     }

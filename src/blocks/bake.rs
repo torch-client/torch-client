@@ -4,23 +4,22 @@ use crate::items::model::{
     Assets, Elem, FaceDef, Resolved, corner_uv, default_face_uv, face_positions,
 };
 use crate::items::raster;
-use crate::renderer::{ATLAS_COLS, Sprites, TILE_PX};
+use crate::renderer::{AtlasGrid, Sprites, TILE_PX};
 
 use super::rotation::{self, Mat3};
 use super::state::{ModelRef, Rot, Slot};
 
-pub fn tile_uv_rect(tile: u32, atlas_rows: u32) -> [f32; 4] {
-    let col = tile % ATLAS_COLS;
-    let row = tile / ATLAS_COLS;
-    let tw = 1.0 / ATLAS_COLS as f32;
-    let th = 1.0 / atlas_rows as f32;
-    let iu = 0.02 / (ATLAS_COLS * TILE_PX) as f32;
-    let iv = 0.02 / (atlas_rows * TILE_PX) as f32;
+pub fn tile_uv_rect(tile: u32, span: u32, grid: AtlasGrid) -> [f32; 4] {
+    let (col, row) = grid.cell(tile);
+    let tw = 1.0 / grid.cols as f32;
+    let th = 1.0 / grid.rows as f32;
+    let iu = 0.02 / (grid.cols * TILE_PX) as f32;
+    let iv = 0.02 / (grid.rows * TILE_PX) as f32;
     [
         col as f32 * tw + iu,
         row as f32 * th + iv,
-        (col + 1) as f32 * tw - iu,
-        (row + 1) as f32 * th - iv,
+        (col + span) as f32 * tw - iu,
+        (row + span) as f32 * th - iv,
     ]
 }
 
@@ -34,6 +33,10 @@ fn sprite_key(path: &str) -> &str {
 
 fn texture_is_opaque(sprites: &Sprites, path: &str) -> bool {
     sprites.is_opaque(sprite_key(path))
+}
+
+fn region_is_opaque(sprites: &Sprites, path: &str, rect: [f32; 4]) -> bool {
+    sprites.region_is_opaque(sprite_key(path), rect)
 }
 
 #[derive(Clone, Debug)]
@@ -142,13 +145,12 @@ pub fn bake_model(assets: &Assets, model_path: &str, rot: Rot, sprites: &Sprites
 }
 
 pub fn bake_resolved(resolved: &Resolved, rot: Rot, sprites: &Sprites) -> BakedModel {
-    let atlas_rows = sprites.rows();
     let matrix = rotation::model_matrix(rot);
     let identity = rot.is_identity();
     let particle_uv = resolved
         .texture_path("particle")
         .and_then(|path| tile_of(sprites, &path))
-        .map(|tile| tile_uv_rect(tile, atlas_rows));
+        .map(|tile| sprites.uv_rect(tile));
     let mut out = BakedModel {
         had_elements: !resolved.elements.is_empty(),
         ambient_occlusion: resolved.ambient_occlusion,
@@ -194,7 +196,6 @@ pub fn bake_resolved(resolved: &Resolved, rot: Rot, sprites: &Sprites) -> BakedM
             let Some((face, tile, _)) = face else {
                 continue;
             };
-            let face_opaque = faces[dir].map(|(_, _, opaque)| opaque).unwrap_or(false);
             let mut pos = face_positions(from, to, dir);
             if let Some(er) = elem.rotation {
                 let origin = [
@@ -216,7 +217,14 @@ pub fn bake_resolved(resolved: &Resolved, rot: Rot, sprites: &Sprites) -> BakedM
                 .uv
                 .unwrap_or_else(|| default_face_uv(elem.from, elem.to, dir));
             let uv_t = (rot.uvlock && !identity).then(|| rotation::uv_transform(&matrix, dir));
-            let [au0, av0, au1, av1] = tile_uv_rect(*tile, atlas_rows);
+            let face_opaque = if uv_t.is_some() {
+                faces[dir].is_some_and(|(_, _, opaque)| opaque)
+            } else {
+                resolved
+                    .texture_path(&face.texture)
+                    .is_some_and(|path| region_is_opaque(sprites, &path, rect))
+            };
+            let [au0, av0, au1, av1] = sprites.uv_rect(*tile);
             let mut uv = [[0.0f32; 2]; 4];
             for (i, out_uv) in uv.iter_mut().enumerate() {
                 let [u, v] = corner_uv(rect, face.quadrant, i);

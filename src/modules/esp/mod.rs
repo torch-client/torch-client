@@ -82,7 +82,7 @@ pub fn mark_dirty() {
 #[inline]
 pub fn any_enabled() -> bool {
     let s = store();
-    ESPS.iter().any(|e| s.enabled(e.edge.id()))
+    ESPS.iter().any(|e| s.enabled(e.edge.id())) || s.enabled(Id::SeedXray)
 }
 
 fn pos_key(c: ChunkPos, section_y: i32) -> u64 {
@@ -92,12 +92,15 @@ fn pos_key(c: ChunkPos, section_y: i32) -> u64 {
 pub fn tick(bot: &azalea::Client, shared: &crate::session::SharedMutex) {
     let s = store();
     let phases = ESPS.each_ref().map(|e| e.edge.poll(s));
-    let running = phases
-        .iter()
-        .any(|p| matches!(p, Phase::Started | Phase::Running));
-    let edged = phases
-        .iter()
-        .any(|p| matches!(p, Phase::Started | Phase::Stopped));
+    let seed = super::seed_xray::tick(bot, shared);
+    let running = seed.running
+        || phases
+            .iter()
+            .any(|p| matches!(p, Phase::Started | Phase::Running));
+    let edged = seed.edged
+        || phases
+            .iter()
+            .any(|p| matches!(p, Phase::Started | Phase::Stopped));
 
     if !running {
         if edged {
@@ -116,7 +119,8 @@ pub fn tick(bot: &azalea::Client, shared: &crate::session::SharedMutex) {
     SINCE.store(since, Relaxed);
 
     let (key, table) = table::current();
-    if !table.any {
+    let key = key.wrapping_add(seed.key);
+    if !table.any && !seed.running {
         if LAST_LEN.swap(0, Relaxed) != 0 {
             shared.lock().unwrap().session.esp = Arc::new(EspFrame::default());
         }
@@ -126,11 +130,8 @@ pub fn tick(bot: &azalea::Client, shared: &crate::session::SharedMutex) {
     let (centre, centre_chunk) = {
         let s = shared.lock().unwrap();
         let p = s.session.player_pos;
-        let centre = p.map(|v| v.floor() as i32);
-        (
-            centre,
-            ChunkPos::new(centre[0].div_euclid(16), centre[2].div_euclid(16)),
-        )
+        let (cx, cz) = s.session.chunk_pos();
+        (p.map(|v| v.floor() as i32), ChunkPos::new(cx, cz))
     };
 
     let pos = pos_key(centre_chunk, centre[1].div_euclid(16));
@@ -181,12 +182,11 @@ pub fn tick(bot: &azalea::Client, shared: &crate::session::SharedMutex) {
             );
         }
     }
+    let mut slots = table.slots.clone();
+    super::seed_xray::append(bot, centre, dirty, MAX_BOXES, &mut boxes, &mut slots);
     LAST_LEN.store(boxes.len(), Relaxed);
 
-    let frame = EspFrame {
-        boxes,
-        slots: table.slots.clone(),
-    };
+    let frame = EspFrame { boxes, slots };
     shared.lock().unwrap().session.esp = Arc::new(frame);
 }
 

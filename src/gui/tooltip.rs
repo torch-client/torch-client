@@ -9,6 +9,7 @@ use azalea_inventory::bundle::{
 use crate::generated_items::item;
 use crate::gui::painter::Painter;
 use crate::items::potions;
+use crate::modules::better_tooltips::{self, FoodRows};
 use crate::play::mob_effects;
 use crate::session::{BundleView, SlotStack};
 use crate::text::{Font, Span};
@@ -20,12 +21,12 @@ const MARGIN: f32 = 9.0;
 const ROW_HEIGHT: f32 = 10.0;
 const TITLE_GAP: f32 = 2.0;
 
-const GRAY: u32 = 0xAAAAAA;
-const DARK_GRAY: u32 = 0x555555;
+const GRAY: u32 = crate::text::GRAY;
+const DARK_GRAY: u32 = crate::text::DARK_GRAY;
 const BLUE: u32 = 0x5555FF;
-const RED: u32 = 0xFF5555;
+const RED: u32 = crate::text::RED;
 const DARK_PURPLE: u32 = 0xAA00AA;
-const WHITE: u32 = 0xFFFFFF;
+const WHITE: u32 = crate::text::WHITE;
 
 static LANG: Reloadable<HashMap<String, String>> = Reloadable::new(load_lang);
 
@@ -201,20 +202,25 @@ fn plain(text: String, color: u32) -> Vec<Span> {
     vec![Span::colored(text, color)]
 }
 
-fn ordered_enchantments(list: &[(String, i32)]) -> Vec<(String, i32)> {
-    let order = &*TOOLTIP_ORDER;
-    let mut out: Vec<(String, i32)> = Vec::with_capacity(list.len());
-    for id in order {
-        if let Some(e) = list.iter().find(|(n, _)| n == id) {
-            out.push(e.clone());
-        }
-    }
-    for e in list {
-        if !order.contains(&e.0) {
-            out.push(e.clone());
-        }
-    }
-    out
+pub(crate) fn ordered_enchantments(
+    list: &[(String, i32)],
+) -> impl Iterator<Item = &(String, i32)> + '_ {
+    let order: &'static [String] = &TOOLTIP_ORDER;
+    order
+        .iter()
+        .filter_map(move |id| list.iter().find(|(n, _)| n == id))
+        .chain(list.iter().filter(move |e| !order.contains(&e.0)))
+}
+
+pub(crate) fn is_curse(id: &str) -> bool {
+    CURSES.contains(id)
+}
+
+pub(crate) fn short_enchantment(id: &str, level: i32, length: usize, out: &mut String) {
+    use std::fmt::Write;
+    let name = translate(&format!("enchantment.minecraft.{id}"), &[]);
+    out.extend(name.chars().take(length));
+    let _ = write!(out, " {level}");
 }
 
 fn enchantment_line(id: &str, level: i32) -> Vec<Span> {
@@ -317,6 +323,32 @@ fn book_lines(book: &crate::session::Book) -> impl Iterator<Item = Vec<Span>> {
     author.into_iter().chain(std::iter::once(generation))
 }
 
+fn painting_lines(stack: &SlotStack, creative: bool) -> Vec<Vec<Span>> {
+    let Some(id) = stack.extra.painting_variant.as_deref() else {
+        return if creative {
+            vec![plain(translate("painting.random", &[]), GRAY)]
+        } else {
+            Vec::new()
+        };
+    };
+    let Some(variant) = crate::util::variants::painting(id) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Vec<Span>> = [&variant.title, &variant.author]
+        .into_iter()
+        .flatten()
+        .map(crate::client::chat_text::to_spans)
+        .collect();
+    out.push(plain(
+        translate(
+            "painting.dimensions",
+            &[variant.width.to_string(), variant.height.to_string()],
+        ),
+        WHITE,
+    ));
+    out
+}
+
 fn format_modifier(value: f64) -> String {
     let text = format!("{:.2}", value);
     let trimmed = text.trim_end_matches('0').trim_end_matches('.');
@@ -349,6 +381,10 @@ fn build_lines(stack: &SlotStack, advanced: bool, creative: bool) -> Vec<Vec<Spa
 
     out.push(styled_hover_name(stack));
 
+    if stack.item == "painting" {
+        out.extend(painting_lines(stack, creative));
+    }
+
     if let Some(b) = &stack.extra.book
         && b.signed
     {
@@ -365,7 +401,7 @@ fn build_lines(stack: &SlotStack, advanced: bool, creative: bool) -> Vec<Vec<Spa
     }
 
     for (id, level) in ordered_enchantments(&stack.extra.enchantments) {
-        out.push(enchantment_line(&id, level));
+        out.push(enchantment_line(id, *level));
     }
 
     for line in &stack.extra.lore {
@@ -470,8 +506,10 @@ struct LineCache {
     creative: bool,
     tick_rate: f32,
     lang_epoch: u32,
+    food_values: bool,
     lines: Vec<Vec<Span>>,
     bundle: BundleText,
+    food: Option<(usize, FoodRows)>,
 }
 
 const BUNDLE_WIDTH: f32 = 96.0;
@@ -630,7 +668,7 @@ impl<'a> BundleImage<'a> {
         let center = x + (w / 2.0).floor() - 12.0;
         let mx = center - (p.atlas.font.width(name).ceil() / 2.0).floor();
         let (vw, vh) = self.screen;
-        place_lines(p, &self.text.selected_name, None, |bw, bh| {
+        place_lines(p, &self.text.selected_name, None, None, |bw, bh| {
             position(mx, y - 15.0, vw, vh, bw, bh)
         });
     }
@@ -688,10 +726,16 @@ pub fn draw(
     creative: bool,
 ) {
     let atlas = p.atlas;
-    with_lines(stack, advanced, creative, &atlas.font, |lines, bundle| {
-        let image = BundleImage::of(stack, bundle, vw, vh);
-        place_lines(p, lines, image, |w, h| position(mx, my, vw, vh, w, h));
-    });
+    with_lines(
+        stack,
+        advanced,
+        creative,
+        &atlas.font,
+        |lines, bundle, food| {
+            let image = BundleImage::of(stack, bundle, vw, vh);
+            place_lines(p, lines, image, food, |w, h| position(mx, my, vw, vh, w, h));
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -706,10 +750,10 @@ pub(crate) fn draw_with_line(
     advanced: bool,
 ) {
     let atlas = p.atlas;
-    with_lines(stack, advanced, false, &atlas.font, |lines, _| {
+    with_lines(stack, advanced, false, &atlas.font, |lines, _, food| {
         let mut all = lines.to_vec();
         all.extend(extra.map(|text| plain(text, WHITE)));
-        draw_lines(p, &all, mx, my, vw, vh);
+        place_lines(p, &all, None, food, |w, h| position(mx, my, vw, vh, w, h));
     });
 }
 
@@ -723,12 +767,18 @@ pub fn draw_over_slot(
     creative: bool,
 ) {
     let atlas = p.atlas;
-    with_lines(stack, advanced, creative, &atlas.font, |lines, bundle| {
-        let image = BundleImage::of(stack, bundle, vw, vh);
-        place_lines(p, lines, image, |w, h| {
-            position_over_slot(slot.0, slot.1, vw, vh, w, h)
-        })
-    });
+    with_lines(
+        stack,
+        advanced,
+        creative,
+        &atlas.font,
+        |lines, bundle, food| {
+            let image = BundleImage::of(stack, bundle, vw, vh);
+            place_lines(p, lines, image, food, |w, h| {
+                position_over_slot(slot.0, slot.1, vw, vh, w, h)
+            })
+        },
+    );
 }
 
 fn with_lines(
@@ -736,60 +786,82 @@ fn with_lines(
     advanced: bool,
     creative: bool,
     font: &Font,
-    draw: impl FnOnce(&[Vec<Span>], &BundleText),
+    draw: impl FnOnce(&[Vec<Span>], &BundleText, Option<(usize, &FoodRows)>),
 ) {
     if stack.is_empty() {
         return;
     }
     let lang_epoch = LANG.epoch();
     let tick_rate = tick_rate();
+    let food_values = better_tooltips::food_values();
     LINES.with_borrow_mut(|cache| {
         let hit = cache.as_ref().is_some_and(|c| {
             c.advanced == advanced
                 && c.creative == creative
                 && c.tick_rate == tick_rate
                 && c.lang_epoch == lang_epoch
+                && c.food_values == food_values
                 && c.stack == *stack
         });
         if !hit {
+            let mut lines = build_lines(stack, advanced, creative);
+            let food = food_values
+                .then(|| FoodRows::of(stack, font))
+                .flatten()
+                .map(|rows| {
+                    let at = lines.len();
+                    lines.extend([Vec::new(), Vec::new()]);
+                    (at, rows)
+                });
             *cache = Some(LineCache {
                 stack: stack.clone(),
                 advanced,
                 creative,
                 tick_rate,
                 lang_epoch,
-                lines: build_lines(stack, advanced, creative),
+                food_values,
+                lines,
                 bundle: BundleText::new(stack, font),
+                food,
             });
         }
         if let Some(c) = cache.as_ref() {
-            draw(&c.lines, &c.bundle);
+            draw(
+                &c.lines,
+                &c.bundle,
+                c.food.as_ref().map(|(at, rows)| (*at, rows)),
+            );
         }
     });
 }
 
 pub(crate) fn draw_lines(p: &mut Painter, lines: &[Vec<Span>], mx: f32, my: f32, vw: f32, vh: f32) {
-    place_lines(p, lines, None, |w, h| position(mx, my, vw, vh, w, h));
+    place_lines(p, lines, None, None, |w, h| position(mx, my, vw, vh, w, h));
 }
 
 fn place_lines(
     p: &mut Painter,
     lines: &[Vec<Span>],
     image: Option<BundleImage<'_>>,
+    food: Option<(usize, &FoodRows)>,
     place: impl FnOnce(f32, f32) -> (f32, f32),
 ) {
     if lines.is_empty() {
         return;
     }
 
-    let w = lines.iter().map(|l| p.atlas.font.width(l).ceil()).fold(
-        if image.is_some() {
-            BUNDLE_WIDTH
-        } else {
-            0.0f32
-        },
-        f32::max,
-    );
+    let w = lines
+        .iter()
+        .map(|l| p.atlas.font.width(l).ceil())
+        .fold(
+            if image.is_some() {
+                BUNDLE_WIDTH
+            } else {
+                0.0f32
+            },
+            f32::max,
+        )
+        .max(food.map_or(0.0, |(_, rows)| rows.width()));
     let image_height = image.as_ref().map(BundleImage::height);
     let h = match image_height {
         Some(height) => ROW_HEIGHT * lines.len() as f32 + height,
@@ -803,7 +875,11 @@ fn place_lines(
     p.sprite("tooltip/frame", bx, by, bw, bh);
 
     let mut row_y = y;
+    let mut food_y = None;
     for (i, line) in lines.iter().enumerate() {
+        if food.is_some_and(|(at, _)| at == i) {
+            food_y = Some(row_y);
+        }
         p.text(line, x, row_y, true);
         row_y += ROW_HEIGHT + if i == 0 { TITLE_GAP } else { 0.0 };
         if i == 0 {
@@ -812,6 +888,9 @@ fn place_lines(
     }
     if let Some(image) = image {
         image.draw(p, x, y + ROW_HEIGHT + TITLE_GAP, w);
+    }
+    if let (Some((_, rows)), Some(food_y)) = (food, food_y) {
+        rows.draw(p, x, food_y);
     }
 }
 

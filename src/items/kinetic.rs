@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use azalea_core::sound::CustomSound;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
@@ -5,6 +7,7 @@ use azalea_inventory::components::{
 };
 use azalea_registry::Holder;
 use azalea_registry::builtin::SoundEvent;
+use azalea_registry::identifier::Identifier;
 
 use super::component;
 use crate::util::mth::ease::{
@@ -15,6 +18,48 @@ use crate::util::mth::{DEG_TO_RAD, progress};
 pub const HIT_FEEDBACK_TICKS: u32 = 10;
 
 pub const CROSSBOW_CHARGE_TICKS: f32 = 25.0;
+
+pub fn crossbow_charge_ticks(quick_charge: u8) -> f32 {
+    let mut seconds = 1.25f32;
+    if quick_charge > 0 {
+        seconds += -0.25 + -0.25 * f32::from(quick_charge - 1);
+    }
+    (seconds.max(0.0) * 20.0).floor()
+}
+
+static QUICK_CHARGE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+
+pub fn refresh_quick_charge(registries: &azalea_core::registry_holder::RegistryHolder) {
+    static KEY: std::sync::LazyLock<azalea::Identifier> =
+        std::sync::LazyLock::new(|| azalea::Identifier::new("quick_charge"));
+    let id = registries
+        .enchantment
+        .map
+        .get_index_of(&*KEY)
+        .map_or(u32::MAX, |i| i as u32);
+    QUICK_CHARGE_ID.store(id, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn quick_charge(data: &ItemStackData) -> u8 {
+    use azalea_registry::DataRegistry;
+    let id = QUICK_CHARGE_ID.load(std::sync::atomic::Ordering::Relaxed);
+    if id == u32::MAX {
+        return 0;
+    }
+    component::<azalea_inventory::components::Enchantments>(data).map_or(0, |e| {
+        e.levels
+            .iter()
+            .find(|(enchantment, _)| enchantment.protocol_id() == id)
+            .map_or(0, |(_, level)| (*level).clamp(0, i32::from(u8::MAX)) as u8)
+    })
+}
+
+pub fn quick_charge_named(enchantments: &[(String, i32)]) -> u8 {
+    enchantments
+        .iter()
+        .find(|(name, _)| name == "quick_charge")
+        .map_or(0, |(_, level)| (*level).clamp(0, i32::from(u8::MAX)) as u8)
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Kinetic {
@@ -117,6 +162,23 @@ fn builtin(holder: &Holder<SoundEvent, CustomSound>) -> Option<SoundEvent> {
 
 pub fn sound_name(event: SoundEvent) -> &'static str {
     event.to_str().trim_start_matches("minecraft:")
+}
+
+#[cfg_attr(not(any(feature = "audio", lua_mods)), allow(dead_code))]
+pub(crate) fn event_name(sound: &Holder<SoundEvent, CustomSound>) -> Cow<'_, str> {
+    match sound {
+        Holder::Reference(event) => sound_name(*event).into(),
+        Holder::Direct(custom) => identifier_name(&custom.sound_id),
+    }
+}
+
+#[cfg_attr(not(any(feature = "audio", lua_mods)), allow(dead_code))]
+pub(crate) fn identifier_name(id: &Identifier) -> Cow<'_, str> {
+    if id.namespace() == "minecraft" {
+        id.path().into()
+    } else {
+        format!("{}:{}", id.namespace(), id.path()).into()
+    }
 }
 
 #[cfg(test)]

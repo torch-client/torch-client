@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::*;
 use crate::renderer::HumanoidAnim;
 
@@ -181,12 +182,13 @@ pub struct MapUpdate {
     pub decorations: Option<std::sync::Arc<Vec<MapDecoration>>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MapDecoration {
     pub kind: u8,
     pub x: i8,
     pub y: i8,
     pub rot: u8,
+    pub name: Option<std::sync::Arc<[crate::text::Span]>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -202,6 +204,7 @@ pub struct SlotStack {
     pub charged: bool,
     pub rocket: bool,
     pub trim: u8,
+    pub block_state: u8,
     pub has_lodestone: bool,
     pub lodestone: Option<[i32; 3]>,
     pub death_protection: bool,
@@ -225,6 +228,7 @@ pub struct StackExtra {
     pub banner_patterns: Option<Box<[Box<str>]>>,
     pub book: Option<Box<Book>>,
     pub banner_layers: Option<Box<[crate::blockentities::banner::BannerLayer]>>,
+    pub painting_variant: Option<Box<str>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -266,6 +270,7 @@ static NO_EXTRA: StackExtra = StackExtra {
     banner_patterns: None,
     book: None,
     banner_layers: None,
+    painting_variant: None,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -324,6 +329,11 @@ impl SlotStack {
         self.item.is_empty() || self.count == 0
     }
 
+    pub fn bundle_selected_item(&self) -> Option<&SlotStack> {
+        let bundle = self.bundle.as_deref()?;
+        bundle.items.get(usize::try_from(bundle.selected).ok()?)
+    }
+
     pub fn item_use(&self) -> crate::items::dispatch::ItemUse {
         use crate::items::dispatch::{ChargeType, ItemUse};
         ItemUse {
@@ -333,8 +343,14 @@ impl SlotStack {
                 (true, true) => ChargeType::Rocket,
             },
             trim: self.trim,
+            block_state: self.block_state,
             has_lodestone: self.has_lodestone,
             lodestone: self.lodestone,
+            bundle_selected: self.bundle_selected_item().is_some(),
+            broken: self.max_damage > 0
+                && !self.unbreakable
+                && i32::from(self.damage) >= i32::from(self.max_damage) - 1,
+            quick_charge: crate::items::kinetic::quick_charge_named(&self.extra.enchantments),
             ..ItemUse::NONE
         }
     }
@@ -432,6 +448,7 @@ pub fn invisible_to(invisible: bool, viewer: Gamemode) -> bool {
 #[derive(Clone, Default)]
 pub struct OtherPlayerInfo {
     pub id: i32,
+    pub uuid: u128,
     pub username: String,
     pub name_tag: std::sync::Arc<[crate::text::Span]>,
     pub hidden_by_team: bool,
@@ -441,6 +458,9 @@ pub struct OtherPlayerInfo {
     pub gamemode: Option<Gamemode>,
     pub below_name: std::sync::Arc<[crate::text::Span]>,
     pub discrete: bool,
+    pub name_tag_distance: f32,
+    pub below_name_distance: f32,
+    pub armor: Option<std::sync::Arc<[SlotStack; 4]>>,
     #[cfg(feature = "skins")]
     pub skin: crate::client::skins::SkinState,
     pub anim: HumanoidAnim,
@@ -482,16 +502,6 @@ pub enum FurnaceKind {
     Furnace,
     BlastFurnace,
     Smoker,
-}
-
-impl FurnaceKind {
-    pub fn texture_key(self) -> &'static str {
-        match self {
-            FurnaceKind::Furnace => "furnace",
-            FurnaceKind::BlastFurnace => "blast_furnace",
-            FurnaceKind::Smoker => "smoker",
-        }
-    }
 }
 
 pub type ContainerData = [i16; CONTAINER_DATA_LEN];

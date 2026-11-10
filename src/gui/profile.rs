@@ -8,6 +8,7 @@ use crate::gui::painter::Painter;
 use crate::gui::widgets::{self, Button, TextBox, WIDGET_HEIGHT, WIDGET_WIDTH_BIG};
 use crate::gui::{GuiState, Screen, ScreenCtx, menu};
 use crate::platform::cli::valid_username;
+use crate::text::{AQUA, GREEN};
 
 const TITLE: &str = "Accounts";
 const SELECT: &str = "Select Account";
@@ -29,8 +30,6 @@ const USERNAME_MAX_LEN: usize = 16;
 const BAR_W: f32 = 3.0 * LOWER_ROW_BUTTON_W + 2.0 * BUTTON_GAP;
 const TOP_ROW_BUTTON_W: f32 = (BAR_W - BUTTON_GAP) / 2.0;
 const GREY: u32 = 0x808080;
-const GREEN: u32 = 0x55FF55;
-const AQUA: u32 = 0x55FFFF;
 
 pub struct ProfileState {
     pub accounts: Accounts,
@@ -508,8 +507,7 @@ pub fn draw_microsoft(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     const COPY: &str = "Copy Link";
     const COPIED: &str = "Copied";
     const RETRY: &str = "Try Again";
-    const YELLOW: u32 = 0xFFFF55;
-    const RED: u32 = 0xFF5555;
+    use crate::text::{RED, YELLOW};
 
     state.profile.ensure_loaded();
     menu::background(p, ctx.vw, ctx.vh);

@@ -16,6 +16,7 @@ pub mod silverfish;
 pub mod slime;
 pub mod snow_golem;
 pub mod spider;
+pub mod sulfur_cube;
 pub mod warden;
 pub mod wither;
 
@@ -36,6 +37,7 @@ pub fn register(registry: &mut Registry) {
     slime::register(registry);
     snow_golem::register(registry);
     spider::register(registry);
+    sulfur_cube::register(registry);
     warden::register(registry);
     wither::register(registry);
 }
@@ -51,23 +53,24 @@ mod tests {
     fn model_geom(spec: &crate::entities::RenderSpec) -> Option<&crate::entities::ModelGeom> {
         match &spec.geom {
             Geom::Model(geom) => Some(geom),
-            Geom::Item(_) => None,
-            Geom::Block(_) | Geom::Built(_) => {
+            Geom::Item(_) | Geom::Block(_) => None,
+            Geom::Built(_) => {
                 panic!("{} is not a Geom::Model spec", spec.name)
             }
         }
     }
 
-    const EXPECTED: [(EntityKind, usize); 22] = [
+    const EXPECTED: [(EntityKind, usize); 23] = [
         (EntityKind::Creeper, 2),
         (EntityKind::Spider, 2),
         (EntityKind::CaveSpider, 2),
         (EntityKind::Silverfish, 1),
         (EntityKind::Endermite, 1),
-        (EntityKind::Enderman, 2),
+        (EntityKind::Enderman, 3),
         (EntityKind::Blaze, 1),
         (EntityKind::Slime, 2),
         (EntityKind::MagmaCube, 1),
+        (EntityKind::SulfurCube, 5),
         (EntityKind::Guardian, 1),
         (EntityKind::ElderGuardian, 1),
         (EntityKind::Shulker, 1),
@@ -78,8 +81,8 @@ mod tests {
         (EntityKind::Creaking, 2),
         (EntityKind::Warden, 6),
         (EntityKind::IronGolem, 2),
-        (EntityKind::SnowGolem, 1),
-        (EntityKind::CopperGolem, 5),
+        (EntityKind::SnowGolem, 2),
+        (EntityKind::CopperGolem, 6),
         (EntityKind::Phantom, 2),
     ];
 
@@ -123,11 +126,13 @@ mod tests {
                     st.extras.flap_time = if flag { 3.0 } else { 0.0 };
                     st.extras.tendril_animation = if flag { 1.0 } else { 0.0 };
                     st.extras.heart_animation = if flag { 1.0 } else { 0.0 };
+                    for state in st.extras.anim.iter_mut() {
+                        state.animate_when(flag, 0);
+                    }
                     st.extras.shared_mut().can_move = flag;
                     st.extras.shared_mut().tearing_down = flag;
                     st.extras.shared_mut().creepy = flag;
-                    st.extras.shared_mut().carried_block =
-                        flag.then(|| "minecraft:grass_block".to_string());
+                    st.extras.shared_mut().carried_block = flag.then_some(9);
                     st.extras.shared_mut().main_hand.id = if flag { "copper_ingot" } else { "" };
                     for pose in [
                         Pose::Standing,

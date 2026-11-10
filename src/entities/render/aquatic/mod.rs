@@ -280,6 +280,9 @@ mod tests {
                     st.extras.playing_dead_factor = if flag { 1.0 } else { 0.0 };
                     st.extras.on_ground_factor = if flag { 1.0 } else { 0.0 };
                     st.extras.moving_factor = if flag { 1.0 } else { 0.0 };
+                    for state in st.extras.anim.iter_mut() {
+                        state.animate_when(flag, 0);
+                    }
                     st.extras.shared_mut().body_armor =
                         flag.then_some("minecraft:copper_nautilus_armor");
                     for pose in [

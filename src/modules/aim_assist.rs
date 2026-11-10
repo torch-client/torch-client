@@ -120,8 +120,10 @@ pub(super) fn visible(bot: &Client, eye: [f64; 3], point: [f64; 3]) -> bool {
         ClipContext {
             from: vec(eye),
             to: vec(point),
-            block_shape_type: BlockShapeType::Visual,
+            block_shape_type: BlockShapeType::Collider,
             fluid_pick_type: FluidPickType::None,
+            held_item: azalea_registry::builtin::ItemKind::Air,
+            entity: None,
         },
     );
     hit.miss

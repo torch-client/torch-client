@@ -10,6 +10,8 @@ counted! {
         MeshJobs,
         SectionsMeshed,
         MeshPanics,
+        MeshRequeued,
+        MeshGaveUp,
         MeshJobsSuperseded,
         SectionsUploaded,
         ViewRecentred,

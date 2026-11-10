@@ -1,8 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::lighter::{self, QuadLight};
-use super::{BlockGeom, MeshTiles, Occupancy, RenderedBlock};
-use crate::blocks::bake::tile_uv_rect;
+use super::{AtlasGrid, BlockGeom, MeshTiles, Occupancy, RenderedBlock, SpriteTile};
 use crate::blocks::rand::position_seed;
 use crate::util::javarandom::JavaRandom;
 use crate::util::mth::lerp;
@@ -27,8 +26,8 @@ pub fn set_lighting_enabled(enabled: bool) {
     LIGHTING_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
-fn uv_horizontal(x0: f32, z0: f32, x1: f32, z1: f32, tile: u32, rows: u32) -> [[f32; 2]; 4] {
-    let [au0, av0, au1, av1] = tile_uv_rect(tile, rows);
+fn uv_horizontal(x0: f32, z0: f32, x1: f32, z1: f32, uv: [f32; 4]) -> [[f32; 2]; 4] {
+    let [au0, av0, au1, av1] = uv;
     let u0 = lerp(x0, au0, au1);
     let u1 = lerp(x1, au0, au1);
     let v0 = lerp(z0, av0, av1);
@@ -36,8 +35,8 @@ fn uv_horizontal(x0: f32, z0: f32, x1: f32, z1: f32, tile: u32, rows: u32) -> [[
     [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]
 }
 
-fn uv_ns(x0: f32, x1: f32, y0: f32, y1: f32, tile: u32, rows: u32) -> [[f32; 2]; 4] {
-    let [au0, av0, au1, av1] = tile_uv_rect(tile, rows);
+fn uv_ns(x0: f32, x1: f32, y0: f32, y1: f32, uv: [f32; 4]) -> [[f32; 2]; 4] {
+    let [au0, av0, au1, av1] = uv;
     let u0 = lerp(x0, au0, au1);
     let u1 = lerp(x1, au0, au1);
     let fv_top = lerp(1.0 - y1, av0, av1);
@@ -45,8 +44,8 @@ fn uv_ns(x0: f32, x1: f32, y0: f32, y1: f32, tile: u32, rows: u32) -> [[f32; 2];
     [[u0, fv_bot], [u1, fv_bot], [u1, fv_top], [u0, fv_top]]
 }
 
-fn uv_ew(z0: f32, z1: f32, y0: f32, y1: f32, tile: u32, rows: u32) -> [[f32; 2]; 4] {
-    let [au0, av0, au1, av1] = tile_uv_rect(tile, rows);
+fn uv_ew(z0: f32, z1: f32, y0: f32, y1: f32, uv: [f32; 4]) -> [[f32; 2]; 4] {
+    let [au0, av0, au1, av1] = uv;
     let u0 = lerp(z0, au0, au1);
     let u1 = lerp(z1, au0, au1);
     let fv_top = lerp(1.0 - y1, av0, av1);
@@ -429,39 +428,38 @@ fn face_geom(
     y1: f32,
     z1: f32,
     face: usize,
-    tile: u32,
-    atlas_rows: u32,
+    uv: [f32; 4],
 ) -> ([[f32; 3]; 4], [f32; 3], [[f32; 2]; 4]) {
     match face {
         0 => (
             [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
             [0., 1., 0.],
-            uv_horizontal(x0, z0, x1, z1, tile, atlas_rows),
+            uv_horizontal(x0, z0, x1, z1, uv),
         ),
         1 => (
             [[x0, y0, z1], [x1, y0, z1], [x1, y0, z0], [x0, y0, z0]],
             [0., -1., 0.],
-            uv_horizontal(x0, z0, x1, z1, tile, atlas_rows),
+            uv_horizontal(x0, z0, x1, z1, uv),
         ),
         2 => (
             [[x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0]],
             [1., 0., 0.],
-            uv_ew(z0, z1, y0, y1, tile, atlas_rows),
+            uv_ew(z0, z1, y0, y1, uv),
         ),
         3 => (
             [[x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1]],
             [-1., 0., 0.],
-            uv_ew(z0, z1, y0, y1, tile, atlas_rows),
+            uv_ew(z0, z1, y0, y1, uv),
         ),
         4 => (
             [[x1, y0, z1], [x0, y0, z1], [x0, y1, z1], [x1, y1, z1]],
             [0., 0., 1.],
-            uv_ns(x0, x1, y0, y1, tile, atlas_rows),
+            uv_ns(x0, x1, y0, y1, uv),
         ),
         _ => (
             [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]],
             [0., 0., -1.],
-            uv_ns(x0, x1, y0, y1, tile, atlas_rows),
+            uv_ns(x0, x1, y0, y1, uv),
         ),
     }
 }
@@ -478,15 +476,13 @@ fn emit_face(
     y1: f32,
     z1: f32,
     face: usize,
-    tile: u32,
-    atlas_rows: u32,
+    uv: [f32; 4],
     light: [f32; 2],
     tint: [f32; 3],
     material: u8,
     buf: &mut MeshBuf,
 ) {
-    let (mut corners, _normal, face_uvs) =
-        face_geom(x0, y0, z0, x1, y1, z1, face, tile, atlas_rows);
+    let (mut corners, _normal, face_uvs) = face_geom(x0, y0, z0, x1, y1, z1, face, uv);
     for c in &mut corners {
         c[0] += wx;
         c[1] += wy;
@@ -516,7 +512,7 @@ pub fn build_section_mesh<'a>(
     let mut water = MeshBuf::new();
     let cardinal = super::dimension::current().cardinal();
     let MeshTiles {
-        rows: atlas_rows,
+        grid,
         water_still,
         water_flow,
     } = tiles;
@@ -582,8 +578,7 @@ pub fn build_section_mesh<'a>(
                     MATERIAL_LAVA
                 };
                 emit_fluid(
-                    wx, wy, wz, material, *amount, *still, *flow, atlas_rows, occ, bx, by, bz,
-                    tint, dest,
+                    wx, wy, wz, material, *amount, *still, *flow, grid, occ, bx, by, bz, tint, dest,
                 );
             }
         }
@@ -604,7 +599,7 @@ pub fn build_section_mesh<'a>(
                 8,
                 water_still,
                 water_flow,
-                atlas_rows,
+                grid,
                 occ,
                 bx,
                 by,
@@ -773,8 +768,8 @@ fn fluid_flow(occ: &Occupancy, bx: i32, by: i32, bz: i32, self_height: f32) -> (
     (flow_x, flow_z)
 }
 
-fn flowing_top_uvs(flow_x: f32, flow_z: f32, tile: u32, ar: u32) -> [[f32; 2]; 4] {
-    let [u0, v0, u1, v1] = tile_uv_rect(tile, ar);
+fn flowing_top_uvs(flow_x: f32, flow_z: f32, uv: [f32; 4]) -> [[f32; 2]; 4] {
+    let [u0, v0, u1, v1] = uv;
     let get_u = |t: f32| lerp(t, u0, u1);
     let get_v = |t: f32| lerp(t, v0, v1);
     let angle = flow_z.atan2(flow_x) - std::f32::consts::FRAC_PI_2;
@@ -839,8 +834,7 @@ fn emit_fluid_side(
     bottom: f32,
     hh0: f32,
     hh1: f32,
-    tile: u32,
-    ar: u32,
+    uv: [f32; 4],
     light: [f32; 2],
     tint: [f32; 3],
     buf: &mut MeshBuf,
@@ -874,7 +868,7 @@ fn emit_fluid_side(
     };
     let corners = corners.map(|[x, y, z]| [x + wx, y + wy, z + wz]);
 
-    let [u0t, v0t, u1t, v1t] = tile_uv_rect(tile, ar);
+    let [u0t, v0t, u1t, v1t] = uv;
     let get_u = |t: f32| lerp(t, u0t, u1t);
     let get_v = |t: f32| lerp(t, v0t, v1t);
     let (u_a, u_b) = (get_u(0.0), get_u(0.5));
@@ -896,9 +890,9 @@ fn emit_fluid(
     wz: f32,
     material: u8,
     amount: u8,
-    still: u32,
-    flow: u32,
-    ar: u32,
+    still: SpriteTile,
+    flow: SpriteTile,
+    grid: AtlasGrid,
     occ: &Occupancy,
     bx: i32,
     by: i32,
@@ -945,6 +939,7 @@ fn emit_fluid(
         (nw - EPS, ne - EPS, se - EPS, sw - EPS)
     };
 
+    let (still, flow) = (still.uv_rect(grid), flow.uv_rect(grid));
     let tiles = [still, still, flow, flow, flow, flow];
     let light = {
         let packed = flat_light_coords(occ, (bx, by, bz), (bx, by, bz));
@@ -981,9 +976,9 @@ fn emit_fluid(
                 ];
                 let corners = corners.map(|[x, y, z]| [x + wx, y + wy, z + wz]);
                 let face_uvs = if flow_x == 0.0 && flow_z == 0.0 {
-                    uv_horizontal(0., 0., 1., 1., tiles[0], ar)
+                    uv_horizontal(0., 0., 1., 1., tiles[0])
                 } else {
-                    flowing_top_uvs(flow_x, flow_z, flow, ar)
+                    flowing_top_uvs(flow_x, flow_z, flow)
                 };
                 buf.push_quad(&corners, &face_uvs, light, tint, material);
                 if backward_up_face(occ, bx, by + 1, bz, lava) {
@@ -995,8 +990,7 @@ fn emit_fluid(
                     continue;
                 }
                 emit_face(
-                    wx, wy, wz, 0., EPS, 0., 1., 1., 1., 1, tiles[1], ar, light, tint, material,
-                    buf,
+                    wx, wy, wz, 0., EPS, 0., 1., 1., 1., 1, tiles[1], light, tint, material, buf,
                 );
             }
             _ => {
@@ -1010,7 +1004,7 @@ fn emit_fluid(
                     _ => (top_nw, top_ne),
                 };
                 emit_fluid_side(
-                    wx, wy, wz, material, fi, bottom, hh0, hh1, tiles[fi], ar, light, tint, buf,
+                    wx, wy, wz, material, fi, bottom, hh0, hh1, tiles[fi], light, tint, buf,
                 );
             }
         }
@@ -1049,9 +1043,9 @@ mod tests {
     use azalea_registry::builtin::BlockKind;
 
     const ONE_ROW: MeshTiles = MeshTiles {
-        rows: 1,
-        water_still: 0,
-        water_flow: 0,
+        grid: AtlasGrid { cols: 16, rows: 1 },
+        water_still: SpriteTile::PLACEHOLDER,
+        water_flow: SpriteTile::PLACEHOLDER,
     };
 
     #[test]

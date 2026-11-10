@@ -24,7 +24,7 @@ const MOB_ROW_H: f32 = 4.0 * LINE_HEIGHT;
 const LIST_SLACK: f32 = 4.0;
 const SLOT: f32 = 18.0;
 
-const EVEN: u32 = 0xFF_FFFF;
+const EVEN: u32 = crate::text::WHITE;
 const ODD: u32 = 0xBA_BABA;
 const NEVER: u32 = 0x80_8080;
 

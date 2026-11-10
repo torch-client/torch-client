@@ -1,6 +1,6 @@
 [package]
 name = "torch-client"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 
 [lib]
@@ -36,13 +36,17 @@ budget = []
 
 mobile_ui = ["bevy/touch"]
 
-click_gui = []
+click_gui = ["dep:sha2"]
 
 module_panel = ["click_gui"]
 
 lua_mods = ["click_gui", "dep:mlua", "dep:flate2", "dep:reqwest", "dep:rustls", "dep:azalea-crypto", "dep:sha1"]
 
+seed_cracker = ["click_gui", "dep:seedcrack"]
+
 hud_editor = []
+
+screen_record = []
 
 tutorial = []
 
@@ -73,6 +77,8 @@ asset_download = ["dep:flate2", "dep:reqwest", "dep:rustls", "dep:sha1"]
 multiversion = ["azalea/multiversion"]
 
 audio = ["asset_download", "dep:rodio", "dep:alsa"]
+
+browser_audio = ["audio"]
 
 eagler = [
     "dep:tokio-tungstenite",
@@ -120,7 +126,7 @@ offset-allocator = "0.2"
 bytemuck = { version = "1", features = ["derive"] }
 
 eyre = "0.6"
-bevy = { version = "0.18", default-features = false, features = [
+bevy = { version = "0.19", default-features = false, features = [
     "std",
     "async_executor",
     "bevy_asset",
@@ -150,6 +156,7 @@ serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 sha1 = { version = "0.11", optional = true }
 sha2 = { version = "0.11", optional = true }
+seedcrack = { git = "https://github.com/xpncvr/seedcrack", rev = "664542309703dcdd949336b23f080cdd07a6bad6", optional = true }
 base64 = "0.22"
 
 azalea-auth = { path = "vendor/azalea/azalea-auth", default-features = false, optional = true }
@@ -158,16 +165,12 @@ uuid = "1"
 
 reqwest = { version = "0.13", default-features = false, optional = true }
 
-rodio = { version = "0.20", default-features = false, features = [
-    "vorbis",
-], optional = true }
-
 flate2 = { version = "1", optional = true }
-naga = { version = "27", default-features = false, features = [
+naga = { version = "29", default-features = false, features = [
     "glsl-in",
     "wgsl-out",
 ], optional = true }
-wgpu = { version = "27", default-features = false, optional = true }
+wgpu = { version = "29", default-features = false, optional = true }
 
 tokio-tungstenite = { version = "0.30", default-features = false, features = [
     "connect",
@@ -237,6 +240,16 @@ web-sys = { version = "0.3", features = [
     "Blob",
     "File",
     "FileList",
+    "BlobPropertyBag",
+    "Url",
+    "HtmlAnchorElement",
+    "ClipboardItem",
+    "HtmlCanvasElement",
+    "MediaStream",
+    "MediaStreamTrack",
+    "MediaRecorder",
+    "MediaRecorderOptions",
+    "BlobEvent",
 ] }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
@@ -248,12 +261,12 @@ mlua-sys = { path = "vendor/mlua-sys" }
 mlua = { path = "vendor/mlua" }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies.bevy]
-version = "0.18"
+version = "0.19"
 default-features = false
 features = ["multi_threaded", "x11", "wayland"]
 
 [target.'cfg(target_os = "android")'.dependencies.bevy]
-version = "0.18"
+version = "0.19"
 default-features = false
 features = ["multi_threaded", "android-native-activity"]
 
@@ -264,7 +277,7 @@ version = "0.22"
 version = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.bevy]
-version = "0.18"
+version = "0.19"
 default-features = false
 features = ["webgl2"]
 
@@ -291,6 +304,9 @@ mlua = { version = "0.11", features = ["luau", "vendored", "send"], optional = t
 reqwest = { version = "0.13", default-features = false, features = [
     "blocking",
     "rustls-no-provider",
+], optional = true }
+rodio = { version = "0.20", default-features = false, features = [
+    "vorbis",
 ], optional = true }
 rustls = { version = "0.23", default-features = false, features = [
     "ring",

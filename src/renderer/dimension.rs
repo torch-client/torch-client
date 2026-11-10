@@ -93,6 +93,7 @@ struct Attributes {
     sky_fog_end: f32,
     has_skylight: bool,
     has_ceiling: bool,
+    ambient_light: f32,
     #[cfg(feature = "shader_support")]
     logical_height: i32,
     cardinal: &'static [f32; 6],
@@ -163,6 +164,17 @@ fn resolve(dimension: Dimension) -> Attributes {
             .and_then(|j| j.get("has_ceiling"))
             .and_then(Value::as_bool)
             .unwrap_or(ceiling_fallback),
+        ambient_light: json
+            .and_then(|j| j.get("ambient_light"))
+            .and_then(Value::as_f64)
+            .map_or(
+                match dimension {
+                    Dimension::Overworld => 0.0,
+                    Dimension::Nether => 0.1,
+                    Dimension::End => 0.25,
+                },
+                |v| v as f32,
+            ),
         #[cfg(feature = "shader_support")]
         logical_height: json
             .and_then(|j| j.get("logical_height"))
@@ -210,6 +222,10 @@ impl Dimension {
         self.attributes().logical_height
     }
 
+    pub fn ambient_light(self) -> f32 {
+        self.attributes().ambient_light
+    }
+
     pub fn ambient_light_color(self) -> Argb {
         self.attributes().ambient_light_color
     }
@@ -228,6 +244,7 @@ impl Dimension {
         }
     }
 
+    #[cfg_attr(not(feature = "builtin_shaders"), allow(dead_code))]
     pub fn has_sun(self) -> bool {
         match self.sky_light_factor() {
             Some(factor) => factor > 0.0,

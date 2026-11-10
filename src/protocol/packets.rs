@@ -61,8 +61,17 @@ impl PacketTable {
     pub(crate) fn native() -> &'static PacketTable {
         static TABLE: OnceLock<PacketTable> = OnceLock::new();
         TABLE.get_or_init(|| {
-            Self::parse(include_str!("data/packets-26.1.1.json"), NATIVE)
+            Self::parse(include_str!("data/packets-26.2.json"), NATIVE)
                 .unwrap_or_else(|e| panic!("embedded {} packet table: {e}", NATIVE.name))
+        })
+    }
+
+    pub(crate) fn v26_1_1() -> &'static PacketTable {
+        static TABLE: OnceLock<PacketTable> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            let version = ProtocolVersion::from_name("26.1.1").expect("26.1.1 is a known version");
+            Self::parse(include_str!("data/packets-26.1.1.json"), version)
+                .unwrap_or_else(|e| panic!("embedded 26.1.1 packet table: {e}"))
         })
     }
 
@@ -79,6 +88,7 @@ impl PacketTable {
     pub(crate) fn for_protocol(protocol: i32) -> Option<&'static PacketTable> {
         match protocol {
             p if p == NATIVE.protocol => Some(Self::native()),
+            775 => Some(Self::v26_1_1()),
             774 => Some(Self::v1_21_11()),
             _ => None,
         }
@@ -239,6 +249,7 @@ mod tests {
         let t = PacketTable::native();
         use Direction::{Clientbound, Serverbound};
         assert_eq!(t.version(), NATIVE);
+        assert_eq!(t.version().protocol, 776);
         assert_eq!(t.count(Phase::Handshake, Serverbound), 1);
         assert_eq!(t.count(Phase::Handshake, Clientbound), 0);
         assert_eq!(t.count(Phase::Status, Serverbound), 2);
@@ -263,6 +274,8 @@ mod tests {
         assert_eq!(t.id(Phase::Game, Serverbound, "attack"), Some(1));
         assert_eq!(t.id(Phase::Handshake, Serverbound, "intention"), Some(0));
         assert_eq!(t.id(Phase::Login, Clientbound, "login_finished"), Some(2));
+        assert_eq!(t.id(Phase::Game, Serverbound, "spectator_action"), Some(62));
+        assert_eq!(t.id(Phase::Game, Serverbound, "spectate_entity"), None);
         assert_eq!(t.id(Phase::Game, Serverbound, "no_such_packet"), None);
         assert_eq!(t.name_of(Phase::Game, Clientbound, 141), None);
     }
@@ -279,6 +292,7 @@ mod tests {
     #[test]
     fn the_embedded_protocols_have_tables() {
         assert!(PacketTable::for_protocol(NATIVE.protocol).is_some());
+        assert!(PacketTable::for_protocol(775).is_some());
         assert!(PacketTable::for_protocol(774).is_some());
         assert!(PacketTable::for_protocol(773).is_none());
     }
@@ -286,7 +300,7 @@ mod tests {
     #[test]
     fn what_moved_between_774_and_775() {
         let old = PacketTable::v1_21_11();
-        let new = PacketTable::native();
+        let new = PacketTable::v26_1_1();
         let moved = |phase, dir| {
             (0..old.count(phase, dir))
                 .filter(|id| {
@@ -315,7 +329,7 @@ mod tests {
     #[test]
     fn every_774_packet_still_exists_in_775() {
         let old = PacketTable::v1_21_11();
-        let new = PacketTable::native();
+        let new = PacketTable::v26_1_1();
         for phase in Phase::ALL {
             for dir in Direction::ALL {
                 for id in 0..old.count(phase, dir) {
@@ -327,5 +341,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn what_moved_between_775_and_776() {
+        let old = PacketTable::v26_1_1();
+        let new = PacketTable::native();
+        let mut renamed = Vec::new();
+        for phase in Phase::ALL {
+            for dir in Direction::ALL {
+                assert_eq!(
+                    old.count(phase, dir),
+                    new.count(phase, dir),
+                    "{phase:?}/{dir:?}"
+                );
+                for id in 0..old.count(phase, dir) as u32 {
+                    let (was, is) = (old.name_of(phase, dir, id), new.name_of(phase, dir, id));
+                    if was != is {
+                        renamed.push((phase, dir, id, was.unwrap(), is.unwrap()));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            renamed,
+            [(
+                Phase::Game,
+                Direction::Serverbound,
+                62,
+                "spectate_entity",
+                "spectator_action"
+            )]
+        );
     }
 }

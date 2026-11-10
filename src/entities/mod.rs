@@ -1,4 +1,5 @@
 pub mod bake;
+pub mod beams;
 pub mod blockmodel;
 pub mod elder_guardian;
 pub mod feed;
@@ -20,6 +21,8 @@ use bevy::platform::collections::HashMap;
 
 use azalea_registry::builtin::EntityKind;
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::primitives::Aabb;
+use bevy::camera::visibility::{NoAutoAabb, NoFrustumCulling};
 use bevy::math::DVec3;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
@@ -204,12 +207,16 @@ pub(crate) fn hurt_overlay_alpha(has_red_overlay: bool) -> f32 {
     if has_red_overlay { 0.698 } else { 1.0 }
 }
 
-fn tnt_flash_alpha(st: &EntityState) -> Option<f32> {
-    (st.kind == EntityKind::Tnt && (st.extras.fuse / 5) % 2 == 0).then_some(0.25)
+fn fuse_flash_alpha(st: &EntityState, spec: &RenderSpec) -> Option<f32> {
+    (spec.fuse_flash)(st).then_some(0.25)
 }
 
-fn overlay_alpha(st: &EntityState) -> f32 {
-    tnt_flash_alpha(st).unwrap_or_else(|| hurt_overlay_alpha(st.has_red_overlay))
+fn overlay_alpha(st: &EntityState, spec: &RenderSpec) -> f32 {
+    fuse_flash_alpha(st, spec).unwrap_or_else(|| hurt_overlay_alpha(st.has_red_overlay))
+}
+
+pub fn no_fuse_flash(_st: &EntityState) -> bool {
+    false
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -339,6 +346,7 @@ pub enum Blend {
     Cutout,
     Translucent,
     Additive,
+    WaterMask,
 }
 
 pub type TexturePath = std::borrow::Cow<'static, str>;
@@ -462,6 +470,7 @@ pub struct Anchors {
     pub hands: [Mat4; 2],
     pub head: Mat4,
     pub carry: Mat4,
+    pub block: Mat4,
 }
 
 impl Default for Anchors {
@@ -470,6 +479,7 @@ impl Default for Anchors {
             hands: [Mat4::IDENTITY; 2],
             head: Mat4::IDENTITY,
             carry: Mat4::IDENTITY,
+            block: Mat4::IDENTITY,
         }
     }
 }
@@ -480,7 +490,16 @@ fn holds_anything(st: &EntityState) -> bool {
     !st.extras.main_hand.is_empty() || !st.extras.off_hand.is_empty() || !st.extras.head.is_empty()
 }
 
-fn layer_base(root: &RootPose) -> Mat4 {
+fn wants_anchors(st: &EntityState, spec_ids: &[usize], registry: &Registry) -> bool {
+    holds_anything(st)
+        || spec_ids.iter().any(|&i| {
+            let spec = &registry.specs[i];
+            matches!(&spec.geom, Geom::Block(BlockGeom { mount: Some(mount), .. }) if mount.on_part)
+                && (spec.visible)(st)
+        })
+}
+
+pub(crate) fn layer_base(root: &RootPose) -> Mat4 {
     Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
         * root.hook.to_matrix()
         * Mat4::from_translation(Vec3::new(0.0, MODEL_Y_OFFSET, 0.0))
@@ -499,6 +518,7 @@ fn held_anchors(
         hands: a.hands.map(|m| base * m),
         head: base * a.head,
         carry: base * a.carry,
+        block: base * a.block,
     };
     (
         RootPose {
@@ -682,6 +702,14 @@ impl FrameModel {
 
 pub struct BlockGeom {
     pub block: fn(&EntityState) -> Option<BlockRef>,
+    pub mount: Option<BlockMount>,
+}
+
+#[derive(Clone, Copy)]
+pub struct BlockMount {
+    pub on_part: bool,
+    pub pose: fn(&EntityState) -> Mat4,
+    pub hurt_overlay: bool,
 }
 
 pub struct BuiltGeom {
@@ -704,13 +732,17 @@ pub struct RenderSpec {
     pub visible: fn(&EntityState) -> bool,
     pub blend: Blend,
     pub depth_bias: i32,
+    pub sort_bias: f32,
     pub tint: fn(&EntityState) -> [f32; 4],
     pub respects_invisibility: bool,
     pub outlined_while_invisible: bool,
     pub light: Option<LightMode>,
     pub levels: fn(&EntityState, (u8, u8)) -> (u8, u8),
     pub armor_glint: fn(&EntityState) -> bool,
+    pub entity_glint: fn(&EntityState) -> bool,
     pub anchors: Option<AnchorHook>,
+    pub fuse_flash: fn(&EntityState) -> bool,
+    pub cutoff: Option<fn(&EntityState) -> f32>,
 }
 
 impl RenderSpec {
@@ -786,7 +818,26 @@ impl RenderSpec {
     }
 
     pub fn block(name: &'static str, block: fn(&EntityState) -> Option<BlockRef>) -> RenderSpec {
-        RenderSpec::with_geom(name, Geom::Block(BlockGeom { block }))
+        RenderSpec::with_geom(name, Geom::Block(BlockGeom { block, mount: None }))
+    }
+
+    pub fn mounted_block(
+        name: &'static str,
+        block: fn(&EntityState) -> Option<BlockRef>,
+        mount: BlockMount,
+    ) -> RenderSpec {
+        RenderSpec::with_geom(
+            name,
+            Geom::Block(BlockGeom {
+                block,
+                mount: Some(mount),
+            }),
+        )
+    }
+
+    pub fn with_anchors(mut self, hook: AnchorHook) -> RenderSpec {
+        self.anchors = Some(hook);
+        self
     }
 
     pub fn built(
@@ -805,6 +856,11 @@ impl RenderSpec {
         )
     }
 
+    pub fn with_sort_bias(mut self, sort_bias: f32) -> RenderSpec {
+        self.sort_bias = sort_bias;
+        self
+    }
+
     fn with_geom(name: &'static str, geom: Geom) -> RenderSpec {
         RenderSpec {
             name,
@@ -813,14 +869,28 @@ impl RenderSpec {
             visible: always_visible,
             blend: Blend::Cutout,
             depth_bias: 0,
+            sort_bias: 0.0,
             tint: no_tint,
             respects_invisibility: true,
             outlined_while_invisible: false,
             light: None,
             levels: own_levels,
             armor_glint: no_glint,
+            entity_glint: no_glint,
             anchors: None,
+            fuse_flash: no_fuse_flash,
+            cutoff: None,
         }
+    }
+
+    pub fn with_cutoff(mut self, cutoff: fn(&EntityState) -> f32) -> RenderSpec {
+        self.cutoff = Some(cutoff);
+        self
+    }
+
+    pub fn with_fuse_flash(mut self, lit: fn(&EntityState) -> bool) -> RenderSpec {
+        self.fuse_flash = lit;
+        self
     }
 
     pub fn with_levels(mut self, levels: fn(&EntityState, (u8, u8)) -> (u8, u8)) -> RenderSpec {
@@ -866,6 +936,11 @@ impl RenderSpec {
         self
     }
 
+    pub fn with_entity_glint(mut self, foil: fn(&EntityState) -> bool) -> RenderSpec {
+        self.entity_glint = foil;
+        self
+    }
+
     pub fn with_light(mut self, light: LightMode) -> RenderSpec {
         self.light = Some(light);
         self
@@ -874,6 +949,7 @@ impl RenderSpec {
     pub fn default_light(&self) -> LightMode {
         match (self.blend, &self.geom) {
             (Blend::Additive, _) => LightMode::Emissive,
+            (Blend::WaterMask, _) => LightMode::WaterMask,
             (_, Geom::Model(_) | Geom::Built(_)) => LightMode::Cardinal,
             (_, Geom::Item(_) | Geom::Block(_)) => LightMode::Flat,
         }
@@ -935,6 +1011,7 @@ struct MaterialKey {
     mode: u32,
     blend: Blend,
     depth_bias: i32,
+    sort_bias: u32,
     tint: [u32; 4],
     levels: (u8, u8),
     dirs: [[u32; 3]; 2],
@@ -956,6 +1033,7 @@ impl MaterialKey {
             mode: spec.effective_light_mode() as u32,
             blend: spec.blend,
             depth_bias: spec.depth_bias,
+            sort_bias: spec.sort_bias.to_bits(),
             tint: lit.tint.map(f32::to_bits),
             levels,
             dirs: lit.dirs.map(|d| d.to_array().map(f32::to_bits)),
@@ -1020,7 +1098,13 @@ impl EntityAssets {
 
     fn armor_glint(&self, spec: &RenderSpec, st: &EntityState) -> Vec4 {
         let foil = self.armor_glint_texture.is_some() && (spec.armor_glint)(st);
-        crate::renderer::glint::armor_scale(foil)
+        if foil {
+            crate::renderer::glint::ARMOR
+        } else if self.glint_texture.is_some() && (spec.entity_glint)(st) {
+            crate::renderer::glint::ENTITY
+        } else {
+            Vec4::ZERO
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1202,7 +1286,7 @@ impl EntityImages {
         let handle = load_entity_image(path, images);
         match &handle {
             Some(handle) if tiled => {
-                if let Some(image) = images.get_mut(handle) {
+                if let Some(mut image) = images.get_mut(handle) {
                     image.sampler = repeating_nearest();
                 }
             }
@@ -1210,7 +1294,12 @@ impl EntityImages {
             None => match path.strip_prefix(crate::entities::render::humanoid::armor::STACK_PREFIX)
             {
                 Some(rest) => warn!("equipment stack would not compose: {rest}"),
-                None => warn!("entity texture not found: textures/{path}.png"),
+                None => match path
+                    .strip_prefix(crate::entities::render::humanoid::trim::TRIM_PREFIX)
+                {
+                    Some(rest) => warn!("armour trim sprite not made by any atlas source: {rest}"),
+                    None => warn!("entity texture not found: textures/{path}.png"),
+                },
             },
         }
         cache.insert(path.to_string(), handle.clone());
@@ -1234,14 +1323,19 @@ pub(crate) fn decode_entity_texture(path: &str) -> Option<image::RgbaImage> {
         Some((sheet, frame)) => (sheet, frame.parse::<u32>().ok()),
         None => (path, None),
     };
-    let mut decoded =
-        match path.strip_prefix(crate::entities::render::humanoid::armor::STACK_PREFIX) {
-            Some(rest) => crate::entities::render::humanoid::armor::stack(rest)?,
-            None => {
-                let file = crate::assets_root().join(format!("textures/{path}.png"));
-                crate::platform::assets::open_image(&file).ok()?.to_rgba8()
-            }
-        };
+    use crate::entities::render::humanoid::{armor, trim};
+    let mut decoded = if let Some(rest) = path.strip_prefix(armor::STACK_PREFIX) {
+        armor::stack(rest)?
+    } else if let Some(rest) = path.strip_prefix(trim::TRIM_PREFIX) {
+        trim::permuted(rest)?
+    } else if let Some(rest) =
+        path.strip_prefix(crate::entities::render::monsters::dragon::DISSOLVE_PREFIX)
+    {
+        crate::entities::render::monsters::dragon::dissolve(rest)?
+    } else {
+        let file = crate::assets_root().join(format!("textures/{path}.png"));
+        crate::platform::assets::open_image(&file).ok()?.to_rgba8()
+    };
     if let Some(frame) = frame {
         let anim = sheet_animation(path)?;
         let y = (frame % anim.frames) * anim.height;
@@ -1257,20 +1351,23 @@ impl Blend {
             Blend::Cutout => (AlphaMode::Mask(ALPHA_CUTOUT), ALPHA_CUTOUT),
             Blend::Translucent => (AlphaMode::Blend, ALPHA_CUTOUT),
             Blend::Additive => (AlphaMode::Add, 0.0),
+            Blend::WaterMask => (AlphaMode::Blend, 0.0),
         }
     }
 }
 
 fn entity_material(texture: Option<Handle<Image>>, spec: &RenderSpec, lit: Lit) -> EntityMaterial {
     let (alpha_mode, cutoff) = spec.blend.alpha();
-    EntityMaterial::new(
+    let mut material = EntityMaterial::new(
         texture,
         spec.effective_light_mode(),
         alpha_mode,
         cutoff,
         lit,
         spec.depth_bias,
-    )
+    );
+    material.sort_bias = spec.sort_bias;
+    material
 }
 
 pub(crate) fn light_levels(st: &EntityState) -> (u8, u8) {
@@ -1543,7 +1640,7 @@ enum RigBody {
 
 struct BakedRig {
     node: Entity,
-    mesh: Handle<Mesh>,
+    mesh: Option<Handle<Mesh>>,
     baked: Option<BakedPose>,
 }
 
@@ -1630,6 +1727,7 @@ impl Plugin for EntityPlugin {
             .init_resource::<shadow::EntityShadows>()
             .init_resource::<leash::Leashes>()
             .init_resource::<elder_guardian::ElderGuardianCurse>()
+            .init_resource::<beams::Beams>()
             .add_systems(
                 Update,
                 (
@@ -1639,6 +1737,7 @@ impl Plugin for EntityPlugin {
                     shadow::hide_shadows.run_if(not(shadow::enabled)),
                     leash::sync_leashes,
                     elder_guardian::sync_elder_guardian,
+                    beams::sync_beams,
                 )
                     .after(crate::renderer::FrameViewSystems)
                     .run_if(in_state(crate::renderer::AppState::InGame)),
@@ -1648,6 +1747,7 @@ impl Plugin for EntityPlugin {
                 (
                     elder_guardian::clear_elder_guardian,
                     leash::clear_leashes,
+                    beams::clear_beams,
                     shadow::hide_shadows,
                 ),
             );
@@ -1661,8 +1761,8 @@ fn sync_entities(
     registry: Res<Registry>,
     mut assets: ResMut<EntityAssets>,
     mut rigs: ResMut<EntityRigs>,
-    mut meshes: ResMut<Assets<Mesh>>,
     (mut images, mut entity_images): (ResMut<Assets<Image>>, ResMut<EntityImages>),
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<EntityMaterial>>,
     standard_materials: Res<Assets<StandardMaterial>>,
     mut item_assets: ResMut<crate::renderer::item_assets::ItemAssets>,
@@ -1686,7 +1786,10 @@ fn sync_entities(
         WornSkins<'_>,
     ),
     mut nodes: Query<(&mut Transform, &mut Visibility), With<EntityRigNode>>,
-    mut globals: Query<&mut GlobalTransform, With<EntityRigNode>>,
+    (mut globals, culling): (
+        Query<&mut GlobalTransform, With<EntityRigNode>>,
+        Query<(Option<&Aabb>, Has<NoFrustumCulling>, Has<NoAutoAabb>), With<EntityRigNode>>,
+    ),
     mut mats: Query<&mut MeshMaterial3d<EntityMaterial>>,
     (mut variant_tick, mut frame, mut seen, mut idx, mut glowing): (
         Local<u32>,
@@ -1739,6 +1842,7 @@ fn sync_entities(
         });
         frame.extend(view.item_pickups.iter().map(|p| p.sample(partial)));
     }
+    beams::aim_guardians(frame, &view);
     let glowing = &mut *glowing;
     glowing.clear();
     glowing.extend(
@@ -1779,14 +1883,13 @@ fn sync_entities(
             continue;
         }
         let in_range = within_view_range(st, &camera);
-        let flash = tnt_flash_alpha(st);
         let levels = entity_levels(&light, st);
         let lit = Lit {
             tint: [1.0; 4],
             light: assets.lights.get(&lightmap.current, levels.0, levels.1),
             dirs,
-            overlay_alpha: flash.unwrap_or(1.0),
-            overlay_white: flash.is_some(),
+            overlay_alpha: 1.0,
+            overlay_white: false,
         };
 
         let rig = rigs.live.entry(st.id).or_insert_with(|| EntityRig {
@@ -1808,6 +1911,12 @@ fn sync_entities(
                         ..lit
                     },
                 ),
+            };
+            let flash = fuse_flash_alpha(st, spec);
+            let lit = Lit {
+                overlay_alpha: flash.unwrap_or(1.0),
+                overlay_white: flash.is_some(),
+                ..lit
             };
             let hidden = crate::session::invisible_to(st.is_invisible, view.gamemode);
             let glow = match glowing.get(&st.id) {
@@ -1844,7 +1953,7 @@ fn sync_entities(
                 && in_range
                 && let Some(hook) = spec.anchors
                 && let Geom::Model(model) = &spec.geom
-                && holds_anything(st)
+                && wants_anchors(st, spec_ids, &registry)
                 && (spec.visible)(st)
             {
                 let gpu = assets.spec(idx, model);
@@ -1899,19 +2008,24 @@ fn sync_entities(
                 Geom::Model(geom) => geom.anchor,
                 _ => None,
             };
+            let mount = match &spec.geom {
+                Geom::Block(geom) => geom.mount,
+                _ => None,
+            };
             let lit = Lit {
                 tint: (spec.tint)(st),
-                overlay_alpha: if anchor.is_some() {
+                overlay_alpha: if anchor.is_some() || mount.is_some_and(|m| !m.hurt_overlay) {
                     1.0
                 } else {
-                    overlay_alpha(st)
+                    overlay_alpha(st, spec)
                 },
                 ..lit
             };
             let mut placement = Transform::IDENTITY;
             copy_locals.clear();
-            let root = match (anchor, &held) {
-                (Some(_), Some((root, _))) => *root,
+            let mut root = match (anchor, mount, &held) {
+                (Some(_), _, Some((root, _))) => *root,
+                (_, Some(mount), Some((root, _))) if mount.on_part => *root,
                 _ => spec.root.pose(st, &camera),
             };
             match (&spec.geom, &mut layer.body) {
@@ -1951,7 +2065,7 @@ fn sync_entities(
                     gpu.model.reset_pose(&mut layer.states);
                     (model.setup)(&gpu.model, &mut layer.states, st);
                     if let Some(hook) = spec.anchors
-                        && holds_anything(st)
+                        && wants_anchors(st, spec_ids, &registry)
                     {
                         held = Some(held_anchors(hook, &gpu.model, &layer.states, st, &root));
                     }
@@ -1965,17 +2079,37 @@ fn sync_entities(
                         .baked
                         .as_ref()
                         .is_none_or(|b| b.states != layer.states || b.base != base);
-                    if stale && let Some(mesh) = meshes.get_mut(&baked.mesh) {
+                    if stale {
                         gpu.model.pose_parts(&layer.states, base, &mut posed);
-                        let aabb = bake::layer(mesh, &gpu.model, &posed, &layer.states);
-                        commands.entity(baked.node).insert(aabb);
-                        let prev = baked.baked.get_or_insert_with(|| BakedPose {
-                            states: Vec::new(),
-                            base: Mat4::IDENTITY,
-                        });
-                        prev.states.clear();
-                        prev.states.extend_from_slice(&layer.states);
-                        prev.base = base;
+                        let aabb = match &baked.mesh {
+                            Some(handle) => meshes.get_mut(handle).map(|mut mesh| {
+                                bake::layer(&mut mesh, &gpu.model, &posed, &layer.states)
+                            }),
+                            None => {
+                                let mut mesh = Mesh::new(
+                                    PrimitiveTopology::TriangleList,
+                                    RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+                                );
+                                let aabb =
+                                    bake::layer(&mut mesh, &gpu.model, &posed, &layer.states);
+                                if mesh.count_vertices() > 0 {
+                                    let handle = meshes.add(mesh);
+                                    commands.entity(baked.node).insert(Mesh3d(handle.clone()));
+                                    baked.mesh = Some(handle);
+                                }
+                                Some(aabb)
+                            }
+                        };
+                        if let Some(aabb) = aabb {
+                            commands.entity(baked.node).insert(aabb);
+                            let prev = baked.baked.get_or_insert_with(|| BakedPose {
+                                states: Vec::new(),
+                                base: Mat4::IDENTITY,
+                            });
+                            prev.states.clear();
+                            prev.states.extend_from_slice(&layer.states);
+                            prev.base = base;
+                        }
                     }
                 }
                 (Geom::Item(geom), RigBody::Single(single)) => {
@@ -2168,7 +2302,22 @@ fn sync_entities(
                         }
                     }
                     if single.key.resolved() {
-                        copy_locals.push(Transform::IDENTITY);
+                        match mount {
+                            None => copy_locals.push(Transform::IDENTITY),
+                            Some(mount) => {
+                                let start = if mount.on_part {
+                                    held.as_ref().map(|(_, anchors)| anchors.block)
+                                } else {
+                                    let base = layer_base(&root);
+                                    root.hook = Transform::IDENTITY;
+                                    Some(base)
+                                };
+                                if let Some(start) = start {
+                                    placement = Transform::from_matrix(start * (mount.pose)(st));
+                                    copy_locals.push(Transform::IDENTITY);
+                                }
+                            }
+                        }
                     }
                 }
                 (Geom::Built(geom), RigBody::Single(single)) => {
@@ -2198,7 +2347,7 @@ fn sync_entities(
                                 layer.material = Some(handle.clone());
                                 handle
                             });
-                            if let Some(handle) = materials.get_mut(&material) {
+                            if let Some(mut handle) = materials.get_mut(&material) {
                                 handle.texture = image;
                             }
                             insert_copies(&mut commands, &single.copies, &mesh, &material);
@@ -2215,7 +2364,7 @@ fn sync_entities(
             if lit != layer.lit {
                 match &spec.geom {
                     Geom::Built(_) => {
-                        if let Some(material) =
+                        if let Some(mut material) =
                             layer.material.as_ref().and_then(|h| materials.get_mut(h))
                         {
                             material.params.set(lit);
@@ -2238,6 +2387,16 @@ fn sync_entities(
                 layer.lit = lit;
             }
 
+            if let Some(cutoff) = spec.cutoff.map(|f| f(st))
+                && let Some(handle) = layer.material.as_ref()
+                && materials
+                    .get(handle)
+                    .is_some_and(|m| m.params.light.w != cutoff)
+                && let Some(mut material) = materials.get_mut(handle)
+            {
+                material.params.light.w = cutoff;
+            }
+
             apply_layer(
                 layer,
                 &root,
@@ -2247,6 +2406,8 @@ fn sync_entities(
                 &copy_locals,
                 &mut nodes,
                 &mut globals,
+                &culling,
+                &mut commands,
             );
         }
     }
@@ -2349,7 +2510,7 @@ fn spawn_layer(
             let texture = (model.texture)(st);
             let lit = Lit {
                 tint: (spec.tint)(st),
-                overlay_alpha: overlay_alpha(st),
+                overlay_alpha: overlay_alpha(st, spec),
                 ..lit
             };
             let glint = assets.armor_glint(spec, st);
@@ -2396,15 +2557,9 @@ fn spawn_model_rig(
     lit: Lit,
     material: Option<Handle<EntityMaterial>>,
     tex: Option<Handle<Image>>,
-    meshes: &mut Assets<Mesh>,
+    _meshes: &mut Assets<Mesh>,
 ) -> LayerRig {
-    let mesh = meshes.add(Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    ));
-
     let mut node = commands.spawn((
-        Mesh3d(mesh.clone()),
         Transform::default(),
         Visibility::Hidden,
         EntityRigNode,
@@ -2425,7 +2580,7 @@ fn spawn_model_rig(
         hook: node,
         body: RigBody::Baked(BakedRig {
             node,
-            mesh,
+            mesh: None,
             baked: None,
         }),
         texture,
@@ -2447,6 +2602,7 @@ fn spawn_single_rig(
 ) -> LayerRig {
     let collapsed = copy_count == 1;
     if collapsed {
+        #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_mut))]
         let mut node = commands.spawn((
             Transform::default(),
             Visibility::Hidden,
@@ -2497,6 +2653,7 @@ fn spawn_single_rig(
 
     let copies: Vec<Entity> = (0..copy_count)
         .map(|_| {
+            #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_mut))]
             let mut copy =
                 commands.spawn((Transform::default(), Visibility::Hidden, EntityRigNode));
             #[cfg(feature = "builtin_shaders")]
@@ -2565,6 +2722,72 @@ fn write_sheared(
     }
 }
 
+fn apply_display_culling(
+    commands: &mut Commands,
+    culling: &Query<(Option<&Aabb>, Has<NoFrustumCulling>, Has<NoAutoAabb>), With<EntityRigNode>>,
+    node: Entity,
+    st: &EntityState,
+    origin: RenderOrigin,
+    composed: Transform,
+    leftover: Option<Quat>,
+) {
+    let Some(display) = st.extras.display.as_deref() else {
+        return;
+    };
+    let Ok((current, no_culling, own_aabb)) = culling.get(node) else {
+        return;
+    };
+    let (w, h) = (display.width, display.height);
+    if w == 0.0 || h == 0.0 {
+        if !no_culling {
+            commands.entity(node).insert(NoFrustumCulling);
+        }
+        if own_aabb {
+            commands.entity(node).remove::<NoAutoAabb>();
+        }
+        return;
+    }
+    let matrix = match leftover {
+        Some(right) => composed.to_matrix() * Mat4::from_quat(right),
+        None => composed.to_matrix(),
+    };
+    let inverse = matrix.inverse();
+    if !inverse.is_finite() {
+        if !no_culling {
+            commands.entity(node).insert(NoFrustumCulling);
+        }
+        if own_aabb {
+            commands.entity(node).remove::<NoAutoAabb>();
+        }
+        return;
+    }
+    let base = Vec3::from(origin.to_render_array(st.pos));
+    let half = Vec3::new(w * 0.5, 0.0, w * 0.5);
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for corner in 0..8u32 {
+        let world = base
+            + Vec3::new(
+                if corner & 1 == 0 { -half.x } else { half.x },
+                if corner & 2 == 0 { 0.0 } else { h },
+                if corner & 4 == 0 { -half.z } else { half.z },
+            );
+        let local = inverse.transform_point3(world);
+        min = min.min(local);
+        max = max.max(local);
+    }
+    let want = Aabb::from_min_max(min, max);
+    if current != Some(&want) {
+        commands.entity(node).insert(want);
+    }
+    if !own_aabb {
+        commands.entity(node).insert(NoAutoAabb);
+    }
+    if no_culling {
+        commands.entity(node).remove::<NoFrustumCulling>();
+    }
+}
+
 fn set_visibility(slot: &mut Mut<'_, Visibility>, want: Visibility) {
     if **slot != want {
         **slot = want;
@@ -2592,6 +2815,10 @@ fn pose_root(st: &EntityState, root: &RootPose, origin: RenderOrigin) -> Transfo
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the pose inputs plus the two sinks"
+)]
 fn apply_layer(
     layer: &LayerRig,
     root: &RootPose,
@@ -2601,6 +2828,8 @@ fn apply_layer(
     copy_locals: &[Transform],
     nodes: &mut Query<(&mut Transform, &mut Visibility), With<EntityRigNode>>,
     globals: &mut Query<&mut GlobalTransform, With<EntityRigNode>>,
+    culling: &Query<(Option<&Aabb>, Has<NoFrustumCulling>, Has<NoAutoAabb>), With<EntityRigNode>>,
+    commands: &mut Commands,
 ) {
     if let RigBody::Baked(baked) = &layer.body {
         if let Ok((mut t, _)) = nodes.get_mut(baked.node) {
@@ -2631,10 +2860,20 @@ fn apply_layer(
                     .mul_transform(root.hook)
                     .mul_transform(*placement)
                     .mul_transform(*local);
-                match display_leftover(st) {
+                let leftover = display_leftover(st);
+                match leftover {
                     None => set_transform(&mut t, composed),
                     Some(right) => write_sheared(globals, single.node, composed, right),
                 }
+                apply_display_culling(
+                    commands,
+                    culling,
+                    single.node,
+                    st,
+                    origin,
+                    composed,
+                    leftover,
+                );
                 Visibility::Inherited
             }
             None => Visibility::Hidden,

@@ -105,6 +105,17 @@ pub fn predict(
         return None;
     }
 
+    let (pos, replaced_state, replacing_clicked) = if block == BlockKind::Scaffolding {
+        let moved =
+            scaffolding_placement_pos(pos, replaced_state, hit, yaw, secondary_use, &block_at)?;
+        if moved.y < min_y || moved.y >= min_y + height as i32 {
+            return None;
+        }
+        (moved, block_at(moved)?, replacing_clicked || moved != pos)
+    } else {
+        (pos, replaced_state, replacing_clicked)
+    };
+
     let attachment = attachment(block);
     let state = state_for_placement(
         block,
@@ -130,6 +141,9 @@ pub fn predict(
 }
 
 pub fn is_unobstructed(state: BlockState, pos: BlockPos, entities: &[Aabb]) -> bool {
+    if state.as_block_kind() == BlockKind::Scaffolding {
+        return true;
+    }
     let offset = pos.to_vec3_floored();
     state.collision_shape(pos).to_aabbs().iter().all(|part| {
         let part = part.move_relative(offset);
@@ -245,6 +259,15 @@ fn fluid_replaceable(state: BlockState) -> bool {
 
 pub(crate) fn replaceable(state: BlockState, item_block: BlockKind) -> Option<bool> {
     let kind = state.as_block_kind();
+    if kind == BlockKind::Scaffolding {
+        return Some(item_block == BlockKind::Scaffolding);
+    }
+    if kind == BlockKind::Snow {
+        if item_block == BlockKind::Snow {
+            return None;
+        }
+        return Some(property_digit(state, "layers") == Some(1));
+    }
     if kind == item_block && !state.is_collision_shape_full() {
         return None;
     }
@@ -403,7 +426,7 @@ fn state_for_placement(
             let _ = placed.set_property("open", "true");
             let _ = placed.set_property("powered", "true");
         }
-        let _ = placed.set_property("waterlogged", bool_str(is_water(replaced_state)));
+        let _ = placed.set_property("waterlogged", bool_str(is_water_source(replaced_state)));
         return Some(placed.as_block_state());
     }
 
@@ -443,7 +466,14 @@ fn state_for_placement(
 
     let _ = placed.set_property("rotation", rotation_segment(yaw));
 
-    let replaced_water = is_water(replaced_state);
+    let id = block.to_str();
+    let full_water_rule =
+        block == BlockKind::Conduit || (id.contains("coral") && !id.ends_with("coral_block"));
+    let replaced_water = if full_water_rule {
+        is_full_water(replaced_state)
+    } else {
+        is_water_source(replaced_state)
+    };
     let _ = placed.set_property("waterlogged", bool_str(replaced_water));
 
     if replaced_water {
@@ -508,7 +538,7 @@ fn lantern_placement(
             continue;
         }
         let _ = placed.set_property("hanging", bool_str(hanging));
-        let _ = placed.set_property("waterlogged", bool_str(is_water(replaced_state)));
+        let _ = placed.set_property("waterlogged", bool_str(is_water_source(replaced_state)));
         return Some(placed.as_block_state());
     }
     None
@@ -527,8 +557,48 @@ fn scaffolding_placement(
 
     let _ = placed.set_property("distance", DIGITS[distance as usize]);
     let _ = placed.set_property("bottom", bool_str(bottom));
-    let _ = placed.set_property("waterlogged", bool_str(is_water(replaced_state)));
+    let _ = placed.set_property("waterlogged", bool_str(is_water_source(replaced_state)));
     Some(placed.as_block_state())
+}
+
+fn scaffolding_placement_pos(
+    pos: BlockPos,
+    replaced_state: BlockState,
+    hit: &BlockHitResult,
+    yaw: f32,
+    secondary_use: bool,
+    block_at: &dyn Fn(BlockPos) -> Option<BlockState>,
+) -> Option<BlockPos> {
+    if replaced_state.as_block_kind() != BlockKind::Scaffolding {
+        return (scaffolding_distance(pos, block_at) != 7).then_some(pos);
+    }
+    let direction = if secondary_use {
+        if hit.inside {
+            hit.direction.opposite()
+        } else {
+            hit.direction
+        }
+    } else if hit.direction == Direction::Up {
+        player_facing(yaw)
+    } else {
+        Direction::Up
+    };
+    let horizontal = !matches!(direction, Direction::Up | Direction::Down);
+    let mut steps = 0;
+    let mut at = pos + direction.normal();
+    while steps < 7 {
+        let state = block_at(at)?;
+        if state.as_block_kind() != BlockKind::Scaffolding {
+            return replaceable(state, BlockKind::Scaffolding)
+                .unwrap_or(false)
+                .then_some(at);
+        }
+        at = at + direction.normal();
+        if horizontal {
+            steps += 1;
+        }
+    }
+    None
 }
 
 fn scaffolding_distance(pos: BlockPos, block_at: &dyn Fn(BlockPos) -> Option<BlockState>) -> u32 {
@@ -588,7 +658,7 @@ fn pointed_dripstone_placement(
     let thickness = dripstone_thickness(pos, tip, !secondary_use, block_at);
     let _ = placed.set_property("vertical_direction", direction_name(tip));
     let _ = placed.set_property("thickness", thickness);
-    let _ = placed.set_property("waterlogged", bool_str(is_water(replaced_state)));
+    let _ = placed.set_property("waterlogged", bool_str(is_water_source(replaced_state)));
     Some(placed.as_block_state())
 }
 
@@ -751,6 +821,16 @@ fn is_water(state: BlockState) -> bool {
         azalea::block::fluid_state::FluidState::from(state).kind,
         azalea::block::fluid_state::FluidKind::Water
     )
+}
+
+fn is_water_source(state: BlockState) -> bool {
+    let fluid = azalea::block::fluid_state::FluidState::from(state);
+    fluid.kind == azalea::block::fluid_state::FluidKind::Water && fluid.is_source()
+}
+
+fn is_full_water(state: BlockState) -> bool {
+    let fluid = azalea::block::fluid_state::FluidState::from(state);
+    fluid.kind == azalea::block::fluid_state::FluidKind::Water && fluid.amount == 8
 }
 
 fn is_lava(state: BlockState) -> bool {
@@ -1417,6 +1497,180 @@ mod tests {
         .expect("scaffolding on stone is predictable");
         assert_eq!(property(state, "distance"), Some("0"));
         assert_eq!(property(state, "bottom"), Some("false"));
+    }
+
+    fn scaffolding(distance: usize) -> BlockState {
+        let mut s = Box::<dyn BlockTrait>::from(BlockState::from(BlockKind::Scaffolding));
+        let _ = s.set_property("distance", DIGITS[distance]);
+        let _ = s.set_property("bottom", "false");
+        s.as_block_state()
+    }
+
+    fn cells(list: Vec<(BlockPos, BlockState)>) -> impl Fn(BlockPos) -> Option<BlockState> {
+        move |pos| {
+            Some(
+                list.iter()
+                    .find(|(p, _)| *p == pos)
+                    .map_or(BlockState::AIR, |(_, s)| *s),
+            )
+        }
+    }
+
+    fn at(x: i32, y: i32, z: i32) -> BlockPos {
+        BlockPos { x, y, z }
+    }
+
+    fn place_scaffolding(
+        face: Direction,
+        yaw: f32,
+        sneak: bool,
+        list: Vec<(BlockPos, BlockState)>,
+    ) -> Option<(BlockPos, BlockState)> {
+        predict(
+            &ItemStack::new(ItemKind::Scaffolding, 1),
+            &hit(face, 0.5),
+            yaw,
+            0.,
+            sneak,
+            MIN_Y,
+            HEIGHT,
+            cells(list),
+        )
+    }
+
+    #[test]
+    fn scaffolding_clicked_on_its_side_builds_up() {
+        let world = vec![
+            (at(0, -1, 0), BlockState::from(BlockKind::Stone)),
+            (TARGET, scaffolding(0)),
+        ];
+        let (pos, state) =
+            place_scaffolding(Direction::North, 0., false, world).expect("a tower is predictable");
+        assert_eq!(pos, at(0, 1, 0));
+        assert_eq!(property(state, "distance"), Some("0"));
+        assert_eq!(property(state, "bottom"), Some("false"));
+    }
+
+    #[test]
+    fn scaffolding_walks_up_a_stack() {
+        let world = vec![
+            (at(0, -1, 0), BlockState::from(BlockKind::Stone)),
+            (TARGET, scaffolding(0)),
+            (at(0, 1, 0), scaffolding(0)),
+            (at(0, 2, 0), scaffolding(0)),
+        ];
+        let (pos, _) =
+            place_scaffolding(Direction::East, 0., false, world).expect("a tower is predictable");
+        assert_eq!(pos, at(0, 3, 0));
+    }
+
+    #[test]
+    fn scaffolding_clicked_on_top_extends_along_the_look() {
+        let world = vec![(TARGET, scaffolding(0))];
+        let (pos, state) =
+            place_scaffolding(Direction::Up, 0., false, world).expect("a bridge is predictable");
+        assert_eq!(pos, at(0, 0, 1));
+        assert_eq!(property(state, "distance"), Some("1"));
+        assert_eq!(property(state, "bottom"), Some("true"));
+    }
+
+    #[test]
+    fn sneaking_extends_scaffolding_out_of_the_clicked_face() {
+        let world = vec![(TARGET, scaffolding(0))];
+        let (pos, _) = place_scaffolding(Direction::North, 0., true, world).expect("predictable");
+        assert_eq!(pos, at(0, 0, -1));
+    }
+
+    #[test]
+    fn scaffolding_extends_at_most_seven_along() {
+        let run = |n: i32| {
+            let mut world = vec![(TARGET, scaffolding(0))];
+            world.extend((1..=n).map(|z| (at(0, 0, z), scaffolding(1))));
+            place_scaffolding(Direction::Up, 0., false, world)
+        };
+        assert_eq!(run(6).map(|(pos, _)| pos), Some(at(0, 0, 7)));
+        assert_eq!(run(7), None);
+    }
+
+    #[test]
+    fn unsupported_scaffolding_is_not_placed() {
+        assert_eq!(
+            place(
+                ItemKind::Scaffolding,
+                Direction::North,
+                0.5,
+                0.,
+                BlockKind::Stone
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn scaffolding_is_never_obstructed() {
+        let player = [Aabb {
+            min: Vec3 {
+                x: 0.2,
+                y: 0.0,
+                z: 0.2,
+            },
+            max: Vec3 {
+                x: 0.8,
+                y: 1.8,
+                z: 0.8,
+            },
+        }];
+        assert!(is_unobstructed(scaffolding(0), TARGET, &player));
+        assert!(!is_unobstructed(
+            BlockState::from(BlockKind::Stone),
+            TARGET,
+            &player
+        ));
+    }
+
+    #[test]
+    fn only_a_single_snow_layer_is_replaced() {
+        let snow = |layers: &str| {
+            let mut s = Box::<dyn BlockTrait>::from(BlockState::from(BlockKind::Snow));
+            let _ = s.set_property("layers", layers);
+            s.as_block_state()
+        };
+        for (layers, expected) in [("1", TARGET), ("2", at(0, 1, 0))] {
+            let (pos, _) = predict(
+                &ItemStack::new(ItemKind::Stone, 1),
+                &hit(Direction::Up, 1.0),
+                0.,
+                0.,
+                false,
+                MIN_Y,
+                HEIGHT,
+                cells(vec![(TARGET, snow(layers))]),
+            )
+            .expect("stone against snow is predictable");
+            assert_eq!(pos, expected, "{layers} layers");
+        }
+    }
+
+    #[test]
+    fn scaffolding_waterlogs_in_source_water_only() {
+        let water = |level: &str| {
+            let mut s = Box::<dyn BlockTrait>::from(BlockState::from(BlockKind::Water));
+            let _ = s.set_property("level", level);
+            s.as_block_state()
+        };
+        for (level, logged) in [("0", "true"), ("1", "false")] {
+            let world = vec![
+                (TARGET, BlockState::from(BlockKind::Stone)),
+                (at(0, 1, 0), water(level)),
+            ];
+            let (_, state) =
+                place_scaffolding(Direction::Up, 0., false, world).expect("predictable in water");
+            assert_eq!(
+                property(state, "waterlogged"),
+                Some(logged),
+                "water level {level}"
+            );
+        }
     }
 
     #[test]

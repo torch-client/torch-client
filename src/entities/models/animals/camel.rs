@@ -197,21 +197,27 @@ pub fn baby_layer() -> LayerDef {
 
 struct Set {
     walk: &'static AnimationDefinition,
+    sit: &'static AnimationDefinition,
     sit_pose: &'static AnimationDefinition,
+    standup: &'static AnimationDefinition,
     idle: &'static AnimationDefinition,
     dash: &'static AnimationDefinition,
 }
 
 const ADULT: Set = Set {
     walk: &adult_anim::CAMEL_WALK,
+    sit: &adult_anim::CAMEL_SIT,
     sit_pose: &adult_anim::CAMEL_SIT_POSE,
+    standup: &adult_anim::CAMEL_STANDUP,
     idle: &adult_anim::CAMEL_IDLE,
     dash: &adult_anim::CAMEL_DASH,
 };
 
 const BABY: Set = Set {
     walk: &baby_anim::CAMEL_BABY_WALK,
+    sit: &baby_anim::CAMEL_BABY_SIT,
     sit_pose: &baby_anim::CAMEL_BABY_SIT_POSE,
+    standup: &baby_anim::CAMEL_BABY_STANDUP,
     idle: &baby_anim::CAMEL_BABY_IDLE,
     dash: &baby_anim::CAMEL_BABY_DASH,
 };
@@ -240,14 +246,14 @@ fn setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState, set: &Se
         MAX_WALK_ANIMATION_SPEED,
         WALK_ANIMATION_SCALE_FACTOR,
     );
-    if st.extras.sitting {
-        keyframe::apply(set.sit_pose, model, parts, set.sit_pose.length_seconds, 1.0);
-    } else if st.extras.dash {
-        keyframe::apply(set.dash, model, parts, st.age_ticks / 20.0, 1.0);
-    } else if st.walk_speed < 0.01 {
-        let seconds = (st.age_ticks / 20.0).rem_euclid(set.idle.length_seconds);
-        keyframe::apply(set.idle, model, parts, seconds, 1.0);
-    }
+    use crate::entities::state::anim_slot::camel as slot;
+    let states = &st.extras.anim;
+    let age = st.age_ticks;
+    keyframe::apply_state(set.sit, model, parts, states[slot::SIT], age);
+    keyframe::apply_state(set.sit_pose, model, parts, states[slot::SIT_POSE], age);
+    keyframe::apply_state(set.standup, model, parts, states[slot::SIT_UP], age);
+    keyframe::apply_state(set.idle, model, parts, states[slot::IDLE], age);
+    keyframe::apply_state(set.dash, model, parts, states[slot::DASH], age);
 }
 
 fn apply_head_rotation(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {

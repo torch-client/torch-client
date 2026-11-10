@@ -32,10 +32,10 @@ pub fn block_set(state: BlockState) -> Option<&'static BlockSetSounds> {
 const DECORATED_POT_CRACKED: usize = 110;
 const NONE: u8 = 255;
 
-const _: () = assert!(BlockKind::is_valid_id(1167) && !BlockKind::is_valid_id(1168));
+const _: () = assert!(BlockKind::is_valid_id(1195) && !BlockKind::is_valid_id(1196));
 
 #[rustfmt::skip]
-static TYPES: [SoundType; 123] = [
+static TYPES: [SoundType; 127] = [
     SoundType { volume: 1.0, pitch: 1.0, break_event: "intentionally_empty", step_event: "intentionally_empty", place_event: "intentionally_empty", hit_event: "intentionally_empty", fall_event: "intentionally_empty" },
     SoundType { volume: 1.0, pitch: 1.0, break_event: "block.wood.break", step_event: "block.wood.step", place_event: "block.wood.place", hit_event: "block.wood.hit", fall_event: "block.wood.fall" },
     SoundType { volume: 1.0, pitch: 1.0, break_event: "block.gravel.break", step_event: "block.gravel.step", place_event: "block.gravel.place", hit_event: "block.gravel.hit", fall_event: "block.gravel.fall" },
@@ -159,10 +159,14 @@ static TYPES: [SoundType; 123] = [
     SoundType { volume: 1.0, pitch: 1.0, break_event: "block.resin_bricks.break", step_event: "block.resin_bricks.step", place_event: "block.resin_bricks.place", hit_event: "block.resin_bricks.hit", fall_event: "block.resin_bricks.fall" },
     SoundType { volume: 1.0, pitch: 1.0, break_event: "block.iron.break", step_event: "block.iron.step", place_event: "block.iron.place", hit_event: "block.iron.hit", fall_event: "block.iron.fall" },
     SoundType { volume: 1.0, pitch: 1.0, break_event: "block.dried_ghast.break", step_event: "block.dried_ghast.step", place_event: "intentionally_empty", hit_event: "intentionally_empty", fall_event: "block.dried_ghast.fall" },
+    SoundType { volume: 1.0, pitch: 1.0, break_event: "block.sulfur.break", step_event: "block.sulfur.step", place_event: "block.sulfur.place", hit_event: "block.sulfur.hit", fall_event: "block.sulfur.fall" },
+    SoundType { volume: 1.0, pitch: 1.0, break_event: "block.potent_sulfur.break", step_event: "block.potent_sulfur.step", place_event: "block.potent_sulfur.place", hit_event: "block.potent_sulfur.hit", fall_event: "block.potent_sulfur.fall" },
+    SoundType { volume: 1.0, pitch: 1.0, break_event: "block.sulfur_spike.break", step_event: "block.sulfur_spike.step", place_event: "block.sulfur_spike.place", hit_event: "block.sulfur_spike.hit", fall_event: "block.sulfur_spike.fall" },
+    SoundType { volume: 1.0, pitch: 1.0, break_event: "block.cinnabar.break", step_event: "block.cinnabar.step", place_event: "block.cinnabar.place", hit_event: "block.cinnabar.hit", fall_event: "block.cinnabar.fall" },
 ];
 
 #[rustfmt::skip]
-static BY_KIND: [u8; 1168] = [
+static BY_KIND: [u8; 1196] = [
     5,
     5,
     5,
@@ -1161,6 +1165,33 @@ static BY_KIND: [u8; 1168] = [
     56,
     56,
     56,
+    123,
+    124,
+    123,
+    123,
+    123,
+    123,
+    123,
+    123,
+    123,
+    123,
+    123,
+    123,
+    123,
+    123,
+    126,
+    126,
+    126,
+    126,
+    126,
+    126,
+    126,
+    126,
+    126,
+    126,
+    126,
+    126,
+    126,
     58,
     7,
     11,
@@ -1170,6 +1201,10 @@ static BY_KIND: [u8; 1168] = [
     82,
     80,
     83,
+    61,
+    61,
+    61,
+    61,
     61,
     61,
     61,
@@ -1224,10 +1259,6 @@ static BY_KIND: [u8; 1168] = [
     61,
     61,
     61,
-    61,
-    61,
-    61,
-    61,
     63,
     63,
     63,
@@ -1268,8 +1299,9 @@ static BY_KIND: [u8; 1168] = [
     61,
     61,
     61,
-    60,
     59,
+    60,
+    125,
     65,
     65,
     66,
@@ -1365,7 +1397,7 @@ static SETS: [BlockSetSounds; 27] = [
 ];
 
 #[rustfmt::skip]
-static SET_BY_KIND: [u8; 1168] = [
+static SET_BY_KIND: [u8; 1196] = [
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -1431,14 +1463,16 @@ static SET_BY_KIND: [u8; 1168] = [
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
-    NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, 10, 10, 10, 10, 10, 10, 10,
-    10, 11, 11, 11, 11, 11, 11, 11, 11, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
+    NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
+    NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
+    NONE, NONE, NONE, NONE, 10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11,
+    11, 11, 11, 11, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
     NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
-    NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
+    NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
 ];
 
 #[cfg(test)]

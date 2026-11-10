@@ -428,6 +428,7 @@ pub(crate) fn sync_leashes(
                 ))
             })
             .clone();
+        #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_mut))]
         let mut spawned = commands.spawn((
             Mesh3d(handle.clone()),
             MeshMaterial3d(material),

@@ -18,13 +18,13 @@ use crate::items::model::DisplayContext;
 
 use crate::util::mth::{DEG_TO_RAD, lerp};
 
+mod avatar_layers;
+
 const FLIP_DEGREES: f32 = 90.0;
 
 pub(crate) const AVATAR_SCALE: f32 = 0.937_5;
 
 pub(crate) const MODEL_Y_OFFSET: f32 = -1.501;
-
-const MAX_CROSSBOW_CHARGE_DURATION: f32 = crate::items::kinetic::CROSSBOW_CHARGE_TICKS;
 
 fn part_at(pivot: [f32; 3]) -> PartState {
     PartState::from(geom::PartPose::offset(pivot[0], pivot[1], pivot[2]))
@@ -69,9 +69,10 @@ pub fn pose_humanoid(s: &AnimSample) -> Pose {
         right: s.right_arm_pose,
         left: s.left_arm_pose,
     };
+    let (x_rot, y_rot) = s.render_rot();
     let input = humanoid::HumanoidIn {
-        x_rot: s.pitch,
-        y_rot: s.head_yaw,
+        x_rot,
+        y_rot,
         walk_pos: s.walk_pos,
         walk_speed: s.walk_speed,
         speed_value: s.speed_value,
@@ -82,7 +83,18 @@ pub fn pose_humanoid(s: &AnimSample) -> Pose {
         poses,
         arm: humanoid::ArmInputs {
             ticks_using_item: s.ticks_using_item,
-            max_crossbow_charge: MAX_CROSSBOW_CHARGE_DURATION,
+            max_crossbow_charge: {
+                let use_item = if s.using_offhand {
+                    &s.off_hand
+                } else {
+                    &s.main_hand
+                };
+                crate::items::kinetic::crossbow_charge_ticks(if s.using_item {
+                    use_item.quick_charge
+                } else {
+                    0
+                })
+            },
             crouching: s.crouching,
             fall_flying: s.fall_flying,
             swim_amount: s.swim_amount,
@@ -149,6 +161,7 @@ pub struct AvatarRoot {
 }
 
 pub fn root_pose(s: &AnimSample, scale: f32) -> AvatarRoot {
+    let (pitch, _) = s.render_rot();
     let living = crate::entities::living_rotations(
         &crate::entities::RotationState {
             body_rot: s.body_yaw,
@@ -156,36 +169,38 @@ pub fn root_pose(s: &AnimSample, scale: f32) -> AvatarRoot {
             age_ticks: s.age_ticks,
             death_time: s.death_time,
             is_auto_spin_attack: s.spin_attack,
-            x_rot: s.pitch,
+            x_rot: pitch,
             sleeping: s.sleeping,
             bed_orientation: s.bed_orientation,
             eye_height: crate::session::player_dimensions(azalea::entity::Pose::Standing, scale)
                 .eye_height,
-            is_upside_down: false,
-            bounding_box_height: 0.0,
-            scale: 1.0,
+            is_upside_down: s.layers.upside_down,
+            bounding_box_height: crate::session::player_dimensions(sample_pose(s), scale).height,
+            scale,
         },
         FLIP_DEGREES,
     );
-    let mut rot = living.rotation * living.extra_rotation;
+    let mut after_body = living.extra_rotation;
     let mut offset = Vec3::ZERO;
 
     if s.fall_flying {
         if !s.spin_attack {
-            rot *= Quat::from_rotation_x((s.fall_flying_scale * (-90.0 - s.pitch)).to_radians());
+            after_body *=
+                Quat::from_rotation_x((s.fall_flying_scale * (-90.0 - pitch)).to_radians());
         }
         if let Some(y_rot) = s.flying_y_rot {
-            rot *= Quat::from_rotation_y(y_rot);
+            after_body *= Quat::from_rotation_y(y_rot);
         }
     } else if s.swim_amount > 0.0 {
-        rot *= Quat::from_rotation_x(lerp(s.swim_amount, 0.0, -90.0 - s.pitch).to_radians());
+        after_body *= Quat::from_rotation_x(lerp(s.swim_amount, 0.0, -90.0 - pitch).to_radians());
         if s.visually_swimming {
             offset = Vec3::new(0.0, -1.0, 0.3);
         }
     }
+    offset += after_body.inverse() * living.extra_offset;
 
     AvatarRoot {
-        rotation: rot,
+        rotation: living.rotation * after_body,
         model_offset: offset,
         world_offset: living.world_offset,
     }
@@ -499,14 +514,22 @@ pub(crate) const ARMOR_PARTS: [(&str, usize); 7] = [
 fn bake_wings(meshes: &mut Assets<Mesh>) -> [Handle<Mesh>; 2] {
     let baked = geom::bake(&crate::entities::models::humanoid::elytra::layer());
     ["left_wing", "right_wing"].map(|name| {
-        let mesh = part_in_model_units(&baked, name).unwrap_or_else(|| {
-            Mesh::new(
-                PrimitiveTopology::TriangleList,
-                RenderAssetUsages::default(),
-            )
-        });
+        let mesh = part_in_model_units(&baked, name).unwrap_or_else(layout_only_mesh);
         meshes.add(mesh)
     })
+}
+
+fn layout_only_mesh() -> Mesh {
+    let mut empty = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    empty.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
+    empty.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
+    empty.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
+    empty.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
+    empty.insert_indices(Indices::U32(Vec::new()));
+    empty
 }
 
 fn part_in_model_units(baked: &geom::BakedModel, name: &str) -> Option<Mesh> {
@@ -572,6 +595,7 @@ struct PlayerModelAssets {
     no_item: Handle<Mesh>,
     armor: [Vec<ArmorMesh>; 4],
     skulls: [geom::BakedModel; 2],
+    layers: avatar_layers::LayerAssets,
 }
 
 const WORN_SKULLS: [&str; 2] = ["dragon", "piglin"];
@@ -612,7 +636,9 @@ const FIRST_OVERLAY: usize = 6;
 struct ArmorSlotRig {
     boxes: Vec<Entity>,
     material: Handle<EntityMaterial>,
-    worn: (Option<&'static str>, bool),
+    trim_boxes: Vec<Entity>,
+    trim_material: Handle<EntityMaterial>,
+    worn: (Option<&'static str>, bool, Option<&'static str>),
 }
 
 struct HeldRig {
@@ -622,7 +648,7 @@ struct HeldRig {
 
 struct SkullRig {
     node: Entity,
-    mesh: Handle<Mesh>,
+    mesh: Option<Handle<Mesh>>,
     material: Handle<EntityMaterial>,
     shown: Option<(&'static str, f32)>,
     states: Vec<PartState>,
@@ -666,6 +692,7 @@ struct Rig {
     worn: crate::client::skins::SkinState,
     #[cfg(feature = "skins")]
     seen_textures: u32,
+    layers: avatar_layers::LayersRig,
 }
 
 #[derive(Resource, Default)]
@@ -751,15 +778,7 @@ fn setup_player_model(
         return;
     };
 
-    let mut empty = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    empty.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
-    empty.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
-    empty.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
-    empty.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
-    empty.insert_indices(Indices::U32(Vec::new()));
+    let empty = layout_only_mesh();
 
     let wide: Vec<Handle<Mesh>> = player_parts(false)
         .iter()
@@ -777,6 +796,7 @@ fn setup_player_model(
         armor: ARMOR_LAYERS.map(|layer| bake_armor(layer(), &mut meshes)),
         skulls: WORN_SKULLS
             .map(|kind| geom::bake(&crate::blockentities::render::skull::layer_for_type(kind))),
+        layers: avatar_layers::LayerAssets::new(&mut meshes),
     };
 
     rigs.local = Some(spawn_rig(
@@ -792,7 +812,7 @@ fn spawn_rig(
     commands: &mut Commands,
     assets: &PlayerModelAssets,
     materials: &mut Assets<EntityMaterial>,
-    meshes: &mut Assets<Mesh>,
+    _meshes: &mut Assets<Mesh>,
 ) -> Rig {
     let lit = Lit::full_bright();
     let skin_material = |materials: &mut Assets<EntityMaterial>| {
@@ -899,14 +919,9 @@ fn spawn_rig(
     ];
     let head_item = item_node(PART_HEAD, ItemSlot::Head, "head_item", head_material);
 
-    let skull_mesh = meshes.add(Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    ));
     let skull_material = materials.add(EntityMaterial::cutout(None, LightMode::Cardinal, lit));
     let skull_node = commands
         .spawn((
-            Mesh3d(skull_mesh.clone()),
             MeshMaterial3d(skull_material.clone()),
             Transform::default(),
             Visibility::Hidden,
@@ -918,7 +933,7 @@ fn spawn_rig(
     commands.entity(entities[PART_HEAD]).add_child(skull_node);
     let skull = SkullRig {
         node: skull_node,
-        mesh: skull_mesh,
+        mesh: None,
         material: skull_material,
         shown: None,
         states: Vec::new(),
@@ -966,14 +981,24 @@ fn spawn_rig(
 
     let armor_materials =
         [(); 4].map(|_| materials.add(EntityMaterial::cutout(None, LightMode::Cardinal, lit)));
-    let armor = std::array::from_fn(|slot| ArmorSlotRig {
-        boxes: assets.armor[slot]
+    let trim_materials = [(); 4].map(|_| {
+        materials.add(EntityMaterial::new(
+            None,
+            LightMode::Cardinal,
+            AlphaMode::Mask(ALPHA_CUTOUT),
+            ALPHA_CUTOUT,
+            lit,
+            1,
+        ))
+    });
+    let mut spawn_boxes = |slot: usize, material: &Handle<EntityMaterial>| -> Vec<Entity> {
+        assets.armor[slot]
             .iter()
             .map(|piece| {
                 let entity = commands
                     .spawn((
                         Mesh3d(piece.mesh.clone()),
-                        MeshMaterial3d(armor_materials[slot].clone()),
+                        MeshMaterial3d(material.clone()),
                         Transform::default(),
                         Visibility::Hidden,
                         RigArmor,
@@ -983,10 +1008,26 @@ fn spawn_rig(
                 commands.entity(entities[piece.part]).add_child(entity);
                 entity
             })
-            .collect(),
+            .collect()
+    };
+    let armor = std::array::from_fn(|slot| ArmorSlotRig {
+        boxes: spawn_boxes(slot, &armor_materials[slot]),
         material: armor_materials[slot].clone(),
-        worn: (None, false),
+        trim_boxes: spawn_boxes(slot, &trim_materials[slot]),
+        trim_material: trim_materials[slot].clone(),
+        worn: (None, false, None),
     });
+
+    let posed_parts: [Entity; 6] = std::array::from_fn(|i| entities[i]);
+    let layers = avatar_layers::spawn(
+        commands,
+        &assets.layers,
+        materials,
+        flip,
+        &posed_parts,
+        &base,
+        lit,
+    );
 
     Rig {
         id: None,
@@ -1033,6 +1074,7 @@ fn spawn_rig(
         },
         #[cfg(feature = "skins")]
         seen_textures: 0,
+        layers,
     }
 }
 
@@ -1089,7 +1131,7 @@ type RigQueries<'w, 's> = (
 type LayerQuery<'w, 's> = Query<
     'w,
     's,
-    (&'static mut Visibility, &'static mut Mesh3d),
+    (&'static mut Visibility, Option<&'static mut Mesh3d>),
     (
         With<RigPart>,
         Without<RigArmor>,
@@ -1105,6 +1147,7 @@ struct ItemCtx<'a> {
     entity_materials: &'a mut Assets<EntityMaterial>,
     no_item: Handle<Mesh>,
     skulls: &'a [geom::BakedModel; 2],
+    layers: &'a avatar_layers::LayerAssets,
     entity_images: &'a mut crate::entities::EntityImages,
     armor_glint: Option<Handle<Image>>,
     #[cfg(feature = "skins")]
@@ -1146,6 +1189,7 @@ fn sync_player_models(
         entity_materials: &mut entity_materials,
         no_item: assets.no_item.clone(),
         skulls: &assets.skulls,
+        layers: &assets.layers,
         entity_images: &mut entity_images,
         armor_glint: armor_glint.map(|glint| glint.0.clone()),
         #[cfg(feature = "skins")]
@@ -1251,6 +1295,7 @@ fn sync_player_models(
             &mut rigs.entries[slot],
             origin.to_render_array(*feet),
             sample,
+            *id,
             owner,
             worn,
             *body,
@@ -1258,6 +1303,7 @@ fn sync_player_models(
             lit,
             &mut queries,
             &mut items,
+            &mut commands,
         );
         let rig = &mut rigs.entries[slot];
         super::outline::set_glowing(&mut commands, rig.root, &mut rig.glow, body.outline);
@@ -1302,6 +1348,7 @@ fn sync_player_models(
             local,
             origin.to_render_array(local_pos),
             &local_pose,
+            crate::client::tracking::local_entity_id(),
             owner,
             &local_skin,
             body,
@@ -1309,6 +1356,7 @@ fn sync_player_models(
             lit,
             &mut queries,
             &mut items,
+            &mut commands,
         );
         super::outline::set_glowing(&mut commands, local.root, &mut local.glow, body.outline);
     }
@@ -1376,7 +1424,7 @@ fn update_held_item(
         {
             node.skin_generation = items.skins.generation();
             if let Some(skin) = head_skin(&node.shown, items)
-                && let Some(material) = items.entity_materials.get_mut(material)
+                && let Some(mut material) = items.entity_materials.get_mut(material)
                 && material.texture.as_ref() != Some(&skin)
             {
                 material.texture = Some(skin);
@@ -1405,7 +1453,7 @@ fn update_held_item(
             };
             #[cfg(not(feature = "skins"))]
             let texture = gpu.texture;
-            if let Some(material) = items.entity_materials.get_mut(material) {
+            if let Some(mut material) = items.entity_materials.get_mut(material) {
                 material.texture = Some(texture);
             }
             *vis = Visibility::Inherited;
@@ -1465,7 +1513,7 @@ fn update_wings(
     });
     let texture = texture.flatten();
 
-    if let Some(material) = items.entity_materials.get_mut(&rig.wings.material) {
+    if let Some(mut material) = items.entity_materials.get_mut(&rig.wings.material) {
         material.texture = texture.clone();
         material.set_glint(super::glint::armor_scale(glint), items.armor_glint.clone());
     }
@@ -1531,7 +1579,7 @@ fn update_skin(
     }
     .unwrap_or_else(|| items.model.skin.clone());
     for handle in [&rig.base, &rig.overlay] {
-        if let Some(material) = items.entity_materials.get_mut(handle) {
+        if let Some(mut material) = items.entity_materials.get_mut(handle) {
             material.texture = Some(body.clone());
         }
     }
@@ -1541,7 +1589,7 @@ fn update_skin(
         .cape
         .as_ref()
         .and_then(|url| items.skins.get(url).cloned());
-    if let Some(material) = items.entity_materials.get_mut(&rig.cape.material) {
+    if let Some(mut material) = items.entity_materials.get_mut(&rig.cape.material) {
         material.texture = cape.clone();
     }
     rig.cape.ready = cape.is_some() && skin.parts & (1 << CAPE_BIT) != 0;
@@ -1577,7 +1625,7 @@ fn update_skin(
             PART_LEFT_SLEEVE,
         ),
     ] {
-        if let Ok((_, mut mesh)) = layers.get_mut(entity) {
+        if let Ok((_, Some(mut mesh))) = layers.get_mut(entity) {
             mesh.0 = set[index].clone();
         }
     }
@@ -1589,8 +1637,12 @@ pub(crate) fn player_eye(feet: [f64; 3], sample: &AnimSample, scale: f32) -> [f6
 }
 
 pub(crate) fn player_eye_height(sample: &AnimSample, scale: f32) -> f32 {
+    crate::session::player_dimensions(sample_pose(sample), scale).eye_height
+}
+
+fn sample_pose(sample: &AnimSample) -> azalea::entity::Pose {
     use azalea::entity::Pose;
-    let pose = if sample.sleeping {
+    if sample.sleeping {
         Pose::Sleeping
     } else if sample.fall_flying {
         Pose::FallFlying
@@ -1602,8 +1654,7 @@ pub(crate) fn player_eye_height(sample: &AnimSample, scale: f32) -> f32 {
         Pose::Crouching
     } else {
         Pose::Standing
-    };
-    crate::session::player_dimensions(pose, scale).eye_height
+    }
 }
 
 fn player_lit(
@@ -1665,7 +1716,7 @@ fn hide_body(rig: &mut Rig, hidden: bool, materials: &mut Assets<EntityMaterial>
     #[cfg(not(feature = "skins"))]
     let cape = None;
     for handle in [&rig.base, &rig.overlay].into_iter().chain(cape) {
-        if let Some(material) = materials.get_mut(handle) {
+        if let Some(mut material) = materials.get_mut(handle) {
             material.params.light.w = cutoff;
         }
     }
@@ -1676,6 +1727,7 @@ fn apply_rig(
     rig: &mut Rig,
     feet: Vec3,
     sample: &AnimSample,
+    entity_id: i32,
     owner: Owner,
     worn: &WornSkin,
     body: Body,
@@ -1683,6 +1735,7 @@ fn apply_rig(
     lit: Lit,
     queries: &mut RigQueries,
     items: &mut ItemCtx,
+    commands: &mut Commands,
 ) {
     let root = root_pose(sample, body.scale);
     let Ok((mut transform, mut vis)) = queries.0.get_mut(rig.root) else {
@@ -1741,8 +1794,14 @@ fn apply_rig(
         (&sample.main_hand, &sample.off_hand)
     };
     let using_left = sample.using_offhand != sample.main_arm_left;
+    let fishing_cast = [false, true].map(|left| {
+        items
+            .assets
+            .fishing_cast(entity_id, sample.main_hand.id, left == sample.main_arm_left)
+    });
     let use_of = |item: &HeldItem, left: bool| ItemUse {
         owner: Some(owner),
+        fishing_cast: fishing_cast[usize::from(left)],
         ..ItemUse::of(
             item,
             sample.using_item && using_left == left,
@@ -1793,10 +1852,26 @@ fn apply_rig(
         sample.walk_pos,
         items,
         &mut queries.5,
+        commands,
     );
 
     update_armor(rig, &sample.armor, items, &mut queries.4);
     update_wings(rig, &sample.armor, items, &mut queries.5);
+
+    #[cfg(feature = "skins")]
+    let slim = rig.worn.slim();
+    #[cfg(not(feature = "skins"))]
+    let slim = false;
+    avatar_layers::update(
+        &mut rig.layers,
+        &rig.parts,
+        sample,
+        slim,
+        lit,
+        items,
+        &mut queries.5,
+        commands,
+    );
 
     if lit != rig.lit {
         #[cfg(feature = "skins")]
@@ -1808,9 +1883,13 @@ fn apply_rig(
             .chain(cape)
             .chain(rig.held.iter().map(|held| &held.material))
             .chain([&rig.head_item.material, &rig.skull.material])
-            .chain(rig.armor.iter().map(|slot| &slot.material))
+            .chain(
+                rig.armor
+                    .iter()
+                    .flat_map(|slot| [&slot.material, &slot.trim_material]),
+            )
         {
-            if let Some(material) = items.entity_materials.get_mut(handle) {
+            if let Some(mut material) = items.entity_materials.get_mut(handle) {
                 material.params.set(lit);
             }
         }
@@ -1830,27 +1909,49 @@ fn update_armor(
     for (index, slot) in rig.armor.iter_mut().enumerate() {
         let item = armor.items[index];
         let glint = armor.foil[index] && items.armor_glint.is_some();
-        if slot.worn == (item, glint) {
+        let trim = armor.trim[index];
+        if slot.worn == (item, glint, trim) {
             continue;
         }
-        slot.worn = (item, glint);
+        slot.worn = (item, glint, trim);
 
         let texture = match item.and_then(|item| armor_texture(index, item)) {
             Some(path) => items.entity_images.get(&path, items.images),
             None => None,
         };
-        if let Some(material) = items.entity_materials.get_mut(&slot.material) {
+        if let Some(mut material) = items.entity_materials.get_mut(&slot.material) {
             material.texture = texture.clone();
             material.set_glint(super::glint::armor_scale(glint), items.armor_glint.clone());
         }
-        let shown = if texture.is_some() {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
+        let trim_texture = match trim {
+            Some(trim) if texture.is_some() => {
+                let path = crate::entities::render::humanoid::trim::texture_name(
+                    trim,
+                    armor_tex::slot_layer_type(index),
+                );
+                items.entity_images.get(&path, items.images)
+            }
+            _ => None,
         };
-        for entity in &slot.boxes {
-            if let Ok(mut vis) = visibility.get_mut(*entity) {
-                *vis = shown;
+        if let Some(mut material) = items.entity_materials.get_mut(&slot.trim_material) {
+            material.texture = trim_texture.clone();
+        }
+        let shown_if = |texture: &Option<Handle<Image>>| {
+            if texture.is_some() {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            }
+        };
+        let sets = [
+            (&slot.boxes, shown_if(&texture)),
+            (&slot.trim_boxes, shown_if(&trim_texture)),
+        ];
+        for (boxes, shown) in sets {
+            for entity in boxes {
+                if let Ok(mut vis) = visibility.get_mut(*entity) {
+                    *vis = shown;
+                }
             }
         }
     }
@@ -1862,6 +1963,7 @@ fn update_worn_skull(
     animation: f32,
     items: &mut ItemCtx,
     layers: &mut LayerQuery<'_, '_>,
+    commands: &mut Commands,
 ) {
     use crate::blockentities::render::skull as skulls;
 
@@ -1883,7 +1985,7 @@ fn update_worn_skull(
         let texture = items
             .entity_images
             .get(skulls::texture_for_type(kind), items.images);
-        if let Some(material) = items.entity_materials.get_mut(&skull.material) {
+        if let Some(mut material) = items.entity_materials.get_mut(&skull.material) {
             material.texture = texture;
         }
         if let Ok((mut vis, _)) = layers.get_mut(skull.node) {
@@ -1899,9 +2001,15 @@ fn update_worn_skull(
     let base = Mat4::from_scale(Vec3::splat(MODEL_UNITS_PER_BLOCK))
         * crate::entities::head_item_pose(crate::entities::HeadTransforms::DEFAULT, true);
     model.pose_parts(&skull.states, base, &mut skull.posed);
-    if let Some(mesh) = items.meshes.get_mut(&skull.mesh) {
-        crate::entities::bake::layer(mesh, model, &skull.posed, &skull.states);
-    }
+    avatar_layers::bake_into(
+        skull.node,
+        &mut skull.mesh,
+        model,
+        &skull.posed,
+        &skull.states,
+        items.meshes,
+        commands,
+    );
 }
 
 #[cfg(test)]

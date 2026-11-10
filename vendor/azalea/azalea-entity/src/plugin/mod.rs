@@ -6,12 +6,16 @@ use std::collections::HashSet;
 
 use azalea_block::{BlockState, BlockTrait, fluid_state::FluidKind, properties};
 use azalea_core::{
+    aabb::Aabb,
     entity_id::MinecraftEntityId,
     game_type::GameMode,
-    position::{BlockPos, ChunkPos},
+    position::{BlockPos, ChunkPos, Vec3},
     tick::GameTick,
 };
-use azalea_registry::{builtin::BlockKind, tags};
+use azalea_registry::{
+    builtin::{BlockKind, EntityKind},
+    tags,
+};
 use azalea_world::{ChunkStorage, WorldName, Worlds};
 use bevy_app::{App, Plugin, PostUpdate, Update};
 use bevy_ecs::prelude::*;
@@ -21,8 +25,11 @@ use indexing::EntityUuidIndex;
 use tracing::debug;
 
 use crate::{
-    FluidOnEyes, LookDirection, Physics, Pose, Position,
-    dimensions::{EntityDimensions, calculate_dimensions},
+    FluidOnEyes, LookDirection, Physics, Pose, Position, SnifferStateKind,
+    dimensions::{
+        EntityDimensions, RemoteScale, ShulkerPeekAmount, baby_dimensions, calculate_dimensions,
+        shulker_bounding_box,
+    },
     metadata::{self, Health, Player},
     plugin::effect_events::{handle_add_effect, handle_remove_effects},
 };
@@ -59,7 +66,9 @@ impl Plugin for EntityPlugin {
                 ),
             ),
         )
-        .add_systems(GameTick, (update_in_loaded_chunk, update_fluid_on_eyes))
+        .add_systems(GameTick,
+            (update_in_loaded_chunk, update_fluid_on_eyes, tick_shulker_peek),
+        )
         .add_observer(handle_add_effect)
         .add_observer(handle_remove_effects)
         .init_resource::<EntityUuidIndex>();
@@ -128,6 +137,9 @@ pub fn update_on_climbable(
 ) {
     for (mut on_climbable, position, world_name, &game_mode, fall_flying) in query.iter_mut() {
         if game_mode == GameMode::Spectator {
+            if **on_climbable {
+                **on_climbable = false;
+            }
             continue;
         }
 
@@ -136,23 +148,22 @@ pub fn update_on_climbable(
         };
 
         let world = world.read();
-
-        let block_pos = BlockPos::from(position);
-        let block_state_at_feet = world.get_block_state(block_pos).unwrap_or_default();
-        let block_at_feet = Box::<dyn BlockTrait>::from(block_state_at_feet);
-        let registry_block_at_feet = block_at_feet.as_block_kind();
-
-        if fall_flying.is_some_and(|f| **f)
-            && tags::blocks::CAN_GLIDE_THROUGH.contains(&registry_block_at_feet)
-        {
-            **on_climbable = false;
-            continue;
-        }
-
-        **on_climbable = tags::blocks::CLIMBABLE.contains(&registry_block_at_feet)
-            || (tags::blocks::TRAPDOORS.contains(&registry_block_at_feet)
-                && is_trapdoor_usable_as_ladder(block_state_at_feet, block_pos, &world));
+        **on_climbable = climbable_at(&world, BlockPos::from(position), fall_flying.is_some_and(|f| **f));
     }
+}
+
+pub fn climbable_at(world: &azalea_world::World, block_pos: BlockPos, fall_flying: bool) -> bool {
+    let block_state_at_feet = world.get_block_state(block_pos).unwrap_or_default();
+    let block_at_feet = Box::<dyn BlockTrait>::from(block_state_at_feet);
+    let registry_block_at_feet = block_at_feet.as_block_kind();
+
+    if fall_flying && tags::blocks::CAN_GLIDE_THROUGH.contains(&registry_block_at_feet) {
+        return false;
+    }
+
+    tags::blocks::CLIMBABLE.contains(&registry_block_at_feet)
+        || (tags::blocks::TRAPDOORS.contains(&registry_block_at_feet)
+            && is_trapdoor_usable_as_ladder(block_state_at_feet, block_pos, world))
 }
 
 fn is_trapdoor_usable_as_ladder(
@@ -197,26 +208,236 @@ pub fn clamp_look_direction(mut query: Query<&mut LookDirection>) {
 #[allow(clippy::type_complexity)]
 pub fn update_bounding_box(
     mut query: Query<
-        (&mut Physics, &Position, &EntityDimensions),
-        Or<(Changed<Position>, Changed<EntityDimensions>)>,
+        (
+            &mut Physics,
+            &Position,
+            &EntityDimensions,
+            &EntityKindComponent,
+            Option<&metadata::AttachFace>,
+            Option<&ShulkerPeekAmount>,
+            Option<&RemoteScale>,
+        ),
+        Or<(
+            Changed<Position>,
+            Changed<EntityDimensions>,
+            Changed<metadata::AttachFace>,
+            Changed<ShulkerPeekAmount>,
+        )>,
     >,
 ) {
-    for (mut physics, position, dimensions) in query.iter_mut() {
-        let bounding_box = dimensions.make_bounding_box(**position);
-        physics.bounding_box = bounding_box;
+    for (mut physics, position, dimensions, kind, attach_face, peek, remote_scale) in
+        query.iter_mut()
+    {
+        physics.bounding_box = if let Some(face) = attach_face {
+            shulker_bounding_box(
+                remote_scale.map_or(1.0, |s| s.0),
+                face.0,
+                peek.map_or(0.0, |p| p.0),
+                **position,
+            )
+        } else if matches!(**kind, EntityKind::WindCharge | EntityKind::BreezeWindCharge) {
+            let half = (dimensions.width / 2.0) as f64;
+            let y = position.y - 0.15f32 as f64;
+            Aabb {
+                min: Vec3::new(position.x - half, y, position.z - half),
+                max: Vec3::new(position.x + half, y + dimensions.height as f64, position.z + half),
+            }
+        } else {
+            dimensions.make_bounding_box(**position)
+        };
+    }
+}
+
+pub fn tick_shulker_peek(
+    mut commands: Commands,
+    mut query: Query<(Entity, &metadata::Peek, Option<&mut ShulkerPeekAmount>)>,
+) {
+    for (entity, peek, current) in &mut query {
+        let target = peek.0 as f32 * 0.01;
+        let now = current.as_ref().map_or(0.0, |c| c.0);
+        if now == target {
+            continue;
+        }
+        let clamp = |v: f32, lo: f32, hi: f32| if v < lo { lo } else if v > hi { hi } else { v };
+        let next = if now > target {
+            clamp(now - 0.05, target, 1.0)
+        } else {
+            clamp(now + 0.05, 0.0, target)
+        };
+        match current {
+            Some(mut c) => c.0 = next,
+            None => {
+                commands.entity(entity).insert(ShulkerPeekAmount(next));
+            }
+        }
     }
 }
 
 #[allow(clippy::type_complexity)]
 pub fn update_dimensions(
     mut query: Query<
-        (&mut EntityDimensions, &EntityKindComponent, &Pose, Option<&crate::Attributes>),
-        Or<(Changed<EntityKindComponent>, Changed<Pose>, Changed<crate::Attributes>)>,
+        (
+            &mut EntityDimensions,
+            &EntityKindComponent,
+            &Pose,
+            Option<&crate::Attributes>,
+            Option<&RemoteScale>,
+            (
+                Option<&metadata::AbstractAgeableBaby>,
+                Option<&metadata::ZombieBaby>,
+                Option<&metadata::ZoglinBaby>,
+                Option<&metadata::PiglinBaby>,
+            ),
+            (
+                Option<&metadata::SlimeSize>,
+                Option<&metadata::MagmaCubeSize>,
+                Option<&metadata::SulfurCubeSize>,
+                Option<&metadata::PhantomSize>,
+            ),
+            (
+                Option<&metadata::Small>,
+                Option<&metadata::ArmorStandMarker>,
+                Option<&metadata::SnifferState>,
+                Option<&metadata::PuffState>,
+            ),
+            (
+                Option<&metadata::AttachFace>,
+                Option<&ShulkerPeekAmount>,
+                Option<&metadata::SalmonKind>,
+            ),
+            (
+                Option<&metadata::InteractionWidth>,
+                Option<&metadata::InteractionHeight>,
+                Option<&metadata::Radius>,
+            ),
+        ),
+        Or<(
+            Or<(
+                Changed<EntityKindComponent>,
+                Changed<Pose>,
+                Changed<crate::Attributes>,
+                Changed<RemoteScale>,
+                Changed<metadata::AbstractAgeableBaby>,
+                Changed<metadata::ZombieBaby>,
+                Changed<metadata::ZoglinBaby>,
+                Changed<metadata::PiglinBaby>,
+                Changed<metadata::InteractionWidth>,
+                Changed<metadata::InteractionHeight>,
+                Changed<metadata::Radius>,
+            )>,
+            Or<(
+                Changed<metadata::SlimeSize>,
+                Changed<metadata::MagmaCubeSize>,
+                Changed<metadata::SulfurCubeSize>,
+                Changed<metadata::PhantomSize>,
+                Changed<metadata::Small>,
+                Changed<metadata::ArmorStandMarker>,
+                Changed<metadata::SnifferState>,
+                Changed<metadata::PuffState>,
+                Changed<metadata::AttachFace>,
+                Changed<ShulkerPeekAmount>,
+                Changed<metadata::SalmonKind>,
+            )>,
+        )>,
     >,
 ) {
-    for (mut dimensions, kind, pose, attributes) in query.iter_mut() {
-        let scale = attributes.map_or(1.0, |a| a.scale.calculate() as f32);
-        *dimensions = calculate_dimensions(**kind, *pose).scale(scale);
+    for (
+        mut dimensions,
+        kind,
+        pose,
+        attributes,
+        remote_scale,
+        babies,
+        sizes,
+        specials,
+        shulker,
+        server_sized,
+    ) in query.iter_mut()
+    {
+        let kind = **kind;
+        let scale = remote_scale
+            .map(|s| s.0)
+            .or_else(|| attributes.map(|a| a.scale.calculate() as f32))
+            .unwrap_or(1.0);
+        let baby = babies.0.is_some_and(|b| b.0)
+            || babies.1.is_some_and(|b| b.0)
+            || babies.2.is_some_and(|b| b.0)
+            || babies.3.is_some_and(|b| b.0);
+
+        let default = if *pose == Pose::Sleeping {
+            calculate_dimensions(kind, *pose)
+        } else if let Some(size) = sizes.0.map(|s| s.0).or(sizes.1.map(|s| s.0)).or(sizes.2.map(|s| s.0)) {
+            calculate_dimensions(kind, *pose).scale(size.clamp(1, 127) as f32)
+        } else if kind == EntityKind::Interaction {
+            EntityDimensions::new(
+                server_sized.0.map_or(1.0, |w| w.0),
+                server_sized.1.map_or(1.0, |h| h.0),
+            )
+        } else if kind == EntityKind::AreaEffectCloud {
+            EntityDimensions::new(server_sized.2.map_or(3.0, |r| r.0) * 2.0, 0.5)
+        } else if kind == EntityKind::ArmorStand {
+            if specials.1.is_some_and(|m| m.0) {
+                EntityDimensions::new(0.0, 0.0).fixed()
+            } else if specials.0.is_some_and(|s| s.0) {
+                EntityDimensions::from(kind).scale(0.5).eye_height(0.9875)
+            } else {
+                EntityDimensions::from(kind)
+            }
+        } else if kind == EntityKind::Sniffer
+            && specials.2.is_some_and(|s| s.0 == SnifferStateKind::Digging)
+        {
+            let adult = EntityDimensions::from(kind);
+            EntityDimensions::new(adult.width, adult.height - 0.4)
+                .eye_height(0.81)
+                .scale(if baby { 0.5 } else { 1.0 })
+        } else if matches!(kind, EntityKind::Camel | EntityKind::CamelHusk)
+            && (baby || *pose == Pose::Sitting)
+        {
+            let adult = EntityDimensions::from(kind);
+            match (*pose == Pose::Sitting, baby) {
+                (true, true) => EntityDimensions::new(0.95, 0.425).eye_height(0.41),
+                (true, false) => {
+                    EntityDimensions::new(adult.width, adult.height - 1.43).eye_height(0.845)
+                }
+                (false, _) => EntityDimensions::new(0.95, 1.4).eye_height(1.38),
+            }
+        } else if baby {
+            let dims = baby_dimensions(kind);
+            if kind == EntityKind::Goat && *pose == Pose::LongJumping {
+                dims.scale(0.7)
+            } else {
+                dims
+            }
+        } else if let Some(size) = sizes.3 {
+            calculate_dimensions(kind, *pose).scale(1.0 + 0.15 * size.0 as f32)
+        } else if kind == EntityKind::Goat && *pose == Pose::LongJumping {
+            calculate_dimensions(kind, *pose).scale(0.7)
+        } else if kind == EntityKind::Warden && matches!(*pose, Pose::Digging | Pose::Emerging) {
+            EntityDimensions::new(calculate_dimensions(kind, *pose).width, 1.0).fixed()
+        } else if kind == EntityKind::Salmon {
+            let factor = match shulker.2.map_or(1, |k| k.0) {
+                i32::MIN..=0 => 0.5,
+                1 => 1.0,
+                _ => 1.5,
+            };
+            calculate_dimensions(kind, *pose).scale(factor)
+        } else if kind == EntityKind::Pufferfish {
+            let factor = match specials.3.map_or(0, |p| p.0) {
+                0 => 0.5,
+                1 => 0.7,
+                _ => 1.0,
+            };
+            calculate_dimensions(kind, *pose).scale(factor)
+        } else if kind == EntityKind::Shulker
+            && shulker.0.is_none_or(|f| f.0 == azalea_core::direction::Direction::Down)
+            && shulker.1.is_some_and(|p| p.0 > 0.0)
+        {
+            let peek = shulker.1.map_or(0.0, |p| p.0);
+            calculate_dimensions(kind, *pose).scale_xy(1.0, 1.0 + peek)
+        } else {
+            calculate_dimensions(kind, *pose)
+        };
+        *dimensions = default.scale(scale);
     }
 }
 

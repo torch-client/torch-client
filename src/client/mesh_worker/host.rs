@@ -36,10 +36,21 @@ struct Handle {
 }
 
 fn worker_url() -> String {
-    js_sys::Reflect::get(&js_sys::global(), &"torchWorker".into())
+    page_url("torchWorker", "./worker.js")
+}
+
+pub(crate) fn page_url(global: &str, fallback: &str) -> String {
+    js_sys::Reflect::get(&js_sys::global(), &global.into())
         .ok()
         .and_then(|v| v.as_string())
-        .unwrap_or_else(|| "./worker.js".to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+pub(crate) fn error_text(e: &web_sys::Event) -> String {
+    js_sys::Reflect::get(e, &"message".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| "the script did not load".to_string())
 }
 
 pub fn spawn(assets: &[u8]) -> bool {
@@ -66,10 +77,7 @@ pub fn spawn(assets: &[u8]) -> bool {
         });
     let error = Closure::<dyn FnMut(web_sys::Event)>::new(|e: web_sys::Event| {
         deactivate();
-        let message = js_sys::Reflect::get(&e, &"message".into())
-            .ok()
-            .and_then(|v| v.as_string())
-            .unwrap_or_else(|| "the script did not load".to_string());
+        let message = error_text(&e);
         log_error!(
             "mesh",
             "the mesh worker failed ({message}); meshing falls back to the frame"
@@ -125,7 +133,7 @@ pub fn send(msg: &ToWorker) {
     });
 }
 
-fn to_buffer(bytes: &[u8]) -> js_sys::ArrayBuffer {
+pub(crate) fn to_buffer(bytes: &[u8]) -> js_sys::ArrayBuffer {
     let array = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
     array.copy_from(bytes);
     array.buffer()
@@ -154,7 +162,7 @@ fn on_message(event: web_sys::MessageEvent) {
         return;
     };
     let (name, n) = match &msg {
-        FromWorker::Sections { chunks, edits } => ("sections", chunks.len() + edits.len()),
+        FromWorker::Sections { chunks, edits, .. } => ("sections", chunks.len() + edits.len()),
         FromWorker::Light(delta) => ("light", delta.sections.len()),
         FromWorker::Ready | FromWorker::Failed(_) => ("other", 0),
     };
@@ -169,23 +177,32 @@ fn apply(msg: FromWorker) {
             deactivate();
             log_error!("mesh", "the mesh worker gave up: {message}");
         }
-        FromWorker::Sections { chunks, edits } => {
+        FromWorker::Sections {
+            chunks,
+            edits,
+            columns,
+            lost,
+        } => {
             let Some(shared) = crate::SHARED.get() else {
                 return;
             };
             let count = chunks.len() + edits.len();
             crate::diag::add(crate::diag::Stat::SectionsMeshed, count as u64);
             super::note_received(count);
-            let mut s = shared.lock().unwrap();
-            let session = &mut s.session;
-            supersede(
-                &mut session.pending_chunks,
-                &mut session.pending_edits,
-                &chunks,
-                &edits,
-            );
-            session.pending_chunks.extend(chunks);
-            session.pending_edits.extend(edits);
+            {
+                let mut s = shared.lock().unwrap();
+                let session = &mut s.session;
+                supersede(session, &chunks, &edits);
+                session.meshed_columns.appended(chunks.len());
+                session.pending_chunks.extend(chunks);
+                session.pending_edits.extend(edits);
+                for key in columns {
+                    session.meshed_columns.mark(key);
+                }
+            }
+            for (cx, cz) in lost {
+                crate::client::worldsync::mesh_worker_lost(cx, cz);
+            }
         }
         FromWorker::Light(delta) => {
             let map = crate::client::worldsync::light_map();
@@ -205,12 +222,11 @@ fn apply(msg: FromWorker) {
 }
 
 fn supersede(
-    pending_chunks: &mut std::collections::VecDeque<crate::renderer::PendingSection>,
-    pending_edits: &mut std::collections::VecDeque<crate::renderer::PendingSection>,
+    session: &mut crate::session::SessionState,
     chunks: &[crate::renderer::PendingSection],
     edits: &[crate::renderer::PendingSection],
 ) {
-    if pending_chunks.is_empty() && pending_edits.is_empty() {
+    if session.pending_chunks.is_empty() && session.pending_edits.is_empty() {
         return;
     }
     let fresh: std::collections::HashSet<(i32, i32, i32)> = chunks
@@ -220,6 +236,8 @@ fn supersede(
         .collect();
     let keep =
         |p: &crate::renderer::PendingSection| !fresh.contains(&(p.chunk_x, p.chunk_z, p.sec_y));
-    pending_chunks.retain(keep);
-    pending_edits.retain(keep);
+    session
+        .meshed_columns
+        .retain_chunks(&mut session.pending_chunks, keep);
+    session.pending_edits.retain(keep);
 }

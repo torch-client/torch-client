@@ -69,10 +69,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=Path,
-                    default=here / "reference/minecraft-26.1.1/assets/minecraft",
+                    default=here / "reference/minecraft-26.2/assets/minecraft",
                     help="assets/minecraft directory to pack")
     ap.add_argument("--data", type=Path,
-                    default=here / "reference/minecraft-26.1.1/data/minecraft",
+                    default=here / "reference/minecraft-26.2/data/minecraft",
                     help="data/minecraft (vanilla datapack) directory to pack")
     ap.add_argument("--out", type=Path, default=here / "dist/assets.bin",
                     help="archive to write")

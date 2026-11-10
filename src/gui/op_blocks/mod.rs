@@ -11,7 +11,7 @@ use crate::gui::{Screen, ScreenCtx, focus};
 use crate::session::{GameMasterOpen, GameMasterPacket, SharedMutex};
 
 const LABEL: u32 = 0xA0A0A0;
-const TITLE: u32 = 0xFFFFFF;
+const TITLE: u32 = crate::text::WHITE;
 const TITLE_Y: f32 = 10.0;
 const DONE_Y: f32 = 210.0;
 const DONE_X: f32 = -154.0;

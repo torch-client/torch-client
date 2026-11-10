@@ -240,7 +240,7 @@ fn update_params(
     }
     *last = Some(clip);
     for h in [&handles.opaque, &handles.blend] {
-        if let Some(m) = materials.get_mut(h) {
+        if let Some(mut m) = materials.get_mut(h) {
             m.params.clip = clip;
         }
     }

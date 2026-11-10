@@ -36,7 +36,7 @@ impl ShapeOffset {
                 max_horizontal: MAX_HORIZONTAL_OFFSET,
                 max_vertical: SMALL_DRIPLEAF_MAX_VERTICAL_OFFSET,
             },
-            "pointed_dripstone" => Self::Xz {
+            "pointed_dripstone" | "sulfur_spike" => Self::Xz {
                 max_horizontal: DRIPSTONE_MAX_HORIZONTAL_OFFSET,
             },
             "allium" | "azure_bluet" | "bamboo" | "bamboo_sapling" | "blue_orchid"

@@ -1,4 +1,4 @@
-use azalea_registry::EntityKind;
+use azalea_registry::builtin::EntityKind;
 
 use crate::entities::geom::{BakedModel, PartState};
 use crate::entities::models::humanoid::elytra as model;

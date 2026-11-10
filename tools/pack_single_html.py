@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import base64
 import collections
 import glob
 import gzip
@@ -21,6 +22,15 @@ def newest_site():
     if not sites:
         sys.exit("no web-output/*/site/index.html; run tools/build_web.sh first")
     return os.path.dirname(max(sites, key=os.path.getmtime))
+
+def default_out(site):
+    build = os.path.dirname(os.path.abspath(site))
+    try:
+        name = read(os.path.join(build, "release-name.txt")).strip()
+    except FileNotFoundError:
+        return os.path.join(build, "torch-client-single.html")
+    os.makedirs(os.path.join(ROOT, "dist"), exist_ok=True)
+    return os.path.join(ROOT, "dist", name)
 
 def read(path, mode="r"):
     with open(path, mode) as f:
@@ -109,23 +119,35 @@ self.onmessage = (e) => {
   const workerUrl = %(worker)s;
   const workerBlob = workerUrl === null ? null : blobUrl(workerUrl.split(%(glue_ref)s).join(window.__glueUrl));
 
+  // The Seed Cracker's worker script and search module, with `seed_cracker`
+  // (`src/modules/seed_cracker/pool.rs`). The module is small enough to carry
+  // as base64 outside the LZMA stream.
+  const seedWorker = %(seed_worker)s;
+  const seedWasm = %(seed_wasm)s;
+  const SEED_WASM_NAME = %(seed_wasm_name)s;
+  const seedBytes = seedWasm === null ? null : Uint8Array.from(atob(seedWasm), (c) => c.charCodeAt(0));
+
+  const wasmResponse = (b) => Promise.resolve(new Response(b.slice().buffer, {
+    status: 200,
+    headers: { "content-length": String(b.length), "content-type": "application/wasm" },
+  }));
   const realFetch = window.fetch.bind(window);
   window.fetch = (input, init) => {
     const url = typeof input === "string" ? input : input.url;
-    if (url.endsWith(WASM_NAME)) {
-      return Promise.resolve(new Response(bytes.slice().buffer, {
-        status: 200,
-        headers: { "content-length": String(bytes.length), "content-type": "application/wasm" },
-      }));
-    }
+    if (url.endsWith(WASM_NAME)) return wasmResponse(bytes);
+    if (seedBytes !== null && url.endsWith(SEED_WASM_NAME)) return wasmResponse(seedBytes);
     return realFetch(input, init);
   };
 
+  // Each worker script the page names, by the name it asks for.
+  const workers = new Map();
+  if (workerBlob !== null) workers.set(%(worker_ref)s, workerBlob);
+  if (seedWorker !== null) workers.set(%(seed_worker_ref)s, blobUrl(seedWorker));
   const RealWorker = window.Worker;
-  if (workerBlob !== null) {
+  if (workers.size > 0) {
     window.Worker = class extends RealWorker {
       constructor(url, options) {
-        super(String(url) === %(worker_ref)s ? workerBlob : url, options);
+        super(workers.get(String(url)) ?? url, options);
       }
     };
   }
@@ -138,7 +160,7 @@ window.__ready.catch((e) => {
 
 def main():
     site = sys.argv[1] if len(sys.argv) > 1 else newest_site()
-    out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(os.path.dirname(os.path.abspath(site)), "torch-client-single.html")
+    out = sys.argv[2] if len(sys.argv) > 2 else default_out(site)
     print("packing %s" % site)
 
     page = read(os.path.join(site, "index.html"))
@@ -187,6 +209,16 @@ def main():
     worker_path = os.path.join(site, worker_name)
     worker_src = read(worker_path) if os.path.exists(worker_path) else None
 
+    seed_worker_name = seed_wasm_name = None
+    seed_worker_src = seed_wasm = None
+    sw = re.search(r"""globalThis\.torchSeedWorker\s*=\s*["']\./(seed_worker[^"']*\.js)["']""", page)
+    sm = re.search(r"""globalThis\.torchSeedWasm\s*=\s*["']\./(seedcrack_wasm[^"']*\.wasm)["']""", page)
+    if sw and sm and os.path.exists(os.path.join(site, sw.group(1))) and os.path.exists(os.path.join(site, sm.group(1))):
+        seed_worker_name, seed_wasm_name = sw.group(1), sm.group(1)
+        seed_worker_src = read(os.path.join(site, seed_worker_name))
+        seed_wasm = base64.b64encode(read(os.path.join(site, seed_wasm_name), "rb")).decode("ascii")
+        print("seed worker %s, search module %s (%.0f KB)" % (seed_worker_name, seed_wasm_name, len(seed_wasm) * 3 / 4 / 1e3))
+
     imp = re.search(r"""import\s+init\s*,\s*\{([^}]*)\}\s*from\s*["']\./""" + re.escape(glue_name) + r"""["']\s*;?""", page)
     if not imp:
         sys.exit("could not find the page's `import init, {...}` line")
@@ -219,6 +251,10 @@ def main():
         "worker": js_string(worker_src) if worker_src is not None else "null",
         "worker_ref": js_string("./" + worker_name),
         "glue_ref": js_string("./" + glue_name),
+        "seed_worker": js_string(seed_worker_src) if seed_worker_src is not None else "null",
+        "seed_worker_ref": js_string("./" + (seed_worker_name or "")),
+        "seed_wasm": js_string(seed_wasm) if seed_wasm is not None else "null",
+        "seed_wasm_name": js_string(seed_wasm_name or ""),
     }
 
     marker = '<script type="module">'

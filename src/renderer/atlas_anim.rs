@@ -14,8 +14,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
 use parking_lot::Mutex;
 
-use super::ATLAS_COLS;
-use super::atlas::{blit_tile, build_mip_chain, tile_levels};
+use super::atlas::{blit_tile, block_cells, build_mip_chain, grid_cols, place_blocks, tile_levels};
 use super::atlas_meta::{AnimLayout, FrameRect};
 use super::terrain_pool::TerrainTextures;
 
@@ -29,6 +28,7 @@ pub struct FrameInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Animation {
     pub atlas_tile: u32,
+    pub span: u32,
     pub frames: Vec<FrameInfo>,
     pub interpolate: bool,
     pub blend_slot: Option<u32>,
@@ -84,10 +84,11 @@ pub struct BlockLevel {
 pub struct TileBlocks {
     levels: Vec<BlockLevel>,
     stride: u32,
+    atlas_cols: u32,
 }
 
 impl TileBlocks {
-    fn new(tile_px: u32, n_mips: u32) -> TileBlocks {
+    fn new(tile_px: u32, n_mips: u32, atlas_cols: u32) -> TileBlocks {
         let mut stride = 0;
         let levels = (0..n_mips)
             .map(|level| {
@@ -102,7 +103,11 @@ impl TileBlocks {
                 at
             })
             .collect();
-        TileBlocks { levels, stride }
+        TileBlocks {
+            levels,
+            stride,
+            atlas_cols,
+        }
     }
 
     fn write(&self, block: &mut [u8], levels: &[Vec<u8>]) {
@@ -134,34 +139,38 @@ impl TileBlocks {
         texture: &Texture,
         tile: u32,
         atlas_tile: u32,
+        span: u32,
     ) {
-        let (tx, ty) = (atlas_tile % ATLAS_COLS, atlas_tile / ATLAS_COLS);
-        for (level, at) in self.levels.iter().enumerate() {
-            encoder.copy_buffer_to_texture(
-                TexelCopyBufferInfo {
-                    buffer,
-                    layout: TexelCopyBufferLayout {
-                        offset: u64::from(tile) * u64::from(self.stride) + u64::from(at.offset),
-                        bytes_per_row: Some(at.pitch),
-                        rows_per_image: None,
+        for (block, cell) in (tile..).zip(block_cells(atlas_tile, span, self.atlas_cols)) {
+            let (tx, ty) = (cell % self.atlas_cols, cell / self.atlas_cols);
+            for (level, at) in self.levels.iter().enumerate() {
+                encoder.copy_buffer_to_texture(
+                    TexelCopyBufferInfo {
+                        buffer,
+                        layout: TexelCopyBufferLayout {
+                            offset: u64::from(block) * u64::from(self.stride)
+                                + u64::from(at.offset),
+                            bytes_per_row: Some(at.pitch),
+                            rows_per_image: None,
+                        },
                     },
-                },
-                TexelCopyTextureInfo {
-                    texture,
-                    mip_level: level as u32,
-                    origin: Origin3d {
-                        x: tx * at.side,
-                        y: ty * at.side,
-                        z: 0,
+                    TexelCopyTextureInfo {
+                        texture,
+                        mip_level: level as u32,
+                        origin: Origin3d {
+                            x: tx * at.side,
+                            y: ty * at.side,
+                            z: 0,
+                        },
+                        aspect: TextureAspect::All,
                     },
-                    aspect: TextureAspect::All,
-                },
-                Extent3d {
-                    width: at.side,
-                    height: at.side,
-                    depth_or_array_layers: 1,
-                },
-            );
+                    Extent3d {
+                        width: at.side,
+                        height: at.side,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
         }
     }
 }
@@ -195,6 +204,7 @@ impl AtlasFrames {
 
 pub(super) struct AnimatedSprite<'a> {
     pub atlas_tile: u32,
+    pub span: u32,
     pub image: &'a image::RgbaImage,
     pub pack_image: Option<&'a image::RgbaImage>,
     pub layout: &'a AnimLayout,
@@ -203,22 +213,25 @@ pub(super) struct AnimatedSprite<'a> {
 pub(super) fn build_frames(
     sprites: &[AnimatedSprite],
     atlas_size: (u32, u32),
+    atlas_cols: u32,
     n_mips: u32,
 ) -> Option<AtlasFrames> {
     if sprites.is_empty() {
         return None;
     }
-    let atlas_w = atlas_size.0;
-    let tile_px = atlas_w / ATLAS_COLS;
-    let mut placed: Vec<(&image::RgbaImage, FrameRect)> = Vec::new();
+    let tile_px = atlas_size.0 / atlas_cols;
+    let mut placed: Vec<(&image::RgbaImage, FrameRect, u32, u32)> = Vec::new();
+    let mut next_block = 0u32;
     let mut animations: Vec<Animation> = sprites
         .iter()
         .map(|sprite| {
+            let span = sprite.span.max(1);
             let (mut own, mut pack) = (HashMap::new(), HashMap::new());
             let mut place = |image, seen: &mut HashMap<u32, u32>, index| {
                 *seen.entry(index).or_insert_with(|| {
-                    placed.push((image, sprite.layout.rect(index)));
-                    placed.len() as u32 - 1
+                    placed.push((image, sprite.layout.rect(index), span, next_block));
+                    next_block += span * span;
+                    next_block - span * span
                 })
             };
             let frames = sprite
@@ -239,6 +252,7 @@ pub(super) fn build_frames(
                 .collect();
             Animation {
                 atlas_tile: sprite.atlas_tile,
+                span,
                 frames,
                 interpolate: sprite.layout.interpolate,
                 blend_slot: None,
@@ -247,56 +261,70 @@ pub(super) fn build_frames(
         })
         .collect();
 
-    let first_slot = placed.len() as u32;
+    let first_slot = next_block;
     let mut next_slot = first_slot;
-    let mut slot = || {
-        next_slot += 1;
-        next_slot - 1
+    let mut slot = |span: u32| {
+        next_slot += span * span;
+        next_slot - span * span
     };
     let mut kept: HashMap<u32, Vec<Vec<u8>>> = HashMap::new();
     for animation in animations
         .iter_mut()
         .filter(|animation| animation.interpolate)
     {
-        animation.blend_slot = Some(slot());
+        let span = animation.span;
+        animation.blend_slot = Some(slot(span));
         if animation
             .frames
             .iter()
             .any(|frame| frame.pack_tile != frame.tile)
         {
-            animation.pack_blend_slot = Some(slot());
+            animation.pack_blend_slot = Some(slot(span));
         }
         for frame in &animation.frames {
-            kept.extend([(frame.tile, Vec::new()), (frame.pack_tile, Vec::new())]);
+            for i in 0..span * span {
+                kept.extend([
+                    (frame.tile + i, Vec::new()),
+                    (frame.pack_tile + i, Vec::new()),
+                ]);
+            }
         }
     }
 
-    let frames_h = (placed.len() as u32).div_ceil(ATLAS_COLS) * tile_px;
-    let mut level0 = vec![0u8; (atlas_w * frames_h * 4) as usize];
-    for (tile, (image, rect)) in placed.iter().enumerate() {
-        blit_tile(&mut level0, tile as u32, atlas_w, image, *rect);
+    let spans: Vec<u32> = placed.iter().map(|&(_, _, span, _)| span).collect();
+    let frames_cols = grid_cols(&spans);
+    let (origins, cells) = place_blocks(&spans, frames_cols);
+    let (frames_w, frames_h) = (frames_cols * tile_px, cells.rows() * tile_px);
+    let mut level0 = vec![0u8; (frames_w * frames_h * 4) as usize];
+    for (&(image, rect, span, _), &origin) in placed.iter().zip(&origins) {
+        blit_tile(
+            &mut level0,
+            origin,
+            span,
+            (frames_w, frames_cols),
+            image,
+            rect,
+        );
     }
-    let chain = build_mip_chain(&level0, atlas_w, frames_h, n_mips);
+    let chain = build_mip_chain(&level0, frames_w, frames_h, n_mips, &cells);
 
-    let layout = TileBlocks::new(tile_px, n_mips);
+    let layout = TileBlocks::new(tile_px, n_mips, atlas_cols);
     let mut blocks = vec![0u8; layout.stride as usize * next_slot as usize];
-    for (tile, block) in blocks
-        .chunks_exact_mut(layout.stride as usize)
-        .take(placed.len())
-        .enumerate()
-    {
-        let tile = tile as u32;
-        let levels = tile_levels(&chain, atlas_w, frames_h, tile, n_mips);
-        layout.write(block, &levels);
-        if let Some(keep) = kept.get_mut(&tile) {
-            *keep = levels;
+    for (&(_, _, span, first), &origin) in placed.iter().zip(&origins) {
+        for (tile, cell) in (first..).zip(block_cells(origin, span, frames_cols)) {
+            let at = (tile * layout.stride) as usize;
+            let levels = tile_levels(&chain, frames_w, frames_h, frames_cols, cell, n_mips);
+            layout.write(&mut blocks[at..at + layout.stride as usize], &levels);
+            if let Some(keep) = kept.get_mut(&tile) {
+                *keep = levels;
+            }
         }
     }
     crate::log_info!(
         "atlas",
         "{} animated sprites, {} frame tiles, {} blend slots, {} KiB",
         animations.len(),
-        placed.len(),
+        first_slot,
         next_slot - first_slot,
         blocks.len() / 1024
     );
@@ -353,6 +381,7 @@ pub struct TileCopy {
     pub tile: u32,
     #[cfg_attr(not(feature = "shader_support"), allow(dead_code))]
     pub pack_tile: u32,
+    pub span: u32,
 }
 
 #[derive(Resource, Default)]
@@ -412,12 +441,13 @@ impl AtlasAnimator {
     }
 
     #[cfg(feature = "shader_support")]
-    pub(crate) fn pack_tiles(&self) -> impl Iterator<Item = (u32, u32)> {
+    pub(crate) fn pack_tiles(&self) -> impl Iterator<Item = (u32, u32, u32)> {
         let animations = self.frames.iter().flat_map(|frames| &frames.animations);
         animations.zip(&self.states).map(|(animation, state)| {
             (
                 animation.atlas_tile,
                 animation.frames[state.frame].pack_tile,
+                animation.span,
             )
         })
     }
@@ -440,27 +470,32 @@ impl AtlasAnimator {
     fn tick(&mut self, copies: &mut Vec<TileCopy>) {
         let Some(frames) = &self.frames else { return };
         let stride = frames.layout.stride as usize;
-        let mut mix = |slot: u32, from: u32, to: u32, q: u32| {
-            let at = (slot - frames.first_slot) as usize * stride;
-            let block = &mut self.tail[at..at + stride];
-            if let (Some(from), Some(to)) = (frames.kept.get(&from), frames.kept.get(&to)) {
-                frames.layout.blend(block, from, to, q);
+        let mut mix = |slot: u32, from: u32, to: u32, q: u32, span: u32| {
+            for i in 0..span * span {
+                let at = (slot + i - frames.first_slot) as usize * stride;
+                let block = &mut self.tail[at..at + stride];
+                if let (Some(from), Some(to)) =
+                    (frames.kept.get(&(from + i)), frames.kept.get(&(to + i)))
+                {
+                    frames.layout.blend(block, from, to, q);
+                }
             }
         };
         for (animation, state) in frames.animations.iter().zip(&mut self.states) {
             state.tick(&animation.frames);
-            let atlas_tile = animation.atlas_tile;
+            let (atlas_tile, span) = (animation.atlas_tile, animation.span);
             if let Some(slot) = animation.blend_slot {
                 let (current, next, q) = state.blend(&animation.frames);
-                mix(slot, current.tile, next.tile, q);
+                mix(slot, current.tile, next.tile, q, span);
                 let pack_tile = animation.pack_blend_slot.unwrap_or(slot);
                 if pack_tile != slot {
-                    mix(pack_tile, current.pack_tile, next.pack_tile, q);
+                    mix(pack_tile, current.pack_tile, next.pack_tile, q, span);
                 }
                 copies.push(TileCopy {
                     atlas_tile,
                     tile: slot,
                     pack_tile,
+                    span,
                 });
             } else if state.dirty {
                 let frame = animation.frames[state.frame];
@@ -468,6 +503,7 @@ impl AtlasAnimator {
                     atlas_tile,
                     tile: frame.tile,
                     pack_tile: frame.pack_tile,
+                    span,
                 });
             }
         }
@@ -517,11 +553,13 @@ pub fn upload_atlas_frames(
             &gpu.texture,
             copy.tile,
             copy.atlas_tile,
+            copy.span,
         );
     }
     queue.submit([encoder.finish()]);
     if let Some(stats) = super::terrain_pool::stats() {
-        let level_copies = copies.0.len() * frames.layout.levels.len();
+        let cells: u32 = copies.0.iter().map(|copy| copy.span * copy.span).sum();
+        let level_copies = cells as usize * frames.layout.levels.len();
         stats.0.atlas_copies.store(level_copies, Ordering::Relaxed);
         stats.0.atlas_steps.fetch_add(1, Ordering::Relaxed);
     }
@@ -615,11 +653,12 @@ mod tests {
         };
         let sprite = AnimatedSprite {
             atlas_tile: 7,
+            span: 1,
             image,
             pack_image: pack,
             layout: &layout,
         };
-        build_frames(&[sprite], (256, 256), 5).expect("one sprite")
+        build_frames(&[sprite], (256, 256), 16, 5).expect("one sprite")
     }
 
     fn animator(frames: AtlasFrames) -> AtlasAnimator {
@@ -678,7 +717,8 @@ mod tests {
             [TileCopy {
                 atlas_tile: 7,
                 tile: slot,
-                pack_tile: slot
+                pack_tile: slot,
+                span: 1
             }]
         );
         let last = animator.frames.as_ref().unwrap().layout.levels[4].offset as usize;
@@ -704,7 +744,8 @@ mod tests {
             [TileCopy {
                 atlas_tile: 7,
                 tile: tiles[1],
-                pack_tile: tiles[1]
+                pack_tile: tiles[1],
+                span: 1
             }]
         );
     }
@@ -722,13 +763,13 @@ mod tests {
         let mut animator = animator(frames);
         assert_eq!(
             animator.pack_tiles().collect::<Vec<_>>(),
-            [(7, pack_tiles[0])]
+            [(7, pack_tiles[0], 1)]
         );
         animator.tick(&mut Vec::new());
         animator.tick(&mut Vec::new());
         assert_eq!(
             animator.pack_tiles().collect::<Vec<_>>(),
-            [(7, pack_tiles[2])]
+            [(7, pack_tiles[2], 1)]
         );
     }
 
@@ -748,7 +789,7 @@ mod tests {
     #[test]
     fn block_rows_and_levels_are_aligned() {
         for (tile_px, n_mips) in [(16, 5), (32, 6), (64, 7)] {
-            let blocks = TileBlocks::new(tile_px, n_mips);
+            let blocks = TileBlocks::new(tile_px, n_mips, 16);
             assert_eq!(blocks.levels.len(), n_mips as usize);
             assert_eq!(blocks.stride % PLACEMENT_ALIGN, 0);
             for (level, at) in blocks.levels.iter().enumerate() {
@@ -759,6 +800,6 @@ mod tests {
                 assert!(at.offset + at.pitch * at.side <= blocks.stride);
             }
         }
-        assert_eq!(TileBlocks::new(16, 5).stride, 8192);
+        assert_eq!(TileBlocks::new(16, 5, 16).stride, 8192);
     }
 }

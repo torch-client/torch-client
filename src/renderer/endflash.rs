@@ -22,6 +22,49 @@ pub(crate) struct EndFlash {
     pub(crate) y_angle: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EndClock {
+    ticks: i64,
+    partial: f32,
+    rate: f32,
+    game_time: i64,
+}
+
+impl Default for EndClock {
+    fn default() -> EndClock {
+        EndClock {
+            ticks: 0,
+            partial: 0.0,
+            rate: 1.0,
+            game_time: 0,
+        }
+    }
+}
+
+impl EndClock {
+    pub(crate) fn set(&mut self, game_time: i64, ticks: i64, partial: f32, rate: f32) {
+        *self = EndClock {
+            ticks,
+            partial,
+            rate,
+            game_time,
+        };
+    }
+
+    pub(crate) fn tick(&mut self, game_time: i64) -> i64 {
+        let next =
+            f64::from(self.partial) + (game_time - self.game_time) as f64 * f64::from(self.rate);
+        self.partial = (next - next.floor()) as f32;
+        self.ticks += next.floor() as i64;
+        self.game_time = game_time;
+        self.ticks
+    }
+
+    pub(crate) fn ticks(&self) -> i64 {
+        self.ticks
+    }
+}
+
 fn between_inclusive(random: &mut JavaRandom, min: i64, max_inclusive: i64) -> i64 {
     i64::from(random.next_int((max_inclusive - min + 1) as u32)) + min
 }

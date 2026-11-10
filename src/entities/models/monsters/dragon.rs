@@ -1,5 +1,6 @@
 use crate::entities::geom::{BakedModel, CubeList, Grow, LayerDef, MeshDef, PartPose, PartState};
-use crate::entities::state::EntityState;
+use crate::entities::state::{DragonPose, EntityState};
+use crate::util::mth::wrap_degrees;
 
 const NECK_PART_COUNT: usize = 5;
 const TAIL_PART_COUNT: usize = 12;
@@ -171,7 +172,10 @@ fn pose_limbs(
     parts[front_foot].x_rot = 0.75 + bounce * 0.1;
 }
 
+const DEG: f32 = 0.017_453_292;
+
 pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
+    let pose = st.extras.dragon.as_deref().unwrap_or(&DragonPose::REST);
     let flap_time = st.extras.flap_time * 6.2831855;
     parts[model.id("jaw")].x_rot = (flap_time.sin() + 1.0) * 0.2;
 
@@ -180,7 +184,37 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
     let root = model.id("root");
     parts[root].y = (bounce - 2.0) * 16.0;
     parts[root].z = -48.0;
-    parts[root].x_rot = bounce * 2.0 * 0.017_453_292;
+    parts[root].x_rot = bounce * 2.0 * DEG;
+
+    let neck0 = model.id(NECK_NAMES[0]);
+    let (mut xx, mut yy, mut zz) = (parts[neck0].x, parts[neck0].y, parts[neck0].z);
+    let start = pose.historical(6);
+    let rot2 = wrap_degrees(pose.historical(5).y_rot - pose.historical(10).y_rot);
+    let rot = wrap_degrees(pose.historical(5).y_rot + rot2 / 2.0);
+    for (i, name) in NECK_NAMES.iter().enumerate() {
+        let neck = &mut parts[model.id(name)];
+        let point = pose.historical(5 - i);
+        let neck_x_rot = (i as f32 * 0.45 + flap_time).cos() * 0.15;
+        neck.y_rot = wrap_degrees(point.y_rot - start.y_rot) * DEG * 1.5;
+        neck.x_rot = neck_x_rot + pose.head_part_y_offset(i, start, point) * DEG * 1.5 * 5.0;
+        neck.z_rot = -wrap_degrees(point.y_rot - rot) * DEG * 1.5;
+        neck.y = yy;
+        neck.z = zz;
+        neck.x = xx;
+        xx -= neck.y_rot.sin() * neck.x_rot.cos() * 10.0;
+        yy += neck.x_rot.sin() * 10.0;
+        zz -= neck.y_rot.cos() * neck.x_rot.cos() * 10.0;
+    }
+
+    let head = &mut parts[model.id("head")];
+    head.y = yy;
+    head.z = zz;
+    head.x = xx;
+    let current = pose.historical(0);
+    head.y_rot = wrap_degrees(current.y_rot - start.y_rot) * DEG;
+    head.x_rot = wrap_degrees(pose.head_part_y_offset(6, start, current)) * DEG * 1.5 * 5.0;
+    head.z_rot = -wrap_degrees(current.y_rot - rot) * DEG;
+    parts[model.id("body")].z_rot = -rot2 * 1.5 * DEG;
 
     let left_wing = model.id("left_wing");
     let left_wing_tip = model.id("left_wing_tip");
@@ -222,15 +256,21 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
     );
 
     let mut tail_x_rot = 0.0;
-    for i in 0..TAIL_PART_COUNT {
+    let tail0 = model.id(TAIL_NAMES[0]);
+    let (mut xx, mut yy, mut zz) = (parts[tail0].x, parts[tail0].y, parts[tail0].z);
+    let start = pose.historical(11);
+    for (i, name) in TAIL_NAMES.iter().enumerate() {
+        let point = pose.historical(12 + i);
         tail_x_rot += (i as f32 * 0.45 + flap_time).sin() * 0.05;
-        let id = model.id(TAIL_NAMES[i]);
-        parts[id].x_rot = tail_x_rot;
-        parts[id].y_rot = 180.0 * 0.017_453_292;
-    }
-
-    for i in 0..NECK_PART_COUNT {
-        let id = model.id(NECK_NAMES[i]);
-        parts[id].x_rot = (i as f32 * 0.45 + flap_time).cos() * 0.15;
+        let tail = &mut parts[model.id(name)];
+        tail.y_rot = (wrap_degrees(point.y_rot - start.y_rot) * 1.5 + 180.0) * DEG;
+        tail.x_rot = tail_x_rot + (point.y - start.y) as f32 * DEG * 1.5 * 5.0;
+        tail.z_rot = wrap_degrees(point.y_rot - rot) * DEG * 1.5;
+        tail.y = yy;
+        tail.z = zz;
+        tail.x = xx;
+        yy += tail.x_rot.sin() * 10.0;
+        zz -= tail.y_rot.cos() * tail.x_rot.cos() * 10.0;
+        xx -= tail.y_rot.sin() * tail.x_rot.cos() * 10.0;
     }
 }

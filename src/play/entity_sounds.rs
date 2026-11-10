@@ -107,35 +107,6 @@ struct Flash {
     voice: Option<Tracked>,
 }
 
-struct EndClock {
-    ticks: i64,
-    partial: f32,
-    rate: f32,
-    game_time: i64,
-}
-
-impl Default for EndClock {
-    fn default() -> EndClock {
-        EndClock {
-            ticks: 0,
-            partial: 0.0,
-            rate: 1.0,
-            game_time: 0,
-        }
-    }
-}
-
-impl EndClock {
-    fn tick(&mut self, game_time: i64) -> i64 {
-        let next =
-            f64::from(self.partial) + (game_time - self.game_time) as f64 * f64::from(self.rate);
-        self.partial = (next - next.floor()) as f32;
-        self.ticks += next.floor() as i64;
-        self.game_time = game_time;
-        self.ticks
-    }
-}
-
 struct Rocket {
     at: [f64; 3],
     large: bool,
@@ -170,7 +141,6 @@ struct Inbox {
     bound: Vec<Bound>,
     attacks: Vec<i32>,
     hurts: Vec<i32>,
-    clock: EndClock,
 }
 
 global! {
@@ -274,15 +244,6 @@ pub(crate) fn guardian_attack(id: i32) {
 
 pub(crate) fn hurt(id: i32) {
     inbox().lock().unwrap().hurts.push(id);
-}
-
-pub(crate) fn set_end_clock(game_time: i64, ticks: i64, partial: f32, rate: f32) {
-    inbox().lock().unwrap().clock = EndClock {
-        ticks,
-        partial,
-        rate,
-        game_time,
-    };
 }
 
 fn voice_pitch(rng: &mut JavaRandom) -> f32 {
@@ -434,7 +395,7 @@ fn drive(
     }
 }
 
-pub(crate) fn tick(bot: &Client) {
+pub(crate) fn tick(bot: &Client, end_clock: i64) {
     use EntityKind as K;
     let Ok(origin) = bot.position() else { return };
     let world_name = {
@@ -908,7 +869,7 @@ pub(crate) fn tick(bot: &Client) {
         false
     });
 
-    let clock = inbox.clock.tick(game_time);
+    let clock = end_clock;
     if dimension::current() == Dimension::End {
         let level = crate::renderer::endflash::intensity(clock);
         let started = level > 0.0 && *flash <= 0.0;

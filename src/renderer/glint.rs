@@ -17,6 +17,10 @@ pub(crate) fn armor_scale(glint: bool) -> Vec4 {
     if glint { ARMOR } else { Vec4::ZERO }
 }
 
+const ENTITY_SCALE: f32 = 0.5;
+
+pub(crate) const ENTITY: Vec4 = Vec4::new(ENTITY_SCALE, ENTITY_SCALE, STRENGTH, 0.0);
+
 pub(crate) fn is_armor(glint: Vec4) -> bool {
     glint.w > 0.0
 }
@@ -64,7 +68,7 @@ fn load_texture(images: &mut Assets<Image>, path: &str, who: &str) -> Option<Han
     use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 
     let handle = super::skin::load_texture(images, path, who)?;
-    if let Some(image) = images.get_mut(&handle) {
+    if let Some(mut image) = images.get_mut(&handle) {
         image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
             address_mode_u: ImageAddressMode::Repeat,
             address_mode_v: ImageAddressMode::Repeat,

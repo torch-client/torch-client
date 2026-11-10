@@ -6,14 +6,17 @@ use core::any::TypeId;
 use bevy_ecs::entity::EntityHashMap;
 use bevy_ecs::lifecycle::HookContext;
 use bevy_ecs::world::DeferredWorld;
+use bevy_mesh::skinning::{
+    entity_aabb_from_skinned_mesh_bounds, SkinnedMesh, SkinnedMeshInverseBindposes,
+};
 use derive_more::derive::{Deref, DerefMut};
 pub use range::*;
 pub use render_layers::*;
 
-use bevy_app::{Plugin, PostUpdate};
+use bevy_app::{Plugin, PostUpdate, ValidateParentHasComponentPlugin};
 use bevy_asset::prelude::AssetChanged;
 use bevy_asset::{AssetEventSystems, Assets};
-use bevy_ecs::{hierarchy::validate_parent_has_component, prelude::*};
+use bevy_ecs::{prelude::*, VariantDefaults};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use bevy_transform::{components::GlobalTransform, TransformSystems};
 use bevy_utils::{Parallel, TypeIdMap};
@@ -29,7 +32,7 @@ use bevy_mesh::{mark_3d_meshes_as_changed_if_their_assets_changed, Mesh, Mesh2d,
 #[derive(Component, Default)]
 pub struct NoCpuCulling;
 
-#[derive(Component, Clone, Copy, Reflect, Debug, PartialEq, Eq, Default)]
+#[derive(Component, Clone, Copy, Reflect, Debug, PartialEq, Eq, Default, VariantDefaults)]
 #[reflect(Component, Default, Debug, PartialEq, Clone)]
 #[require(InheritedVisibility, ViewVisibility)]
 pub enum Visibility {
@@ -82,7 +85,6 @@ impl PartialEq<&Visibility> for Visibility {
 
 #[derive(Component, Deref, Debug, Default, Clone, Copy, Reflect, PartialEq, Eq)]
 #[reflect(Component, Default, Debug, PartialEq, Clone)]
-#[component(on_insert = validate_parent_has_component::<Self>)]
 pub struct InheritedVisibility(bool);
 
 impl InheritedVisibility {
@@ -107,7 +109,9 @@ pub struct ViewVisibility(
 );
 
 impl ViewVisibility {
-    pub const HIDDEN: Self = Self(0);
+    pub const HIDDEN: Self = Self(0b00);
+
+    pub const VISIBLE: Self = Self(0b11);
 
     #[inline]
     pub fn get(self) -> bool {
@@ -142,15 +146,27 @@ impl<'a> SetViewVisibility for Mut<'a, ViewVisibility> {
     }
 }
 
-#[derive(Debug, Component, Default, Reflect)]
+#[derive(Debug, Component, Default, Reflect, Clone, PartialEq)]
 #[reflect(Component, Default, Debug)]
 pub struct NoFrustumCulling;
 
-#[derive(Clone, Component, Default, Debug, Reflect)]
+#[derive(Debug, Component, Default, Reflect)]
+#[reflect(Component, Default, Debug)]
+pub struct DynamicSkinnedMeshBounds;
+
+#[derive(Clone, Component, Debug, Reflect)]
 #[reflect(Component, Default, Debug, Clone)]
 pub struct VisibleEntities {
     #[reflect(ignore, clone)]
     pub entities: TypeIdMap<Vec<Entity>>,
+}
+
+impl Default for VisibleEntities {
+    fn default() -> VisibleEntities {
+        let mut entities = TypeIdMap::default();
+        entities.insert(TypeId::of::<Mesh3d>(), vec![]);
+        VisibleEntities { entities }
+    }
 }
 
 impl VisibleEntities {
@@ -192,11 +208,28 @@ impl VisibleEntities {
     }
 }
 
-#[derive(Component, Clone, Debug, Default, Reflect, Deref, DerefMut)]
+#[derive(Component, Clone, Debug, Default, Reflect)]
 #[reflect(Component, Debug, Default, Clone)]
 pub struct VisibleMeshEntities {
     #[reflect(ignore, clone)]
     pub entities: Vec<Entity>,
+}
+
+impl VisibleMeshEntities {
+    pub fn shrink(&mut self) {
+        let capacity = self.entities.capacity();
+        let reserved = capacity
+            .checked_div(self.entities.len())
+            .map_or(0, |reserve| {
+                if reserve > 2 {
+                    capacity / (reserve / 2)
+                } else {
+                    capacity
+                }
+            });
+
+        self.entities.shrink_to(reserved);
+    }
 }
 
 #[derive(Component, Clone, Debug, Default, Reflect)]
@@ -246,7 +279,8 @@ impl Plugin for VisibilityPlugin {
     fn build(&self, app: &mut bevy_app::App) {
         use VisibilitySystems::*;
 
-        app.register_required_components::<Mesh3d, Visibility>()
+        app.add_plugins(ValidateParentHasComponentPlugin::<InheritedVisibility>::default())
+            .register_required_components::<Mesh3d, Visibility>()
             .register_required_components::<Mesh3d, VisibilityClass>()
             .register_required_components::<Mesh2d, Visibility>()
             .register_required_components::<Mesh2d, VisibilityClass>()
@@ -272,10 +306,13 @@ impl Plugin for VisibilityPlugin {
             .add_systems(
                 PostUpdate,
                 (
-                    calculate_bounds.in_set(CalculateBounds),
+                    (calculate_bounds, update_skinned_mesh_bounds)
+                        .chain()
+                        .in_set(CalculateBounds),
                     (visibility_propagate_system, reset_view_visibility)
                         .in_set(VisibilityPropagate),
-                    check_visibility.in_set(CheckVisibility),
+                    (check_visibility_cpu_culling, check_visibility_gpu_culling)
+                        .in_set(CheckVisibility),
                     mark_newly_hidden_entities_invisible.in_set(MarkNewlyHiddenEntitiesInvisible),
                 ),
             );
@@ -328,6 +365,34 @@ pub fn calculate_bounds(
         });
 }
 
+fn update_skinned_mesh_bounds(
+    inverse_bindposes_assets: Res<Assets<SkinnedMeshInverseBindposes>>,
+    mesh_assets: Res<Assets<Mesh>>,
+    mut mesh_entities: Query<
+        (&mut Aabb, &Mesh3d, &SkinnedMesh, Option<&GlobalTransform>),
+        With<DynamicSkinnedMeshBounds>,
+    >,
+    joint_entities: Query<&GlobalTransform>,
+) {
+    mesh_entities
+        .par_iter_mut()
+        .for_each(|(mut aabb, mesh, skinned_mesh, world_from_entity)| {
+            if let Some(inverse_bindposes_asset) =
+                inverse_bindposes_assets.get(&skinned_mesh.inverse_bindposes)
+                && let Some(mesh_asset) = mesh_assets.get(mesh)
+                && let Ok(skinned_aabb) = entity_aabb_from_skinned_mesh_bounds(
+                    &joint_entities,
+                    mesh_asset,
+                    skinned_mesh,
+                    inverse_bindposes_asset,
+                    world_from_entity,
+                )
+            {
+                *aabb = skinned_aabb.into();
+            }
+        });
+}
+
 pub fn update_frusta(
     mut views: Query<
         (&GlobalTransform, &Projection, &mut Frustum),
@@ -349,6 +414,7 @@ fn visibility_propagate_system(
     >,
     mut visibility_query: Query<(&Visibility, &mut InheritedVisibility)>,
     children_query: Query<&Children, (With<Visibility>, With<InheritedVisibility>)>,
+    mut removed_child_of: RemovedComponents<ChildOf>,
 ) {
     for (entity, visibility, child_of, children) in &changed {
         let is_visible = match visibility {
@@ -366,6 +432,26 @@ fn visibility_propagate_system(
             inherited_visibility.0 = is_visible;
 
             for &child in children.into_iter().flatten() {
+                let _ =
+                    propagate_recursive(is_visible, child, &mut visibility_query, &children_query);
+            }
+        }
+    }
+
+    for entity in removed_child_of.read() {
+        let Ok((visibility, mut inherited_visibility)) = visibility_query.get_mut(entity) else {
+            continue;
+        };
+
+        let is_visible = match visibility {
+            Visibility::Visible | Visibility::Inherited => true,
+            Visibility::Hidden => false,
+        };
+
+        if inherited_visibility.get() != is_visible {
+            inherited_visibility.0 = is_visible;
+
+            for &child in children_query.get(entity).ok().into_iter().flatten() {
                 let _ =
                     propagate_recursive(is_visible, child, &mut visibility_query, &children_query);
             }
@@ -398,13 +484,13 @@ fn propagate_recursive(
     Ok(())
 }
 
-fn reset_view_visibility(mut query: Query<&mut ViewVisibility>) {
-    query.par_iter_mut().for_each(|mut view_visibility| {
+fn reset_view_visibility(mut reset_query: Query<&mut ViewVisibility, Without<NoCpuCulling>>) {
+    reset_query.par_iter_mut().for_each(|mut view_visibility| {
         view_visibility.bypass_change_detection().update();
     });
 }
 
-pub fn check_visibility(
+pub fn check_visibility_cpu_culling(
     mut thread_queues: Local<Parallel<TypeIdMap<Vec<Entity>>>>,
     mut view_query: Query<(
         Entity,
@@ -414,33 +500,41 @@ pub fn check_visibility(
         &Camera,
         Has<NoCpuCulling>,
     )>,
-    mut unlayered_query: Query<(
-        Entity,
-        &InheritedVisibility,
-        &mut ViewVisibility,
-        Option<&VisibilityClass>,
-        Option<&RenderLayers>,
-        Option<&Aabb>,
-        &GlobalTransform,
-        Has<NoFrustumCulling>,
-        Has<VisibilityRange>,
-    ), Without<RenderLayers>>,
-    mut layered_query: Query<(
-        Entity,
-        &InheritedVisibility,
-        &mut ViewVisibility,
-        Option<&VisibilityClass>,
-        Option<&RenderLayers>,
-        Option<&Aabb>,
-        &GlobalTransform,
-        Has<NoFrustumCulling>,
-        Has<VisibilityRange>,
-    ), With<RenderLayers>>,
+    mut unlayered_query: Query<
+        (
+            Entity,
+            &InheritedVisibility,
+            &mut ViewVisibility,
+            Option<&VisibilityClass>,
+            Option<&RenderLayers>,
+            Option<&Aabb>,
+            Option<&Sphere>,
+            &GlobalTransform,
+            Has<NoFrustumCulling>,
+            Has<VisibilityRange>,
+        ),
+        (Without<NoCpuCulling>, Without<RenderLayers>),
+    >,
+    mut layered_query: Query<
+        (
+            Entity,
+            &InheritedVisibility,
+            &mut ViewVisibility,
+            Option<&VisibilityClass>,
+            Option<&RenderLayers>,
+            Option<&Aabb>,
+            Option<&Sphere>,
+            &GlobalTransform,
+            Has<NoFrustumCulling>,
+            Has<VisibilityRange>,
+        ),
+        (Without<NoCpuCulling>, With<RenderLayers>),
+    >,
     visible_entity_ranges: Option<Res<VisibleEntityRanges>>,
 ) {
     let visible_entity_ranges = visible_entity_ranges.as_deref();
 
-    for (view, mut visible_entities, frustum, maybe_view_mask, camera, no_cpu_culling) in
+    for (view, mut visible_entities, frustum, maybe_view_mask, camera, no_cpu_culling_camera) in
         &mut view_query
     {
         if !camera.is_active {
@@ -461,6 +555,7 @@ pub fn check_visibility(
                     visibility_class,
                     maybe_entity_mask,
                     maybe_model_aabb,
+                    maybe_model_sphere,
                     transform,
                     no_frustum_culling,
                     has_visibility_range,
@@ -483,19 +578,22 @@ pub fn check_visibility(
                     return;
                 }
 
-                if !no_frustum_culling
-                    && !no_cpu_culling
-                    && let Some(model_aabb) = maybe_model_aabb
-                {
-                    let world_from_local = transform.affine();
-                    let model_sphere = Sphere {
-                        center: world_from_local.transform_point3a(model_aabb.center),
-                        radius: transform.radius_vec3a(model_aabb.half_extents),
-                    };
-                    if !frustum.intersects_sphere(&model_sphere, false) {
-                        return;
-                    }
-                    if !frustum.intersects_obb(model_aabb, &world_from_local, true, false) {
+                if !no_frustum_culling && !no_cpu_culling_camera {
+                    if let Some(model_aabb) = maybe_model_aabb {
+                        let world_from_local = transform.affine();
+                        let model_sphere = Sphere {
+                            center: world_from_local.transform_point3a(model_aabb.center),
+                            radius: transform.radius_vec3a(model_aabb.half_extents),
+                        };
+                        if !frustum.intersects_sphere(&model_sphere, false) {
+                            return;
+                        }
+                        if !frustum.intersects_obb(model_aabb, &world_from_local, true, false) {
+                            return;
+                        }
+                    } else if let Some(model_sphere) = maybe_model_sphere
+                        && !frustum.intersects_sphere(model_sphere, false)
+                    {
                         return;
                     }
                 }
@@ -524,10 +622,37 @@ pub fn check_visibility(
                 visible_entities.get_mut(*class).append(entities);
             }
         }
+
+        for visible_entities in visible_entities.entities.values_mut() {
+            visible_entities.sort_unstable();
+        }
     }
 }
 
-fn mark_newly_hidden_entities_invisible(mut view_visibilities: Query<&mut ViewVisibility>) {
+pub fn check_visibility_gpu_culling(
+    mut query: Query<
+        (&mut ViewVisibility, &InheritedVisibility),
+        (
+            With<NoCpuCulling>,
+            Or<(Changed<InheritedVisibility>, Added<NoCpuCulling>)>,
+        ),
+    >,
+) {
+    query
+        .par_iter_mut()
+        .for_each(|(mut view_visibility, inherited_visibility)| {
+            let new_view_visibility = if inherited_visibility.0 {
+                ViewVisibility::VISIBLE
+            } else {
+                ViewVisibility::HIDDEN
+            };
+            view_visibility.set_if_neq(new_view_visibility);
+        });
+}
+
+fn mark_newly_hidden_entities_invisible(
+    mut view_visibilities: Query<&mut ViewVisibility, Without<NoCpuCulling>>,
+) {
     view_visibilities
         .par_iter_mut()
         .for_each(|mut view_visibility| {
@@ -683,6 +808,39 @@ mod test {
             is_visible(child2),
             "Child2 should inherit visibility from parent"
         );
+    }
+
+    #[test]
+    fn test_visibility_propagation_on_parent_removed() {
+        let mut app = App::new();
+
+        app.add_systems(Update, visibility_propagate_system);
+
+        let parent = app.world_mut().spawn((Visibility::Hidden,)).id();
+        let child = app.world_mut().spawn((Visibility::Inherited,)).id();
+
+        app.world_mut().entity_mut(parent).add_children(&[child]);
+
+        app.update();
+
+        let is_visible = |app: &App, e: Entity| {
+            app.world()
+                .entity(e)
+                .get::<InheritedVisibility>()
+                .unwrap()
+                .get()
+        };
+
+        assert!(
+            !is_visible(&app, child),
+            "Child should inherit visibility from parent"
+        );
+
+        app.world_mut().entity_mut(child).remove::<ChildOf>();
+
+        app.update();
+
+        assert!(is_visible(&app, child), "Child should have become visible");
     }
 
     #[test]

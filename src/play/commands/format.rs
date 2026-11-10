@@ -2,9 +2,15 @@ use crate::text::{Span, Style};
 
 use super::parse::Parse;
 
-pub(super) const LITERAL_COLOR: u32 = 0xAAAAAA;
-pub(super) const UNPARSED_COLOR: u32 = 0xFF5555;
-pub(super) const ARGUMENT_COLORS: [u32; 5] = [0x55FFFF, 0xFFFF55, 0x55FF55, 0xFF55FF, 0xFFAA00];
+pub(super) const LITERAL_COLOR: u32 = crate::text::GRAY;
+pub(super) const UNPARSED_COLOR: u32 = crate::text::RED;
+pub(super) const ARGUMENT_COLORS: [u32; 5] = [
+    crate::text::AQUA,
+    crate::text::YELLOW,
+    crate::text::GREEN,
+    0xFF55FF,
+    crate::text::GOLD,
+];
 
 pub fn format_text(parse: &Parse, input: &[char]) -> Vec<Span> {
     let mut parts: Vec<Span> = Vec::new();

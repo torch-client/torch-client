@@ -146,6 +146,7 @@ fn builtin_children(b: &mut B, shape: Shape, table: &Table) -> (bool, Vec<usize>
             true,
             vec![b.arg("player", BrigadierParser::GameProfile, true, vec![])],
         ),
+        Shape::Choice(words) => (true, b.lits(words.iter().copied(), true, &[])),
         Shape::Category => {
             let names: Vec<String> = Category::ALL.iter().map(|c| norm(c.name())).collect();
             (true, b.lits(names.iter().map(String::as_str), true, &[]))

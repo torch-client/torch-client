@@ -9,6 +9,7 @@ const fn v(name: &'static str, protocol: i32) -> ProtocolVersion {
 }
 
 pub(crate) const VERSIONS: &[ProtocolVersion] = &[
+    v("26.2", 776),
     v("26.1.2", 775),
     v("26.1.1", 775),
     v("26.1", 775),
@@ -17,9 +18,9 @@ pub(crate) const VERSIONS: &[ProtocolVersion] = &[
     v("1.21.9", 773),
 ];
 
-pub(crate) const NATIVE: ProtocolVersion = v("26.1.1", 775);
+pub(crate) const NATIVE: ProtocolVersion = v("26.2", 776);
 
-const TRANSLATED: &[i32] = &[774];
+const TRANSLATED: &[i32] = &[775, 774];
 
 pub(crate) fn joinable(protocol: i32) -> bool {
     protocol == NATIVE.protocol || TRANSLATED.contains(&protocol)
@@ -60,7 +61,9 @@ mod tests {
         assert_eq!(picked[0], NATIVE);
         assert_eq!(picked.len(), 1 + TRANSLATED.len());
         assert!(picked.iter().all(|v| joinable(v.protocol)));
-        assert_eq!(picked[1].name, "1.21.11");
+        assert_eq!(picked[0].name, "26.2");
+        assert_eq!(picked[1].name, "26.1.2");
+        assert_eq!(picked[2].name, "1.21.11");
     }
 
     #[test]
@@ -80,7 +83,9 @@ mod tests {
 
     #[test]
     fn lookups() {
+        assert_eq!(ProtocolVersion::from_protocol(776).unwrap().name, "26.2");
         assert_eq!(ProtocolVersion::from_protocol(775).unwrap().name, "26.1.2");
+        assert_eq!(ProtocolVersion::from_name("26.1.1").unwrap().protocol, 775);
         assert_eq!(ProtocolVersion::from_protocol(773).unwrap().name, "1.21.10");
         assert_eq!(ProtocolVersion::from_name("1.21.11").unwrap().protocol, 774);
         assert!(ProtocolVersion::from_protocol(47).is_none());
@@ -90,6 +95,8 @@ mod tests {
     #[test]
     fn a_translated_version_is_joinable_and_an_unknown_one_is_not() {
         assert!(joinable(NATIVE.protocol));
+        assert!(joinable(776));
+        assert!(joinable(775));
         assert!(joinable(774));
         assert!(!joinable(773), "1.21.10 has no tables and no hop");
         assert!(!joinable(47));

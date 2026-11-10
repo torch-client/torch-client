@@ -348,6 +348,7 @@ pub(crate) fn kind_for_block(id: &str) -> Option<BlockEntityKind> {
         "end_portal" => BlockEntityKind::EndPortal,
         "end_gateway" => BlockEntityKind::EndGateway,
         "beacon" => BlockEntityKind::Beacon,
+        "potent_sulfur" => BlockEntityKind::PotentSulfur,
         "structure_block" => BlockEntityKind::StructureBlock,
         "test_instance_block" => BlockEntityKind::TestInstanceBlock,
         "jigsaw" => BlockEntityKind::Jigsaw,
@@ -359,7 +360,6 @@ pub(crate) fn kind_for_block(id: &str) -> Option<BlockEntityKind> {
         _ if id.ends_with("copper_chest") => BlockEntityKind::Chest,
         _ if id.ends_with("_hanging_sign") => BlockEntityKind::HangingSign,
         _ if id.ends_with("_sign") => BlockEntityKind::Sign,
-        _ if id.ends_with("_bed") => BlockEntityKind::Bed,
         _ if id.ends_with("_banner") => BlockEntityKind::Banner,
         _ if id.ends_with("shulker_box") => BlockEntityKind::ShulkerBox,
         _ if id.ends_with("campfire") => BlockEntityKind::Campfire,
@@ -514,7 +514,7 @@ fn component(tag: &NbtTag) -> Option<azalea_chat::FormattedText> {
 pub fn publish(
     world: &azalea_world::World,
     game_time: u64,
-    players: &[[f64; 3]],
+    players: &[sim::PlayerSeen],
 ) -> Option<Arc<BlockEntityMap>> {
     let mut store = store();
     let store = &mut *store;

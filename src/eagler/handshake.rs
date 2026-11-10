@@ -4,14 +4,7 @@ use crate::{log_info, log_warn};
 pub(super) const HANDSHAKE_VERSIONS: [u16; 2] = [5, 4];
 
 fn offered_protocol() -> i32 {
-    #[cfg(feature = "multiversion")]
-    {
-        crate::protocol::session()
-    }
-    #[cfg(not(feature = "multiversion"))]
-    {
-        azalea_protocol::packets::PROTOCOL_VERSION
-    }
+    crate::util::session_protocol()
 }
 
 fn offered_version_name() -> &'static str {

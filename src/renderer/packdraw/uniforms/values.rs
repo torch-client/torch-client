@@ -206,7 +206,7 @@ impl FrameValues {
             end_flash: if crate::renderer::dimension::current()
                 == crate::renderer::dimension::Dimension::End
             {
-                crate::renderer::endflash::at(inputs.day_ticks)
+                crate::renderer::endflash::at(inputs.end_ticks)
             } else {
                 Default::default()
             },

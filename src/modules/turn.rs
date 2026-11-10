@@ -37,6 +37,14 @@ pub fn look_toward(
     )
 }
 
+pub fn body_step(s: &mut SharedState, aim: [f64; 3], rate: f32) {
+    const TICK: f32 = 0.05;
+    let (want_yaw, want_pitch) = super::aim_assist::look_at(super::aim_assist::eye(s, 1.0), aim);
+    let (yaw, pitch) = (s.camera_yaw, s.camera_pitch);
+    s.camera_yaw = yaw + step(wrap_degrees(want_yaw - yaw), rate, TICK);
+    s.camera_pitch = (pitch + step(want_pitch - pitch, rate, TICK)).clamp(-89.0, 89.0);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

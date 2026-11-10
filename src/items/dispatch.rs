@@ -15,6 +15,12 @@ pub struct ItemUse {
     pub trim: u8,
     pub has_lodestone: bool,
     pub lodestone: Option<[i32; 3]>,
+    pub bundle_selected: bool,
+    pub broken: bool,
+    pub fishing_cast: bool,
+    pub use_max: i32,
+    pub quick_charge: u8,
+    pub block_state: u8,
     pub owner: Option<Owner>,
 }
 
@@ -52,12 +58,55 @@ impl ItemUse {
         trim: 0,
         has_lodestone: false,
         lodestone: None,
+        bundle_selected: false,
+        broken: false,
+        fishing_cast: false,
+        use_max: 0,
+        quick_charge: 0,
+        block_state: 0,
         owner: None,
     };
 
     fn use_duration(&self) -> f32 {
         self.use_ticks.floor()
     }
+
+    fn use_remaining(&self) -> Option<f32> {
+        (self.use_max > 0).then(|| self.use_max as f32 - self.use_duration())
+    }
+}
+
+#[rustfmt::skip]
+pub const BLOCK_STATE_VALUES: [(&str, &str); 20] = [
+    ("level", "0"), ("level", "1"), ("level", "2"), ("level", "3"), ("level", "4"),
+    ("level", "5"), ("level", "6"), ("level", "7"), ("level", "8"), ("level", "9"),
+    ("level", "10"), ("level", "11"), ("level", "12"), ("level", "13"), ("level", "14"),
+    ("level", "15"), ("mode", "start"), ("mode", "log"), ("mode", "fail"), ("mode", "accept"),
+];
+
+pub fn block_state_index(property: &str, value: &str) -> u8 {
+    BLOCK_STATE_VALUES
+        .iter()
+        .position(|&(p, v)| p == property && v == value)
+        .map_or(0, |i| i as u8 + 1)
+}
+
+pub fn block_state_of(data: &azalea_inventory::ItemStackData) -> u8 {
+    super::component::<azalea_inventory::components::BlockState>(data).map_or(0, |c| {
+        c.properties
+            .iter()
+            .map(|(p, v)| block_state_index(p, v))
+            .find(|&i| i != 0)
+            .unwrap_or(0)
+    })
+}
+
+pub fn block_state_of_codec(state: &simdnbt::owned::NbtCompound) -> u8 {
+    state
+        .iter()
+        .filter_map(|(p, v)| Some(block_state_index(&p.to_str(), &v.string()?.to_str())))
+        .find(|&i| i != 0)
+        .unwrap_or(0)
 }
 
 pub const TRIM_MATERIALS: [&str; 11] = [
@@ -133,6 +182,8 @@ pub struct ItemWorld {
     pub spin: f32,
     pub daytime: f32,
     pub clock: f32,
+    pub moon: f32,
+    pub moon_wobble: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -158,6 +209,7 @@ pub struct Needles {
     spin: Wobbler,
     daytime: Wobbler,
     clock: Wobbler,
+    moon: Wobbler,
     world: ItemWorld,
 }
 
@@ -170,22 +222,26 @@ impl Default for Needles {
             spin: Wobbler::default(),
             daytime: Wobbler::default(),
             clock: Wobbler::default(),
+            moon: Wobbler::default(),
             world: ItemWorld::default(),
         }
     }
 }
 
 impl Needles {
+    #[allow(clippy::too_many_arguments, reason = "one parameter per level input")]
     pub fn step(
         &mut self,
         game_time: u64,
         yaw: f32,
         sun_angle: f32,
+        moon_phase: usize,
         spawn: Option<[i32; 3]>,
         death: Option<[i32; 3]>,
         level: &'static str,
     ) -> ItemWorld {
         let sun = positive_modulo(sun_angle / std::f32::consts::TAU, 1.0);
+        let moon = moon_phase as f32 / MOON_PHASE_COUNT;
         if self.tick != Some(game_time) {
             self.tick = Some(game_time);
             let random = self.random.next_f32();
@@ -196,19 +252,26 @@ impl Needles {
             self.world.spin = self.spin.update(random, 0.8);
             self.world.daytime = self.daytime.update(sun, 0.9);
             self.world.clock = self.clock.update(clock_random, 0.9);
+            self.world.moon_wobble = self.moon.update(moon, 0.9);
         }
         self.world.spawn = spawn;
         self.world.death = death;
         self.world.level = level;
         self.world.sun = sun;
+        self.world.moon = moon;
         self.world
     }
 }
+
+const MOON_PHASE_COUNT: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CondProp {
     UsingItem,
     HasLodestone,
+    HasSelectedItem,
+    Broken,
+    FishingRodCast,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -217,6 +280,8 @@ enum SelectProp {
     ChargeType,
     TrimMaterial,
     ContextDimension,
+    BlockState { property: &'static str },
+    LocalTime(u16),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -231,11 +296,13 @@ enum Target {
 enum TimeSource {
     Daytime,
     Random,
+    MoonPhase,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RangeProp {
     UseDuration { remaining: bool },
+    UseCycle { period: f32 },
     CrossbowPull,
     Compass { target: Target, wobble: bool },
     Time { source: TimeSource, wobble: bool },
@@ -256,6 +323,9 @@ impl CondProp {
     fn of(node: &Json) -> Option<CondProp> {
         match property(node) {
             "using_item" => Some(CondProp::UsingItem),
+            "bundle/has_selected_item" => Some(CondProp::HasSelectedItem),
+            "broken" => Some(CondProp::Broken),
+            "fishing_rod/cast" => Some(CondProp::FishingRodCast),
             "has_component"
                 if node
                     .get("component")
@@ -277,6 +347,20 @@ impl SelectProp {
             "charge_type" => Some(SelectProp::ChargeType),
             "trim_material" => Some(SelectProp::TrimMaterial),
             "context_dimension" => Some(SelectProp::ContextDimension),
+            "block_state" => {
+                let name = node.get("block_state_property").and_then(Json::as_str)?;
+                let &(property, _) = BLOCK_STATE_VALUES.iter().find(|(p, _)| *p == name)?;
+                Some(SelectProp::BlockState { property })
+            }
+            "local_time" => {
+                let field = |key: &str| node.get(key).and_then(Json::as_str);
+                let index = super::local_time::intern(
+                    field("pattern")?,
+                    field("locale").unwrap_or(""),
+                    field("time_zone"),
+                )?;
+                Some(SelectProp::LocalTime(index))
+            }
             _ => None,
         }
     }
@@ -291,6 +375,12 @@ impl RangeProp {
                     .get("remaining")
                     .and_then(Json::as_bool)
                     .unwrap_or(false),
+            },
+            "use_cycle" => RangeProp::UseCycle {
+                period: match node.get("period") {
+                    None => 1.0,
+                    Some(period) => period.as_f32().filter(|p| *p > 0.0)?,
+                },
             },
             "crossbow/pull" => RangeProp::CrossbowPull,
             "compass" => RangeProp::Compass {
@@ -307,6 +397,7 @@ impl RangeProp {
                 source: match field("source") {
                     "daytime" => TimeSource::Daytime,
                     "random" => TimeSource::Random,
+                    "moon_phase" => TimeSource::MoonPhase,
                     _ => return None,
                 },
                 wobble: wobble(node),
@@ -317,11 +408,14 @@ impl RangeProp {
 
     fn get(self, use_: &ItemUse, world: &ItemWorld) -> f32 {
         match self {
-            RangeProp::UseDuration { .. } if !use_.using => 0.0,
-            RangeProp::UseDuration { remaining: true } => f32::NAN,
+            RangeProp::UseDuration { .. } | RangeProp::UseCycle { .. } if !use_.using => 0.0,
+            RangeProp::UseDuration { remaining: true } => use_.use_remaining().unwrap_or(f32::NAN),
             RangeProp::UseDuration { remaining: false } => use_.use_duration(),
+            RangeProp::UseCycle { period } => use_.use_remaining().map_or(f32::NAN, |r| r % period),
             RangeProp::CrossbowPull if use_.charge != ChargeType::None || !use_.using => 0.0,
-            RangeProp::CrossbowPull => use_.use_duration() / CROSSBOW_CHARGE_TICKS,
+            RangeProp::CrossbowPull => {
+                use_.use_duration() / crossbow_charge_ticks(use_.quick_charge)
+            }
             RangeProp::Compass { target, wobble } => compass(target, wobble, use_, world),
             RangeProp::Time { source, wobble } => match (use_.owner, source, wobble) {
                 (None, ..) => 0.0,
@@ -329,12 +423,14 @@ impl RangeProp {
                 (_, TimeSource::Daytime, false) => world.sun,
                 (_, TimeSource::Random, true) => world.clock,
                 (_, TimeSource::Random, false) => world.random,
+                (_, TimeSource::MoonPhase, true) => world.moon_wobble,
+                (_, TimeSource::MoonPhase, false) => world.moon,
             },
         }
     }
 }
 
-use super::kinetic::CROSSBOW_CHARGE_TICKS;
+use super::kinetic::crossbow_charge_ticks;
 
 fn compass(target: Target, wobble: bool, use_: &ItemUse, world: &ItemWorld) -> f32 {
     let Some(owner) = use_.owner else {
@@ -348,7 +444,7 @@ fn compass(target: Target, wobble: bool, use_: &ItemUse, world: &ItemWorld) -> f
     };
     let [ox, oy, oz] = owner.pos;
     let centre = pos.map(|[x, y, z]| [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5]);
-    let Some([cx, cy, cz]) = centre.filter(|[cx, cy, cz]| {
+    let Some([cx, _, cz]) = centre.filter(|[cx, cy, cz]| {
         (cx - ox).powi(2) + (cy - oy).powi(2) + (cz - oz).powi(2) >= 9.999999747378752E-6
     }) else {
         let spin = if wobble { world.spin } else { world.random };
@@ -429,6 +525,7 @@ pub struct Leaf {
     pub json: Json,
     pub transform: Mat4,
     pub icon: Option<Box<str>>,
+    pub bundle_open: Option<(Box<str>, Box<str>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -471,9 +568,22 @@ impl ModelTree {
                     let holds = match prop {
                         CondProp::UsingItem => use_.using,
                         CondProp::HasLodestone => use_.has_lodestone,
+                        CondProp::HasSelectedItem => use_.bundle_selected,
+                        CondProp::Broken => use_.broken,
+                        CondProp::FishingRodCast => use_.fishing_cast,
                     };
                     if holds { *on_true } else { *on_false }
                 }
+                Node::Select {
+                    prop: SelectProp::LocalTime(format),
+                    cases,
+                    fallback,
+                } => super::local_time::pick(*format, |value| {
+                    cases
+                        .iter()
+                        .find(|(when, _)| **when == *value)
+                        .map_or(*fallback, |(_, node)| *node)
+                }),
                 Node::Select {
                     prop,
                     cases,
@@ -488,6 +598,11 @@ impl ModelTree {
                         SelectProp::ContextDimension => {
                             Some(world.level).filter(|level| !level.is_empty())
                         }
+                        SelectProp::BlockState { property } => BLOCK_STATE_VALUES
+                            .get((use_.block_state as usize).wrapping_sub(1))
+                            .filter(|&&(p, _)| p == *property)
+                            .map(|&(_, value)| value),
+                        SelectProp::LocalTime(_) => None,
                     };
                     value
                         .and_then(|value| cases.iter().find(|(when, _)| **when == *value))
@@ -601,13 +716,33 @@ impl Builder {
             .then(|| json.get("model").and_then(Json::as_str))
             .flatten()
             .map(|model| Box::from(strip_namespace(model)));
+        let bundle_open = bundle_open_layers(json);
         self.leaves.push(Leaf {
             json: json.clone(),
             transform,
             icon,
+            bundle_open,
         });
         (self.leaves.len() - 1) as u16
     }
+}
+
+fn bundle_open_layers(json: &Json) -> Option<(Box<str>, Box<str>)> {
+    if Dispatch::of(json) != Dispatch::Composite {
+        return None;
+    }
+    let models = json.get("models").map(Json::arr)?;
+    let path = |node: Option<&Json>| {
+        let node = node.filter(|n| Dispatch::of(n) == Dispatch::Model)?;
+        Some(Box::from(strip_namespace(node.get("model")?.as_str()?)))
+    };
+    let at = models
+        .iter()
+        .position(|m| Dispatch::of(m) == Dispatch::Bundle)?;
+    Some((
+        path(models.get(at.checked_sub(1)?))?,
+        path(models.get(at + 1))?,
+    ))
 }
 
 #[cfg(test)]
@@ -649,6 +784,79 @@ mod tests {
     }
 
     #[test]
+    fn a_brush_cycles_on_its_remaining_ticks() {
+        let brush = tree(
+            r#"{"type":"minecraft:range_dispatch","property":"minecraft:use_cycle","period":10.0,"scale":0.1,
+            "fallback":{"type":"minecraft:model","model":"minecraft:item/brush"},
+            "entries":[{"threshold":0.25,"model":{"type":"minecraft:model","model":"minecraft:item/brush_brushing_0"}},
+                       {"threshold":0.5,"model":{"type":"minecraft:model","model":"minecraft:item/brush_brushing_1"}},
+                       {"threshold":0.75,"model":{"type":"minecraft:model","model":"minecraft:item/brush_brushing_2"}}]}"#,
+        );
+        let world = ItemWorld::default();
+        let at = |ticks: f32| ItemUse {
+            using: true,
+            use_ticks: ticks,
+            use_max: 200,
+            ..ItemUse::NONE
+        };
+        assert_eq!(icon(&brush, "gui", &ItemUse::NONE, &world), "item/brush");
+        assert_eq!(
+            icon(&brush, "gui", &at(3.5), &world),
+            "item/brush_brushing_1"
+        );
+        assert_eq!(
+            icon(&brush, "gui", &at(7.0), &world),
+            "item/brush_brushing_0"
+        );
+        assert_eq!(icon(&brush, "gui", &at(8.0), &world), "item/brush");
+        let unknown = ItemUse {
+            use_max: 0,
+            ..at(3.0)
+        };
+        assert_eq!(icon(&brush, "gui", &unknown, &world), "item/brush");
+    }
+
+    #[test]
+    fn broken_and_cast_pick_their_models() {
+        let elytra = tree(
+            r#"{"type":"minecraft:condition","property":"minecraft:broken",
+            "on_false":{"type":"minecraft:model","model":"minecraft:item/elytra"},
+            "on_true":{"type":"minecraft:model","model":"minecraft:item/elytra_broken"}}"#,
+        );
+        let rod = tree(
+            r#"{"type":"minecraft:condition","property":"minecraft:fishing_rod/cast",
+            "on_false":{"type":"minecraft:model","model":"minecraft:item/fishing_rod"},
+            "on_true":{"type":"minecraft:model","model":"minecraft:item/fishing_rod_cast"}}"#,
+        );
+        let world = ItemWorld::default();
+        assert_eq!(
+            icon(
+                &elytra,
+                "gui",
+                &ItemUse {
+                    broken: true,
+                    ..ItemUse::NONE
+                },
+                &world
+            ),
+            "item/elytra_broken"
+        );
+        assert_eq!(icon(&elytra, "gui", &ItemUse::NONE, &world), "item/elytra");
+        assert_eq!(
+            icon(
+                &rod,
+                "gui",
+                &ItemUse {
+                    fishing_cast: true,
+                    ..ItemUse::NONE
+                },
+                &world
+            ),
+            "item/fishing_rod_cast"
+        );
+    }
+
+    #[test]
     fn a_trim_select_matches_its_material() {
         let armour = tree(
             r#"{"type":"minecraft:select","property":"minecraft:trim_material",
@@ -669,6 +877,29 @@ mod tests {
         )
         .unwrap();
         assert!(ModelTree::compile(&wolf).is_none());
+    }
+
+    #[test]
+    fn a_block_state_select_matches_its_property() {
+        let light = tree(
+            r#"{"type":"minecraft:select","property":"minecraft:block_state","block_state_property":"level",
+            "cases":[{"when":"7","model":{"type":"minecraft:model","model":"minecraft:item/light_07"}}],
+            "fallback":{"type":"minecraft:model","model":"minecraft:item/light"}}"#,
+        );
+        let world = ItemWorld::default();
+        let at = |p, v| ItemUse {
+            block_state: block_state_index(p, v),
+            ..ItemUse::NONE
+        };
+        assert_eq!(
+            icon(&light, "gui", &at("level", "7"), &world),
+            "item/light_07"
+        );
+        assert_eq!(icon(&light, "gui", &ItemUse::NONE, &world), "item/light");
+        assert_eq!(
+            icon(&light, "gui", &at("mode", "log"), &world),
+            "item/light"
+        );
     }
 
     #[test]

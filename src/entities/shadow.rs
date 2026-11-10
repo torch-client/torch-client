@@ -69,7 +69,7 @@ pub(crate) fn shadow(kind: EntityKind) -> (f32, f32) {
         K::Tadpole => (0.14, 1.0),
         K::TropicalFish => (0.15, 1.0),
         K::Pufferfish => (0.2, 1.0),
-        K::Bat | K::Slime | K::MagmaCube => (0.25, 1.0),
+        K::Bat | K::Slime | K::MagmaCube | K::SulfurCube => (0.25, 1.0),
 
         K::Chicken
         | K::Cod
@@ -237,7 +237,7 @@ fn shadow_radius(
 ) -> f32 {
     use EntityKind as K;
     match kind {
-        K::Slime | K::MagmaCube => return shared.size as f32 * 0.25,
+        K::Slime | K::MagmaCube | K::SulfurCube => return shared.size as f32 * 0.25,
         K::Pufferfish => return 0.1 + 0.1 * shared.puff_state as f32,
         _ => {}
     }
@@ -528,6 +528,7 @@ pub(crate) fn sync_shadows(
             DEPTH_BIAS,
         ));
         let mesh = meshes.add(empty_mesh());
+        #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_mut))]
         let mut spawned = commands.spawn((
             Mesh3d(mesh.clone()),
             MeshMaterial3d(material),
@@ -544,9 +545,9 @@ pub(crate) fn sync_shadows(
     }
     if let Some((_, handle)) = node.as_ref()
         && !crate::util::same_bits(&pieces[..], &written[..])
-        && let Some(mesh) = meshes.get_mut(handle)
+        && let Some(mut mesh) = meshes.get_mut(handle)
     {
-        write_mesh(mesh, pieces);
+        write_mesh(&mut mesh, pieces);
         std::mem::swap(pieces, written);
     }
     set_visible(node.as_ref(), true, &mut nodes);

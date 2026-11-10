@@ -120,8 +120,8 @@ fn depth_copy(device: &RenderDevice) -> &'static DepthCopy {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(gpu_label!("depth copy gl")),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(gpu_label!("depth copy gl")),
@@ -135,8 +135,8 @@ fn depth_copy(device: &RenderDevice) -> &'static DepthCopy {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: super::targets::DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Always,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -147,7 +147,7 @@ fn depth_copy(device: &RenderDevice) -> &'static DepthCopy {
                 compilation_options: Default::default(),
                 targets: &[],
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         DepthCopy { layout, pipeline }
@@ -184,6 +184,7 @@ pub(super) fn copy_depth(
         }),
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
     pass.set_pipeline(&copy.pipeline);
     pass.set_bind_group(0, &group, &[]);

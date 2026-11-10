@@ -101,8 +101,8 @@ mod tests {
         for spec in indices.into_iter().map(|i| &registry.specs[i]) {
             let geom = match &spec.geom {
                 Geom::Model(geom) => geom,
-                Geom::Item(_) => continue,
-                Geom::Block(_) | Geom::Built(_) => {
+                Geom::Item(_) | Geom::Block(_) => continue,
+                Geom::Built(_) => {
                     panic!("{} is not a Geom::Model spec", spec.name)
                 }
             };
@@ -127,6 +127,10 @@ mod tests {
                     st.extras.shared_mut().sniffer_state = if flag { 4 } else { 0 };
                     st.extras.lie_down_amount = if flag { 1.0 } else { 0.0 };
                     st.extras.sit_amount = if flag { 1.0 } else { 0.0 };
+                    st.extras.hiding_in_shell = flag;
+                    for state in st.extras.anim.iter_mut() {
+                        state.animate_when(flag, 0);
+                    }
                     model.reset_pose(&mut parts);
                     (geom.setup)(&model, &mut parts, &st);
                 }

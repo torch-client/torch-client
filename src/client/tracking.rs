@@ -80,8 +80,13 @@ pub struct Equipment {
     pub leggings: Option<&'static str>,
     pub boots: Option<&'static str>,
     pub armor_foil: [bool; 4],
+    pub armor_trim: [Option<&'static str>; 4],
+    pub worn: [crate::util::combat::Worn; 4],
+    pub armor: Arc<[crate::session::SlotStack; 4]>,
     pub body_armor: Option<&'static str>,
+    pub body_block: Option<u32>,
     pub saddle: Option<&'static str>,
+    pub saddle_block: Option<u32>,
 }
 
 impl Equipment {
@@ -159,6 +164,11 @@ impl RangedAttribute {
 
 pub(crate) const fn ranged(attribute: Attr) -> RangedAttribute {
     let (default, min, max) = match attribute {
+        Attr::AirDragModifier => (1.0, 0.0, 2048.0),
+        Attr::BelowNameDistance => (10.0, 0.0, 512.0),
+        Attr::Bounciness => (0.0, 0.0, 1.0),
+        Attr::FrictionModifier => (1.0, 0.0, 2048.0),
+        Attr::NameTagDistance => (64.0, 0.0, 512.0),
         Attr::Armor => (0.0, 0.0, 30.0),
         Attr::ArmorToughness => (0.0, 0.0, 20.0),
         Attr::AttackDamage => (2.0, 0.0, 2048.0),
@@ -175,7 +185,7 @@ pub(crate) const fn ranged(attribute: Attr) -> RangedAttribute {
         Attr::FollowRange => (32.0, 0.0, 2048.0),
         Attr::Gravity => (0.08, -1.0, 1.0),
         Attr::JumpStrength => (0.41999998688697815, 0.0, 32.0),
-        Attr::KnockbackResistance => (0.0, 0.0, 1.0),
+        Attr::KnockbackResistance => (0.0, -2.0, 1.0),
         Attr::Luck => (0.0, -1024.0, 1024.0),
         Attr::MaxAbsorption => (0.0, 0.0, 2048.0),
         Attr::MaxHealth => (20.0, 1.0, 1024.0),
@@ -340,6 +350,12 @@ pub(crate) fn game_time() -> i64 {
     GAME_TIME.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+pub(crate) static DIFFICULTY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+
+pub(crate) fn difficulty() -> u8 {
+    DIFFICULTY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn overworld_clock(
     world: &azalea::local_player::WorldHolder,
     packet: &azalea_protocol::packets::game::c_set_time::ClientboundSetTime,
@@ -364,6 +380,21 @@ pub(crate) fn overworld_clock(
         rate: state.rate,
         drift: 0.0,
     })
+}
+
+pub(crate) fn end_clock(
+    world: &azalea::local_player::WorldHolder,
+    packet: &azalea_protocol::packets::game::c_set_time::ClientboundSetTime,
+) -> Option<(i64, f32, f32)> {
+    use azalea_core::data_registry::DataRegistryWithKey;
+    use azalea_registry::data::WorldClockKey;
+
+    let guard = world.shared.read();
+    let (_, state) = packet
+        .clock_updates
+        .iter()
+        .find(|(id, _)| id.key_owned(&guard.registries) == Some(WorldClockKey::TheEnd))?;
+    Some((state.total_ticks as i64, state.partial_tick, state.rate))
 }
 
 global! {

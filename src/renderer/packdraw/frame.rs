@@ -309,13 +309,18 @@ pub(crate) fn take_over_view(
     hand_views: Query<&ExtractedView, With<crate::renderer::hand::HandCamera>>,
     mut opaque: ResMut<ViewBinnedRenderPhases<bevy::core_pipeline::core_3d::Opaque3d>>,
     mut alpha_mask: ResMut<ViewBinnedRenderPhases<bevy::core_pipeline::core_3d::AlphaMask3d>>,
-    mut transmissive: ResMut<ViewSortedRenderPhases<bevy::core_pipeline::core_3d::Transmissive3d>>,
+    mut transmissive: ResMut<ViewSortedRenderPhases<bevy::pbr::Transmissive3d>>,
     mut transparent: ResMut<ViewSortedRenderPhases<bevy::core_pipeline::core_3d::Transparent3d>>,
     mut prepass: (
         Option<ResMut<ViewBinnedRenderPhases<bevy::core_pipeline::prepass::Opaque3dPrepass>>>,
         Option<ResMut<ViewBinnedRenderPhases<bevy::core_pipeline::prepass::AlphaMask3dPrepass>>>,
     ),
     gpu_preprocessing: Res<bevy::render::batching::gpu_preprocessing::GpuPreprocessingSupport>,
+    mut dirty: ResMut<bevy::render::camera::DirtySpecializations>,
+    #[cfg(feature = "builtin_shaders")] light_views: Query<
+        &ExtractedView,
+        With<bevy::pbr::LightEntity>,
+    >,
 ) {
     let Some(mut takeover) = takeover else { return };
     let mut taken_over = false;
@@ -354,12 +359,24 @@ pub(crate) fn take_over_view(
             for key in keys {
                 opaque.prepare_for_new_frame(key, mode);
                 alpha_mask.prepare_for_new_frame(key, mode);
-                transmissive.insert_or_clear(key);
-                transparent.insert_or_clear(key);
+                transmissive.prepare_for_new_frame(key);
+                transparent.prepare_for_new_frame(key);
             }
         }
     }
     if takeover.0 != taken_over {
+        if !taken_over {
+            let world = views.iter().map(|(view, _)| view);
+            dirty.views.extend(
+                world
+                    .chain(&hand_views)
+                    .map(|view| view.retained_view_entity),
+            );
+            #[cfg(feature = "builtin_shaders")]
+            dirty
+                .views
+                .extend(light_views.iter().map(|view| view.retained_view_entity));
+        }
         takeover.0 = taken_over;
     }
 }

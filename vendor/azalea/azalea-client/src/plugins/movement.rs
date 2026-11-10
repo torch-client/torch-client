@@ -299,6 +299,7 @@ pub fn local_player_ai_step(
                 Option<&azalea_world::WorldBorder>,
                 Option<&Pose>,
                 Option<&ActiveEffects>,
+                Option<&Passenger>,
             ),
             &mut Physics,
             &mut Sprinting,
@@ -321,7 +322,7 @@ pub fn local_player_ai_step(
         hunger,
         last_sent_input,
         item_in_use,
-        (fall_flying, border, pose, active_effects),
+        (fall_flying, border, pose, active_effects, passenger),
         mut physics,
         mut sprinting,
         mut crouching,
@@ -330,7 +331,7 @@ pub fn local_player_ai_step(
     {
 
         let is_swimming = **swimming;
-        let is_passenger = false;
+        let is_passenger = passenger.is_some();
         let is_sleeping = sleeping_pos.is_some();
 
         let world = world_holder.shared.read();
@@ -354,7 +355,8 @@ pub fn local_player_ai_step(
             **crouching = new_crouching;
         }
 
-        let has_enough_food_to_sprint = hunger.is_none_or(Hunger::is_enough_to_sprint);
+        let has_enough_food_to_sprint = abilities.can_fly
+            || hunger.is_none_or(Hunger::is_enough_to_sprint);
 
         let trying_to_sprint = physics_state.trying_to_sprint;
 
@@ -368,8 +370,7 @@ pub fn local_player_ai_step(
             );
         let is_in_shallow_water = is_in_water && !is_underwater;
         let is_fall_flying = fall_flying.is_some_and(|f| **f);
-        let is_passenger = false;
-        let vehicle_can_sprint = false;
+        let vehicle_can_sprint = passenger.is_some_and(|p| p.vehicle_can_sprint);
         let slow_due_to_using_item = item_in_use.is_some_and(|u| !u.can_sprint);
         let has_blindness = active_effects.is_some_and(|e| e.has(MobEffect::Blindness));
 
@@ -417,7 +418,7 @@ pub fn local_player_ai_step(
         let move_vector = modify_input(
             physics_state.move_vector,
             item_in_use.map(|u| u.speed_multiplier),
-            false,
+            is_passenger,
             moving_slowly,
             &attributes,
         );
@@ -437,6 +438,11 @@ pub struct ServerSetLook;
 pub struct ItemInUse {
     pub speed_multiplier: f32,
     pub can_sprint: bool,
+}
+
+#[derive(Clone, Component, Copy, Debug, PartialEq, Eq)]
+pub struct Passenger {
+    pub vehicle_can_sprint: bool,
 }
 
 fn modify_input(

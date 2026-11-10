@@ -21,7 +21,7 @@ pub(in crate::gui) const LAYOUT: HeaderFooter =
     HeaderFooter::new(SEARCH_Y + SEARCH_H + 4.0, HeaderFooter::DEFAULT_H);
 pub(in crate::gui) const SEARCH_W: f32 = 200.0;
 const SEARCH_MAX_LEN: usize = 32;
-pub(in crate::gui) const GRAY: u32 = 0xAA_AAAA;
+pub(in crate::gui) const GRAY: u32 = crate::text::GRAY;
 
 pub(in crate::gui) fn search_box() -> TextBox {
     let mut search = TextBox::bordered(SEARCH_MAX_LEN, &translate("gui.packSelection.search", &[]));

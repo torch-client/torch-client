@@ -283,6 +283,7 @@ define_data_components!(
     CowSoundVariant,
     ChickenSoundVariant,
     CatSoundVariant,
+    SulfurCubeContent,
 );
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -2016,32 +2017,54 @@ impl Default for AttackRange {
 }
 
 #[derive(Clone, PartialEq, AzBuf, Debug, Serialize)]
+#[serde(transparent)]
 pub struct AdditionalTradeCost {
     #[var]
     pub cost: i32,
 }
 
 #[derive(Clone, PartialEq, AzBuf, Debug, Serialize)]
+#[serde(transparent)]
 pub struct Dye {
     pub color: DyeColor,
 }
 
 #[derive(Clone, PartialEq, AzBuf, Debug, Serialize)]
+#[serde(transparent)]
 pub struct PigSoundVariant {
     pub value: azalea_registry::data::PigSoundVariant,
 }
 
 #[derive(Clone, PartialEq, AzBuf, Debug, Serialize)]
+#[serde(transparent)]
 pub struct CowSoundVariant {
     pub value: azalea_registry::data::CowSoundVariant,
 }
 
 #[derive(Clone, PartialEq, AzBuf, Debug, Serialize)]
+#[serde(transparent)]
 pub struct ChickenSoundVariant {
     pub value: azalea_registry::data::ChickenSoundVariant,
 }
 
 #[derive(Clone, PartialEq, AzBuf, Debug, Serialize)]
+#[serde(transparent)]
 pub struct CatSoundVariant {
     pub value: azalea_registry::data::CatSoundVariant,
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize)]
+#[serde(transparent)]
+pub struct SulfurCubeContent {
+    pub absorbed_block_item_stack: ItemStack,
+}
+impl AzBuf for SulfurCubeContent {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        Ok(Self {
+            absorbed_block_item_stack: ItemStack::read_template(buf)?,
+        })
+    }
+    fn azalea_write(&self, buf: &mut impl io::Write) -> io::Result<()> {
+        self.absorbed_block_item_stack.write_template(buf)
+    }
 }

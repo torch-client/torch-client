@@ -67,7 +67,9 @@ const BUTTON_W: f32 = 100.0;
 const BUTTON_H: f32 = 20.0;
 const BUTTON_GAP: f32 = 8.0;
 
+#[cfg(self_update)]
 const BAR_W: f32 = 220.0;
+#[cfg(self_update)]
 const BAR_H: f32 = 10.0;
 
 const LINE: f32 = 12.0;
@@ -81,7 +83,11 @@ const BOX_TEXT_TOP: f32 = 3.0;
 const PERCENT_INSET: f32 = 18.0;
 
 const ASSETS_SIZE: &str = "43.7 MiB";
-const AUDIO_SIZE: &str = "330 MiB";
+const AUDIO_SIZE: &str = if cfg!(target_arch = "wasm32") {
+    "2.1 MiB"
+} else {
+    "330 MiB"
+};
 const CONTACTING: &str = "Contacting Mojang";
 const ASSETS_NAME: &str = "Built in";
 const AUDIO_NAME: &str = "Install audio";
@@ -152,7 +158,11 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             }
             p.text_centered("The assets are ready", cx, mid - 14.0, 0x7FDF7F, false);
             p.text_centered(
-                "Restart the client to use them",
+                if cfg!(target_arch = "wasm32") {
+                    "Reload the page to use them"
+                } else {
+                    "Restart the client to use them"
+                },
                 cx,
                 mid - 14.0 + LINE,
                 0xA0A0A8,
@@ -270,6 +280,8 @@ fn progress_boxes(
             of_total(done, total)
         } else if stage == Stage::Asking || dl.sounds_running() {
             CONTACTING.to_string()
+        } else if cfg!(target_arch = "wasm32") {
+            "Waiting".to_string()
         } else {
             "Already installed".to_string()
         };
@@ -336,6 +348,7 @@ fn button(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, label: &str) -> bool
     hovered && ctx.input.left_click
 }
 
+#[cfg(self_update)]
 pub(super) fn bar(p: &mut Painter, ctx: &ScreenCtx, y: f32, frac: f32) {
     let w = fitted(BAR_W, ctx);
     let x = ((ctx.vw - w) * 0.5).floor();

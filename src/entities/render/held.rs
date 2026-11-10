@@ -368,7 +368,9 @@ fn copper_golem(model: &BakedModel, s: &[PartState], st: &EntityState) -> Anchor
                 Quat::IDENTITY,
                 Vec3::new(0.0, 0.125, 0.0),
             ),
-        ..Anchors::default()
+        block: model.chain(s, model.id("head"))
+            * Mat4::from_translation(Vec3::new(0.0, -1.75, 0.0)),
+        carry: Mat4::IDENTITY,
     }
 }
 
@@ -493,6 +495,7 @@ mod tests {
                 let anchors = hook(&model, &parts, &st);
                 assert!(anchors.hands[0].is_finite(), "{}", spec.name);
                 assert!(anchors.carry.is_finite(), "{}", spec.name);
+                assert!(anchors.block.is_finite(), "{}", spec.name);
             }
         }
     }

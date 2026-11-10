@@ -26,6 +26,92 @@ pub enum Pose {
 }
 
 pub use crate::blocks::direction::Direction;
+pub use crate::entities::keyframe::AnimationState;
+
+pub mod anim_slot {
+    pub const COUNT: usize = 7;
+
+    pub mod warden {
+        pub const ROAR: usize = 0;
+        pub const SNIFF: usize = 1;
+        pub const EMERGE: usize = 2;
+        pub const DIGGING: usize = 3;
+        pub const ATTACK: usize = 4;
+        pub const SONIC_BOOM: usize = 5;
+    }
+
+    pub mod breeze {
+        pub const IDLE: usize = 0;
+        pub const SLIDE: usize = 1;
+        pub const SLIDE_BACK: usize = 2;
+        pub const LONG_JUMP: usize = 3;
+        pub const SHOOT: usize = 4;
+        pub const INHALE: usize = 5;
+    }
+
+    pub mod sniffer {
+        pub const FEELING_HAPPY: usize = 0;
+        pub const SCENTING: usize = 1;
+        pub const SNIFFING: usize = 2;
+        pub const DIGGING: usize = 3;
+        pub const RISING: usize = 4;
+    }
+
+    pub mod rabbit {
+        pub const HOP: usize = 0;
+        pub const IDLE_HEAD_TILT: usize = 1;
+    }
+
+    pub mod creaking {
+        pub const ATTACK: usize = 0;
+        pub const INVULNERABILITY: usize = 1;
+        pub const DEATH: usize = 2;
+    }
+
+    pub mod armadillo {
+        pub const ROLL_OUT: usize = 0;
+        pub const ROLL_UP: usize = 1;
+        pub const PEEK: usize = 2;
+    }
+
+    pub mod copper_golem {
+        pub const IDLE: usize = 0;
+        pub const INTERACTION_GET_ITEM: usize = 1;
+        pub const INTERACTION_GET_NO_ITEM: usize = 2;
+        pub const INTERACTION_DROP_ITEM: usize = 3;
+        pub const INTERACTION_DROP_NO_ITEM: usize = 4;
+    }
+
+    pub mod camel {
+        pub const SIT: usize = 0;
+        pub const SIT_POSE: usize = 1;
+        pub const SIT_UP: usize = 2;
+        pub const IDLE: usize = 3;
+        pub const DASH: usize = 4;
+    }
+
+    pub mod axolotl {
+        pub const SWIM: usize = 0;
+        pub const WALK: usize = 1;
+        pub const WALK_UNDER_WATER: usize = 2;
+        pub const IDLE_UNDER_WATER: usize = 3;
+        pub const IDLE_UNDER_WATER_ON_GROUND: usize = 4;
+        pub const IDLE_ON_GROUND: usize = 5;
+        pub const PLAY_DEAD: usize = 6;
+    }
+
+    pub mod frog {
+        pub const JUMP: usize = 0;
+        pub const CROAK: usize = 1;
+        pub const TONGUE: usize = 2;
+        pub const SWIM_IDLE: usize = 3;
+    }
+
+    pub mod bat {
+        pub const FLY: usize = 0;
+        pub const REST: usize = 1;
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Billboard {
@@ -55,6 +141,8 @@ pub struct Display {
     pub left_rotation: [f32; 4],
     pub right_rotation: [f32; 4],
     pub view_range: f32,
+    pub width: f32,
+    pub height: f32,
     pub text: Vec<crate::text::Span>,
     pub line_width: f32,
     pub background: u32,
@@ -88,6 +176,8 @@ impl Default for Display {
             left_rotation: [0.0, 0.0, 0.0, 1.0],
             right_rotation: [0.0, 0.0, 0.0, 1.0],
             view_range: 1.0,
+            width: 0.0,
+            height: 0.0,
             text: Vec::new(),
             line_width: 200.0,
             background: 0x4000_0000,
@@ -135,6 +225,8 @@ pub struct Extras {
     pub ramming_x_head_rot: f32,
     pub attack_animation_remaining_ticks: i32,
     pub jump_completion: f32,
+    pub hiding_in_shell: bool,
+    pub anim: [AnimationState; anim_slot::COUNT],
     pub tentacle_angle: f32,
     pub squid_x_body_rot: f32,
     pub squid_z_body_rot: f32,
@@ -154,8 +246,13 @@ pub struct Extras {
     pub ticks_using_item: f32,
     pub wiggle: f32,
     pub squish: f32,
+    pub fuse_remaining: f32,
+    pub minecart_fuse: f32,
     pub spikes_animation: f32,
     pub tail_animation: f32,
+    pub guardian_attack_time: f32,
+    pub attack_target_body: Option<TargetBody>,
+    pub look_at: Option<[f64; 3]>,
     pub attack_ticks: f32,
     pub stunned_ticks: f32,
     pub roar_animation: f32,
@@ -167,6 +264,7 @@ pub struct Extras {
     pub bite_progress: f32,
     pub head_y_rots: [f32; 2],
     pub head_x_rots: [f32; 2],
+    pub dragon: Option<Box<DragonPose>>,
     shared: std::sync::Arc<ExtrasShared>,
 }
 
@@ -208,6 +306,7 @@ pub struct ExtrasShared {
     pub has_pumpkin: bool,
     pub charged: bool,
     pub moving: bool,
+    pub attack_target: i32,
     pub resting: bool,
     pub dancing: bool,
     pub saddled: bool,
@@ -223,7 +322,7 @@ pub struct ExtrasShared {
     pub tearing_down: bool,
     pub active: bool,
     pub puff_state: i32,
-    pub carried_block: Option<String>,
+    pub carried_block: Option<u32>,
     pub creepy: bool,
     pub spell: u8,
     pub charging_crossbow: bool,
@@ -250,6 +349,7 @@ pub struct ExtrasShared {
     pub leggings: Option<&'static str>,
     pub boots: Option<&'static str>,
     pub armor_foil: [bool; 4],
+    pub armor_trim: [Option<&'static str>; 4],
     pub body_armor: Option<&'static str>,
     pub left_handed: bool,
     pub name: Option<String>,
@@ -282,7 +382,10 @@ pub struct ExtrasShared {
     pub under_water: bool,
     pub arrow_tipped: bool,
     pub skull_dangerous: bool,
+    pub shot_at_angle: bool,
+    pub trident_foil: bool,
     pub shows_bottom: bool,
+    pub beam_target: Option<[i32; 3]>,
     pub dark_ticks_remaining: i32,
     pub brightness_override: i32,
 }
@@ -355,6 +458,8 @@ impl Extras {
             ramming_x_head_rot: 0.0,
             attack_animation_remaining_ticks: 0,
             jump_completion: 0.0,
+            hiding_in_shell: false,
+            anim: [AnimationState::new(); anim_slot::COUNT],
             tentacle_angle: 0.0,
             squid_x_body_rot: 0.0,
             squid_z_body_rot: 0.0,
@@ -374,8 +479,13 @@ impl Extras {
             ticks_using_item: 0.0,
             wiggle: 5.0,
             squish: 0.0,
+            fuse_remaining: 0.0,
+            minecart_fuse: -1.0,
             spikes_animation: 0.0,
             tail_animation: 0.0,
+            guardian_attack_time: 0.0,
+            attack_target_body: None,
+            look_at: None,
             attack_ticks: 0.0,
             stunned_ticks: 0.0,
             roar_animation: 0.0,
@@ -387,6 +497,7 @@ impl Extras {
             bite_progress: 0.0,
             head_y_rots: [0.0; 2],
             head_x_rots: [0.0; 2],
+            dragon: None,
             shared,
         }
     }
@@ -439,6 +550,7 @@ impl Default for ExtrasShared {
             has_pumpkin: true,
             charged: false,
             moving: false,
+            attack_target: 0,
             resting: false,
             dancing: false,
             saddled: false,
@@ -481,6 +593,7 @@ impl Default for ExtrasShared {
             leggings: None,
             boots: None,
             armor_foil: [false; 4],
+            armor_trim: [None; 4],
             body_armor: None,
             left_handed: false,
             name: None,
@@ -513,10 +626,89 @@ impl Default for ExtrasShared {
             under_water: false,
             arrow_tipped: false,
             skull_dangerous: false,
+            shot_at_angle: false,
+            trident_foil: false,
             shows_bottom: true,
+            beam_target: None,
             dark_ticks_remaining: 0,
             brightness_override: -1,
         }
+    }
+}
+
+pub const DRAGON_DELAYS: usize = 24;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DragonSample {
+    pub y: f64,
+    pub y_rot: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DragonHeadMode {
+    LandingOrTakingOff { distance_to_egg: f64 },
+    Sitting,
+    Flying,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DragonPose {
+    pub history: [DragonSample; DRAGON_DELAYS],
+    pub head_mode: DragonHeadMode,
+    pub nearest_crystal: Option<i32>,
+}
+
+impl DragonPose {
+    pub const REST: DragonPose = DragonPose {
+        history: [DragonSample { y: 0.0, y_rot: 0.0 }; DRAGON_DELAYS],
+        head_mode: DragonHeadMode::Flying,
+        nearest_crystal: None,
+    };
+
+    pub fn historical(&self, delay: usize) -> DragonSample {
+        self.history[delay]
+    }
+
+    pub fn head_part_y_offset(
+        &self,
+        part: usize,
+        body: DragonSample,
+        part_pos: DragonSample,
+    ) -> f32 {
+        let result = match self.head_mode {
+            DragonHeadMode::LandingOrTakingOff { distance_to_egg } => {
+                part as f64 / (distance_to_egg / 4.0).max(1.0)
+            }
+            DragonHeadMode::Sitting => part as f64,
+            DragonHeadMode::Flying if part == 6 => 0.0,
+            DragonHeadMode::Flying => part_pos.y - body.y,
+        };
+        result as f32
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TargetBody {
+    pub feet: [f64; 3],
+    pub height: f32,
+    pub eye_height: f32,
+}
+
+impl TargetBody {
+    pub fn eye(&self) -> [f64; 3] {
+        [
+            self.feet[0],
+            self.feet[1] + f64::from(self.eye_height),
+            self.feet[2],
+        ]
+    }
+
+    pub fn middle(&self) -> [f64; 3] {
+        [
+            self.feet[0],
+            self.feet[1] + f64::from(self.height) * 0.5,
+            self.feet[2],
+        ]
     }
 }
 

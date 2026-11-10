@@ -1,9 +1,9 @@
 #![allow(clippy::approx_constant)]
 
 use crate::entities::geom::{BakedModel, CubeList, Grow, LayerDef, MeshDef, PartPose, PartState};
-use crate::entities::keyframe::{apply, apply_walk};
+use crate::entities::keyframe::{apply_state, apply_walk};
 use crate::entities::models::aquatic::animation::frog as anim;
-use crate::entities::state::{EntityState, Pose};
+use crate::entities::state::EntityState;
 
 pub fn frog_layer() -> LayerDef {
     let mut mesh = MeshDef::new();
@@ -113,18 +113,12 @@ const MAX_SWIM_ANIMATION_SPEED: f32 = 1.0;
 const WALK_ANIMATION_SCALE_FACTOR: f32 = 2.5;
 
 pub fn frog_setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
-    let seconds = st.age_ticks / 20.0;
-
-    if st.extras.jump_progress > 0.0 {
-        apply(&anim::FROG_JUMP, model, parts, seconds, 1.0);
-    }
-    let croaking = st.has_pose(Pose::Croaking);
-    if croaking {
-        apply(&anim::FROG_CROAK, model, parts, seconds, 1.0);
-    }
-    if st.has_pose(Pose::UsingTongue) {
-        apply(&anim::FROG_TONGUE, model, parts, seconds, 1.0);
-    }
+    use crate::entities::state::anim_slot::frog as slot;
+    let states = &st.extras.anim;
+    let age = st.age_ticks;
+    apply_state(&anim::FROG_JUMP, model, parts, states[slot::JUMP], age);
+    apply_state(&anim::FROG_CROAK, model, parts, states[slot::CROAK], age);
+    apply_state(&anim::FROG_TONGUE, model, parts, states[slot::TONGUE], age);
 
     if st.is_in_water {
         apply_walk(
@@ -136,7 +130,6 @@ pub fn frog_setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
             MAX_SWIM_ANIMATION_SPEED,
             WALK_ANIMATION_SCALE_FACTOR,
         );
-        apply(&anim::FROG_IDLE_WATER, model, parts, seconds, 1.0);
     } else {
         apply_walk(
             &anim::FROG_WALK,
@@ -148,8 +141,15 @@ pub fn frog_setup(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
             WALK_ANIMATION_SCALE_FACTOR,
         );
     }
+    apply_state(
+        &anim::FROG_IDLE_WATER,
+        model,
+        parts,
+        states[slot::SWIM_IDLE],
+        age,
+    );
 
-    parts[model.id("croaking_body")].visible = croaking;
+    parts[model.id("croaking_body")].visible = states[slot::CROAK].is_started();
 }
 
 pub fn tadpole_layer() -> LayerDef {

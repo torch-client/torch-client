@@ -25,7 +25,7 @@ use azalea_protocol::{
 };
 use azalea_registry::builtin::EntityKind;
 use azalea_world::{PartialWorld, WorldName, Worlds};
-use bevy_ecs::{prelude::*, system::SystemState};
+use bevy_ecs::prelude::*;
 pub use events::*;
 use tracing::{debug, error, warn};
 
@@ -38,7 +38,7 @@ use crate::{
     cookies::{RequestCookieEvent, StoreCookieEvent},
     disconnect::DisconnectEvent,
     inventory::{ClientsideCloseContainerEvent, MenuOpenedEvent, SetContainerContentEvent},
-    local_player::{Experience, Hunger, PreviousGameMode, TabList, WorldHolder},
+    local_player::{Experience, Hunger, PreviousGameMode, TabList, TabListResource, WorldHolder},
     movement::{KnockbackData, KnockbackEvent},
     packet::{
         as_system, declare_packet_handlers,
@@ -457,7 +457,7 @@ impl GamePacketHandler<'_> {
             Query<&mut TabList>,
             MessageWriter<AddPlayerEvent>,
             MessageWriter<UpdatePlayerEvent>,
-            ResMut<TabList>,
+            ResMut<TabListResource>,
         )>(
             self.ecs,
             |(
@@ -502,7 +502,7 @@ impl GamePacketHandler<'_> {
                     }
                 }
 
-                *tab_list_resource = tab_list.clone();
+                *tab_list_resource = tab_list.clone().into();
             },
         );
     }
@@ -513,7 +513,7 @@ impl GamePacketHandler<'_> {
         as_system::<(
             Query<&mut TabList>,
             MessageWriter<RemovePlayerEvent>,
-            ResMut<TabList>,
+            ResMut<TabListResource>,
         )>(
             self.ecs,
             |(mut query, mut remove_player_events, mut tab_list_resource)| {
@@ -681,15 +681,14 @@ impl GamePacketHandler<'_> {
                 move |entity| {
                     let entity_id = entity.id();
                     entity.world_scope(|world| {
-                        let mut commands_system_state = SystemState::<Commands>::new(world);
-                        let mut commands = commands_system_state.get_mut(world);
+                        let mut commands = world.commands();
                         let mut entity_commands = commands.entity(entity_id);
                         if let Err(e) =
                             apply_metadata(&mut entity_commands, entity_kind, packed_items)
                         {
                             warn!("{e}");
                         }
-                        commands_system_state.apply(world);
+                        world.flush();
                     });
                 },
             ));
@@ -697,22 +696,34 @@ impl GamePacketHandler<'_> {
     }
 
     pub fn update_attributes(&mut self, p: &ClientboundUpdateAttributes) {
-        as_system::<Query<(&MinecraftEntityId, &mut azalea_entity::Attributes)>>(
-            self.ecs,
-            |mut query| {
-                let Ok((id, mut attributes)) = query.get_mut(self.player) else {
+        as_system::<(
+            Commands,
+            Query<(&MinecraftEntityId, &mut azalea_entity::Attributes, &EntityIdIndex)>,
+        )>(self.ecs, |(mut commands, mut query)| {
+            let Ok((id, mut attributes, index)) = query.get_mut(self.player) else {
+                return;
+            };
+            if *id != p.entity_id {
+                let Some(entity) = index.get_by_minecraft_entity(p.entity_id) else {
                     return;
                 };
-                if *id != p.entity_id {
-                    return;
-                }
                 for value in &p.values {
-                    if let Some(instance) = attributes.get_mut(value.attribute) {
+                    if value.attribute == azalea_registry::builtin::Attribute::Scale {
+                        let mut instance = azalea_entity::attributes::AttributeInstance::new(value.base);
                         instance.apply_snapshot(value.base, &value.modifiers);
+                        let scale = instance.calculate();
+                        let scale = if scale.is_nan() { 0.0625 } else { scale.clamp(0.0625, 16.0) };
+                        commands.entity(entity).insert(azalea_entity::dimensions::RemoteScale(scale as f32));
                     }
                 }
-            },
-        );
+                return;
+            }
+            for value in &p.values {
+                if let Some(instance) = attributes.get_mut(value.attribute) {
+                    instance.apply_snapshot(value.base, &value.modifiers);
+                }
+            }
+        });
     }
 
     pub fn set_entity_motion(&mut self, p: &ClientboundSetEntityMotion) {

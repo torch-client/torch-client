@@ -1,15 +1,13 @@
 use bevy::asset::embedded_asset;
 use bevy::camera::{ClearColor, NormalizedRenderTarget};
 use bevy::color::LinearRgba;
+use bevy::core_pipeline::schedule::camera_driver;
+use bevy::ecs::schedule::ScheduleCleanupPolicy;
 use bevy::mesh::VertexBufferLayout;
-use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use bevy::render::camera::{ExtractedCamera, SortedCameras};
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{
-    Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
-};
 use std::num::NonZeroU64;
 
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
@@ -22,7 +20,9 @@ use bevy::render::render_resource::{
     TextureSampleType, TextureView, TextureViewId, VertexAttribute, VertexFormat, VertexState,
     VertexStepMode,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::renderer::{
+    FlushCommands, RenderContext, RenderDevice, RenderGraph, RenderGraphSystems,
+};
 use bevy::render::texture::{GpuImage, OutputColorAttachment};
 use bevy::render::view::{ExtractedWindows, ViewTargetAttachments};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
@@ -279,6 +279,9 @@ pub(crate) fn prepare_gui_image_groups(
     }
 }
 
+#[derive(Resource, Default)]
+struct GuiSwapchainRequests(Vec<Entity>);
+
 #[allow(clippy::too_many_arguments, reason = "one system, flat arguments")]
 fn plan_gui_passes(
     mut plan: ResMut<GuiPlan>,
@@ -397,182 +400,169 @@ fn plan_gui_passes(
     }
 }
 
-struct GuiCameraDriverNode {
-    cameras: QueryState<&'static ExtractedCamera>,
-}
-
-impl Node for GuiCameraDriverNode {
-    fn update(&mut self, world: &mut World) {
-        self.cameras.update_archetypes(world);
-    }
-
-    fn run(
-        &self,
-        graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let sorted = world.resource::<SortedCameras>();
-        let windows = world.resource::<ExtractedWindows>();
-        let mut camera_windows = HashSet::<Entity>::default();
-        for sorted_camera in &sorted.0 {
-            let Ok(camera) = self.cameras.get_manual(world, sorted_camera.entity) else {
-                continue;
-            };
-            if let Some(NormalizedRenderTarget::Window(window_ref)) = camera.target {
-                let window = window_ref.entity();
-                if !windows
-                    .get(&window)
-                    .is_some_and(|w| w.physical_width > 0 && w.physical_height > 0)
-                {
-                    continue;
-                }
-                camera_windows.insert(window);
-            }
-            graph.run_sub_graph(
-                camera.render_graph,
-                vec![],
-                Some(sorted_camera.entity),
-                Some(format!(
-                    "Camera {} ({})",
-                    sorted_camera.order, sorted_camera.entity
-                )),
-            )?;
+fn request_gui_swapchains(
+    mut requested: ResMut<GuiSwapchainRequests>,
+    mut windows: ResMut<ExtractedWindows>,
+    pool: Res<GuiPool>,
+) {
+    requested.0.clear();
+    let primary = windows.primary;
+    for (&id, window) in windows.iter_mut() {
+        let drawn = primary == Some(id)
+            || pool
+                .ranges
+                .iter()
+                .any(|r| r.window == id && r.index_count > 0);
+        if drawn && !window.needs_initial_present {
+            window.needs_initial_present = true;
+            requested.0.push(id);
         }
-
-        let plan = world.resource::<GuiPlan>();
-        let clear = world.resource::<ClearColor>();
-        for (id, window) in windows.iter() {
-            if camera_windows.contains(id) || plan.0.iter().any(|pass| pass.window == *id) {
-                continue;
-            }
-            let Some(view) = &window.swap_chain_texture_view else {
-                continue;
-            };
-            render_context
-                .command_encoder()
-                .begin_render_pass(&RenderPassDescriptor {
-                    label: Some("no_camera_clear_pass"),
-                    color_attachments: &[Some(RenderPassColorAttachment {
-                        view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: Operations {
-                            load: LoadOp::Clear(clear.to_linear().into()),
-                            store: StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-        }
-        Ok(())
     }
 }
 
-#[derive(RenderLabel, Debug, Hash, PartialEq, Eq, Clone)]
-pub(crate) struct GuiLabel;
-
-struct GuiNode;
-
-impl Node for GuiNode {
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let plan = world.resource::<GuiPlan>();
-        if plan.0.is_empty() {
-            return Ok(());
+fn settle_gui_swapchains(
+    requested: Res<GuiSwapchainRequests>,
+    mut windows: ResMut<ExtractedWindows>,
+) {
+    for id in &requested.0 {
+        if let Some(window) = windows.get_mut(id) {
+            window.needs_initial_present = false;
         }
-        let attachments = world.resource::<ViewTargetAttachments>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let pool = world.resource::<GuiPool>();
-        let gui_group = world.resource::<GuiBindGroup>().group.as_ref();
-        let image_groups = world.resource::<GuiImageGroups>();
-        let blit_group = world
-            .resource::<SceneBlitBindGroup>()
-            .0
-            .as_ref()
-            .map(|(_, group)| group);
+    }
+}
 
-        let recorder = render_context.diagnostic_recorder();
-        for pass in &plan.0 {
-            let Some(attachment) = attachments.get(&pass.target) else {
-                continue;
-            };
-            let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-                label: Some("gui"),
-                color_attachments: &[Some(attachment.get_attachment(Some(pass.clear)))],
+fn clear_uncovered_windows(
+    sorted: Res<SortedCameras>,
+    windows: Res<ExtractedWindows>,
+    plan: Res<GuiPlan>,
+    clear: Res<ClearColor>,
+    mut ctx: RenderContext,
+) {
+    for (id, window) in windows.iter() {
+        let camera = sorted.0.iter().any(|camera| {
+            matches!(&camera.target, Some(NormalizedRenderTarget::Window(w)) if w.entity() == *id)
+        });
+        if camera || plan.0.iter().any(|pass| pass.window == *id) {
+            continue;
+        }
+        let Some(view) = &window.swap_chain_texture_view else {
+            continue;
+        };
+        ctx.command_encoder()
+            .begin_render_pass(&RenderPassDescriptor {
+                label: Some("no_camera_clear_pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(clear.to_linear().into()),
+                        store: StoreOp::Store,
+                    },
+                })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
-            let span = recorder.pass_span(&mut render_pass, "gui");
+    }
+}
 
-            if let (Some(id), Some(group)) = (pass.blit, blit_group)
-                && let Some(pipeline) = pipeline_cache.get_render_pipeline(id)
-            {
-                render_pass.set_render_pipeline(pipeline);
-                render_pass.set_bind_group(0, group, &[]);
-                render_pass.draw(0..3, 0..1);
-            }
+fn submit_commands(mut flush: FlushCommands) {
+    flush.flush();
+}
 
-            if let (Some(id), Some(group), Some(vertices), Some(indices)) =
-                (pass.gui, gui_group, &pool.vertices, &pool.indices)
-                && let Some(pipeline) = pipeline_cache.get_render_pipeline(id)
-            {
-                render_pass.set_render_pipeline(pipeline);
-                render_pass.set_bind_group(0, group, &[]);
-                render_pass.set_vertex_buffer(0, vertices.slice(..));
-                render_pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
-                let atlas = crate::gui::painter::ATLAS_TEXTURE;
-                let mut bound = atlas;
-                let vignette = pass
-                    .vignette
-                    .and_then(|id| pipeline_cache.get_render_pipeline(id));
-                for range in &pool.ranges {
-                    if range.window != pass.window || range.index_count == 0 {
-                        continue;
-                    }
-                    if range.texture == crate::gui::painter::VIGNETTE_TEXTURE {
-                        if let Some(vignette) = vignette {
-                            if bound != atlas {
-                                render_pass.set_bind_group(0, group, &[]);
-                                bound = atlas;
-                            }
-                            render_pass.set_render_pipeline(vignette);
-                            render_pass.draw_indexed(
-                                range.first_index..range.first_index + range.index_count,
-                                range.base_vertex,
-                                0..1,
-                            );
-                            render_pass.set_render_pipeline(pipeline);
-                        }
-                        continue;
-                    }
-                    if range.texture != bound {
-                        let next = if range.texture == atlas {
-                            Some(group)
-                        } else {
-                            image_groups.0.get(&range.texture).map(|(_, g)| g)
-                        };
-                        let Some(next) = next else { continue };
-                        render_pass.set_bind_group(0, next, &[]);
-                        bound = range.texture;
-                    }
-                    render_pass.draw_indexed(
-                        range.first_index..range.first_index + range.index_count,
-                        range.base_vertex,
-                        0..1,
-                    );
-                }
-            }
-            span.end(&mut render_pass);
+pub(crate) fn gui_pass(world: &World, mut ctx: RenderContext) {
+    let plan = world.resource::<GuiPlan>();
+    if plan.0.is_empty() {
+        return;
+    }
+    let attachments = world.resource::<ViewTargetAttachments>();
+    let pipeline_cache = world.resource::<PipelineCache>();
+    let pool = world.resource::<GuiPool>();
+    let gui_group = world.resource::<GuiBindGroup>().group.as_ref();
+    let image_groups = world.resource::<GuiImageGroups>();
+    let blit_group = world
+        .resource::<SceneBlitBindGroup>()
+        .0
+        .as_ref()
+        .map(|(_, group)| group);
+
+    let recorder = ctx.diagnostic_recorder();
+    let recorder = recorder.as_deref();
+    for pass in &plan.0 {
+        let Some(attachment) = attachments.get(&pass.target) else {
+            continue;
+        };
+        let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("gui"),
+            color_attachments: &[Some(attachment.get_attachment(Some(pass.clear)))],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let span = recorder.pass_span(&mut render_pass, "gui");
+
+        if let (Some(id), Some(group)) = (pass.blit, blit_group)
+            && let Some(pipeline) = pipeline_cache.get_render_pipeline(id)
+        {
+            render_pass.set_render_pipeline(pipeline);
+            render_pass.set_bind_group(0, group, &[]);
+            render_pass.draw(0..3, 0..1);
         }
-        Ok(())
+
+        if let (Some(id), Some(group), Some(vertices), Some(indices)) =
+            (pass.gui, gui_group, &pool.vertices, &pool.indices)
+            && let Some(pipeline) = pipeline_cache.get_render_pipeline(id)
+        {
+            render_pass.set_render_pipeline(pipeline);
+            render_pass.set_bind_group(0, group, &[]);
+            render_pass.set_vertex_buffer(0, vertices.slice(..));
+            render_pass.set_index_buffer(indices.slice(..), IndexFormat::Uint32);
+            let atlas = crate::gui::painter::ATLAS_TEXTURE;
+            let mut bound = atlas;
+            let vignette = pass
+                .vignette
+                .and_then(|id| pipeline_cache.get_render_pipeline(id));
+            for range in &pool.ranges {
+                if range.window != pass.window || range.index_count == 0 {
+                    continue;
+                }
+                if range.texture == crate::gui::painter::VIGNETTE_TEXTURE {
+                    if let Some(vignette) = vignette {
+                        if bound != atlas {
+                            render_pass.set_bind_group(0, group, &[]);
+                            bound = atlas;
+                        }
+                        render_pass.set_render_pipeline(vignette);
+                        render_pass.draw_indexed(
+                            range.first_index..range.first_index + range.index_count,
+                            range.base_vertex,
+                            0..1,
+                        );
+                        render_pass.set_render_pipeline(pipeline);
+                    }
+                    continue;
+                }
+                if range.texture != bound {
+                    let next = if range.texture == atlas {
+                        Some(group)
+                    } else {
+                        image_groups.0.get(&range.texture).map(|(_, g)| g)
+                    };
+                    let Some(next) = next else { continue };
+                    render_pass.set_bind_group(0, next, &[]);
+                    bound = range.texture;
+                }
+                render_pass.draw_indexed(
+                    range.first_index..range.first_index + range.index_count,
+                    range.base_vertex,
+                    0..1,
+                );
+            }
+        }
+        span.end(&mut render_pass);
     }
 }
 
@@ -611,14 +601,21 @@ pub fn build(app: &mut App) {
         .init_resource::<GuiImageGroups>()
         .init_resource::<SceneBlitBindGroup>()
         .init_resource::<GuiPlan>()
+        .init_resource::<GuiSwapchainRequests>()
         .init_resource::<SpecializedRenderPipelines<GuiPipeline>>()
         .add_systems(RenderStartup, init_gui_pipeline)
         .add_systems(bevy::render::ExtractSchedule, crate::gui::pool::extract_gui)
         .add_systems(
             Render,
             (
+                request_gui_swapchains
+                    .in_set(RenderSystems::PrepareViews)
+                    .before(bevy::render::view::prepare_windows),
+                settle_gui_swapchains
+                    .in_set(RenderSystems::PrepareViews)
+                    .after(bevy::render::view::prepare_windows),
                 plan_gui_passes
-                    .in_set(RenderSystems::ManageViews)
+                    .in_set(RenderSystems::PrepareViews)
                     .after(bevy::render::view::prepare_view_targets),
                 prepare_gui_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 prepare_gui_image_groups.in_set(RenderSystems::PrepareBindGroups),
@@ -628,16 +625,13 @@ pub fn build(app: &mut App) {
             ),
         );
 
-    let driver = GuiCameraDriverNode {
-        cameras: render_app.world_mut().query(),
-    };
-    let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
-    graph
-        .remove_node(bevy::render::graph::CameraDriverLabel)
-        .expect("CameraPlugin adds the camera driver before the gui plugin builds");
-    graph.add_node(bevy::render::graph::CameraDriverLabel, driver);
-    graph.add_node(GuiLabel, GuiNode);
-    graph.add_node_edge(bevy::render::graph::CameraDriverLabel, GuiLabel);
+    render_app.add_systems(
+        RenderGraph,
+        (clear_uncovered_windows, gui_pass)
+            .chain()
+            .in_set(RenderGraphSystems::Render)
+            .after(camera_driver),
+    );
 }
 
 pub fn finish(app: &mut App) {
@@ -650,4 +644,20 @@ pub fn finish(app: &mut App) {
         return;
     };
     render_app.insert_resource(shaders);
+
+    let removed = render_app
+        .remove_systems_in_set(
+            RenderGraph,
+            RenderGraphSystems::Submit,
+            ScheduleCleanupPolicy::RemoveSystemsOnly,
+        )
+        .expect("CorePipelinePlugin fills the Submit set before finish");
+    assert_eq!(
+        removed, 2,
+        "RenderGraphSystems::Submit no longer holds what gui::draw replaces"
+    );
+    render_app.add_systems(
+        RenderGraph,
+        submit_commands.in_set(RenderGraphSystems::Submit),
+    );
 }

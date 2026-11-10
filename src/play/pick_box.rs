@@ -1,6 +1,8 @@
 use azalea::ecs::prelude::*;
-use azalea::entity::dimensions::EntityDimensions;
-use azalea::entity::metadata::Health;
+use azalea::entity::dimensions::{
+    EntityDimensions, RemoteScale, ShulkerPeekAmount, shulker_bounding_box,
+};
+use azalea::entity::metadata::{AttachFace, Health};
 use azalea::entity::{EntityKindComponent, LocalEntity, Position};
 use azalea::interact::pick::PickBoundingBox;
 use azalea_core::position::Vec3;
@@ -26,11 +28,16 @@ pub(crate) fn step_pick_boxes(
             Has<Health>,
             Option<&mut Interpolated>,
             Option<&mut PickBoundingBox>,
+            (
+                Option<&AttachFace>,
+                Option<&ShulkerPeekAmount>,
+                Option<&RemoteScale>,
+            ),
         ),
         Without<LocalEntity>,
     >,
 ) {
-    for (entity, position, dimensions, kind, living, state, pick_box) in &mut query {
+    for (entity, position, dimensions, kind, living, state, pick_box, shulker) in &mut query {
         let target = [position.x, position.y, position.z];
         let pos = match state {
             Some(mut state) => {
@@ -68,7 +75,16 @@ pub(crate) fn step_pick_boxes(
                 target
             }
         };
-        let aabb = dimensions.make_bounding_box(Vec3::new(pos[0], pos[1], pos[2]));
+        let at = Vec3::new(pos[0], pos[1], pos[2]);
+        let aabb = match shulker {
+            (Some(face), peek, scale) => shulker_bounding_box(
+                scale.map_or(1.0, |s| s.0),
+                face.0,
+                peek.map_or(0.0, |p| p.0),
+                at,
+            ),
+            _ => dimensions.make_bounding_box(at),
+        };
         match pick_box {
             Some(mut pick_box) => pick_box.0 = aabb,
             None => {

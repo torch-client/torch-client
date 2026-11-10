@@ -49,12 +49,40 @@ struct Mirror {
 thread_local! {
     static MIRROR: RefCell<Option<Mirror>> = const { RefCell::new(None) };
     static CHANGED: RefCell<Vec<BlockPos>> = const { RefCell::new(Vec::new()) };
+    static LOST: RefCell<Option<Vec<(i32, i32)>>> = const { RefCell::new(None) };
     static ON_MESSAGE: RefCell<Option<Closure<dyn FnMut(web_sys::MessageEvent)>>> =
         const { RefCell::new(None) };
 }
 
 fn scope() -> web_sys::DedicatedWorkerGlobalScope {
     js_sys::global().unchecked_into()
+}
+
+pub(crate) fn note_lost(cx: i32, cz: i32) -> bool {
+    LOST.with(|lost| match lost.borrow_mut().as_mut() {
+        Some(list) => {
+            list.push((cx, cz));
+            true
+        }
+        None => false,
+    })
+}
+
+fn clear_lost() {
+    LOST.with(|lost| {
+        if let Some(list) = lost.borrow_mut().as_mut() {
+            list.clear();
+        }
+    });
+}
+
+fn take_lost() -> Vec<(i32, i32)> {
+    LOST.with(|lost| {
+        lost.borrow_mut()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    })
 }
 
 fn post(bytes: Vec<u8>) {
@@ -90,6 +118,7 @@ pub fn start(assets: Vec<u8>) {
         return;
     }
 
+    LOST.with(|lost| *lost.borrow_mut() = Some(Vec::new()));
     let shared = Arc::new(SharedMutex::default());
     let queue = crate::client::worker::spawn_chunk_workers(shared.clone());
     queue.prefer_loads();
@@ -222,12 +251,14 @@ impl Mirror {
             ToWorker::ResetLight => {
                 self.queue.reset();
                 self.meshed.clear();
+                clear_lost();
                 self.clear_light_delta();
                 self.batch.push(LightJob::Reset);
             }
             ToWorker::ResetLevel => {
                 self.queue.reset();
                 self.meshed.clear();
+                clear_lost();
                 self.level = None;
                 self.clear_light_delta();
                 self.batch.clear();
@@ -236,6 +267,7 @@ impl Mirror {
                 let mut s = self.shared.lock().unwrap();
                 s.session.pending_chunks.clear();
                 s.session.pending_edits.clear();
+                s.session.meshed_columns.cleared();
             }
             #[cfg(feature = "shader_support")]
             ToWorker::PackIds(bytes) => {
@@ -288,37 +320,46 @@ impl Mirror {
     fn chunk(&mut self, cx: i32, cz: i32, mesh: Vec<(i32, i32)>, packet: &[u8]) {
         let Some(level) = self.level.as_mut() else {
             log_error!("mesh", "a chunk arrived for {cx},{cz} before its level did");
+            for (x, z) in mesh {
+                note_lost(x, z);
+            }
             return;
         };
         let mut light = None;
         if packet.is_empty() && !level.resident.contains_key(&(cx, cz)) {
             log_error!("mesh", "column {cx},{cz} arrived with no blocks to mesh");
         }
-        if !packet.is_empty() {
-            let Ok(p) = ClientboundLevelChunkWithLight::azalea_read(&mut Cursor::new(packet))
-            else {
-                log_error!("mesh", "the chunk packet for {cx},{cz} would not decode");
-                return;
-            };
-            let chunk = match Chunk::read_with_dimension_height(
+        let decoded = (!packet.is_empty())
+            .then(
+                || match ClientboundLevelChunkWithLight::azalea_read(&mut Cursor::new(packet)) {
+                    Ok(p) => Some(p),
+                    Err(_) => {
+                        log_error!("mesh", "the chunk packet for {cx},{cz} would not decode");
+                        None
+                    }
+                },
+            )
+            .flatten();
+        if let Some(p) = decoded {
+            match Chunk::read_with_dimension_height(
                 &mut Cursor::new(&p.chunk_data.data[..]),
                 level.height,
                 level.min_y,
                 &p.chunk_data.heightmaps,
             ) {
-                Ok(chunk) => chunk,
+                Ok(chunk) => {
+                    let arc = level
+                        .world
+                        .write()
+                        .chunks
+                        .upsert(AzChunkPos { x: cx, z: cz }, chunk);
+                    level.resident.insert((cx, cz), arc);
+                    light = Some(crate::client::packets::server_light(&p.light_data));
+                }
                 Err(e) => {
                     log_error!("mesh", "the chunk data for {cx},{cz} would not decode: {e}");
-                    return;
                 }
-            };
-            let arc = level
-                .world
-                .write()
-                .chunks
-                .upsert(AzChunkPos { x: cx, z: cz }, chunk);
-            level.resident.insert((cx, cz), arc);
-            light = Some(crate::client::packets::server_light(&p.light_data));
+            }
         }
         for col in &mesh {
             self.meshed.insert(*col);
@@ -360,7 +401,7 @@ impl Mirror {
                 self.queue.push(world.clone(), cx, cz, scope);
             }
         }
-        self.batch.push(LightJob::Block { world, pos });
+        self.batch.push(LightJob::Block { pos });
     }
 
     fn run_light(&mut self, batch: Vec<LightJob>) {
@@ -374,7 +415,9 @@ impl Mirror {
         } = self;
         let mut whole: HashSet<(i32, i32)> = HashSet::new();
         let mut on_dirty =
-            |sections: &[SectionPos], to_mesh: &[(Arc<RwLock<World>>, ColumnPos)]| {
+            |_: &Arc<RwLock<World>>,
+             sections: &[SectionPos],
+             to_mesh: &[(Arc<RwLock<World>>, ColumnPos)]| {
                 for (world, col) in to_mesh {
                     whole.insert((col.x, col.z));
                     queue.push(world.clone(), col.x, col.z, JobScope::Column);
@@ -437,14 +480,19 @@ impl Mirror {
             &mut self.scratch,
             POST_SECTIONS,
         );
-        let (mut chunks, mut edits) = {
+        let (mut chunks, mut edits, columns) = {
             let mut s = self.shared.lock().unwrap();
             (
                 std::mem::take(&mut s.session.pending_chunks),
                 std::mem::take(&mut s.session.pending_edits),
+                s.session.meshed_columns.take_keys(),
             )
         };
-        if chunks.is_empty() && edits.is_empty() {
+        let lost = take_lost();
+        for col in &lost {
+            self.meshed.remove(col);
+        }
+        if chunks.is_empty() && edits.is_empty() && columns.is_empty() && lost.is_empty() {
             return 0;
         }
         let n = chunks.len() + edits.len();
@@ -452,6 +500,8 @@ impl Mirror {
         post(msg::sections(
             chunks.make_contiguous(),
             edits.make_contiguous(),
+            &columns,
+            &lost,
         ));
         n
     }

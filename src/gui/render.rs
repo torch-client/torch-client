@@ -91,6 +91,7 @@ pub struct GuiInput {
     pub paste: bool,
     pub cut: bool,
     pub select_all: bool,
+    pub edit_shortcut: bool,
     #[cfg(feature = "hud_editor")]
     pub undo: bool,
     #[cfg(feature = "hud_editor")]
@@ -692,6 +693,7 @@ pub(crate) fn collect_input(
     input.paste = shortcut && keys.just_pressed(KeyCode::KeyV);
     input.cut = shortcut && keys.just_pressed(KeyCode::KeyX);
     input.select_all = shortcut && keys.just_pressed(KeyCode::KeyA);
+    input.edit_shortcut = shortcut && keys.just_pressed(KeyCode::KeyE);
     input.profile_down = shortcut && keys.just_pressed(KeyCode::BracketLeft);
     input.profile_up = shortcut && keys.just_pressed(KeyCode::BracketRight);
     #[cfg(feature = "hud_editor")]
@@ -878,13 +880,34 @@ pub(crate) fn draw_gui(
         .as_ref()
         .filter(|view| view.local.using_item)
         .map(|view| (view.local.using_offhand, view.local.ticks_using_item));
+    let item_use_max = view
+        .as_ref()
+        .filter(|view| view.local.using_item)
+        .map_or(0, |view| {
+            let held = if view.local.using_offhand {
+                &view.local.off_hand
+            } else {
+                &view.local.main_hand
+            };
+            held.use_duration
+        });
+    let fishing_cast = match (&view, &item_assets) {
+        (Some(view), Some(items)) => {
+            let id = crate::client::tracking::local_entity_id();
+            [true, false].map(|main| items.fishing_cast(id, view.local.main_hand.id, main))
+        }
+        _ => [false; 2],
+    };
     state.screen_effects = match view {
         Some(view) => {
             let detached = camera_view.is_some_and(|c| c.detached());
             crate::gui::screen_effects::ScreenEffects::read(
                 &view,
                 detached,
-                state.options.screen_effects,
+                &state.options,
+                state.screen_effects.scope_scale,
+                time.delta_secs() * 20.0,
+                state.hide_gui,
             )
         }
         None => Default::default(),
@@ -897,6 +920,8 @@ pub(crate) fn draw_gui(
         painter.item_owner = items.local_owner();
     }
     painter.item_use = item_use;
+    painter.item_use_max = item_use_max;
+    painter.fishing_cast = fishing_cast;
     screens::draw(
         &mut painter,
         &mut state,

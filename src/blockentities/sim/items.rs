@@ -38,6 +38,68 @@ pub fn campfire(tag: &Nbt) -> Campfire {
     Container::load(tag)
 }
 
+const STEPS_2D: [[f32; 2]; 4] = [[0.0, 1.0], [-1.0, 0.0], [0.0, -1.0], [1.0, 0.0]];
+
+pub fn campfire_particle_tick(ctx: &super::TickCtx) {
+    use azalea::entity::particle::Particle;
+
+    if ctx.state.prop("lit") != "true" {
+        return;
+    }
+    let [x, y, z] = ctx.pos.map(f64::from);
+    let signal = ctx.state.prop("signal_fire") == "true";
+    let column = if signal {
+        Particle::CampfireSignalSmoke
+    } else {
+        Particle::CampfireCosySmoke
+    };
+    let puffs: Vec<[f64; 3]> = ctx.random(|r| {
+        let mut out = Vec::new();
+        if r.next_f32() < 0.11 {
+            let mut i = 0;
+            while i < r.next_int(2) + 2 {
+                let sign = |r: &mut crate::util::javarandom::JavaRandom| {
+                    if r.next_bool() { 1.0 } else { -1.0 }
+                };
+                let px = x + 0.5 + r.next_f64() / 3.0 * sign(r);
+                let py = y + r.next_f64() + r.next_f64();
+                let pz = z + 0.5 + r.next_f64() / 3.0 * sign(r);
+                out.push([px, py, pz]);
+                i += 1;
+            }
+        }
+        out
+    });
+    for at in puffs {
+        ctx.add_always_visible_particle(column.clone(), at, [0.0, 0.07, 0.0]);
+    }
+
+    let crate::blockentities::feed::BlockEntityData::Campfire(campfire) = ctx.data else {
+        return;
+    };
+    let rotation = match ctx.state.prop("facing") {
+        "west" => 1,
+        "north" => 2,
+        "east" => 3,
+        _ => 0,
+    };
+    for (slot, item) in campfire.items.iter().enumerate() {
+        if item.is_empty() || ctx.random(|r| r.next_f32() >= 0.2) {
+            continue;
+        }
+        let direction = STEPS_2D[(slot + rotation) % 4];
+        let clockwise = STEPS_2D[(slot + rotation + 1) % 4];
+        let at = [
+            x + 0.5 - f64::from(direction[0] * 0.3125) + f64::from(clockwise[0] * 0.3125),
+            y + 0.5,
+            z + 0.5 - f64::from(direction[1] * 0.3125) + f64::from(clockwise[1] * 0.3125),
+        ];
+        for _ in 0..4 {
+            ctx.add_particle(Particle::Smoke, at, [0.0, 5.0e-4, 0.0]);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Shelf {
     pub slots: Container<3>,
@@ -103,6 +165,9 @@ pub fn stack(tag: &NbtCompound) -> HeldItem {
             .map_or(0, |m| {
                 crate::items::dispatch::trim_index(&bare(&m.to_str()))
             }),
+        block_state: components
+            .and_then(|c| c.compound("minecraft:block_state"))
+            .map_or(0, crate::items::dispatch::block_state_of_codec),
         ..HeldItem::default()
     }
 }

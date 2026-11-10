@@ -2,7 +2,7 @@ use crate::platform::time::Instant;
 use std::collections::HashMap;
 use std::sync::Once;
 
-use super::bake::{bake_resolved, tile_uv_rect};
+use super::bake::bake_resolved;
 use super::rand::position_seed;
 use super::rotation;
 use super::state::{Rot, StateDef};
@@ -468,7 +468,7 @@ fn per_face_uv_and_rotation_land_where_the_maths_says() {
 
     let blocks = super::registry();
     let tile = blocks.sprites().tile("stone").unwrap();
-    let [au0, av0, au1, av1] = tile_uv_rect(tile, blocks.sprites().rows());
+    let [au0, av0, au1, av1] = blocks.sprites().uv_rect(tile);
     let at = |u: f32, v: f32| [au0 + (au1 - au0) * u, av0 + (av1 - av0) * v];
 
     let expected = [at(0.0, 1.0), at(0.5, 1.0), at(0.5, 0.5), at(0.0, 0.5)];

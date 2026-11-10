@@ -119,6 +119,36 @@ fn spike_z(spike: usize, age_ticks: f32, withdrawal: f32) -> f32 {
     SPIKE_Z[spike] * spike_offset(spike, age_ticks, withdrawal)
 }
 
+fn eye_offset(st: &EntityState) -> Option<[f32; 2]> {
+    let look = st.extras.look_at?;
+    let eye = [st.pos[0], st.pos[1] + f64::from(st.eye_height), st.pos[2]];
+    let y = if look[1] - eye[1] > 0.0 { 0.0 } else { 1.0 };
+
+    let head_yaw = (st.body_rot + st.y_rot) * DEG_TO_RAD;
+    let x_cos = (st.x_rot * DEG_TO_RAD).cos();
+    let view = [
+        f64::from((-head_yaw).sin() * x_cos),
+        f64::from((-head_yaw).cos() * x_cos),
+    ];
+
+    let (dx, dz) = (eye[0] - look[0], eye[2] - look[2]);
+    let len = (dx * dx + dz * dz).sqrt();
+    let (dx, dz) = if len < 1.0e-5 {
+        (0.0, 0.0)
+    } else {
+        (dx / len, dz / len)
+    };
+    let (cos, sin) = (
+        f64::from(std::f32::consts::FRAC_PI_2.cos()),
+        f64::from(std::f32::consts::FRAC_PI_2.sin()),
+    );
+    let delta = [dx * cos + dz * sin, dz * cos - dx * sin];
+
+    let dot = view[0] * delta[0] + view[1] * delta[1];
+    let x = (dot.abs() as f32).sqrt() * 2.0 * (dot as f32).signum();
+    Some([x, y])
+}
+
 pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState) {
     let head = model.id("head");
     parts[head].y_rot = st.y_rot * DEG_TO_RAD;
@@ -133,6 +163,10 @@ pub fn setup_anim(model: &BakedModel, parts: &mut [PartState], st: &EntityState)
     }
 
     let eye = model.id("eye");
+    if let Some([x, y]) = eye_offset(st) {
+        parts[eye].x = x;
+        parts[eye].y = y;
+    }
     parts[eye].visible = true;
 
     let swim = st.extras.tail_animation;

@@ -305,3 +305,23 @@ fn test_intangible_projectile_is_an_empty_compound() {
     c.azalea_write(&mut back).unwrap();
     assert_eq!(back, bytes);
 }
+
+#[test]
+fn test_sulfur_cube_content_is_a_template() {
+    use std::io::Cursor;
+
+    use azalea_buf::AzBuf;
+    use azalea_inventory::components::SulfurCubeContent;
+    use azalea_registry::Registry;
+
+    let c = SulfurCubeContent {
+        absorbed_block_item_stack: ItemStack::from((ItemKind::Stone, 5)),
+    };
+    let mut bytes = Vec::new();
+    c.azalea_write(&mut bytes).unwrap();
+    let stone = ItemKind::Stone.to_u32() as u8;
+    assert_eq!(bytes, [stone, 5, 0, 0]);
+    let mut cursor = Cursor::new(&bytes[..]);
+    assert_eq!(SulfurCubeContent::azalea_read(&mut cursor).unwrap(), c);
+    assert_eq!(cursor.position() as usize, bytes.len());
+}

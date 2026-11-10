@@ -1,3 +1,4 @@
+pub mod bedrock;
 pub mod look;
 pub mod pad;
 pub mod pointer;
@@ -19,6 +20,7 @@ use crate::session::{
     Gamemode, MOVE_BACK, MOVE_DESCEND, MOVE_FORWARD, MOVE_JUMP, MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK,
     MOVE_SPRINT,
 };
+use bedrock::Key;
 use look::{LastTap, LookTrack, MobileConfig, ZoomTaps};
 use pad::{Cell, Control, Layout, Movement, PadState, Rect, Stick};
 use pointer::{Pointer, PointerId};
@@ -35,6 +37,11 @@ enum Claim {
     Stick {
         at: Vec2,
     },
+    DPad {
+        cell: Option<(i8, i8)>,
+        sprint: bool,
+    },
+    Key(Key),
     Use,
     Hotbar,
     Chat,
@@ -50,6 +57,11 @@ impl Claim {
         match control {
             Control::Pad(cell) => Claim::Pad(cell),
             Control::Stick => Claim::Stick { at: stick_at() },
+            Control::DPad => Claim::DPad {
+                cell: None,
+                sprint: false,
+            },
+            Control::Key(key) => Claim::Key(key),
             Control::Use => Claim::Use,
             Control::Hotbar(_) => Claim::Hotbar,
             Control::Chat => Claim::Chat,
@@ -71,9 +83,13 @@ pub struct MobileUi {
     pressed_cells: u16,
     use_pressed: bool,
     stick_at: Option<Vec2>,
+    dpad_held: Option<(i8, i8)>,
+    dpad_sprint: bool,
+    keys_held: u16,
     last_tap: Option<LastTap>,
     hold_hints: Vec<(Vec2, f32)>,
     zoom: ZoomTaps,
+    seen_respawns: u32,
 }
 
 impl MobileUi {
@@ -86,6 +102,9 @@ impl MobileUi {
         self.pressed_cells = 0;
         self.use_pressed = false;
         self.stick_at = None;
+        self.dpad_held = None;
+        self.dpad_sprint = false;
+        self.keys_held = 0;
         self.last_tap = None;
         self.hold_hints.clear();
         crate::modules::zoom::set_touch(self.zoom.latched);
@@ -123,7 +142,8 @@ fn mobile_input(
     mut gui: ResMut<GuiState>,
     mut gui_input: ResMut<crate::gui::render::GuiInput>,
     mut angles: ResMut<CameraAngles>,
-    camera_view: Res<CameraView>,
+    mut camera_view: ResMut<CameraView>,
+    mut debug_overlay: ResMut<crate::renderer::systems::ProfVisible>,
     mut intent: ResMut<crate::renderer::intent::Intent>,
     mut freecam_touch: ResMut<FreecamTouch>,
 ) {
@@ -166,13 +186,17 @@ fn mobile_input(
     }
 
     if gui.screen.is_open() {
-        let closed = closable(gui.screen)
-            && ui.pointers.iter().any(|p| {
-                p.pressed
-                    && layout
-                        .close_button
-                        .contains(xf.to_local(ElementId::ChatButton, p.pos))
-            });
+        let on_close = |at: Vec2| match layout.bedrock {
+            Some(b) => {
+                let (c, r) = b.close();
+                at.distance(c) <= r * 1.2
+            }
+            None => layout
+                .close_button
+                .contains(xf.to_local(ElementId::ChatButton, at)),
+        };
+        let closed =
+            closable(gui.screen) && ui.pointers.iter().any(|p| p.pressed && on_close(p.pos));
         let swapped = gui.screen == Screen::Chat
             && crate::platform::orientation::SUPPORTED
             && ui.pointers.iter().any(|p| {
@@ -200,6 +224,7 @@ fn mobile_input(
         return;
     }
 
+    let sneak_hold = gui.options.touch_sneak == crate::gui::TouchSneak::Hold;
     let ui = &mut gui.mobile;
     let MobileUi {
         pad,
@@ -208,9 +233,13 @@ fn mobile_input(
         pressed_cells,
         use_pressed,
         stick_at,
+        dpad_held,
+        dpad_sprint,
+        keys_held,
         last_tap,
         hold_hints,
         zoom,
+        seen_respawns,
         ..
     } = ui;
 
@@ -223,18 +252,28 @@ fn mobile_input(
     let mut attack_click = false;
     let mut use_click = false;
     let mut fly_toggle = false;
+    let mut drop_item = false;
+    let mut swap_hands = false;
     let mut look_delta = Vec2::ZERO;
     let mut claimed = false;
 
     for p in pointers.iter() {
         if p.pressed {
-            let control = layout.hit_in(p.pos, &xf, &gui.hud_state.layout.areas);
+            let mut control = layout.hit_in(p.pos, &xf, &gui.hud_state.layout.areas);
+            if control == Control::DPad
+                && owners
+                    .iter()
+                    .any(|o| o.id != p.id && matches!(o.claim, Claim::DPad { .. }))
+            {
+                control = Control::Look;
+            }
             match control {
                 Control::Pad(Cell::Inventory) => nav = Some(inventory_screen(&shared)),
                 Control::Pad(Cell::Pause) => nav = Some(Screen::Pause),
                 Control::Pad(Cell::Jump) => {
                     fly_toggle |= pad.jump_double_tap(now, cfg.double_tap_secs);
                 }
+                Control::Pad(Cell::SneakToggle) if sneak_hold => {}
                 Control::Pad(cell) => pad.press(cell, now, cfg.double_tap_secs),
                 Control::Hotbar(slot) => hotbar = Some(slot),
                 Control::Use => use_click = true,
@@ -248,14 +287,48 @@ fn mobile_input(
                     nav = Some(Screen::ClickGui);
                 }
                 Control::Zoom => zoom.press(now, &cfg),
-                Control::Stick | Control::Look | Control::LookOnly => {}
+                Control::Key(key) => match key {
+                    Key::Jump => fly_toggle |= pad.jump_double_tap(now, cfg.double_tap_secs),
+                    Key::Sneak if sneak_hold => {}
+                    Key::Sneak => pad.press(Cell::SneakToggle, now, cfg.double_tap_secs),
+                    Key::Attack => attack_click = true,
+                    Key::Use => use_click = true,
+                    Key::Inventory => nav = Some(inventory_screen(&shared)),
+                    Key::Pause => nav = Some(Screen::Pause),
+                    Key::Chat => {
+                        gui.chat.open("");
+                        nav = Some(Screen::Chat);
+                    }
+                    Key::Command => {
+                        gui.chat.open("/");
+                        nav = Some(Screen::Chat);
+                    }
+                    Key::Camera => camera_view.cycle_perspective(),
+                    Key::Debug => debug_overlay.toggle(&shared),
+                    Key::Drop => drop_item = true,
+                    Key::Offhand => swap_hands = true,
+                    Key::Mods => {
+                        #[cfg(feature = "module_panel")]
+                        {
+                            gui.clickgui_parent = Screen::None;
+                            nav = Some(Screen::ClickGui);
+                        }
+                    }
+                },
+                Control::Stick | Control::DPad | Control::Look | Control::LookOnly => {}
             }
             let camera = matches!(control, Control::Look | Control::LookOnly | Control::Zoom);
             claimed |= !camera;
+            let local = xf.to_local(ElementId::Pad, p.pos);
+            let mut claim = Claim::new(control, p.pos, now, || local);
+            if let Claim::DPad { cell, sprint } = &mut claim {
+                *cell = layout.bedrock.and_then(|b| b.dpad_cell(local));
+                *sprint = cell.is_some_and(|c| c.1 == -1) && pad.dpad_sprints(now);
+            }
             owners.retain(|o| o.id != p.id);
             owners.push(Owner {
                 id: p.id,
-                claim: Claim::new(control, p.pos, now, || xf.to_local(ElementId::Pad, p.pos)),
+                claim,
                 seen: true,
             });
             continue;
@@ -270,10 +343,21 @@ fn mobile_input(
                 *at = xf.to_local(ElementId::Pad, p.pos);
                 continue;
             }
+            Claim::DPad { cell, sprint } => {
+                let local = xf.to_local(ElementId::Pad, p.pos);
+                *cell = layout.bedrock.and_then(|b| b.dpad_cell(local));
+                if cell.is_none_or(|c| c.1 != -1) {
+                    *sprint = false;
+                }
+                if p.released && *cell == Some((0, -1)) {
+                    pad.dpad_up_lifted(now);
+                }
+                continue;
+            }
             Claim::Look(track) => (track, true),
             Claim::LookOnly(track) => (track, false),
             Claim::Zoom(track) => (track, false),
-            Claim::Pad(_) | Claim::Use | Claim::Hotbar | Claim::Chat => continue,
+            Claim::Pad(_) | Claim::Key(_) | Claim::Use | Claim::Hotbar | Claim::Chat => continue,
             #[cfg(feature = "module_panel")]
             Claim::Modules => continue,
         };
@@ -305,6 +389,9 @@ fn mobile_input(
     *pressed_cells = 0;
     *use_pressed = false;
     *stick_at = None;
+    *dpad_held = None;
+    *dpad_sprint = false;
+    *keys_held = 0;
     hold_hints.clear();
     for owner in owners.iter() {
         match owner.claim {
@@ -337,6 +424,31 @@ fn mobile_input(
                     move_bits |= MOVE_BACK;
                 }
             }
+            Claim::DPad { cell, sprint } => {
+                *dpad_held = cell;
+                *dpad_sprint |= sprint;
+                let Some((x, y)) = cell else { continue };
+                if x > 0 {
+                    move_bits |= MOVE_RIGHT;
+                } else if x < 0 {
+                    move_bits |= MOVE_LEFT;
+                }
+                if y < 0 {
+                    move_bits |= MOVE_FORWARD;
+                } else if y > 0 {
+                    move_bits |= MOVE_BACK;
+                }
+            }
+            Claim::Key(key) => {
+                *keys_held |= key.bit();
+                match key {
+                    Key::Jump => move_bits |= MOVE_JUMP,
+                    Key::Attack => attack_held = true,
+                    Key::Use => use_held = true,
+                    Key::Sneak => *pressed_cells |= 1 << Cell::SneakToggle.index(),
+                    _ => {}
+                }
+            }
             Claim::Use => {
                 *use_pressed = true;
                 use_held = true;
@@ -354,10 +466,22 @@ fn mobile_input(
             Claim::Modules => {}
         }
     }
+    if layout.movement != Movement::Buttons {
+        pad.auto_walk = false;
+    }
     if pad.auto_walk {
         move_bits |= MOVE_FORWARD;
     }
-    let (sneak, sprint) = (pad.sneak, pad.sprint);
+    if layout.movement == Movement::Bedrock {
+        pad.sprint = false;
+    }
+    let sneak = if sneak_hold {
+        pad.sneak = false;
+        *pressed_cells & (1 << Cell::SneakToggle.index()) != 0
+    } else {
+        pad.sneak
+    };
+    let sprint = pad.sprint || *dpad_sprint;
 
     crate::modules::zoom::set_touch(zoom_held || zoom.latched);
     if look_delta != Vec2::ZERO {
@@ -370,6 +494,15 @@ fn mobile_input(
         apply_look(
             look_delta.x * cfg.look_deg_per_unit * sens,
             look_delta.y * cfg.look_deg_per_unit * sens,
+            &mut angles,
+            &shared,
+            camera_view.free(),
+            time.delta_secs(),
+        );
+    } else if crate::modules::hooks::drives_look() {
+        apply_look(
+            0.0,
+            0.0,
             &mut angles,
             &shared,
             camera_view.free(),
@@ -388,7 +521,7 @@ fn mobile_input(
     let free = camera_view.free();
     let fly_toggle = fly_toggle && !free;
 
-    let flying = {
+    let (flying, respawns) = {
         let mut s = shared.0.lock().unwrap();
         if fly_toggle && matches!(s.session.gamemode, Gamemode::Creative | Gamemode::Spectator) {
             s.session.fly_toggle = true;
@@ -396,7 +529,22 @@ fn mobile_input(
         if let Some(slot) = hotbar {
             s.session.hotbar_target = Some(slot);
         }
-        s.session.flying
+        if drop_item {
+            s.session
+                .pending_drops
+                .push(crate::session::DropRequest::HeldItem);
+        }
+        if swap_hands {
+            s.session.swap_hands = true;
+        }
+        (s.session.flying, s.respawns)
+    };
+    let sneak = if *seen_respawns != respawns {
+        *seen_respawns = respawns;
+        pad.sneak = false;
+        sneak && sneak_hold
+    } else {
+        sneak
     };
     if free {
         let bit = |b: u8| if move_bits & b != 0 { 1.0 } else { 0.0 };
@@ -414,6 +562,8 @@ fn mobile_input(
             down: sneak,
             sprint,
         };
+        intent.hold(attack_held, use_held);
+        intent.click(attack_click, use_click);
         return;
     }
     let descend = flying && sneak;
@@ -438,6 +588,9 @@ fn swallow_click(input: &mut crate::gui::render::GuiInput) {
 fn closable(screen: Screen) -> bool {
     #[cfg(feature = "module_panel")]
     if screen == Screen::ClickGui {
+        return false;
+    }
+    if screen == Screen::TouchLayout {
         return false;
     }
     !matches!(
@@ -494,7 +647,7 @@ const FACE_PRESSED: u32 = 0xA0E0_E0E0;
 const FACE_LATCHED: u32 = 0xE0_5CC8_4A;
 const BORDER: u32 = 0x80FF_FFFF;
 const BORDER_LATCHED: u32 = 0xFFD8_FFA0;
-const LABEL: u32 = 0xFF_FFFF;
+const LABEL: u32 = crate::text::WHITE;
 const LABEL_PRESSED: u32 = 0x20_2020;
 const LINE_H: f32 = 8.0;
 const GAP: f32 = 1.5;
@@ -509,17 +662,32 @@ pub struct View<'a> {
 }
 
 pub fn draw(p: &mut Painter, ctx: &ScreenCtx, view: View, hud: &mut Hud) {
-    if view.in_menu && !view.editing {
+    let shown = view.editing || view.screen == Screen::TouchLayout;
+    if view.in_menu && !shown {
         return;
     }
     let ui = view.ui;
     let (vw, vh) = (ctx.vw, ctx.vh);
     let layout = Layout::new(vw, vh, ui.cfg.safe_inset, view.movement);
-    if view.screen.is_open() && !view.editing {
+    if view.screen.is_open() && !shown {
         if closable(view.screen) {
-            hud.draw(p, vw, vh, ElementId::ChatButton, |p| {
-                button(p, layout.close_button, "X", false, false);
-            });
+            match layout.bedrock {
+                Some(b) => {
+                    let (c, r) = b.close();
+                    disc(p, c, r, CLOSE_FACE);
+                    let w = p.atlas.font.width_str("X");
+                    p.text_plain(
+                        "X",
+                        (c.x - w / 2.0).round(),
+                        (c.y - LINE_H / 2.0).round(),
+                        CLOSE_INK,
+                        false,
+                    );
+                }
+                None => hud.draw(p, vw, vh, ElementId::ChatButton, |p| {
+                    button(p, layout.close_button, "X", false, false);
+                }),
+            }
             if view.screen == Screen::Chat && crate::platform::orientation::SUPPORTED {
                 hud.follow(p, vw, vh, ElementId::ChatButton, |p| {
                     #[cfg(feature = "tutorial")]
@@ -539,7 +707,12 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, view: View, hud: &mut Hud) {
         }
         return;
     }
-    if view.hide_gui {
+    if view.hide_gui && !shown {
+        return;
+    }
+    if let Some(b) = layout.bedrock {
+        draw_bedrock(p, vw, vh, &b, ui, hud);
+        draw_hold_hints(p, &layout, ui);
         return;
     }
     hud.draw(p, vw, vh, ElementId::Pad, |p| {
@@ -573,6 +746,7 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, view: View, hud: &mut Hud) {
                     );
                 }
             }
+            Movement::Bedrock => {}
             Movement::Joystick => {
                 if let Some(round) = layout.round_cells {
                     for (cell, at) in round {
@@ -615,12 +789,46 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, view: View, hud: &mut Hud) {
         button(p, layout.texting_button, "MOD", false, false);
     });
 
+    draw_hold_hints(p, &layout, ui);
+}
+
+fn draw_hold_hints(p: &mut Painter, layout: &Layout, ui: &MobileUi) {
     let radius = layout.cell * HINT_RADIUS;
     for (at, progress) in &ui.hold_hints {
         ring(p, *at, radius, HINT_EDGE, BORDER);
         disc(p, *at, (radius - HINT_EDGE) * progress, BORDER);
     }
 }
+
+fn draw_bedrock(
+    p: &mut Painter,
+    vw: f32,
+    vh: f32,
+    b: &bedrock::Layout,
+    ui: &MobileUi,
+    hud: &mut Hud,
+) {
+    hud.draw(p, vw, vh, ElementId::Pad, |p| {
+        bedrock::draw_dpad(p, b, ui.dpad_held);
+    });
+    let held = |k: Key| ui.keys_held & k.bit() != 0 || (k == Key::Sneak && ui.pad.sneak);
+    for element in [
+        ElementId::JumpButton,
+        ElementId::UseButton,
+        ElementId::ChatButton,
+        ElementId::ModButton,
+    ] {
+        hud.draw(p, vw, vh, element, |p| {
+            bedrock::draw_group(p, b, element, held)
+        });
+    }
+    hud.follow(p, vw, vh, ElementId::Hotbar, |p| {
+        bedrock::draw_group(p, b, ElementId::Hotbar, held);
+    });
+}
+
+const CLOSE_FACE: u32 = 0xB30D_0E13;
+const CLOSE_INK: u32 = 0xD9FF_FFFF;
 
 fn draw_stick(p: &mut Painter, stick: Stick, at: Option<Vec2>) {
     disc(p, stick.center, stick.radius, FACE);

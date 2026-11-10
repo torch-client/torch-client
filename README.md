@@ -43,7 +43,7 @@ See [CONTRIBUTING.md](.github/CONTRIBUTING.md#feature-system) to find out more a
 
 ## Linux persistence
 
-Override the ```MC_CLIENT_CONFIG_DIR``` env var (default value ```/tmp/torch-client```) to properly persist in a folder.
+If ```XDG_CONFIG_HOME``` exists it will save to there otherwise override the ```MC_CLIENT_CONFIG_DIR``` env var (default value ```/tmp/torch-client```) to properly persist in a folder.
 
 ## FAQ
 

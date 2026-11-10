@@ -12,7 +12,7 @@ const ALL: &[Var] = &[
         default: if cfg!(feature = "asset_download") {
             "the downloaded asset set"
         } else {
-            "reference/minecraft-26.1.1/assets/minecraft in the checkout"
+            "reference/minecraft-26.2/assets/minecraft in the checkout"
         },
         enabled: true,
     },
@@ -22,7 +22,7 @@ const ALL: &[Var] = &[
         default: if cfg!(feature = "asset_download") {
             "the downloaded asset set"
         } else {
-            "reference/minecraft-26.1.1/data/minecraft in the checkout"
+            "reference/minecraft-26.2/data/minecraft in the checkout"
         },
         enabled: true,
     },
@@ -39,6 +39,8 @@ const ALL: &[Var] = &[
             "the package's own data directory"
         } else if cfg!(target_os = "windows") {
             "torch-client\\config under %LOCALAPPDATA%"
+        } else if cfg!(target_os = "linux") {
+            "torch-client under $XDG_CONFIG_HOME (or ~/.config) if that exists, else /tmp/torch-client"
         } else {
             "/tmp/torch-client"
         },
@@ -49,6 +51,8 @@ const ALL: &[Var] = &[
         what: "where downloaded assets are stored",
         default: if cfg!(target_os = "windows") {
             "torch-client\\assets under %LOCALAPPDATA%"
+        } else if cfg!(target_os = "linux") {
+            "torch-client/assets under $XDG_CACHE_HOME (~/.cache)"
         } else {
             "torch-client/assets under the system temporary directory"
         },

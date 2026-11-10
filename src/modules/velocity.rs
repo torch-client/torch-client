@@ -3,10 +3,6 @@ use azalea::movement::KnockbackData;
 use super::registry::{Id, velocity as setting};
 use super::store;
 
-pub fn enabled() -> bool {
-    store().enabled(Id::Velocity)
-}
-
 pub fn keeps(data: &KnockbackData) -> bool {
     let s = store();
     if !s.enabled(Id::Velocity) {

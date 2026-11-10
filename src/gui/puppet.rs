@@ -267,6 +267,7 @@ pub struct Worn {
     parts: u8,
     skin: Option<(SkinKey, Option<Arc<Vec<u8>>>)>,
     armor: [Option<(&'static str, Option<Arc<Vec<u8>>>)>; 4],
+    trims: [Option<&'static str>; 4],
     assets_seen: u32,
 }
 
@@ -362,18 +363,24 @@ pub fn update(
     }
 
     for (slot, &item) in view.local.armor.items.iter().enumerate() {
-        if worn.armor[slot].as_ref().map(|(seen, _)| *seen) != item {
+        let trim = view.local.armor.trim[slot];
+        if worn.armor[slot].as_ref().map(|(seen, _)| *seen) != item || worn.trims[slot] != trim {
+            worn.trims[slot] = trim;
             worn.armor[slot] = item.map(|item| {
+                use crate::entities::render::humanoid::{armor, trim as trims};
                 let sheet = crate::renderer::player_model::armor_texture(slot, item)
                     .and_then(|path| crate::entities::decode_entity_texture(&path))
                     .map(|image| {
+                        let mut sheet = fit(image, SHEET_PX, ARMOR_SHEET_H);
+                        let over = trim.and_then(|trim| {
+                            let path = trims::texture_name(trim, armor::slot_layer_type(slot));
+                            crate::entities::decode_entity_texture(&path)
+                        });
+                        if let Some(over) = over {
+                            trims::cut_over(&mut sheet, &fit(over, SHEET_PX, ARMOR_SHEET_H));
+                        }
                         let mut cell = RgbaImage::new(SHEET_PX, SHEET_PX);
-                        image::imageops::replace(
-                            &mut cell,
-                            &fit(image, SHEET_PX, ARMOR_SHEET_H),
-                            0,
-                            0,
-                        );
+                        image::imageops::replace(&mut cell, &sheet, 0, 0);
                         Arc::new(cell.into_raw())
                     });
                 (item, sheet)

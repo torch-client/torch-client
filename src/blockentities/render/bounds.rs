@@ -165,7 +165,7 @@ fn update(
             Visibility::Visible
         };
         if !edges.is_empty()
-            && let Some(slot) = meshes.get_mut(&mesh.0)
+            && let Some(mut slot) = meshes.get_mut(&mesh.0)
         {
             let colors = vec![[0.9, 0.9, 0.9, 1.0]; edges.len()];
             *slot = line_mesh(edges, Some(colors));
@@ -178,7 +178,7 @@ fn update(
             Visibility::Visible
         };
         if !fills_boxes.is_empty()
-            && let Some(slot) = meshes.get_mut(&mesh.0)
+            && let Some(mut slot) = meshes.get_mut(&mesh.0)
         {
             *slot = fill_mesh(&fills_boxes);
         }

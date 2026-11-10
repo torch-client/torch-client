@@ -8,7 +8,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::ClearColorConfig;
 use bevy::camera::visibility::RenderLayers;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
-use bevy::light::cluster::ClusterConfig;
+use bevy::light::cluster::{ClusterConfig, GlobalClusterSettings};
 use bevy::math::DVec3;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
@@ -114,6 +114,7 @@ fn update_environment(
         delta_ticks,
         || super::lightmap::levels_at(eye).1 as f32,
         crate::client::envprobe::camera_has_precipitation(),
+        view.sky_flash && !gui.options.hide_lightning_flashes,
     );
 }
 
@@ -154,8 +155,24 @@ pub(crate) fn update_lightmap(
     state.flicker_tick = tick;
 
     let gamma = gui.options.gamma as f32 / 100.0;
-    let mut lm =
-        super::lightmap::State::sample(super::dimension::current(), &env.sky, state.flicker, gamma);
+    let dim = super::dimension::current();
+    let mut lm = super::lightmap::State::sample(dim, &env.sky, state.flicker, gamma);
+    if env.sky_flash {
+        lm.sky_factor = 1.0;
+    }
+    if dim == super::dimension::Dimension::End
+        && !gui.options.hide_lightning_flashes
+        && !view
+            .no_render
+            .has(crate::modules::no_render::Part::Lightning)
+    {
+        let intensity = super::endflash::at(view.end_ticks).intensity;
+        lm.sky_factor += if view.boss_fog {
+            intensity / 3.0
+        } else {
+            intensity
+        };
+    }
     let [boss_prev, boss] = state.boss_darkening;
     state.water_vision = super::lightmap::water_vision(state.water_vision_time, eye_in_water);
     lm.apply_effects(&super::lightmap::Effects {
@@ -164,8 +181,16 @@ pub(crate) fn update_lightmap(
         conduit_power: view.conduit_power,
         darkness: view.darkness,
         darkness_age: view.local.age_ticks - 2.0 * view.partial,
-        boss_darkening: boss_prev + (boss - boss_prev) * view.partial,
+        boss_darkening: if view.no_render.has(crate::modules::no_render::Part::BossSky) {
+            0.0
+        } else {
+            boss_prev + (boss - boss_prev) * view.partial
+        },
     });
+    if crate::modules::fullbright::night_vision() {
+        lm.night_vision_factor = 1.0;
+        lm.night_vision_color = [1.0; 3];
+    }
     if state.current == lm && !pixels.data.is_empty() {
         return;
     }
@@ -203,6 +228,8 @@ impl Default for ChunkIndex {
 #[derive(Default)]
 struct Column {
     sections: HashMap<i32, SectionSlot>,
+    #[cfg_attr(not(lua_mods), allow(dead_code))]
+    complete: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -297,9 +324,13 @@ impl ChunkIndex {
         self.generation
     }
 
+    pub fn mark_complete(&mut self, key: (i32, i32)) {
+        self.columns.entry(key).or_default().complete = true;
+    }
+
     #[cfg(lua_mods)]
-    pub fn has_column(&self, cx: i32, cz: i32) -> bool {
-        self.columns.contains_key(&(cx, cz))
+    pub fn column_complete(&self, cx: i32, cz: i32) -> bool {
+        self.columns.get(&(cx, cz)).is_some_and(|c| c.complete)
     }
 
     pub fn len(&self) -> usize {
@@ -311,14 +342,6 @@ impl ChunkIndex {
             return (0, 0);
         }
         (self.y_lo - 16, self.y_hi + 16)
-    }
-
-    pub fn visibility(&self, pos: (i32, i32, i32)) -> VisibilitySet {
-        self.columns
-            .get(&(pos.0, pos.2))
-            .and_then(|column| column.sections.get(&pos.1))
-            .map(|slot| slot.vis)
-            .unwrap_or_else(VisibilitySet::all)
     }
 
     pub fn sections(&self) -> impl Iterator<Item = ((i32, i32, i32), VisibilitySet)> + '_ {
@@ -362,7 +385,7 @@ pub struct BlockAtlasHandle(pub Handle<Image>);
 struct PendingAtlas(Image);
 
 #[derive(Resource, Default)]
-struct ProfVisible {
+pub(crate) struct ProfVisible {
     shown: bool,
     used_as_modifier: bool,
     page: crate::gui::hud::DebugPage,
@@ -442,7 +465,10 @@ fn setup(
     let (entity, mesh) = spawn_overlay(
         &mut commands,
         &mut meshes,
-        crumbling_mesh(&[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]], 0, 1),
+        crumbling_mesh(
+            &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]],
+            super::atlas::SpriteTile::PLACEHOLDER.uv_rect(super::AtlasGrid { cols: 1, rows: 1 }),
+        ),
         break_mat.clone(),
         BreakOverlayMarker,
     );
@@ -628,7 +654,7 @@ fn place_camera(
 ) {
     if camera.free() {
         let eye = camera.free_eye();
-        crate::modules::freecam::publish_eye(eye.to_array());
+        crate::modules::freecam::publish_eye(eye.to_array(), angles.yaw, angles.pitch);
         origin.follow(eye);
         transform.translation = origin.to_render(eye);
         transform.rotation = angles.rotation();
@@ -646,7 +672,11 @@ fn place_camera(
             angles.rotation()
         };
         let back = -(rotation * Vec3::NEG_Z);
-        if let Some(zoom) = max_zoom(eye_world, back.as_dvec3(), view.camera_distance) {
+        let entity = azalea::physics::clip::ClipEntity {
+            bottom: view.player_pos[1],
+            descending: view.descending,
+        };
+        if let Some(zoom) = max_zoom(eye_world, back.as_dvec3(), view.camera_distance, entity) {
             *last_zoom = zoom;
         }
         let zoom = last_zoom.min(view.camera_distance);
@@ -668,7 +698,12 @@ fn place_camera(
 
 const CAMERA_CLIP_SPREAD: f64 = 0.1;
 
-fn max_zoom(eye: DVec3, back: DVec3, max: f32) -> Option<f32> {
+fn max_zoom(
+    eye: DVec3,
+    back: DVec3,
+    max: f32,
+    entity: azalea::physics::clip::ClipEntity,
+) -> Option<f32> {
     use azalea::physics::clip::{BlockShapeType, ClipContext, FluidPickType, clip};
     use azalea_core::position::Vec3 as AzVec3;
 
@@ -694,6 +729,8 @@ fn max_zoom(eye: DVec3, back: DVec3, max: f32) -> Option<f32> {
                 to: az(to),
                 block_shape_type: BlockShapeType::Visual,
                 fluid_pick_type: FluidPickType::None,
+                held_item: azalea_registry::builtin::ItemKind::Air,
+                entity: Some(entity),
             },
         );
         if !hit.miss {
@@ -747,13 +784,14 @@ fn poll_shared_state(
         view.camera_world = moved.to_world(transform.translation);
         view.camera_render = transform.translation;
         view.camera_rotation = transform.rotation;
-        view.hurt_tilt = if camera_view.free() {
-            Quat::IDENTITY
-        } else {
-            let local = &view.local;
-            let strength = gui.options.damage_tilt as f32 / 100.0;
-            super::anim::hurt_tilt(local.hurt_time, local.hurt_dir, local.death_time, strength)
-        };
+        view.hurt_tilt =
+            if camera_view.free() || view.no_render.has(crate::modules::no_render::Part::HurtCam) {
+                Quat::IDENTITY
+            } else {
+                let local = &view.local;
+                let strength = gui.options.damage_tilt as f32 / 100.0;
+                super::anim::hurt_tilt(local.hurt_time, local.hurt_dir, local.death_time, strength)
+            };
         transform.rotation *= view.hurt_tilt.inverse();
     }
 
@@ -777,6 +815,7 @@ fn poll_shared_state(
 
     if state.session.pending_chunks.is_empty()
         && state.session.pending_edits.is_empty()
+        && state.session.meshed_columns.is_empty()
         && unloaded.is_empty()
         && !clear_all
     {
@@ -801,15 +840,20 @@ fn poll_shared_state(
     let mut verts = max_verts;
     let mut sections = max_sections;
     let mut pending = take_budgeted(&mut state.session.pending_edits, &mut verts, &mut sections);
-    pending.extend(take_budgeted(
-        &mut state.session.pending_chunks,
-        &mut verts,
-        &mut sections,
-    ));
+    let streamed = take_budgeted(&mut state.session.pending_chunks, &mut verts, &mut sections);
+    let session = &mut state.session;
+    session.meshed_columns.taken(streamed.len());
+    pending.extend(streamed);
+    let mut complete = Vec::new();
+    let edits_empty = session.pending_edits.is_empty();
+    session.meshed_columns.resolve(edits_empty, &mut complete);
     drop(state);
     crate::log_debug!("render", "uploading {} sections", pending.len());
 
     crate::client::tracking::retain_loaded(&mut pending, |s| (s.chunk_x, s.chunk_z));
+    if !complete.is_empty() {
+        crate::client::tracking::retain_loaded(&mut complete, |&key| key);
+    }
 
     if clear_all {
         index.clear(&ops);
@@ -848,6 +892,9 @@ fn poll_shared_state(
             );
             crate::diag::bump(crate::diag::Stat::SectionsUploaded);
         }
+    }
+    for key in complete {
+        index.mark_complete(key);
     }
 
     *last_poll_ms = poll_start.elapsed().as_secs_f32() * 1000.0;
@@ -906,6 +953,7 @@ pub(super) fn spawn_overlay<M: bevy::pbr::Material, K: Component>(
 }
 
 pub enum CameraStart {
+    #[allow(dead_code)]
     Active,
     Inactive,
 }
@@ -1049,6 +1097,7 @@ impl TagProjector {
         below: Option<&std::sync::Arc<[crate::text::Span]>>,
         at: Vec3,
         range: f32,
+        below_range: f32,
     ) -> Option<crate::gui::hud::NameTag> {
         let Self {
             eye,
@@ -1077,7 +1126,7 @@ impl TagProjector {
         Some(crate::gui::hud::NameTag {
             name: name.clone(),
             below: match below {
-                Some(below) if distance <= BELOW_NAME_RANGE => below.clone(),
+                Some(below) if distance <= below_range => below.clone(),
                 _ => std::sync::Arc::default(),
             },
             x: (ndc.x * 0.5 + 0.5) * view.x,
@@ -1087,8 +1136,33 @@ impl TagProjector {
             health: None,
             max_health: crate::session::VANILLA_MAX_HEALTH,
             gamemode: crate::gui::hud::TagGamemode::Hidden,
+            armor: None,
         })
     }
+}
+
+fn dress_player_tag(
+    tag: &mut crate::gui::hud::NameTag,
+    cfg: &crate::modules::nametags::Config,
+    health: Option<f32>,
+    max_health: f32,
+    gamemode: Option<crate::session::Gamemode>,
+    armor: Option<&std::sync::Arc<[crate::session::SlotStack; 4]>>,
+) {
+    use crate::gui::hud::TagGamemode;
+    use crate::modules::nametags::{Health, Sizing};
+
+    tag.scale = nametag_scale(tag.scale, cfg.scale, cfg.sizing == Sizing::Constant);
+    tag.health = health.filter(|_| cfg.health != Health::Off);
+    tag.max_health = max_health;
+    tag.gamemode = match (cfg.gamemode, gamemode) {
+        (false, _) => TagGamemode::Hidden,
+        (true, Some(mode)) => TagGamemode::Known(mode),
+        (true, None) => TagGamemode::Unknown,
+    };
+    tag.armor = armor
+        .filter(|a| cfg.armor && a.iter().any(|s| !s.is_empty()))
+        .cloned();
 }
 
 fn collect_player_tags(
@@ -1098,19 +1172,8 @@ fn collect_player_tags(
     projector: &TagProjector,
     tags: &mut Vec<crate::gui::hud::NameTag>,
 ) {
-    use crate::gui::hud::TagGamemode;
-
-    let (on, scale_mul, constant, want_health, want_gamemode) =
-        match crate::modules::nametags::config() {
-            Some(c) => (
-                true,
-                c.scale,
-                c.sizing == crate::modules::nametags::Sizing::Constant,
-                c.health != crate::modules::nametags::Health::Off,
-                c.gamemode,
-            ),
-            None => (false, 1.0, false, false, false),
-        };
+    let cfg = crate::modules::nametags::config();
+    let on = cfg.is_some();
     for info in players {
         if info.hidden_by_team && !on {
             continue;
@@ -1125,23 +1188,31 @@ fn collect_player_tags(
         let height = info.body.bounding_box[1];
         let range = match (on, info.discrete) {
             (true, _) => f32::INFINITY,
-            (false, true) => NAME_TAG_RANGE_DISCRETE,
-            (false, false) => NAME_TAG_RANGE,
+            (false, true) => NAME_TAG_RANGE_DISCRETE.min(info.name_tag_distance),
+            (false, false) => info.name_tag_distance,
         };
         let at = projector.anchor(feet, height + 0.5);
-        let Some(mut tag) = projector.project(&info.name_tag, Some(&info.below_name), at, range)
-        else {
+        let Some(mut tag) = projector.project(
+            &info.name_tag,
+            Some(&info.below_name),
+            at,
+            range,
+            info.below_name_distance,
+        ) else {
             continue;
         };
-        if on {
-            tag.scale = nametag_scale(tag.scale, scale_mul, constant);
-            tag.health = want_health.then_some(info.health).flatten();
-            tag.max_health = info.max_health;
-            tag.gamemode = match (want_gamemode, info.gamemode) {
-                (false, _) => TagGamemode::Hidden,
-                (true, Some(mode)) => TagGamemode::Known(mode),
-                (true, None) => TagGamemode::Unknown,
-            };
+        if let Some(cfg) = &cfg {
+            dress_player_tag(
+                &mut tag,
+                cfg,
+                info.health,
+                info.max_health,
+                info.gamemode,
+                info.armor.as_ref(),
+            );
+        }
+        if info.anim.layers().extra_ears {
+            tag.y -= 10.0 * tag.scale;
         }
         tags.push(tag);
     }
@@ -1169,7 +1240,13 @@ fn collect_nametags(
             continue;
         }
         let at = projector.anchor(anim.position(partial), anim.bounding_box_height() + 0.5);
-        tags.extend(projector.project(&extras.name_spans, None, at, NAME_TAG_RANGE));
+        tags.extend(projector.project(
+            &extras.name_spans,
+            None,
+            at,
+            NAME_TAG_RANGE,
+            BELOW_NAME_RANGE,
+        ));
     }
 
     tags.sort_by(|a, b| b.distance.total_cmp(&a.distance));
@@ -1535,7 +1612,8 @@ fn log_frame_rate(
     crate::log_info!(
         "render",
         "pipeline: {} packets ({} outside the window), {} columns received ({} dropped), {} lit \
-         ({} light jobs dropped), {} mesh jobs, {} sections meshed ({} panicked), {} uploaded",
+         ({} light jobs dropped), {} mesh jobs, {} sections meshed ({} panicked, {} columns \
+         queued again, {} left unbuilt), {} uploaded",
         c[crate::diag::Stat::ChunkPacketsSeen],
         c[crate::diag::Stat::ChunkPacketsOutOfWindow],
         c[crate::diag::Stat::ChunksReceived],
@@ -1545,6 +1623,8 @@ fn log_frame_rate(
         c[crate::diag::Stat::MeshJobs],
         c[crate::diag::Stat::SectionsMeshed],
         c[crate::diag::Stat::MeshPanics],
+        c[crate::diag::Stat::MeshRequeued],
+        c[crate::diag::Stat::MeshGaveUp],
         c[crate::diag::Stat::SectionsUploaded],
     );
     *frames = 0;
@@ -1628,8 +1708,10 @@ pub(super) fn enter_screen(
     state: &mut crate::gui::GuiState,
     shared: &Shared,
     windows: &mut Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
+    buttons: &ButtonInput<MouseButton>,
 ) {
     let was_open = state.screen.is_open();
+    state.claim_buttons(buttons);
     if next != state.screen {
         crate::platform::keyboard::hide();
         crate::platform::keyboard::disarm();
@@ -1705,9 +1787,6 @@ pub(super) fn enter_screen(
         }
         #[cfg(any(target_os = "android", target_arch = "wasm32"))]
         let _ = (&window, was_open);
-    }
-    if was_open && !open {
-        state.suppress_click = true;
     }
 }
 
@@ -2061,7 +2140,11 @@ fn spinning_warp(strength: f32, degrees: f32, screen_effects: u32) -> Mat4 {
         * Mat4::from_axis_angle(axis, -angle)
 }
 
-fn modify_fov_for_death_or_fluid(mut fov: f32, view: &FrameView, effect_scale: f32) -> f32 {
+pub(crate) fn modify_fov_for_death_or_fluid(
+    mut fov: f32,
+    view: &FrameView,
+    effect_scale: f32,
+) -> f32 {
     if view.local.death_time > 0.0 {
         let scale = view.local.death_time.min(20.0);
         fov /= (1.0 - 500.0 / (scale + 500.0)) * 2.0 + 1.0;
@@ -2393,7 +2476,7 @@ fn instance_flags() -> bevy::render::settings::InstanceFlags {
 fn withheld_features() -> Option<bevy::render::settings::WgpuFeatures> {
     use bevy::render::settings::WgpuFeatures;
     let withheld = if cfg!(target_os = "android") {
-        WgpuFeatures::BUFFER_BINDING_ARRAY
+        WgpuFeatures::TEXTURE_BINDING_ARRAY
     } else {
         WgpuFeatures::empty()
     };
@@ -2442,9 +2525,15 @@ fn toggle_prof_overlay(
         visible.used_as_modifier = false;
         return;
     }
-    visible.shown = !visible.shown;
-    if visible.shown {
-        shared.0.lock().unwrap().profiling.reset_peaks();
+    visible.toggle(&shared);
+}
+
+impl ProfVisible {
+    pub(crate) fn toggle(&mut self, shared: &Shared) {
+        self.shown = !self.shown;
+        if self.shown {
+            shared.0.lock().unwrap().profiling.reset_peaks();
+        }
     }
 }
 
@@ -2513,14 +2602,14 @@ pub fn run(
                 ..default()
             })
             .set(bevy::render::RenderPlugin {
-                render_creation: bevy::render::settings::RenderCreation::Automatic(
+                render_creation: bevy::render::settings::RenderCreation::Automatic(Box::new(
                     bevy::render::settings::WgpuSettings {
                         disabled_features: withheld_features(),
                         constrained_limits: constrained_limits(),
                         instance_flags: instance_flags(),
                         ..default()
                     },
-                ),
+                )),
                 ..default()
             })
             .disable::<bevy::app::PanicHandlerPlugin>(),
@@ -2569,6 +2658,7 @@ pub fn run(
     .add_plugins(crate::util::particles::ParticlePlugin)
     .add_plugins(crate::renderer::world_text::WorldTextPlugin)
     .add_plugins(crate::renderer::reload::ReloadPlugin)
+    .add_plugins(crate::renderer::empty_mesh::EmptyMeshPlugin)
     .insert_resource(Shared(shared))
     .insert_resource(PendingAtlas(atlas))
     .insert_resource(ClearColor(SKY_COLOR))
@@ -2585,7 +2675,10 @@ pub fn run(
         crate::renderer::item_assets::step_item_world.after(FrameViewSystems),
     )
     .init_state::<AppState>()
-    .add_systems(Startup, setup.in_set(RendererSetup))
+    .add_systems(
+        Startup,
+        (setup.in_set(RendererSetup), disable_gpu_clustering),
+    )
     .init_resource::<LightmapState>()
     .init_resource::<super::environment::Environment>()
     .init_resource::<FrameView>()
@@ -2855,19 +2948,17 @@ pub fn run(
                 budget_render_begin.before(Set::ExtractCommands),
                 budget_mark_upload
                     .after(Set::PrepareMeshes)
-                    .before(Set::ManageViews),
+                    .before(Set::CreateViews),
                 budget_mark_views
-                    .in_set(Set::ManageViews)
-                    .after(bevy::render::camera::sort_cameras)
-                    .after(bevy::pbr::prepare_lights)
+                    .in_set(Set::PrepareViews)
                     .before(bevy::render::view::prepare_windows),
                 budget_mark_acquire
-                    .in_set(Set::ManageViews)
+                    .in_set(Set::PrepareViews)
                     .after(bevy::render::view::prepare_windows)
                     .before(bevy::render::view::prepare_view_attachments)
                     .before(bevy::render::view::prepare_view_targets),
                 budget_mark_views_after
-                    .after(Set::ManageViews)
+                    .after(Set::PrepareViews)
                     .before(Set::Queue),
                 budget_mark_prepare.after(Set::Prepare).before(Set::Render),
                 budget_mark_draw.in_set(Set::PostCleanup),
@@ -2895,19 +2986,19 @@ pub fn run(
     crate::mobile::register(&mut app);
 
     if !matches!(std::env::var("MC_EXEC").as_deref(), Ok("mt")) {
-        use bevy::ecs::schedule::ExecutorKind;
+        use bevy::ecs::schedule::SingleThreadedExecutor;
         let mut schedules = app
             .world_mut()
             .resource_mut::<bevy::ecs::schedule::Schedules>();
         for (_, schedule) in schedules.iter_mut() {
-            schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+            schedule.set_executor(SingleThreadedExecutor::new());
         }
         if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
             let mut schedules = render_app
                 .world_mut()
                 .resource_mut::<bevy::ecs::schedule::Schedules>();
             for (_, schedule) in schedules.iter_mut() {
-                schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+                schedule.set_executor(SingleThreadedExecutor::new());
             }
         }
     }
@@ -2970,5 +3061,11 @@ mod tests {
         let (render, next) = frame_gate_decision(now, None, SIXTY_HZ);
         assert!(render);
         assert_eq!(next, Some(now + SIXTY_HZ));
+    }
+}
+
+fn disable_gpu_clustering(settings: Option<ResMut<GlobalClusterSettings>>) {
+    if let Some(mut settings) = settings {
+        settings.gpu_clustering = None;
     }
 }

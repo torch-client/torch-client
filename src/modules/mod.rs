@@ -39,6 +39,7 @@ pub mod sneak;
 pub mod spam;
 pub mod special;
 pub mod speed;
+pub mod tracers;
 #[cfg(feature = "click_gui")]
 mod store;
 #[cfg(not(feature = "click_gui"))]

@@ -70,7 +70,7 @@ fn main() {
     }
 
     if let Some(wasm) = &wasm {
-        wasm32_cxx(&mut base, wasm, &shim);
+        wasm32_cxx(&mut base, wasm, &shim, &out_dir);
     }
 
     let file_map = format!("-fmacro-prefix-map={}=mlua-sys", manifest_dir.display());
@@ -132,7 +132,10 @@ fn main() {
     println!("cargo:rustc-env=LUAU_VERSION={LUAU_VERSION}");
 }
 
-fn wasm32_cxx(build: &mut cc::Build, wasm: &WasmToolchain, shim: &Path) {
+fn wasm32_cxx(build: &mut cc::Build, wasm: &WasmToolchain, shim: &Path, out_dir: &Path) {
+    if let Some(site) = wasm32_config_site(&wasm.libcxx_include, out_dir) {
+        build.flag("-isystem").flag(site);
+    }
     build
         .compiler(&wasm.clangxx)
         .archiver(&wasm.ar)
@@ -158,6 +161,37 @@ fn wasm32_cxx(build: &mut cc::Build, wasm: &WasmToolchain, shim: &Path) {
         .define("LUAU_NO_EXCEPTIONS", None)
         .flag("-mllvm")
         .flag("-enable-emscripten-sjlj");
+}
+
+fn wasm32_config_site(libcxx_include: &[PathBuf], out_dir: &Path) -> Option<PathBuf> {
+    const OFF: [&str; 3] = ["_LIBCPP_HAS_THREADS", "_LIBCPP_HAS_WIDE_CHARACTERS", "_LIBCPP_HAS_LOCALIZATION"];
+    let source = libcxx_include.iter().map(|dir| dir.join("__config_site")).find(|f| f.is_file())?;
+    println!("cargo:rerun-if-changed={}", source.display());
+    let text = fs::read_to_string(&source).ok()?;
+    let mut changed = false;
+    let lines: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let mut words = line.split_whitespace();
+            let (Some("#define"), Some(name), Some(_), None) = (words.next(), words.next(), words.next(), words.next())
+            else {
+                return line.to_string();
+            };
+            if OFF.contains(&name) {
+                changed = true;
+                format!("#define {name} 0")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !changed {
+        return None;
+    }
+    let dir = out_dir.join("libcxx-site");
+    fs::create_dir_all(&dir).expect("create OUT_DIR/libcxx-site");
+    fs::write(dir.join("__config_site"), lines.join("\n") + "\n").expect("write OUT_DIR/libcxx-site/__config_site");
+    Some(dir)
 }
 
 struct WasmToolchain {

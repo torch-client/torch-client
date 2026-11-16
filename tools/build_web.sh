@@ -7,6 +7,7 @@ HARDEN=0
 OPT=0
 CHROMEBOOK=0
 APPLE=0
+HEARTBEAT=
 kept=()
 for arg in "$@"; do
   case "$arg" in
@@ -14,6 +15,8 @@ for arg in "$@"; do
     --opt) OPT=1 ;;
     --chromebook) CHROMEBOOK=1 ;;
     --apple) APPLE=1 ;;
+    --heartbeat) HEARTBEAT=web ;;
+    --heartbeat=*) HEARTBEAT=${arg#*=} ;;
     *) kept+=("$arg") ;;
   esac
 done
@@ -180,6 +183,9 @@ if (( CHROMEBOOK )); then
 fi
 if (( APPLE )); then
   page_args+=(--apple)
+fi
+if [[ -n "$HEARTBEAT" ]]; then
+  page_args+=("--heartbeat=$HEARTBEAT")
 fi
 python3 tools/minify_page.py ${page_args[@]+"${page_args[@]}"} web/index.html "$DIST/index.html"
 

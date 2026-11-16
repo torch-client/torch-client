@@ -12,7 +12,12 @@ tools/build_web.sh             # browser
 tools/build_android.sh         # Android APK
 ```
 
-The release files go into `dist/` under the names the releases page uses: `tools/build_desktop.sh` (add `--windows` to cross-build) zips the desktop executable, `tools/build_android.sh` writes the APK, and `tools/pack_single_html.py` turns a browser build into one HTML page.
+## Building from source
+
+1. Install [rustup](https://rustup.rs). `rust-toolchain.toml` pins `nightly-2026-04-11` and rustup fetches it on the first build.
+2. Clone the repository and run `cargo build --release` for desktop. The binary is `target/release/torch-client`.
+3. For the browser, add the target with `rustup target add wasm32-unknown-unknown`, then run `tools/build_web.sh`. It writes `web-output/default/site/`, which you can serve with `python3 -m http.server 8080 --directory web-output/default/site`.
+4. For Android, run `tools/build_android.sh`. It needs a JDK, the Android NDK and SDK build-tools; the script pins the exact versions. The APK lands in `dist/`.
 
 Optional features are listed under [Feature system](#feature-system). If your change touches code behind a feature, build with that feature on (for example `--features builtin_shaders`), since code behind a feature that is off is not compiled at all.
 

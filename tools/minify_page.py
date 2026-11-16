@@ -2,10 +2,22 @@
 """Strip `web/index.html` down to what a browser needs.
 
     tools/minify_page.py web/index.html dist/index.html
+    tools/minify_page.py --heartbeat web/index.html dist/index.html
 """
 
 import re
 import sys
+
+PLATFORMS = ("web", "web-legit", "mobile-web", "mobile-web-legit")
+
+HEARTBEAT = (
+    "<script>(()=>{const u='https://presence-api.xpncvr.workers.dev/api/presence';"
+    "let id;try{id=localStorage.getItem('playerId');if(!id){id=crypto.randomUUID();localStorage.setItem('playerId',id)}}"
+    "catch{id=crypto.randomUUID()}"
+    "let t;const beat=()=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,platform:'PLATFORM'})})"
+    ".then(r=>r.json()).then(d=>{if(d.beat===false)clearInterval(t)}).catch(()=>{});"
+    "beat();t=setInterval(beat,300000)})()</script>"
+)
 
 INSTALLABLE = (
     '<link rel="manifest" href="manifest.webmanifest">\n'
@@ -157,7 +169,15 @@ def main(argv):
     argv = list(argv)
     chromebook = "--chromebook" in argv[1:]
     apple = "--apple" in argv[1:]
-    argv = [a for a in argv if a != "--apple"]
+    heartbeat = None
+    for a in argv[1:]:
+        if a == "--heartbeat":
+            heartbeat = "web"
+        elif a.startswith("--heartbeat="):
+            heartbeat = a.split("=", 1)[1]
+    if heartbeat is not None and heartbeat not in PLATFORMS:
+        raise SystemExit(f"--heartbeat: unknown platform {heartbeat!r}, expected one of {', '.join(PLATFORMS)}")
+    argv = [a for a in argv if a != "--apple" and not a.startswith("--heartbeat")]
     argv = [a for a in argv if a != "--chromebook"]
     if len(argv) != 3:
         raise SystemExit(__doc__)
@@ -175,6 +195,8 @@ def main(argv):
         if result.count("</title>") != 1:
             raise SystemExit("--chromebook and --apple need exactly one </title> to insert after")
         result = result.replace("</title>", "</title>\n" + "\n".join(head))
+    if heartbeat is not None:
+        result += HEARTBEAT.replace("PLATFORM", heartbeat) + "\n"
     open(argv[2], "w", encoding="utf-8").write(result)
     before = len(source.encode("utf-8"))
     after = len(result.encode("utf-8"))

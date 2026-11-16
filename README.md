@@ -34,7 +34,7 @@ Builds for Linux, Android and Windows are on the [releases page](https://github.
 ```sh
 git clone https://github.com/torch-client/torch-client.git
 cd torch-client
-cargo build --release
+cargo build --release --features click_gui,shader_support,audio,explore_modrinth,lua_mods,tutorial,seed_cracker
 ```
 
 See [CONTRIBUTING.md](.github/CONTRIBUTING.md#feature-system) to find out more about the projects cargo features
@@ -62,6 +62,36 @@ Go to:
 Make sure you downloaded a release with `clickgui` in the file name. Builds without it do not include the click GUI.
 
 </details>
+
+<details>
+<summary>Edit HUD or mobile controls</summary>
+Go into `Options -> anage Storage -> restart tutorial` or on mobile:</br>
+  `Options -> Controls -> Edit control layout`
+</details>
+
+<details>
+<summary>Asset issues</summary>
+Go into `Options -> Manage Storage -> Reinstall Missing Assets` or import assets (generate full asset importable package on the website) if on html release
+</details>
+
+<details>
+<summary>How to use litematica?</summary>
+Clickgui -> mods at the top</br>
+Press explore mods</br>
+Install "litematica"</br>
+Go to "Modules"</br>
+Enable "Litematica" module</br>
+Press Open, next to menu while in a world</br>
+Click load...</br>
+Load .schem or .litematica model and it will render into the world</br>
+</details>
+
+<details>
+<summary>How to do X with HUD (e.g remove coordinates)?</summary>
+Press escape -> Options -> Edit HUD...</br>
+Drag and right click element to open delete menu</br>
+</details>
+
 
 ## License
 

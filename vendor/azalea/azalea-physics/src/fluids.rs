@@ -3,6 +3,7 @@ use azalea_block::{
     fluid_state::{FluidKind, FluidState},
 };
 use azalea_core::{
+    aabb::Aabb,
     direction::Direction,
     position::{BlockPos, Vec3},
 };
@@ -29,15 +30,35 @@ pub fn player_eye_height(swimming: bool, crouching: bool) -> f64 {
 
 use crate::collision::legacy_blocks_motion;
 
+#[derive(Clone, Component, Copy, Debug, PartialEq)]
+pub enum PassengerFluidBox {
+    AboveHull(f64),
+}
+
+impl PassengerFluidBox {
+    fn apply(self, passenger: Aabb) -> Option<Aabb> {
+        match self {
+            PassengerFluidBox::AboveHull(hull_top) => {
+                if hull_top >= passenger.max.y {
+                    return None;
+                }
+                let mut clipped = passenger;
+                clipped.min.y = passenger.min.y.max(hull_top);
+                Some(clipped)
+            }
+        }
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub fn update_in_water_state_and_do_fluid_pushing(
     mut query: Query<
-        (&mut Physics, &WorldName, Option<&PlayerAbilities>),
+        (&mut Physics, &WorldName, Option<&PlayerAbilities>, Option<&PassengerFluidBox>),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
     worlds: Res<Worlds>,
 ) {
-    for (mut physics, world_name, abilities) in &mut query {
+    for (mut physics, world_name, abilities, passenger_box) in &mut query {
         let Some(world_lock) = worlds.get(world_name) else {
             continue;
         };
@@ -47,7 +68,7 @@ pub fn update_in_water_state_and_do_fluid_pushing(
         } else {
             FluidPush::Player
         };
-        update_fluid_interaction(&mut physics, &world, world_name, push);
+        update_fluid_interaction(&mut physics, &world, world_name, push, passenger_box.copied());
     }
 }
 
@@ -63,11 +84,12 @@ pub fn update_fluid_interaction(
     world: &World,
     world_name: &WorldName,
     push: FluidPush,
+    passenger_box: Option<PassengerFluidBox>,
 ) {
     physics.water_fluid_height = 0.;
     physics.lava_fluid_height = 0.;
 
-    update_in_water_state_and_do_water_current_pushing(physics, world, push);
+    update_in_water_state_and_do_water_current_pushing(physics, world, push, passenger_box);
 
     let is_ultrawarm = world
         .registries
@@ -88,6 +110,7 @@ pub fn update_fluid_interaction(
         FluidKind::Lava,
         lava_push_factor,
         push,
+        passenger_box,
     );
 }
 
@@ -95,9 +118,16 @@ fn update_in_water_state_and_do_water_current_pushing(
     physics: &mut Physics,
     world: &World,
     push: FluidPush,
+    passenger_box: Option<PassengerFluidBox>,
 ) {
-
-    if update_fluid_height_and_do_fluid_pushing(physics, world, FluidKind::Water, 0.014, push) {
+    if update_fluid_height_and_do_fluid_pushing(
+        physics,
+        world,
+        FluidKind::Water,
+        0.014,
+        push,
+        passenger_box,
+    ) {
 
         physics.reset_fall_distance();
         physics.was_touching_water = true;
@@ -113,9 +143,14 @@ fn update_fluid_height_and_do_fluid_pushing(
     checking_fluid: FluidKind,
     fluid_push_factor: f64,
     push: FluidPush,
+    passenger_box: Option<PassengerFluidBox>,
 ) -> bool {
 
-    let checking_liquids_aabb = physics.bounding_box.deflate_all(0.001);
+    let own_box = physics.bounding_box.deflate_all(0.001);
+    let Some(checking_liquids_aabb) = passenger_box.map_or(Some(own_box), |b| b.apply(own_box)) else {
+        return false;
+    };
+    let entity_min_y = physics.bounding_box.min.y;
 
     let min_x = checking_liquids_aabb.min.x.floor() as i32;
     let min_y = checking_liquids_aabb.min.y.floor() as i32;
@@ -146,10 +181,7 @@ fn update_fluid_height_and_do_fluid_pushing(
                     continue;
                 }
                 touching_fluid = true;
-                min_height_touching = f64::max(
-                    fluid_max_y - checking_liquids_aabb.min.y,
-                    min_height_touching,
-                );
+                min_height_touching = f64::max(fluid_max_y - entity_min_y, min_height_touching);
                 if !is_entity_pushable_by_fluid {
                     continue;
                 }

@@ -24,11 +24,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  DESKTOP_PLAIN: shader_support,audio,explore_modrinth,tutorial
-  DESKTOP_CLICKGUI: click_gui,shader_support,audio,explore_modrinth,lua_mods,tutorial,seed_cracker
-  WEB: asset_download,multiversion,full_font,skins,resourcepacks,hud_editor,click_gui,explore_modrinth,tutorial,lua_mods,seed_cracker,browser_audio
-  WEB_MOBILE: asset_download,multiversion,full_font,skins,resourcepacks,hud_editor,click_gui,explore_modrinth,tutorial,lua_mods,mobile_ui,module_panel,seed_cracker,browser_audio
-  ANDROID_FEATURES: module_panel
+  DESKTOP_PLAIN: shader_support,audio,explore_modrinth,tutorial,render_scale
+  DESKTOP_CLICKGUI: click_gui,shader_support,audio,explore_modrinth,lua_mods,tutorial,seed_cracker,render_scale
+  WEB: asset_download,multiversion,full_font,skins,resourcepacks,hud_editor,click_gui,explore_modrinth,tutorial,lua_mods,seed_cracker,small_audio
+  WEB_MOBILE: asset_download,multiversion,full_font,skins,resourcepacks,hud_editor,click_gui,explore_modrinth,tutorial,lua_mods,mobile_ui,module_panel,seed_cracker,small_audio
+  ANDROID_FEATURES: module_panel,small_audio
 
 jobs:
   version:
@@ -119,6 +119,12 @@ jobs:
         with:
           cache-key: ${{ matrix.name }}
           target: wasm32-unknown-unknown
+
+      # `lua_mods` compiles Luau (C++) for wasm32 with the runner's clang, and
+      # vendor/mlua-sys looks for libc++'s headers beside that clang.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libc++-dev
 
       - run: |
           version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"

@@ -96,11 +96,14 @@ pub fn read_packets(ecs: &mut World) {
 
     for entity in entities_handling_packets {
         loop {
+            let mut conn = conn_query.get_mut(ecs, entity).unwrap();
             #[cfg(target_arch = "wasm32")]
-            if read_started.elapsed() >= WEB_READ_BUDGET {
+            if matches!(conn.state, ConnectionProtocol::Game)
+                && read_started.elapsed() >= WEB_READ_BUDGET
+            {
+                conn.read_backlog = true;
                 break;
             }
-            let mut conn = conn_query.get_mut(ecs, entity).unwrap();
             let net_conn = conn.net_conn().unwrap();
             let read_res = net_conn.reader.try_read();
             let state = conn.state;
@@ -112,6 +115,8 @@ pub fn read_packets(ecs: &mut World) {
                         None => raw_packet,
                     };
                     let raw_packet = Arc::<[u8]>::from(raw_packet);
+                    #[cfg(target_arch = "wasm32")]
+                    let packet_started = bevy_platform::time::Instant::now();
                     if let Err(e) = handle_raw_packet(
                         ecs,
                         &raw_packet,
@@ -134,8 +139,14 @@ pub fn read_packets(ecs: &mut World) {
                             );
                         }
                     }
+                    #[cfg(target_arch = "wasm32")]
+                    warn_slow_packet(state, &raw_packet, packet_started.elapsed());
                 }
                 Ok(None) => {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        conn.read_backlog = false;
+                    }
                     break;
                 }
                 Err(err) => {
@@ -194,10 +205,38 @@ fn log_for_error(error: &ReadPacketError) {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn warn_slow_packet(state: ConnectionProtocol, raw_packet: &[u8], took: std::time::Duration) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    const SLOW: std::time::Duration = std::time::Duration::from_millis(8);
+    const MAX_WARNINGS: u32 = 64;
+    static WARNED: AtomicU32 = AtomicU32::new(0);
+
+    if took < SLOW || WARNED.load(Ordering::Relaxed) >= MAX_WARNINGS {
+        return;
+    }
+    WARNED.fetch_add(1, Ordering::Relaxed);
+    let mut id = 0u32;
+    for (i, byte) in raw_packet.iter().take(5).enumerate() {
+        id |= u32::from(byte & 0x7f) << (7 * i);
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    tracing::warn!(
+        "slow packet: {state:?} id {id:#04x}, {} bytes, {:.1} ms",
+        raw_packet.len(),
+        took.as_secs_f32() * 1000.0
+    );
+}
+
 #[derive(Component)]
 pub struct RawConnection {
     pub(crate) network: Option<NetworkConnection>,
     pub(crate) warned_no_network: bool,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) read_backlog: bool,
     pub state: ConnectionProtocol,
     pub(crate) is_alive: bool,
 
@@ -235,6 +274,8 @@ impl RawConnection {
         Self {
             network: None,
             warned_no_network: false,
+            #[cfg(target_arch = "wasm32")]
+            read_backlog: false,
             state,
             is_alive: true,
             injected_clientbound_packets: Vec::new(),
@@ -275,6 +316,14 @@ impl RawConnection {
     }
 }
 
+pub type GamePacketObserver = fn(&mut World, Entity, &ClientboundGamePacket);
+
+static GAME_PACKET_OBSERVER: std::sync::OnceLock<GamePacketObserver> = std::sync::OnceLock::new();
+
+pub fn set_game_packet_observer(observer: GamePacketObserver) -> bool {
+    GAME_PACKET_OBSERVER.set(observer).is_ok()
+}
+
 pub fn handle_raw_packet(
     ecs: &mut World,
     raw_packet: &[u8],
@@ -293,6 +342,9 @@ pub fn handle_raw_packet(
             })?);
             trace!("Packet: {packet:?}");
             game::process_packet(ecs, entity, packet.as_ref());
+            if let Some(observer) = GAME_PACKET_OBSERVER.get() {
+                observer(ecs, entity, packet.as_ref());
+            }
             queued_packet_events
                 .game
                 .push(ReceiveGamePacketEvent { entity, packet });

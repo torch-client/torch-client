@@ -1,3 +1,5 @@
+#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+pub mod art;
 pub mod bedrock;
 pub mod look;
 pub mod pad;
@@ -38,7 +40,7 @@ enum Claim {
         at: Vec2,
     },
     DPad {
-        cell: Option<(i8, i8)>,
+        cell: (i8, i8),
         sprint: bool,
     },
     Key(Key),
@@ -58,7 +60,7 @@ impl Claim {
             Control::Pad(cell) => Claim::Pad(cell),
             Control::Stick => Claim::Stick { at: stick_at() },
             Control::DPad => Claim::DPad {
-                cell: None,
+                cell: (0, 0),
                 sprint: false,
             },
             Control::Key(key) => Claim::Key(key),
@@ -90,6 +92,7 @@ pub struct MobileUi {
     hold_hints: Vec<(Vec2, f32)>,
     zoom: ZoomTaps,
     seen_respawns: u32,
+    flying: bool,
 }
 
 impl MobileUi {
@@ -122,6 +125,8 @@ pub fn register(app: &mut App) {
             .before(crate::gui::render::draw_gui)
             .run_if(pad_is_drawn),
     );
+    #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+    art::register(app);
 }
 
 fn pad_is_drawn(state: Res<GuiState>) -> bool {
@@ -240,8 +245,11 @@ fn mobile_input(
         hold_hints,
         zoom,
         seen_respawns,
+        flying: last_flying,
         ..
     } = ui;
+    let was_flying = *last_flying;
+    let scheme = layout.bedrock.map(|b| b.scheme);
 
     for owner in owners.iter_mut() {
         owner.seen = false;
@@ -289,8 +297,10 @@ fn mobile_input(
                 Control::Zoom => zoom.press(now, &cfg),
                 Control::Key(key) => match key {
                     Key::Jump => fly_toggle |= pad.jump_double_tap(now, cfg.double_tap_secs),
-                    Key::Sneak if sneak_hold => {}
+                    Key::Sneak if sneak_hold || was_flying => {}
+                    Key::Sneak if scheme == Some(bedrock::Scheme::Dpad) => pad.dpad_sneak_tap(now),
                     Key::Sneak => pad.press(Cell::SneakToggle, now, cfg.double_tap_secs),
+                    Key::Sprint => {}
                     Key::Attack => attack_click = true,
                     Key::Use => use_click = true,
                     Key::Inventory => nav = Some(inventory_screen(&shared)),
@@ -322,8 +332,8 @@ fn mobile_input(
             let local = xf.to_local(ElementId::Pad, p.pos);
             let mut claim = Claim::new(control, p.pos, now, || local);
             if let Claim::DPad { cell, sprint } = &mut claim {
-                *cell = layout.bedrock.and_then(|b| b.dpad_cell(local));
-                *sprint = cell.is_some_and(|c| c.1 == -1) && pad.dpad_sprints(now);
+                *cell = layout.bedrock.map_or((0, 0), |b| b.dpad_cell(local));
+                *sprint = cell.1 == -1 && pad.dpad_sprints(now);
             }
             owners.retain(|o| o.id != p.id);
             owners.push(Owner {
@@ -345,11 +355,11 @@ fn mobile_input(
             }
             Claim::DPad { cell, sprint } => {
                 let local = xf.to_local(ElementId::Pad, p.pos);
-                *cell = layout.bedrock.and_then(|b| b.dpad_cell(local));
-                if cell.is_none_or(|c| c.1 != -1) {
+                *cell = layout.bedrock.map_or((0, 0), |b| b.dpad_cell(local));
+                if cell.1 != -1 {
                     *sprint = false;
                 }
-                if p.released && *cell == Some((0, -1)) {
+                if p.released && *cell == (0, -1) {
                     pad.dpad_up_lifted(now);
                 }
                 continue;
@@ -386,6 +396,7 @@ fn mobile_input(
     let mut attack_held = false;
     let mut use_held = false;
     let mut zoom_held = false;
+    let mut sprint_key = false;
     *pressed_cells = 0;
     *use_pressed = false;
     *stick_at = None;
@@ -425,9 +436,9 @@ fn mobile_input(
                 }
             }
             Claim::DPad { cell, sprint } => {
-                *dpad_held = cell;
+                *dpad_held = Some(cell);
                 *dpad_sprint |= sprint;
-                let Some((x, y)) = cell else { continue };
+                let (x, y) = cell;
                 if x > 0 {
                     move_bits |= MOVE_RIGHT;
                 } else if x < 0 {
@@ -446,6 +457,7 @@ fn mobile_input(
                     Key::Attack => attack_held = true,
                     Key::Use => use_held = true,
                     Key::Sneak => *pressed_cells |= 1 << Cell::SneakToggle.index(),
+                    Key::Sprint => sprint_key = true,
                     _ => {}
                 }
             }
@@ -472,16 +484,16 @@ fn mobile_input(
     if pad.auto_walk {
         move_bits |= MOVE_FORWARD;
     }
-    if layout.movement == Movement::Bedrock {
+    if layout.bedrock.is_some() {
         pad.sprint = false;
     }
     let sneak = if sneak_hold {
         pad.sneak = false;
         *pressed_cells & (1 << Cell::SneakToggle.index()) != 0
     } else {
-        pad.sneak
+        pad.sneak || (was_flying && *keys_held & Key::Sneak.bit() != 0)
     };
-    let sprint = pad.sprint || *dpad_sprint;
+    let sprint = pad.sprint || *dpad_sprint || sprint_key;
 
     crate::modules::zoom::set_touch(zoom_held || zoom.latched);
     if look_delta != Vec2::ZERO {
@@ -539,6 +551,7 @@ fn mobile_input(
         }
         (s.session.flying, s.respawns)
     };
+    *last_flying = flying;
     let sneak = if *seen_respawns != respawns {
         *seen_respawns = respawns;
         pad.sneak = false;
@@ -607,6 +620,8 @@ fn close_target(gui: &mut GuiState) -> Screen {
         }
         #[cfg(resource_packs)]
         Screen::ResourcePacks => Screen::Options,
+        #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+        Screen::ExportAssets => Screen::ManageStorage,
         #[cfg(explore_modrinth)]
         Screen::ExplorePacks => Screen::ResourcePacks,
         #[cfg(feature = "shader_support")]
@@ -711,7 +726,9 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, view: View, hud: &mut Hud) {
         return;
     }
     if let Some(b) = layout.bedrock {
-        draw_bedrock(p, vw, vh, &b, ui, hud);
+        #[cfg(feature = "asset_download")]
+        crate::client::bedrock_art::request();
+        draw_bedrock(p, vw, vh, &b, layout.stick, ui, hud);
         draw_hold_hints(p, &layout, ui);
         return;
     }
@@ -746,7 +763,7 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, view: View, hud: &mut Hud) {
                     );
                 }
             }
-            Movement::Bedrock => {}
+            Movement::BedrockDpad | Movement::BedrockJoystick => {}
             Movement::Joystick => {
                 if let Some(round) = layout.round_cells {
                     for (cell, at) in round {
@@ -805,25 +822,40 @@ fn draw_bedrock(
     vw: f32,
     vh: f32,
     b: &bedrock::Layout,
+    stick: Option<Stick>,
     ui: &MobileUi,
     hud: &mut Hud,
 ) {
+    let lit = bedrock::Lit {
+        art: bedrock::art_ready(p.atlas),
+        flying: ui.flying,
+        keys: ui.keys_held | if ui.pad.sneak { Key::Sneak.bit() } else { 0 },
+        dpad: ui.dpad_held,
+        stick: match (stick, ui.stick_at) {
+            (Some(s), Some(at)) if s.radius > 0.0 => (at - s.center) / s.radius,
+            _ => Vec2::ZERO,
+        },
+    };
     hud.draw(p, vw, vh, ElementId::Pad, |p| {
-        bedrock::draw_dpad(p, b, ui.dpad_held);
+        match (b.scheme, stick) {
+            (bedrock::Scheme::Joystick, _) if lit.art => bedrock::draw_stick(p, b, &lit),
+            (bedrock::Scheme::Joystick, Some(stick)) => draw_stick(p, stick, ui.stick_at),
+            (bedrock::Scheme::Joystick, None) => {}
+            (bedrock::Scheme::Dpad, _) => bedrock::draw_dpad(p, b, &lit),
+        }
+        bedrock::draw_group(p, b, ElementId::Pad, &lit);
     });
-    let held = |k: Key| ui.keys_held & k.bit() != 0 || (k == Key::Sneak && ui.pad.sneak);
     for element in [
         ElementId::JumpButton,
         ElementId::UseButton,
         ElementId::ChatButton,
-        ElementId::ModButton,
     ] {
         hud.draw(p, vw, vh, element, |p| {
-            bedrock::draw_group(p, b, element, held)
+            bedrock::draw_group(p, b, element, &lit)
         });
     }
     hud.follow(p, vw, vh, ElementId::Hotbar, |p| {
-        bedrock::draw_group(p, b, ElementId::Hotbar, held);
+        bedrock::draw_group(p, b, ElementId::Hotbar, &lit);
     });
 }
 

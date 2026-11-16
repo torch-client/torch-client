@@ -93,6 +93,7 @@ impl MaterialExtension for HandProjection {
 }
 
 fn hand_material(base: StandardMaterial) -> HandMaterial {
+    debug_assert!(base.unlit, "the WebGL2 hand fragment has no lit branch");
     ExtendedMaterial {
         base: StandardMaterial {
             fog_enabled: false,
@@ -1096,6 +1097,7 @@ impl Plugin for HandPlugin {
         use crate::renderer::AppState;
         embedded_asset!(app, "hand_projection.wgsl");
         embedded_asset!(app, "hand_glint.wgsl");
+        bevy::shader::load_shader_library!(app, "unlit.wgsl");
         app.add_plugins(MaterialPlugin::<HandMaterial>::default());
         crate::renderer::reload::touch_on_reload::<HandMaterial>(app);
         app.add_systems(

@@ -109,17 +109,19 @@ fn chest_raft_texture(_st: &EntityState) -> TexturePath {
 
 fn root(st: &EntityState) -> RootPose {
     let mut extra_rotation = hurt_wobble(st);
+    let mut scale = 1.0;
 
     let bubble = st.extras.bubble_angle;
     if !st.extras.under_water && !mth_equal(bubble, 0.0) {
-        let axis = Vec3::new(1.0, 0.0, 1.0).normalize();
-        extra_rotation *= Quat::from_axis_angle(axis, bubble.to_radians());
+        let (s, c) = (bubble.to_radians() * 0.5).sin_cos();
+        extra_rotation *= Quat::from_xyzw(s, 0.0, s, c).normalize();
+        scale = 1.0 + s * s;
     }
 
     RootPose {
         world_offset: Vec3::new(0.0, 0.375, 0.0),
         rotation: Quat::from_rotation_y((180.0 - st.body_rot).to_radians()),
-        scale: 1.0,
+        scale,
         extra_rotation,
         extra_offset: Vec3::ZERO,
         hook: hook_for(mirror() * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)),

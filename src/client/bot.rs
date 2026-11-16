@@ -55,6 +55,7 @@ async fn run_client(
                 .disable::<azalea::accept_resource_packs::AcceptResourcePacksPlugin>()
         })
         .add_plugins(chat_sign::ChatSigningPlugin)
+        .add_plugins(crate::client::outbox::OutboxPlugin)
         .add_plugins(flight::FlightPlugin)
         .add_plugins(crate::play::elytra::ElytraPlugin)
         .add_plugins(crate::play::riptide::RiptidePlugin)
@@ -155,7 +156,8 @@ pub struct PacketRelayPlugin;
 
 impl azalea::app::Plugin for PacketRelayPlugin {
     fn build(&self, app: &mut azalea::app::App) {
-        app.add_systems(azalea::app::Update, relay_packets);
+        azalea::connection::set_game_packet_observer(relay_packet);
+        app.add_systems(azalea::app::Update, crate::client::level_load::publish);
         #[cfg(feature = "audio")]
         app.add_systems(
             azalea::app::Update,
@@ -206,21 +208,26 @@ fn install_translator(
     }
 }
 
-fn relay_packets(
-    mut events: azalea::ecs::prelude::MessageReader<azalea::packet::game::ReceiveGamePacketEvent>,
-    worlds: azalea::ecs::prelude::Query<&azalea::local_player::WorldHolder>,
+fn relay_packet(
+    ecs: &mut azalea::ecs::prelude::World,
+    entity: azalea::ecs::prelude::Entity,
+    packet: &azalea_protocol::packets::game::ClientboundGamePacket,
 ) {
     let Some(shared) = SHARED.get() else {
         return;
     };
-    for event in events.read() {
-        let Ok(world) = worlds.get(event.entity) else {
-            continue;
-        };
-        let started = crate::platform::time::Instant::now();
-        packets::handle_packet(world, shared, event.packet.as_ref());
-        crate::diag::note_event(started.elapsed().as_nanos() as u64, true);
-    }
+    let Some(world) = ecs
+        .get::<azalea::local_player::WorldHolder>(entity)
+        .map(|w| azalea::local_player::WorldHolder {
+            partial: w.partial.clone(),
+            shared: w.shared.clone(),
+        })
+    else {
+        return;
+    };
+    let started = crate::platform::time::Instant::now();
+    packets::handle_packet(&world, shared, packet);
+    crate::diag::note_event(started.elapsed().as_nanos() as u64, true);
 }
 
 pub struct BotHeartbeatPlugin;
@@ -484,8 +491,13 @@ async fn handle_event(
                 "net",
                 "connected; waiting for the server to stream the world"
             );
-            shared.lock().unwrap().session.status =
-                Some("Connected — waiting for chunks...".into());
+            {
+                let mut s = shared.lock().unwrap();
+                s.session.status = Some("Connected, waiting for chunks...".into());
+                if !s.session_ended {
+                    s.in_world = true;
+                }
+            }
             #[cfg(lua_mods)]
             crate::modules::script::joined();
         }
@@ -506,9 +518,7 @@ async fn handle_event(
             }
         }
         Event::Tick => tick::handle_tick(&bot, shared),
-        Event::ReceiveChunk(chunk_pos) => {
-            worldsync::note_chunk_received(&bot, chunk_pos.x, chunk_pos.z)
-        }
+        Event::ReceiveChunk(_) => {}
         Event::Chat(m) => chat_recv::handle_chat(&bot, shared, m),
         Event::Death(packet) => {
             let cause = packet.map(|p| crate::client::chat_text::to_spans(&p.message));
@@ -578,6 +588,8 @@ fn reset_session_side_tables(blocking: bool) {
     azalea::registry::unknown::reset();
     #[cfg(feature = "seed_cracker")]
     crate::modules::seed_cracker::disconnected();
+    crate::modules::sound_esp::disconnected();
+    crate::modules::basefinder::disconnected();
     if blocking {
         reset_chunk_tracking();
     } else {

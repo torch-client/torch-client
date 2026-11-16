@@ -179,6 +179,13 @@ impl ServerPacks {
         required: bool,
         prompt: Option<&azalea::FormattedText>,
     ) {
+        #[cfg(feature = "ui_utils")]
+        if crate::modules::ui_utils::bypass_pack(required) {
+            crate::log_info!("net", "UI Utils bypassed the server resource pack {url}");
+            self.replies.push((id, Reply::Accepted));
+            self.replies.push((id, Reply::Loaded));
+            return;
+        }
         if !http_url(url) {
             self.replies.push((id, Reply::InvalidUrl));
             return;

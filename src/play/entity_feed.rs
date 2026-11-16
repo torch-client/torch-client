@@ -175,6 +175,17 @@ where
     Some((<Value<C> as DataRegistry>::NAME, value.protocol_id()))
 }
 
+fn painting_variant_key(eref: &EntityView) -> Option<(&'static str, u32)> {
+    use azalea_registry::{DataRegistry, Holder, data::PaintingVariant};
+    match &eref
+        .get_component::<azalea::entity::metadata::PaintingVariant>()?
+        .0
+    {
+        Holder::Reference(v) => Some((PaintingVariant::NAME, v.protocol_id())),
+        Holder::Direct(_) => None,
+    }
+}
+
 fn resolve_variant(
     registries: Option<&azalea_core::registry_holder::RegistryHolder>,
     key: Option<(&'static str, u32)>,
@@ -282,7 +293,9 @@ fn seat_riders(
     player_anims: &mut HashMap<i32, crate::renderer::HumanoidAnim>,
     players: &mut [crate::session::OtherPlayerInfo],
 ) -> Vec<(i32, [f64; 3])> {
-    use crate::play::riding::{Passenger, SeatPose, passenger_attachment, vehicle_attachment};
+    use crate::play::riding::{
+        Hull, Passenger, SeatPose, passenger_attachment, vehicle_attachment,
+    };
     use crate::session::OtherPlayerInfo;
     use azalea_registry::builtin::EntityKind;
 
@@ -351,12 +364,35 @@ fn seat_riders(
             vehicle.pos[1] + seat.y - drop,
             vehicle.pos[2] + seat.z,
         ];
+        let boat_turn = Hull::of(vehicle_kind)
+            .filter(|_| rider_kind != EntityKind::Breeze)
+            .map(|hull| {
+                let max = match hull {
+                    Hull::ChestBoat | Hull::ChestRaft => 1,
+                    Hull::Boat | Hull::Raft => 2,
+                };
+                let offset = (passenger.animal && m.of == max).then_some(if rider % 2 == 0 {
+                    90.0
+                } else {
+                    270.0
+                });
+                (vehicle.y_rot, offset)
+            });
         if let Some(a) = anims.get_mut(&rider) {
             a.set_seated_pos(pos);
+            if let Some((boat_y_rot, offset)) = boat_turn {
+                a.turn_in_boat(boat_y_rot, offset);
+            }
         } else if let Some(a) = player_anims.get_mut(&rider) {
             a.set_seated_pos(pos);
+            if let Some((boat_y_rot, _)) = boat_turn {
+                a.turn_in_boat(boat_y_rot);
+            }
             if let Some(p) = players.iter_mut().find(|p| p.id == rider) {
                 p.anim.set_seated_pos(pos);
+                if let Some((boat_y_rot, _)) = boat_turn {
+                    p.anim.turn_in_boat(boat_y_rot);
+                }
             }
         }
         seated.push((rider, pos));
@@ -1298,10 +1334,10 @@ pub(crate) fn collect_entities(
                     .or_else(|| variant_key::<metadata::PigVariant>(eref))
                     .or_else(|| variant_key::<metadata::ChickenVariant>(eref))
                     .or_else(|| variant_key::<metadata::FrogVariant>(eref))
-                    .or_else(|| variant_key::<metadata::PaintingVariant>(eref))
+                    .or_else(|| painting_variant_key(eref))
                     .or_else(|| variant_key::<metadata::ZombieNautilusVariant>(eref))
             } else {
-                variant_key::<metadata::PaintingVariant>(eref)
+                painting_variant_key(eref)
             },
             sleeping_pos: if living {
                 meta::<metadata::SleepingPos>(eref).flatten()
@@ -1549,6 +1585,29 @@ pub(crate) fn collect_entities(
     }
     drop(meta_cache_guard);
     drop(meta_dirty_guard);
+
+    let uncontrolled: Vec<usize> = pending
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.input.paddling_left || p.input.paddling_right)
+        .filter(|(_, p)| {
+            let first = mounts
+                .iter()
+                .find(|(_, m)| m.vehicle == p.id && m.index == 0)
+                .map(|(rider, _)| *rider);
+            first.is_none_or(|rider| {
+                pending
+                    .iter()
+                    .find(|q| q.id == rider)
+                    .is_some_and(|q| !q.input.is_living)
+            })
+        })
+        .map(|(i, _)| i)
+        .collect();
+    for i in uncontrolled {
+        pending[i].input.paddling_left = false;
+        pending[i].input.paddling_right = false;
+    }
 
     if let Some(d) = driven
         && let Some(p) = pending.iter_mut().find(|p| p.id == d.id)

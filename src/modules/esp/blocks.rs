@@ -47,8 +47,11 @@ static TINTS: &[Tint] = &[
     p("tnt", 0xE0_3A_2A),
     p("bedrock", 0x33_33_33),
     p("water", 0x2E_5A_C8),
-    p("lava", 0xE0_6A_1A),
+    p("lava", LAVA_RGB),
+    p("nether_portal", 0x9B_30_FF),
 ];
+
+pub(in crate::modules) const LAVA_RGB: u32 = 0xFF_00_00;
 
 static GROUPS: [&str; 5] = ["Ores", "Storage", "Spawners", "Notable", "Other"];
 
@@ -77,6 +80,7 @@ static NOTABLE: &[&str] = &[
     "bookshelf",
     "water",
     "lava",
+    "nether_portal",
     "sculk_shrieker",
     "sculk_catalyst",
     "reinforced_deepslate",
@@ -222,9 +226,13 @@ pub(crate) fn mod_list(
     )
 }
 
+pub(in crate::modules) fn ids() -> &'static [&'static str] {
+    &shared().0
+}
+
 #[cfg(lua_mods)]
 pub(crate) fn is_row(id: &str) -> bool {
-    shared().0.binary_search(&id).is_ok()
+    ids().binary_search(&id).is_ok()
 }
 
 fn build_xray() -> Built {
@@ -258,6 +266,20 @@ pub static SCAFFOLD: BitList = BitList::new(
     false,
     PRESETS,
     build_scaffold,
+);
+
+fn build_block_esp() -> Built {
+    build_with(|_| false, color_of)
+}
+
+pub static BLOCK_ESP: BitList = BitList::new(
+    "block_esp",
+    "Blocks",
+    214.0,
+    &GROUPS,
+    true,
+    PRESETS,
+    build_block_esp,
 );
 
 pub static STORAGE: BitList = BitList::new(

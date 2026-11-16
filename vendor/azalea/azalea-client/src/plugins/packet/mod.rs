@@ -36,6 +36,7 @@ impl Plugin for PacketPlugin {
             relative_updates::debug_detect_updates_received_on_local_entities,
         )
         .add_observer(game::handle_outgoing_packets_observer)
+        .add_observer(game::handle_outgoing_packets_bypass_observer)
         .add_observer(config::handle_outgoing_packets_observer)
         .add_observer(login::handle_outgoing_packets_observer)
         .add_systems(Update, death_event_on_0_health)

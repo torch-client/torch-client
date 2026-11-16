@@ -10,6 +10,8 @@ pub struct SessionState {
     pub clear_chunks: bool,
     pub player_pos: [f64; 3],
     pub status: Option<std::sync::Arc<str>>,
+    pub level_loading: Option<LevelLoading>,
+    pub player_section_ready: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub current_address: Option<String>,
     pub advanced_tooltips: bool,
     pub fly_toggle: bool,
@@ -43,6 +45,8 @@ pub struct SessionState {
     pub horse: Option<HorseMenu>,
     pub horse_published_state_id: u32,
     pub inv_actions: Vec<InvAction>,
+    #[cfg(feature = "ui_utils")]
+    pub ui_utils: crate::modules::ui_utils::SessionUi,
     pub hotbar_selected: u8,
     pub health: f32,
     pub health_display: HealthDisplay,
@@ -118,7 +122,10 @@ pub struct SessionState {
     pub crosshair_entity: Option<i32>,
     pub aim_target: Option<i32>,
     pub auto_mine: Option<MineIntent>,
-    pub auto_mace: Option<MaceAim>,
+    pub auto_mace: Option<CameraAim>,
+    pub safe_anchor: Option<CameraAim>,
+    pub route_look: Option<CameraAim>,
+    pub ore_miner_look: Option<CameraAim>,
     pub attack_strength: f32,
     pub attack_delay: f32,
     pub item_swap: f32,
@@ -298,6 +305,13 @@ impl CameraEye {
     pub fn sample(&self, partial: f32) -> f32 {
         self.prev + (self.cur - self.prev) * partial
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LevelLoading {
+    pub id: u64,
+    pub reason: azalea::loading::LevelLoadingReason,
+    pub server_started: bool,
 }
 
 #[derive(Default, Clone, Copy)]

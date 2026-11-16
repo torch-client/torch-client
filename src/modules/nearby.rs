@@ -17,6 +17,17 @@ pub struct Seen<'a> {
     pub world: &'a World,
 }
 
+impl Seen<'_> {
+    pub fn protected(&self) -> bool {
+        self.kind == EntityKind::Player
+            && super::friends::guarding()
+            && self
+                .world
+                .get::<azalea::player::GameProfileComponent>(self.entity)
+                .is_some_and(|p| super::friends::is_friend(&p.0.name))
+    }
+}
+
 type Everyone = QueryState<
     (
         AzEntity,

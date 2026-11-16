@@ -320,6 +320,12 @@ impl ChunkIndex {
             .unwrap_or((None, None))
     }
 
+    pub fn has_section(&self, cx: i32, cz: i32, sec_y: i32) -> bool {
+        self.columns
+            .get(&(cx, cz))
+            .is_some_and(|column| column.sections.contains_key(&sec_y))
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -557,6 +563,31 @@ fn setup(
             shown: None,
         });
     }
+    #[cfg(feature = "click_gui")]
+    {
+        use crate::renderer::esp_material::EspMaterial;
+        let material = esp_materials.add(EspMaterial::default());
+        let boxes = spawn_overlay(
+            &mut commands,
+            &mut meshes,
+            super::overlays::empty_esp_mesh(),
+            material.clone(),
+            super::overlays::PlayerEspMarker,
+        );
+        let tracers = spawn_overlay(
+            &mut commands,
+            &mut meshes,
+            super::overlays::empty_esp_lines(),
+            material,
+            super::overlays::PlayerEspMarker,
+        );
+        commands.insert_resource(super::overlays::PlayerEspOverlay {
+            boxes,
+            tracers,
+            shown: false,
+            empty: false,
+        });
+    }
     #[cfg(lua_mods)]
     commands.insert_resource(super::ghosts::Ghosts::default());
 
@@ -581,6 +612,12 @@ fn setup(
         },
         Msaa::Off,
         Tonemapping::None,
+        #[cfg(all(
+            target_arch = "wasm32",
+            not(feature = "webgpu"),
+            not(feature = "builtin_shaders")
+        ))]
+        DebandDither::Disabled,
         RenderLayers::from_layers(&[0, super::hand::HAND_LAYER]),
         Projection::Perspective(PerspectiveProjection {
             fov: VANILLA_FOV_DEGREES.to_radians(),
@@ -625,6 +662,89 @@ fn take_budgeted(
     }
     *sections -= charged.min(*sections);
     queue.drain(..room).collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UploadPacer {
+    scale: f32,
+    baseline_ms: f32,
+    last_admitted: usize,
+    carried_ms: f32,
+    last_rendered: bool,
+}
+
+impl Default for UploadPacer {
+    fn default() -> Self {
+        UploadPacer {
+            scale: 1.0,
+            baseline_ms: 0.0,
+            last_admitted: 0,
+            carried_ms: 0.0,
+            last_rendered: true,
+        }
+    }
+}
+
+impl UploadPacer {
+    const MIN_SCALE: f32 = 0.125;
+    const IGNORE_MS: f32 = 500.0;
+
+    fn slow_ms(&self) -> f32 {
+        self.baseline_ms * 1.5 + 4.0
+    }
+
+    fn fast_ms(&self) -> f32 {
+        self.baseline_ms * 1.2 + 2.0
+    }
+
+    fn learn(&mut self, frame_ms: f32) {
+        let rate = if frame_ms < self.baseline_ms {
+            0.5
+        } else {
+            0.1
+        };
+        self.baseline_ms += (frame_ms - self.baseline_ms) * rate;
+    }
+
+    fn observe(&mut self, tick_ms: f32, rendered: bool) {
+        let described_rendered = std::mem::replace(&mut self.last_rendered, rendered);
+        if !described_rendered {
+            self.carried_ms += tick_ms;
+            return;
+        }
+        let frame_ms = tick_ms + std::mem::take(&mut self.carried_ms);
+        let uploaded = std::mem::take(&mut self.last_admitted) > 0;
+        if !(frame_ms > 0.0 && frame_ms < Self::IGNORE_MS) {
+            return;
+        }
+        if self.baseline_ms == 0.0 {
+            self.baseline_ms = frame_ms;
+            return;
+        }
+        if !uploaded {
+            self.learn(frame_ms);
+            return;
+        }
+        if frame_ms < self.baseline_ms
+            || (self.scale <= Self::MIN_SCALE && frame_ms >= self.fast_ms())
+        {
+            self.learn(frame_ms);
+        }
+        if frame_ms > self.slow_ms() {
+            self.scale = (self.scale * 0.5).max(Self::MIN_SCALE);
+        } else if frame_ms < self.fast_ms() {
+            self.scale = (self.scale * 1.25).min(1.0);
+        }
+    }
+
+    fn scaled(&self, verts: usize, sections: usize) -> (usize, usize) {
+        let scale = |n: usize| ((n as f32 * self.scale) as usize).max(1);
+        (scale(verts), scale(sections))
+    }
+
+    fn admitted(&mut self, verts: usize) {
+        self.last_admitted += verts;
+    }
 }
 
 fn mesh_on_render_thread(mut scratch: Local<crate::client::worker::Scratch>) {
@@ -758,11 +878,15 @@ fn poll_shared_state(
     mut dedup_keep: Local<Vec<bool>>,
     gui: Res<crate::gui::GuiState>,
     mut view: ResMut<FrameView>,
+    real_time: Res<Time<bevy::time::Real>>,
+    frame_gate: Res<FrameGate>,
+    mut pacer: Local<UploadPacer>,
 ) {
     crate::prof_span!("render:poll_shared_state");
     #[cfg(feature = "budget")]
     let _t = crate::diag::budget::timed(crate::diag::budget::Slot::Poll);
     let poll_start = Instant::now();
+    pacer.observe(real_time.delta_secs() * 1000.0, frame_gate.render);
 
     let lock_t0 = Instant::now();
     let mut state = shared.0.lock().unwrap();
@@ -837,10 +961,36 @@ fn poll_shared_state(
         "MC_UPLOAD_SECTIONS",
         DEFAULT_SECTION_BUDGET,
     );
+    const AWAITED_VERT_BUDGET: usize = 120_000;
+    const AWAITED_SECTION_BUDGET: usize = 128;
+    let (base_verts, base_sections) = (max_verts, max_sections);
+    let awaited = view
+        .player_section_ready
+        .as_ref()
+        .is_some_and(|ready| !ready.load(std::sync::atomic::Ordering::Relaxed));
+    let (max_verts, max_sections) = if awaited {
+        (
+            max_verts.max(AWAITED_VERT_BUDGET),
+            max_sections.max(AWAITED_SECTION_BUDGET),
+        )
+    } else {
+        (max_verts, max_sections)
+    };
+    let (max_verts, max_sections) = if cfg!(target_arch = "wasm32") {
+        let (verts, sections) = pacer.scaled(max_verts, max_sections);
+        if awaited {
+            (verts.max(base_verts), sections.max(base_sections))
+        } else {
+            (verts, sections)
+        }
+    } else {
+        (max_verts, max_sections)
+    };
     let mut verts = max_verts;
     let mut sections = max_sections;
     let mut pending = take_budgeted(&mut state.session.pending_edits, &mut verts, &mut sections);
     let streamed = take_budgeted(&mut state.session.pending_chunks, &mut verts, &mut sections);
+    pacer.admitted(max_verts - verts);
     let session = &mut state.session;
     session.meshed_columns.taken(streamed.len());
     pending.extend(streamed);
@@ -1611,13 +1761,13 @@ fn log_frame_rate(
     );
     crate::log_info!(
         "render",
-        "pipeline: {} packets ({} outside the window), {} columns received ({} dropped), {} lit \
-         ({} light jobs dropped), {} mesh jobs, {} sections meshed ({} panicked, {} columns \
-         queued again, {} left unbuilt), {} uploaded",
+        "pipeline: {} packets, {} columns received ({} with undecodable sections, {} swept), \
+         {} lit ({} light jobs dropped), {} mesh jobs, {} sections meshed ({} panicked, {} \
+         columns queued again, {} left unbuilt, {} meshed before a neighbour), {} uploaded",
         c[crate::diag::Stat::ChunkPacketsSeen],
-        c[crate::diag::Stat::ChunkPacketsOutOfWindow],
         c[crate::diag::Stat::ChunksReceived],
-        c[crate::diag::Stat::ChunksDropped],
+        c[crate::diag::Stat::ChunkDecodeFailed],
+        c[crate::diag::Stat::ChunksSwept],
         c[crate::diag::Stat::ColumnsLit],
         c[crate::diag::Stat::LightJobsDropped],
         c[crate::diag::Stat::MeshJobs],
@@ -1625,6 +1775,7 @@ fn log_frame_rate(
         c[crate::diag::Stat::MeshPanics],
         c[crate::diag::Stat::MeshRequeued],
         c[crate::diag::Stat::MeshGaveUp],
+        c[crate::diag::Stat::MeshedWithoutNeighbours],
         c[crate::diag::Stat::SectionsUploaded],
     );
     *frames = 0;
@@ -1728,6 +1879,7 @@ pub(super) fn enter_screen(
     #[cfg(feature = "click_gui")]
     if state.screen == crate::gui::Screen::ClickGui && next != state.screen {
         crate::modules::flush_changed();
+        crate::gui::clickgui::flush_look();
     }
     #[cfg(feature = "hud_editor")]
     if state.screen == crate::gui::Screen::HudEditor && next != state.screen {
@@ -1755,6 +1907,7 @@ pub(super) fn enter_screen(
     {
         let mut s = shared.0.lock().unwrap();
         s.screen_open = open;
+        s.pause_screen = next == crate::gui::Screen::Pause;
         if advancements_closed {
             s.session.seen_advancements.push(None);
         }
@@ -2281,10 +2434,25 @@ fn sync_smooth_lighting(state: Res<crate::gui::GuiState>, mut last: Local<Option
 }
 
 fn forward_lighting_options() {
-    crate::client::mesh_worker::sync_options(
-        crate::renderer::lighting_enabled(),
-        crate::renderer::smooth_lighting_enabled(),
-    );
+    crate::client::mesh_worker::sync_options();
+}
+
+fn sync_cutout_leaves(
+    state: Res<crate::gui::GuiState>,
+    shared: Res<Shared>,
+    mut last: Local<Option<bool>>,
+) {
+    let wanted = state.options.cutout_leaves;
+    if *last == Some(wanted) {
+        return;
+    }
+    let had_previous_value = last.is_some();
+    *last = Some(wanted);
+    crate::renderer::set_cutout_leaves(wanted);
+    forward_lighting_options();
+    if had_previous_value {
+        shared.0.lock().unwrap().remesh_chunks_requested = true;
+    }
 }
 
 fn sync_lighting_enabled(
@@ -2647,6 +2815,10 @@ pub fn run(
     .add_plugins(crate::renderer::clouds::CloudPlugin)
     .add_plugins(crate::renderer::weather::WeatherPlugin)
     .add_plugins(crate::renderer::world_border::WorldBorderPlugin)
+    .add_plugins((
+        #[cfg(target_arch = "wasm32")]
+        crate::renderer::warmup::WarmupPlugin,
+    ))
     .configure_sets(
         PostUpdate,
         super::CameraPinnedMeshes
@@ -2741,6 +2913,7 @@ pub fn run(
     app.add_systems(Last, trace_reextracted_meshes)
         .add_systems(Update, sync_smooth_lighting)
         .add_systems(Update, sync_lighting_enabled)
+        .add_systems(Update, sync_cutout_leaves)
         .add_systems(Update, toggle_screen.after(apply_gui_nav))
         .add_systems(
             Update,
@@ -2777,6 +2950,12 @@ pub fn run(
         .add_systems(Update, toggle_advanced_tooltips)
         .add_systems(Update, toggle_chunk_borders)
         .add_systems(Update, reload_all_chunks.run_if(in_state(AppState::InGame)))
+        .add_systems(
+            Update,
+            crate::client::level_load::note_player_section
+                .after(poll_shared_state)
+                .run_if(in_state(AppState::InGame)),
+        )
         .add_systems(Update, debug_spectate)
         .add_systems(
             Update,
@@ -2818,6 +2997,18 @@ pub fn run(
             #[cfg(feature = "click_gui")]
             {
                 super::overlays::update_world_draw
+                    .after(FrameViewSystems)
+                    .run_if(in_state(AppState::InGame))
+            }
+            #[cfg(not(feature = "click_gui"))]
+            {
+                || {}
+            }
+        })
+        .add_systems(Update, {
+            #[cfg(feature = "click_gui")]
+            {
+                super::overlays::update_player_esp
                     .after(FrameViewSystems)
                     .run_if(in_state(AppState::InGame))
             }
@@ -3019,6 +3210,86 @@ mod tests {
     use super::*;
 
     const SIXTY_HZ: Duration = Duration::from_nanos(16_666_666);
+
+    fn settled_pacer() -> UploadPacer {
+        let mut pacer = UploadPacer::default();
+        for _ in 0..4 {
+            pacer.observe(16.7, true);
+        }
+        pacer
+    }
+
+    #[test]
+    fn a_long_upload_frame_halves_the_budget() {
+        let mut pacer = settled_pacer();
+        pacer.admitted(30_000);
+        pacer.observe(33.3, true);
+        assert_eq!(pacer.scaled(30_000, 24), (15_000, 12));
+
+        let mut idle = settled_pacer();
+        idle.observe(33.3, true);
+        assert_eq!(idle.scaled(30_000, 24), (30_000, 24));
+    }
+
+    #[test]
+    fn short_upload_frames_restore_the_budget() {
+        let mut pacer = settled_pacer();
+        pacer.admitted(30_000);
+        pacer.observe(50.0, true);
+        for _ in 0..8 {
+            pacer.admitted(1);
+            pacer.observe(16.7, true);
+        }
+        assert_eq!(pacer.scaled(30_000, 24), (30_000, 24));
+    }
+
+    #[test]
+    fn the_floor_relearns_the_baseline() {
+        let mut pacer = settled_pacer();
+        for _ in 0..3 {
+            pacer.admitted(1);
+            pacer.observe(40.0, true);
+        }
+        assert_eq!(pacer.scaled(120_000, 128), (15_000, 16));
+        for _ in 0..200 {
+            pacer.admitted(1);
+            pacer.observe(40.0, true);
+        }
+        assert_eq!(pacer.scaled(120_000, 128), (120_000, 128));
+    }
+
+    #[test]
+    fn a_hidden_tab_frame_is_ignored() {
+        let mut pacer = settled_pacer();
+        pacer.admitted(30_000);
+        pacer.observe(4_000.0, true);
+        assert_eq!(pacer.scaled(30_000, 24), (30_000, 24));
+    }
+
+    #[test]
+    fn a_gated_tick_is_judged_with_the_frame_after_it() {
+        let mut pacer = settled_pacer();
+        pacer.admitted(30_000);
+        pacer.observe(50.0, false);
+        assert_eq!(pacer.scaled(30_000, 24), (15_000, 12));
+        pacer.admitted(100);
+        pacer.observe(8.3, true);
+        assert_eq!(pacer.scaled(30_000, 24), (15_000, 12));
+        pacer.observe(8.3, true);
+        assert_eq!(pacer.scaled(30_000, 24), (18_750, 15));
+    }
+
+    #[test]
+    fn a_long_first_frame_does_not_set_the_baseline() {
+        let mut pacer = UploadPacer::default();
+        pacer.observe(400.0, true);
+        for _ in 0..12 {
+            pacer.observe(16.7, true);
+        }
+        pacer.admitted(30_000);
+        pacer.observe(50.0, true);
+        assert_eq!(pacer.scaled(30_000, 24), (15_000, 12));
+    }
 
     #[test]
     fn the_warp_is_the_identity_without_distortion() {

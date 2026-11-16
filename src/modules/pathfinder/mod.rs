@@ -2,11 +2,13 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering::Relaxed};
 use std::sync::{Mutex, PoisonError};
 
 use azalea::Client;
+use azalea::block::BlockTrait;
 use azalea::ecs::entity::Entity;
 use azalea::ecs::query::With;
 use azalea::entity::metadata::Player;
-use azalea::entity::{LookDirection, Physics};
-use azalea::pathfinder::goals::{BlockPosGoal, RadiusGoal};
+use azalea::entity::{Physics, Position};
+use azalea::mining::MineBlockPos;
+use azalea::pathfinder::goals::{BlockPosGoal, Goal, RadiusGoal};
 use azalea::pathfinder::moves::{ExecutorIntent, MovesCtx, basic, uncommon};
 use azalea::pathfinder::positions::RelBlockPos;
 use azalea::pathfinder::{
@@ -14,14 +16,18 @@ use azalea::pathfinder::{
 };
 use azalea::player::GameProfileComponent;
 use azalea::{BlockPos, Vec3};
+use azalea_core::hit_result::BlockHitResult;
 use uuid::Uuid;
 
-use super::sent::{Look, keys_toward, look_at};
-use super::{MS_PER_TICK, turn};
+use super::auto_mine::shared::{
+    STALL_TICKS, aim_at, best_tool, gate, present, sees, select_tool, state_at,
+};
+use super::sent::{Look, WALK_KEYS, keys_toward, look_at, view_vector};
+use super::turn;
 use crate::modules::chat_math::{GREEN, RED, say};
 use crate::renderer::world_draw::{self, Node};
 use crate::session::{
-    MOVE_BACK, MOVE_DESCEND, MOVE_FORWARD, MOVE_JUMP, MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK,
+    CameraAim, MOVE_BACK, MOVE_DESCEND, MOVE_FORWARD, MOVE_JUMP, MOVE_LEFT, MOVE_RIGHT, MOVE_SNEAK,
     MOVE_SPRINT, SharedMutex,
 };
 use crate::util::mth::wrap_degrees;
@@ -37,7 +43,15 @@ const WALK_ERR: f32 = 45.0;
 
 const NEAR_POINT: f64 = 0.3;
 
-const TICK: f32 = MS_PER_TICK / 1000.0;
+const COAST_WITHIN: f64 = 0.2;
+
+const LOOKAHEAD_NODES: usize = 3;
+
+const MINE_TURN_TICKS: u32 = 20;
+
+const REVERT_LIMIT: u32 = 3;
+
+const AIM_DISTANCE: f64 = 16.0;
 
 const START_GRACE: u32 = 5;
 
@@ -122,8 +136,98 @@ fn set_travel(t: Travel) {
     TRAVEL.store(t as u8, Relaxed);
 }
 
-enum Target {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QuietGoal {
     Block(BlockPos),
+    Near(Vec<BlockPos>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuietOpts {
+    pub parkour: bool,
+    pub mining: bool,
+}
+
+impl QuietGoal {
+    fn reached(&self, feet: BlockPos) -> bool {
+        match self {
+            QuietGoal::Block(b) => feet == *b,
+            QuietGoal::Near(ores) => near_success(ores, feet),
+        }
+    }
+
+    fn box_at(&self, feet: Vec3) -> BlockPos {
+        match self {
+            QuietGoal::Block(b) => *b,
+            QuietGoal::Near(ores) => {
+                let d2 = |b: &BlockPos| {
+                    let c = [
+                        b.x as f64 + 0.5 - feet.x,
+                        b.y as f64 + 0.5 - feet.y,
+                        b.z as f64 + 0.5 - feet.z,
+                    ];
+                    c[0] * c[0] + c[1] * c[1] + c[2] * c[2]
+                };
+                ores.iter()
+                    .copied()
+                    .min_by(|a, b| d2(a).total_cmp(&d2(b)))
+                    .unwrap_or(BlockPos::from(feet))
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NearGoal(Vec<BlockPos>);
+
+pub(in crate::modules) fn near_success(ores: &[BlockPos], n: BlockPos) -> bool {
+    ores.iter().any(|o| {
+        let dy = o.y - n.y;
+        (o.x - n.x).abs() + (o.z - n.z).abs() == 1 && (dy == 0 || dy == 1)
+    })
+}
+
+impl Goal for NearGoal {
+    fn heuristic(&self, n: BlockPos) -> f32 {
+        let mut best = f32::INFINITY;
+        for o in &self.0 {
+            let side = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                .into_iter()
+                .map(|(dx, dz)| BlockPosGoal(BlockPos::new(o.x + dx, n.y, o.z + dz)).heuristic(n))
+                .fold(f32::INFINITY, f32::min);
+            let height = [0, 1]
+                .into_iter()
+                .map(|dy| BlockPosGoal(BlockPos::new(n.x, o.y - dy, n.z)).heuristic(n))
+                .fold(f32::INFINITY, f32::min);
+            best = best.min(side + height);
+        }
+        best
+    }
+
+    fn success(&self, n: BlockPos) -> bool {
+        near_success(&self.0, n)
+    }
+}
+
+#[derive(Clone)]
+struct Route {
+    goal: QuietGoal,
+    opts: QuietOpts,
+    dug: bool,
+}
+
+impl Route {
+    fn send(&self, bot: &Client) {
+        let opts = opts_for(self.opts.parkour).allow_mining(self.dug);
+        match &self.goal {
+            QuietGoal::Block(b) => bot.start_goto_with_opts(BlockPosGoal(*b), opts),
+            QuietGoal::Near(ores) => bot.start_goto_with_opts(NearGoal(ores.clone()), opts),
+        }
+    }
+}
+
+enum Target {
+    Block(Route),
     Player(Follow),
 }
 
@@ -241,7 +345,7 @@ struct Run {
     age: u32,
     drawn: Option<DrawKey>,
     quiet: bool,
-    deferred: Option<bool>,
+    deferred: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -256,8 +360,109 @@ static RUN: Mutex<Run> = Mutex::new(Run {
     age: 0,
     drawn: None,
     quiet: false,
-    deferred: None,
+    deferred: false,
 });
+
+static PARKOUR: AtomicBool = AtomicBool::new(false);
+
+static MINING: AtomicBool = AtomicBool::new(false);
+
+static MINE_FAILED: AtomicBool = AtomicBool::new(false);
+
+struct MineAt {
+    at: Option<BlockPos>,
+    aim: Option<[f64; 3]>,
+    tool: Option<u8>,
+    tool_ready: bool,
+    track: Option<Track>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Track {
+    block: BlockPos,
+    idle: u32,
+    breaks: u32,
+    gone: bool,
+}
+
+impl Track {
+    fn new(block: BlockPos) -> Track {
+        Track {
+            block,
+            idle: 0,
+            breaks: 0,
+            gone: false,
+        }
+    }
+
+    fn step(&mut self, progressing: bool) -> bool {
+        self.idle = if progressing {
+            0
+        } else {
+            self.idle.saturating_add(1)
+        };
+        self.idle > STALL_TICKS as u32 + MINE_TURN_TICKS || self.breaks >= REVERT_LIMIT
+    }
+
+    fn ask(track: &mut Option<Track>, block: BlockPos) {
+        match track {
+            Some(t) if t.block == block => {
+                if t.gone {
+                    t.breaks += 1;
+                    t.gone = false;
+                }
+            }
+            _ => *track = Some(Track::new(block)),
+        }
+    }
+}
+
+static MINE_AT: Mutex<MineAt> = Mutex::new(MineAt {
+    at: None,
+    aim: None,
+    tool: None,
+    tool_ready: false,
+    track: None,
+});
+
+fn mine_at() -> std::sync::MutexGuard<'static, MineAt> {
+    MINE_AT.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn clear_mine(route_over: bool) {
+    if !route_over && !MINING.load(Relaxed) {
+        return;
+    }
+    MINING.store(false, Relaxed);
+    let mut m = mine_at();
+    m.at = None;
+    m.aim = None;
+    m.tool = None;
+    m.tool_ready = false;
+    if route_over {
+        m.track = None;
+        MINE_FAILED.store(false, Relaxed);
+    }
+}
+
+pub fn mining() -> bool {
+    MINING.load(Relaxed)
+}
+
+pub fn attack(shared: &SharedMutex, hit: Option<&BlockHitResult>) -> bool {
+    if !MINING.load(Relaxed)
+        || !GOING.load(Relaxed)
+        || IDLE.load(Relaxed)
+        || MINE_FAILED.load(Relaxed)
+    {
+        return false;
+    }
+    let ready = {
+        let m = mine_at();
+        m.tool_ready && m.at.is_some() && hit.is_some_and(|h| Some(h.block_pos) == m.at)
+    };
+    ready && gate(shared, false).is_some()
+}
 
 fn run() -> std::sync::MutexGuard<'static, Run> {
     RUN.lock().unwrap_or_else(PoisonError::into_inner)
@@ -274,6 +479,7 @@ pub fn drives(bot: &Client, hand_keys: u8) -> bool {
     }
     if hand_keys & TAKEOVER != 0 {
         bot.force_stop_pathfinding();
+        clear_mine(true);
         GOING.store(false, Relaxed);
         JUST_STOPPED.store(true, Relaxed);
         return false;
@@ -281,62 +487,234 @@ pub fn drives(bot: &Client, hand_keys: u8) -> bool {
     !IDLE.load(Relaxed)
 }
 
-pub fn steer(bot: &Client) -> Option<(Look, u8)> {
+pub fn steer(bot: &Client, shared: &SharedMutex, camera: Look, sent: Look) -> u8 {
     let intent = bot
         .component::<ExecutorIntent>()
         .ok()
         .map(|i| *i)
         .unwrap_or_default();
-    let now = bot.component::<LookDirection>().ok().map(|l| Look {
-        yaw: l.y_rot(),
-        pitch: l.x_rot(),
-    })?;
-    let want = match (intent.look_target, bot.eye_position()) {
-        (Some(t), Ok(eye)) => {
-            let w = look_at([eye.x, eye.y, eye.z], [t.x, t.y, t.z]);
-            let (dx, dz) = (t.x - eye.x, t.z - eye.z);
-            Some(if dx * dx + dz * dz < NEAR_POINT * NEAR_POINT {
-                Look { yaw: now.yaw, ..w }
+    let eye = bot.eye_position().ok().map(|e| [e.x, e.y, e.z]);
+    let feet = bot.component::<Position>().ok().map(|p| **p);
+    let (velocity, in_water) = bot
+        .component::<Physics>()
+        .ok()
+        .map_or((Vec3::ZERO, false), |p| (p.velocity, p.is_in_water()));
+
+    let (point, exact) = match intent.mine {
+        Some(block) => (Some(dig_point(bot, block, eye)), true),
+        None => {
+            clear_mine(false);
+            note_gone(bot);
+            let ahead =
+                (!intent.jump && !intent.sneak && !(intent.sprint && PARKOUR.load(Relaxed)))
+                    .then(|| eye.and_then(|eye| look_ahead(bot, eye[1])))
+                    .flatten();
+            (ahead.or(intent.look_target), false)
+        }
+    };
+    let want = match (point, eye) {
+        (Some(t), Some(eye)) => {
+            let w = look_at(eye, [t.x, t.y, t.z]);
+            let (dx, dz) = (t.x - eye[0], t.z - eye[2]);
+            let near = dx * dx + dz * dz < NEAR_POINT * NEAR_POINT;
+            let w = if near {
+                Look {
+                    yaw: camera.yaw,
+                    ..w
+                }
             } else {
                 w
-            })
+            };
+            let aim = if exact && !near {
+                [t.x, t.y, t.z]
+            } else {
+                let v = view_vector(w);
+                std::array::from_fn(|i| eye[i] + v[i] * AIM_DISTANCE)
+            };
+            Some((w, aim))
         }
         _ => None,
     };
-    let next = want.map_or(now, |w| Look {
-        yaw: now.yaw + turn::step(wrap_degrees(w.yaw - now.yaw), TURN_RATE, TICK),
-        pitch: (now.pitch + turn::step(w.pitch - now.pitch, TURN_RATE, TICK)).clamp(-90.0, 90.0),
-    });
+    publish_look(shared, want.map(|(_, aim)| aim));
 
-    let facing = want.is_none_or(|w| wrap_degrees(w.yaw - next.yaw).abs() <= WALK_ERR);
+    let facing = match (intent.look_target, eye) {
+        (Some(t), Some(eye)) => {
+            let (dx, dz) = (t.x - eye[0], t.z - eye[2]);
+            dx * dx + dz * dz < NEAR_POINT * NEAR_POINT
+                || wrap_degrees(look_at(eye, [t.x, t.y, t.z]).yaw - camera.yaw).abs() <= WALK_ERR
+        }
+        _ => true,
+    };
+    let coast = match (intent.look_target, feet) {
+        (Some(t), Some(feet)) if !intent.jump => {
+            coasts_in(feet, t, velocity, friction_below(bot, feet))
+        }
+        _ => false,
+    };
+
     let mut keys = 0;
-    if facing {
-        if let Some((dx, dz)) = intent.world_dir {
-            keys |= keys_toward(dx, dz, next.yaw).unwrap_or(0);
-        }
-        if intent.sprint {
-            keys |= MOVE_SPRINT;
-        }
+    if intent.mine.is_none()
+        && !coast
+        && let Some((dx, dz)) = intent.world_dir
+    {
+        keys |= keys_toward(dx, dz, sent.yaw).unwrap_or(0);
     }
-    if intent.jump && (facing || bot.component::<Physics>().is_ok_and(|p| p.is_in_water())) {
+    if intent.sprint && facing && keys & WALK_KEYS != 0 {
+        keys |= MOVE_SPRINT;
+    }
+    if intent.jump && (!intent.sprint || facing || in_water) {
         keys |= MOVE_JUMP;
     }
     if intent.sneak {
         keys |= MOVE_SNEAK;
     }
-    Some((next, keys))
+
+    keys
 }
 
-pub fn goto_quiet(bot: &Client, goal: BlockPos, parkour: bool) {
+fn coasts_in(feet: Vec3, t: Vec3, velocity: Vec3, friction: f64) -> bool {
+    let (ox, oz) = (feet.x - t.x, feet.z - t.z);
+    if ox * ox + oz * oz >= NEAR_POINT * NEAR_POINT {
+        return false;
+    }
+    let scale = 0.4 / (1.0 - friction).max(1e-3);
+    let (px, pz) = (ox + velocity.x * scale, oz + velocity.z * scale);
+    px * px + pz * pz < COAST_WITHIN * COAST_WITHIN
+}
+
+fn friction_below(bot: &Client, feet: Vec3) -> f64 {
+    let below = azalea::physics::get_block_pos_below_that_affects_movement(Position::new(feet));
+    let state = state_at(bot, below).unwrap_or_default();
+    Box::<dyn BlockTrait>::from(state).behavior().friction as f64
+}
+
+fn look_ahead(bot: &Client, eye_y: f64) -> Option<Vec3> {
+    let path = bot.component::<ExecutingPath>().ok()?;
+    let first = path.path.front()?.movement.target;
+    let mut prev = path.last_reached_node;
+    let mut furthest = first;
+    let mut level = true;
+    for edge in path.path.iter().take(LOOKAHEAD_NODES) {
+        let t = edge.movement.target;
+        if (t.x - prev.x).abs().max((t.z - prev.z).abs()) >= 2 {
+            return None;
+        }
+        prev = t;
+        level &= t.y == first.y;
+        if level {
+            furthest = t;
+        }
+    }
+    Some(Vec3::new(
+        furthest.x as f64 + 0.5,
+        eye_y,
+        furthest.z as f64 + 0.5,
+    ))
+}
+
+fn dig_point(bot: &Client, block: BlockPos, eye: Option<[f64; 3]>) -> Vec3 {
+    let state = state_at(bot, block);
+    let progressing =
+        bot.is_mining() && bot.component::<MineBlockPos>().ok().and_then(|p| p.0) == Some(block);
+    let best = state.and_then(|st| best_tool(bot, st));
+
+    let (aim, tool, failed) = {
+        let mut m = mine_at();
+        if m.at != Some(block) {
+            m.at = Some(block);
+            m.aim = None;
+            m.tool = best;
+            m.tool_ready = false;
+            Track::ask(&mut m.track, block);
+        }
+        MINING.store(true, Relaxed);
+        if let (Some(eye), Some(state), Ok(world)) = (eye, state, bot.world()) {
+            let world = world.read();
+            let keep = m.aim.is_some_and(|p| sees(&world.chunks, eye, block, p));
+            if !keep {
+                m.aim = aim_at(&world.chunks, eye, block, state);
+            }
+        }
+        let failed = m.track.as_mut().is_some_and(|t| t.step(progressing));
+        (m.aim, m.tool, failed)
+    };
+    if failed {
+        MINE_FAILED.store(true, Relaxed);
+        BUSY.store(true, Relaxed);
+    }
+
+    let ready = select_tool(bot, tool);
+    mine_at().tool_ready = ready;
+
+    match aim {
+        Some(p) => Vec3::new(p[0], p[1], p[2]),
+        None => Vec3::new(
+            block.x as f64 + 0.5,
+            block.y as f64 + 0.5,
+            block.z as f64 + 0.5,
+        ),
+    }
+}
+
+fn note_gone(bot: &Client) {
+    let block = match &mine_at().track {
+        Some(t) if !t.gone => t.block,
+        _ => return,
+    };
+    if !present(bot, block) {
+        let mut m = mine_at();
+        if let Some(t) = m.track.as_mut().filter(|t| t.block == block) {
+            t.gone = true;
+        }
+    }
+}
+
+static LOOK_OUT: AtomicBool = AtomicBool::new(false);
+
+pub fn publish_look(shared: &SharedMutex, aim: Option<[f64; 3]>) {
+    if aim.is_none() && !LOOK_OUT.load(Relaxed) {
+        return;
+    }
+    LOOK_OUT.store(aim.is_some(), Relaxed);
+    let mut st = shared.lock().unwrap();
+    if let Some(aim) = aim
+        && super::freecam::active()
+    {
+        turn::body_step(&mut st, aim, TURN_RATE);
+    }
+    st.session.route_look = aim.map(|aim| CameraAim {
+        aim,
+        turn: TURN_RATE,
+    });
+}
+
+pub fn drives_camera() -> bool {
+    LOOK_OUT.load(Relaxed)
+}
+
+pub fn goto_quiet(bot: &Client, goal: QuietGoal, opts: QuietOpts) {
+    if matches!(&goal, QuietGoal::Near(ores) if ores.is_empty()) {
+        cancel_quiet(bot);
+        set_travel(Travel::Failed);
+        return;
+    }
+    let feet = bot.position().unwrap_or_default();
+    let shown = goal.box_at(feet);
+    let route = Route {
+        goal,
+        opts,
+        dug: false,
+    };
     let wait = JUST_STOPPED.load(Relaxed);
     if !wait {
-        bot.start_goto_with_opts(BlockPosGoal(goal), opts_for(parkour));
+        route.send(bot);
     }
-    begin(Target::Block(goal), true);
+    let parkour = route.opts.parkour;
+    begin(Target::Block(route), true, parkour);
     if wait {
-        run().deferred = Some(parkour);
+        run().deferred = true;
     }
-    draw(goal, goal, &[]);
+    draw(shown, shown, &[]);
 }
 
 pub fn user_route() -> bool {
@@ -371,6 +749,8 @@ pub fn reset() {
     IDLE.store(false, Relaxed);
     JUST_STOPPED.store(false, Relaxed);
     BUSY.store(false, Relaxed);
+    PARKOUR.store(false, Relaxed);
+    clear_mine(true);
     set_travel(Travel::Idle);
     *run() = Run::default();
     world_draw::clear(OWNER);
@@ -447,6 +827,16 @@ pub fn tick(bot: &Client, shared: &SharedMutex) {
 
     let stopped_now = JUST_STOPPED.swap(false, Relaxed);
     let live = run().target.is_some();
+    if MINE_FAILED.swap(false, Relaxed) && live && GOING.load(Relaxed) {
+        bot.force_stop_pathfinding();
+        finish(
+            shared,
+            Some(("Route cancelled: a block would not break", RED)),
+        );
+        JUST_STOPPED.store(true, Relaxed);
+        BUSY.store(true, Relaxed);
+        return;
+    }
     if live && !GOING.load(Relaxed) {
         let note = match following() {
             Some(name) => (format!("Stopped following {name}"), GREEN),
@@ -470,22 +860,22 @@ pub fn tick(bot: &Client, shared: &SharedMutex) {
 
     let deferred = {
         let mut r = run();
-        let parkour = r.deferred.take();
-        match (parkour, &r.target) {
-            (Some(parkour), Some(Target::Block(goal))) => Some((*goal, parkour)),
+        let deferred = std::mem::take(&mut r.deferred);
+        match &r.target {
+            Some(Target::Block(route)) if deferred => Some(route.clone()),
             _ => None,
         }
     };
-    if let Some((goal, parkour)) = deferred {
-        bot.start_goto_with_opts(BlockPosGoal(goal), opts_for(parkour));
+    if let Some(route) = deferred {
+        route.send(bot);
     }
 
     let target = {
         let mut r = run();
         r.age = (r.age + 1).min(START_GRACE);
         let block = match &r.target {
-            Some(Target::Block(goal)) => Some(Some(*goal)),
-            Some(Target::Player(_)) => Some(None),
+            Some(Target::Block(_)) => Some(true),
+            Some(Target::Player(_)) => Some(false),
             None => None,
         };
         (block, r.age)
@@ -498,9 +888,10 @@ pub fn tick(bot: &Client, shared: &SharedMutex) {
         finish(shared, None);
         return;
     }
-    let goal = match block {
-        Some(goal) => tick_goto(bot, shared, feet, goal, age),
-        None => tick_follow(bot, shared, feet),
+    let goal = if block {
+        tick_goto(bot, shared, feet, age)
+    } else {
+        tick_follow(bot, shared, feet)
     };
     if let Some(goal) = goal {
         draw_route(bot, goal);
@@ -535,8 +926,16 @@ fn start(bot: &Client, shared: &SharedMutex, req: Request, feet: Vec3) -> bool {
                 at[1].resolve(here[1]),
                 at[2].resolve(here[2]),
             );
-            bot.start_goto_with_opts(BlockPosGoal(goal), opts());
-            begin(Target::Block(goal), false);
+            let route = Route {
+                goal: QuietGoal::Block(goal),
+                opts: QuietOpts {
+                    parkour: true,
+                    mining: false,
+                },
+                dug: false,
+            };
+            route.send(bot);
+            begin(Target::Block(route), false, true);
             draw(goal, goal, &[]);
             stopped(shared);
             say(
@@ -579,6 +978,7 @@ fn start(bot: &Client, shared: &SharedMutex, req: Request, feet: Vec3) -> bool {
                     begin(
                         Target::Player(Follow::new(uuid, name.clone(), feet, replacing)),
                         false,
+                        true,
                     );
                     let text = if was.is_some() {
                         format!("Following {name} now")
@@ -614,7 +1014,9 @@ fn keep_or_finish(shared: &SharedMutex) -> bool {
     false
 }
 
-fn begin(target: Target, quiet: bool) {
+fn begin(target: Target, quiet: bool, parkour: bool) {
+    clear_mine(true);
+    PARKOUR.store(parkour, Relaxed);
     {
         let mut r = run();
         if r.quiet && r.target.is_some() && travel_status() == Travel::Going {
@@ -634,17 +1036,39 @@ fn begin(target: Target, quiet: bool) {
     BUSY.store(true, Relaxed);
 }
 
-fn tick_goto(
-    bot: &Client,
-    shared: &SharedMutex,
-    feet: Vec3,
-    goal: BlockPos,
-    age: u32,
-) -> Option<BlockPos> {
+fn tick_goto(bot: &Client, shared: &SharedMutex, feet: Vec3, age: u32) -> Option<BlockPos> {
+    let feet_block = player_pos_to_block_pos(feet);
+    let (there, goal, quiet, dig) = {
+        let r = run();
+        let Some(Target::Block(route)) = &r.target else {
+            return None;
+        };
+        (
+            route.goal.reached(feet_block),
+            route.goal.box_at(feet),
+            r.quiet,
+            route.opts.mining && !route.dug,
+        )
+    };
     if age >= START_GRACE && bot.is_goto_target_reached() {
-        let quiet = run().quiet;
         if quiet {
-            let there = player_pos_to_block_pos(feet) == goal;
+            if !there && dig {
+                let route = {
+                    let mut r = run();
+                    r.age = 0;
+                    match &mut r.target {
+                        Some(Target::Block(route)) => {
+                            route.dug = true;
+                            Some(route.clone())
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(route) = route {
+                    route.send(bot);
+                }
+                return Some(goal);
+            }
             set_travel(if there {
                 Travel::Arrived
             } else {
@@ -687,6 +1111,9 @@ fn tick_follow(bot: &Client, shared: &SharedMutex, feet: Vec3) -> Option<BlockPo
     let executing = bot.is_executing_path();
     let calculating = bot.is_calculating_path();
     IDLE.store(!executing, Relaxed);
+    if !executing {
+        clear_mine(false);
+    }
 
     let (step, name) = {
         let mut r = run();
@@ -728,6 +1155,8 @@ fn end() {
     GOING.store(false, Relaxed);
     IDLE.store(false, Relaxed);
     BUSY.store(false, Relaxed);
+    PARKOUR.store(false, Relaxed);
+    clear_mine(true);
     if PENDING
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -930,5 +1359,143 @@ mod tests {
             })
             .collect();
         assert_eq!(notes, [Note::Away]);
+    }
+
+    #[test]
+    fn near_succeeds_beside_a_block_at_feet_or_head_level() {
+        let ore = BlockPos::new(10, 20, 30);
+        let goal = NearGoal(vec![ore]);
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            assert!(goal.success(BlockPos::new(10 + dx, 20, 30 + dz)));
+            assert!(goal.success(BlockPos::new(10 + dx, 19, 30 + dz)));
+            assert!(!goal.success(BlockPos::new(10 + dx, 21, 30 + dz)));
+            assert!(!goal.success(BlockPos::new(10 + dx, 18, 30 + dz)));
+        }
+        assert!(!goal.success(BlockPos::new(11, 20, 31)));
+        assert!(!goal.success(BlockPos::new(10, 21, 30)));
+        assert!(!goal.success(BlockPos::new(10, 18, 30)));
+        assert!(!goal.success(ore));
+        assert!(!goal.success(BlockPos::new(12, 20, 30)));
+        assert!(!NearGoal(Vec::new()).success(ore));
+    }
+
+    #[test]
+    fn near_heuristic_is_zero_exactly_where_it_succeeds() {
+        let ores = vec![BlockPos::new(0, 64, 0), BlockPos::new(20, 40, -7)];
+        let goal = NearGoal(ores);
+        for x in -3..=23 {
+            for y in [38, 39, 40, 41, 62, 63, 64, 65] {
+                for z in -9..=3 {
+                    let n = BlockPos::new(x, y, z);
+                    let h = goal.heuristic(n);
+                    assert!(h >= 0.0, "{n:?}: {h}");
+                    if goal.success(n) {
+                        assert_eq!(h, 0.0, "{n:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn near_heuristic_takes_the_nearest_block_and_cell() {
+        let a = BlockPos::new(0, 64, 0);
+        let b = BlockPos::new(30, 64, 0);
+        let both = NearGoal(vec![a, b]);
+        let n = BlockPos::new(25, 64, 0);
+        assert_eq!(
+            both.heuristic(n),
+            BlockPosGoal(BlockPos::new(29, 64, 0)).heuristic(n)
+        );
+        assert_eq!(both.heuristic(n), NearGoal(vec![b]).heuristic(n));
+        let up = NearGoal(vec![BlockPos::new(5, 66, 0)]);
+        let n = BlockPos::new(0, 64, 0);
+        assert_eq!(
+            up.heuristic(n),
+            BlockPosGoal(BlockPos::new(4, 65, 0)).heuristic(n)
+        );
+    }
+
+    #[test]
+    fn a_near_goal_is_reached_by_its_own_test_and_boxes_the_nearest_block() {
+        let goal = QuietGoal::Near(vec![BlockPos::new(0, 64, 0), BlockPos::new(9, 64, 0)]);
+        assert!(goal.reached(BlockPos::new(8, 64, 0)));
+        assert!(!goal.reached(BlockPos::new(7, 64, 0)));
+        assert_eq!(
+            goal.box_at(Vec3::new(7.5, 64.0, 0.5)),
+            BlockPos::new(9, 64, 0)
+        );
+        let block = QuietGoal::Block(BlockPos::new(1, 2, 3));
+        assert!(block.reached(BlockPos::new(1, 2, 3)));
+        assert_eq!(
+            block.box_at(Vec3::new(50.0, 0.0, 0.0)),
+            BlockPos::new(1, 2, 3)
+        );
+    }
+
+    #[test]
+    fn coasting_starts_only_inside_the_near_point_with_the_stop_inside_the_tolerance() {
+        let t = Vec3::new(0.5, 64.0, 0.5);
+        let still = Vec3::ZERO;
+        assert!(coasts_in(Vec3::new(0.6, 64.0, 0.5), t, still, 0.6));
+        assert!(!coasts_in(Vec3::new(0.75, 64.0, 0.5), t, still, 0.6));
+        assert!(coasts_in(
+            Vec3::new(0.75, 64.0, 0.5),
+            t,
+            Vec3::new(-0.1, 0.0, 0.0),
+            0.6
+        ));
+        assert!(!coasts_in(
+            Vec3::new(0.6, 64.0, 0.5),
+            t,
+            Vec3::new(0.2, 0.0, 0.0),
+            0.6
+        ));
+        assert!(!coasts_in(
+            Vec3::new(1.0, 64.0, 0.5),
+            t,
+            Vec3::new(-0.5, 0.0, 0.0),
+            0.6
+        ));
+        assert!(!coasts_in(
+            Vec3::new(0.75, 64.0, 0.5),
+            t,
+            Vec3::new(-0.1, 0.0, 0.0),
+            0.98
+        ));
+    }
+
+    #[test]
+    fn a_dig_stalls_after_the_budget_and_progress_resets_it() {
+        let mut t = Track::new(BlockPos::new(0, 0, 0));
+        let budget = STALL_TICKS as u32 + MINE_TURN_TICKS;
+        for _ in 0..budget {
+            assert!(!t.step(false));
+        }
+        assert!(!t.step(true));
+        for _ in 0..budget {
+            assert!(!t.step(false));
+        }
+        assert!(t.step(false));
+    }
+
+    #[test]
+    fn a_block_asked_for_again_after_three_breaks_ends_the_route() {
+        let b = BlockPos::new(1, 2, 3);
+        let mut track = None;
+        Track::ask(&mut track, b);
+        for i in 1..=REVERT_LIMIT {
+            track.as_mut().unwrap().gone = true;
+            Track::ask(&mut track, b);
+            assert_eq!(track.unwrap().breaks, i);
+        }
+        assert!(track.as_mut().unwrap().step(true));
+        let mut track = None;
+        Track::ask(&mut track, b);
+        Track::ask(&mut track, b);
+        assert_eq!(track.unwrap().breaks, 0);
+        track.as_mut().unwrap().gone = true;
+        Track::ask(&mut track, BlockPos::new(9, 9, 9));
+        assert_eq!(track, Some(Track::new(BlockPos::new(9, 9, 9))));
     }
 }

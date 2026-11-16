@@ -92,7 +92,7 @@ export CC_aarch64_linux_android="$TOOLS/aarch64-linux-android$MIN_SDK-clang"
 export CXX_aarch64_linux_android="$TOOLS/aarch64-linux-android$MIN_SDK-clang++"
 export AR_aarch64_linux_android="$TOOLS/llvm-ar"
 export RANLIB_aarch64_linux_android="$TOOLS/llvm-ranlib"
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=-Wl,-z,max-page-size=16384"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=-Wl,-z,max-page-size=16384 -Clink-arg=-lc++abi"
 
 export CARGO_PROFILE_ANDROID_TRIM_PATHS=all
 CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
@@ -102,12 +102,12 @@ export CXXFLAGS_aarch64_linux_android="$C_PREFIX_MAP"
 
 cargo_extra=()
 [ "$RELEASE" = 1 ] && cargo_extra+=(--locked)
-echo "==> cargo -Z trim-paths rustc --lib --crate-type cdylib --profile $PROFILE --target $TARGET --features mobile_ui ${cargo_extra[*]} $*"
+echo "==> cargo -Z trim-paths rustc --lib --crate-type cdylib --profile $PROFILE --target $TARGET --features mobile_ui,small_audio ${cargo_extra[*]} $*"
 cargo -Z trim-paths rustc \
   --lib --crate-type cdylib \
   --profile "$PROFILE" \
   --target "$TARGET" \
-  --features mobile_ui \
+  --features mobile_ui,small_audio \
   ${cargo_extra[@]+"${cargo_extra[@]}"} \
   "$@"
 

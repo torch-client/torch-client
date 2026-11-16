@@ -2216,13 +2216,16 @@ fn place(ctx: &Ctx, spec: Table) -> mlua::Result<bool> {
         world_border: false,
     };
     crate::play::interaction::place_at(&bot, &hit, offhand, slot, sneak);
-    bot.write_packet(azalea_protocol::packets::game::s_swing::ServerboundSwing {
-        hand: if offhand {
-            azalea_protocol::packets::game::s_interact::InteractionHand::OffHand
-        } else {
-            azalea_protocol::packets::game::s_interact::InteractionHand::MainHand
+    crate::client::outbox::send(
+        &bot,
+        azalea_protocol::packets::game::s_swing::ServerboundSwing {
+            hand: if offhand {
+                azalea_protocol::packets::game::s_interact::InteractionHand::OffHand
+            } else {
+                azalea_protocol::packets::game::s_interact::InteractionHand::MainHand
+            },
         },
-    });
+    );
     OUT.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .act(|a| a.swing = Some(offhand));

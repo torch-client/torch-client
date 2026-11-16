@@ -26,6 +26,16 @@ pub fn set_lighting_enabled(enabled: bool) {
     LIGHTING_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
+static CUTOUT_LEAVES: AtomicBool = AtomicBool::new(true);
+
+pub fn cutout_leaves_enabled() -> bool {
+    CUTOUT_LEAVES.load(Ordering::Relaxed)
+}
+
+pub fn set_cutout_leaves(enabled: bool) {
+    CUTOUT_LEAVES.store(enabled, Ordering::Relaxed);
+}
+
 fn uv_horizontal(x0: f32, z0: f32, x1: f32, z1: f32, uv: [f32; 4]) -> [[f32; 2]; 4] {
     let [au0, av0, au1, av1] = uv;
     let u0 = lerp(x0, au0, au1);
@@ -374,6 +384,7 @@ impl MeshBuf {
     }
 
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn push_baked(
         &mut self,
         quad: &crate::blocks::BakedQuad,
@@ -383,6 +394,7 @@ impl MeshBuf {
         lit: &QuadLight,
         tint: [f32; 3],
         material: u8,
+        force_opaque: bool,
     ) {
         let shade = shade_to_linear_q(lit.face_shade);
         for i in 0..4 {
@@ -415,7 +427,7 @@ impl MeshBuf {
                 quad.normal,
             ));
         }
-        self.end_quad(!quad.opaque);
+        self.end_quad(!quad.opaque && !force_opaque);
     }
 }
 
@@ -515,6 +527,7 @@ pub fn build_section_mesh<'a>(
         grid,
         water_still,
         water_flow,
+        water_overlay,
     } = tiles;
 
     #[cfg(feature = "shader_support")]
@@ -577,8 +590,10 @@ pub fn build_section_mesh<'a>(
                 } else {
                     MATERIAL_LAVA
                 };
+                let overlay = is_water.then_some(water_overlay);
                 emit_fluid(
-                    wx, wy, wz, material, *amount, *still, *flow, grid, occ, bx, by, bz, tint, dest,
+                    wx, wy, wz, material, *amount, *still, *flow, overlay, grid, occ, bx, by, bz,
+                    tint, dest,
                 );
             }
         }
@@ -599,6 +614,7 @@ pub fn build_section_mesh<'a>(
                 8,
                 water_still,
                 water_flow,
+                Some(water_overlay),
                 grid,
                 occ,
                 bx,
@@ -677,6 +693,9 @@ fn emit_baked(
         MATERIAL_SOLID
     };
 
+    let leaves = rb.cull_group == crate::util::block_model::LEAVES_CULL_GROUP;
+    let force_opaque = leaves && !cutout_leaves_enabled();
+
     for part in &baked.parts {
         let model = match (&mut random, part.choices.len()) {
             (Some(random), 2..) => part.pick(random.next_int(part.total)),
@@ -689,9 +708,8 @@ fn emit_baked(
                 if occ.is_solid(nx, ny, nz) {
                     continue;
                 }
-                if rb.cull_group != crate::util::block_model::LEAVES_CULL_GROUP
-                    && occ.same_cull_group(nx, ny, nz, rb.cull_group)
-                {
+                let skip_same = if leaves { force_opaque } else { true };
+                if skip_same && occ.same_cull_group(nx, ny, nz, rb.cull_group) {
                     continue;
                 }
             }
@@ -718,7 +736,7 @@ fn emit_baked(
             } else {
                 crate::util::biome_color::NEUTRAL
             };
-            buf.push_baked(quad, wx, wy, wz, &lit, quad_tint, material);
+            buf.push_baked(quad, wx, wy, wz, &lit, quad_tint, material, force_opaque);
         }
     }
 }
@@ -824,6 +842,8 @@ fn corner_height(self_height: f32, h1: f32, h2: f32, diagonal: f32) -> f32 {
     w[0] / w[1]
 }
 
+const FLUID_INSET: f32 = 1.0 / 256.0;
+
 #[allow(clippy::too_many_arguments)]
 fn emit_fluid_side(
     wx: f32,
@@ -835,35 +855,36 @@ fn emit_fluid_side(
     hh0: f32,
     hh1: f32,
     uv: [f32; 4],
+    back_face: bool,
     light: [f32; 2],
     tint: [f32; 3],
     buf: &mut MeshBuf,
 ) {
-    const EPS: f32 = 0.001;
+    let (near, far) = (FLUID_INSET, 1. - FLUID_INSET);
     let corners: [[f32; 3]; 4] = match fi {
         2 => [
-            [1. - EPS, bottom, 0.],
-            [1. - EPS, bottom, 1.],
-            [1. - EPS, hh1, 1.],
-            [1. - EPS, hh0, 0.],
+            [far, bottom, 0.],
+            [far, bottom, 1.],
+            [far, hh1, 1.],
+            [far, hh0, 0.],
         ],
         3 => [
-            [EPS, bottom, 1.],
-            [EPS, bottom, 0.],
-            [EPS, hh1, 0.],
-            [EPS, hh0, 1.],
+            [near, bottom, 1.],
+            [near, bottom, 0.],
+            [near, hh1, 0.],
+            [near, hh0, 1.],
         ],
         4 => [
-            [1., bottom, 1. - EPS],
-            [0., bottom, 1. - EPS],
-            [0., hh1, 1. - EPS],
-            [1., hh0, 1. - EPS],
+            [1., bottom, far],
+            [0., bottom, far],
+            [0., hh1, far],
+            [1., hh0, far],
         ],
         _ => [
-            [0., bottom, EPS],
-            [1., bottom, EPS],
-            [1., hh1, EPS],
-            [0., hh0, EPS],
+            [0., bottom, near],
+            [1., bottom, near],
+            [1., hh1, near],
+            [0., hh0, near],
         ],
     };
     let corners = corners.map(|[x, y, z]| [x + wx, y + wy, z + wz]);
@@ -880,7 +901,9 @@ fn emit_fluid_side(
         [u_a, get_v((1.0 - hh0) * 0.5)],
     ];
     buf.push_quad(&corners, &face_uvs, light, tint, material);
-    push_back_face(buf, &corners, &face_uvs, light, tint, material);
+    if back_face {
+        push_back_face(buf, &corners, &face_uvs, light, tint, material);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -892,6 +915,7 @@ fn emit_fluid(
     amount: u8,
     still: SpriteTile,
     flow: SpriteTile,
+    overlay: Option<SpriteTile>,
     grid: AtlasGrid,
     occ: &Occupancy,
     bx: i32,
@@ -900,7 +924,6 @@ fn emit_fluid(
     tint: [f32; 3],
     buf: &mut MeshBuf,
 ) {
-    const EPS: f32 = 0.001;
     let lava = material == MATERIAL_LAVA;
 
     let above_fluid = occ.same_fluid(bx, by + 1, bz, lava);
@@ -936,7 +959,12 @@ fn emit_fluid(
             west,
             corner_height_input(occ, bx - 1, by, bz + 1, lava),
         );
-        (nw - EPS, ne - EPS, se - EPS, sw - EPS)
+        (
+            nw - FLUID_INSET,
+            ne - FLUID_INSET,
+            se - FLUID_INSET,
+            sw - FLUID_INSET,
+        )
     };
 
     let (still, flow) = (still.uv_rect(grid), flow.uv_rect(grid));
@@ -957,13 +985,13 @@ fn emit_fluid(
         (0, 0, -1),
     ];
     let render_down = !occ.same_fluid(bx, by - 1, bz, lava) && !occ.is_solid(bx, by - 1, bz);
-    let bottom = if render_down { EPS } else { 0.0 };
+    let bottom = if render_down { FLUID_INSET } else { 0.0 };
     for fi in 0..6usize {
         let (dx, dy, dz) = NBR[fi];
         let (nx, ny, nz) = (bx + dx, by + dy, bz + dz);
         match fi {
             0 => {
-                let lowest = top_nw.min(top_ne).min(top_se).min(top_sw) + EPS;
+                let lowest = top_nw.min(top_ne).min(top_se).min(top_sw) + FLUID_INSET;
                 if above_fluid || (occ.is_solid(nx, ny, nz) && lowest >= 1.0) {
                     continue;
                 }
@@ -990,7 +1018,21 @@ fn emit_fluid(
                     continue;
                 }
                 emit_face(
-                    wx, wy, wz, 0., EPS, 0., 1., 1., 1., 1, tiles[1], light, tint, material, buf,
+                    wx,
+                    wy,
+                    wz,
+                    0.,
+                    FLUID_INSET,
+                    0.,
+                    1.,
+                    1.,
+                    1.,
+                    1,
+                    tiles[1],
+                    light,
+                    tint,
+                    material,
+                    buf,
                 );
             }
             _ => {
@@ -1003,9 +1045,27 @@ fn emit_fluid(
                     4 => (top_se, top_sw),
                     _ => (top_nw, top_ne),
                 };
-                emit_fluid_side(
-                    wx, wy, wz, material, fi, bottom, hh0, hh1, tiles[fi], light, tint, buf,
-                );
+                match overlay.filter(|_| occ.takes_fluid_overlay(nx, ny, nz)) {
+                    Some(overlay) => emit_fluid_side(
+                        wx,
+                        wy,
+                        wz,
+                        material,
+                        fi,
+                        bottom,
+                        hh0,
+                        hh1,
+                        overlay.uv_rect(grid),
+                        false,
+                        light,
+                        tint,
+                        buf,
+                    ),
+                    None => emit_fluid_side(
+                        wx, wy, wz, material, fi, bottom, hh0, hh1, tiles[fi], true, light, tint,
+                        buf,
+                    ),
+                }
             }
         }
     }
@@ -1046,6 +1106,7 @@ mod tests {
         grid: AtlasGrid { cols: 16, rows: 1 },
         water_still: SpriteTile::PLACEHOLDER,
         water_flow: SpriteTile::PLACEHOLDER,
+        water_overlay: SpriteTile::PLACEHOLDER,
     };
 
     #[test]
@@ -1084,6 +1145,31 @@ mod tests {
                 "a vertex is lit in a cell with no light"
             );
         }
+    }
+
+    #[test]
+    fn a_water_side_facing_ice_has_no_back_face() {
+        crate::blocks::tests::atlas_once();
+        let mut occ = Occupancy::new(0, 0, -2, 20);
+        let water = crate::util::block_model::block_visual(BlockState::from(BlockKind::Water));
+        let ice = crate::util::block_model::block_visual(BlockState::from(BlockKind::Ice));
+        assert!(!ice.is_solid, "ice would cull the water side outright");
+        occ.set_fluid(0, 0, 0, 8, false);
+        occ.set_cull_group(1, 0, 0, ice.cull_group);
+        assert!(occ.takes_fluid_overlay(1, 0, 0));
+        assert!(!occ.takes_fluid_overlay(-1, 0, 0));
+        let (_, buf) = build_section_mesh([(0, 0, 0, &water)], 0, 0, 0, ONE_ROW, &occ);
+        assert_eq!(buf.verts.len() % 4, 0);
+        let on_plane = |x: i16| {
+            buf.verts
+                .chunks_exact(4)
+                .filter(|q| q.iter().all(|v| v.pos[0] == x))
+                .count()
+        };
+        assert_eq!(on_plane(255), 1, "the side toward the ice");
+        assert_eq!(on_plane(256), 0, "nothing on the ice's own face");
+        assert_eq!(on_plane(1), 2, "the side toward the air and its back face");
+        assert_eq!(on_plane(0), 0, "nothing on the cell boundary");
     }
 
     fn quads_by_group(first: usize, quads: u32, faces: &[u16; FACE_GROUPS]) -> Vec<(usize, usize)> {

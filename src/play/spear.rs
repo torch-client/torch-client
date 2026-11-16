@@ -34,12 +34,15 @@ pub(crate) fn held_weapon(bot: &Client) -> HeldWeapon {
 }
 
 pub(crate) fn stab(bot: &Client, shared: &SharedMutex, sound: Option<SoundEvent>) {
-    bot.write_packet(ServerboundPlayerAction {
-        action: Action::Stab,
-        pos: BlockPos::new(0, 0, 0),
-        direction: Direction::Down,
-        seq: 0,
-    });
+    crate::client::outbox::send(
+        bot,
+        ServerboundPlayerAction {
+            action: Action::Stab,
+            pos: BlockPos::new(0, 0, 0),
+            direction: Direction::Down,
+            seq: 0,
+        },
+    );
     crate::client::tick::request_attack_strength_only_reset();
     play_at_player(shared, sound);
     crate::play::interaction::swing_hand(bot, shared, crate::session::InteractionHand::Main);

@@ -39,7 +39,7 @@ pub fn get_mine_progress(
     (base_destroy_speed / destroy_time) / (divisor as f32)
 }
 
-fn has_correct_tool_for_drops(block: &dyn BlockTrait, item: &ItemStack) -> bool {
+pub fn has_correct_tool_for_drops(block: &dyn BlockTrait, item: &ItemStack) -> bool {
     if !block.behavior().requires_correct_tool_for_drops {
         return true;
     }

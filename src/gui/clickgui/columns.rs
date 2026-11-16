@@ -214,6 +214,10 @@ impl ClickGuiState {
                     store().toggle(id);
                     self.selected = self.match_top + i;
                 }
+                if ui.input.right_click {
+                    self.toggle_settings(id);
+                    self.selected = self.match_top + i;
+                }
             }
             ry += look.row_h;
         }

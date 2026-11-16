@@ -65,13 +65,21 @@ impl AzBuf for ClientboundAddEntity {
 impl ClientboundAddEntity {
     #[cfg(feature = "bevy_ecs")]
     pub fn as_entity_bundle(&self, world_name: WorldName) -> azalea_entity::EntityBundle {
-        azalea_entity::EntityBundle::new(self.uuid, self.position, self.entity_type, world_name)
+        let mut bundle =
+            azalea_entity::EntityBundle::new(self.uuid, self.position, self.entity_type, world_name);
+        bundle.direction =
+            azalea_entity::LookDirection::new(unpack_degrees(self.y_rot), unpack_degrees(self.x_rot));
+        bundle
     }
 
     #[cfg(feature = "bevy_ecs")]
     pub fn apply_metadata(&self, entity: &mut bevy_ecs::system::EntityCommands) {
         azalea_entity::metadata::apply_default_metadata(entity, self.entity_type);
     }
+}
+
+pub fn unpack_degrees(packed: i8) -> f32 {
+    packed as f32 * 360.0 / 256.0
 }
 
 #[cfg(test)]

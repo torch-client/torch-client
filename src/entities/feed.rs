@@ -383,6 +383,9 @@ struct KindAnim {
     bubble_multiplier: f32,
     bubble_angle: f32,
     bubble_angle_old: f32,
+    vehicle_hurt: i32,
+    vehicle_damage: f32,
+    out_of_control_ticks: f32,
     eat_ticks: i32,
     shaking: bool,
     shake_anim: f32,
@@ -493,6 +496,9 @@ impl KindAnim {
         bubble_multiplier: 0.0,
         bubble_angle: 0.0,
         bubble_angle_old: 0.0,
+        vehicle_hurt: 0,
+        vehicle_damage: 0.0,
+        out_of_control_ticks: 0.0,
         eat_ticks: 0,
         shaking: false,
         shake_anim: 0.0,
@@ -1055,7 +1061,11 @@ impl EntityAnim {
                 input.pos,
                 input.y_rot,
                 input.x_rot,
-                input.head_rot.unwrap_or(input.y_rot),
+                if input.is_living {
+                    input.head_rot.unwrap_or(input.y_rot)
+                } else {
+                    input.y_rot
+                },
                 interpolation_for(self.kind, input.is_living),
             );
             self.set_pos(input.pos, input.is_passenger);
@@ -1168,6 +1178,27 @@ impl EntityAnim {
                 } else {
                     k.paddle[i] = 0.0;
                 }
+            }
+
+            if crate::play::riding::Hull::of(self.kind).is_some() {
+                k.out_of_control_ticks = if input.shared.under_water {
+                    k.out_of_control_ticks + 1.0
+                } else {
+                    0.0
+                };
+            }
+
+            if input.shared.hurt_time != self.sampled.shared.hurt_time {
+                k.vehicle_hurt = input.shared.hurt_time as i32;
+            }
+            if input.shared.damage != self.sampled.shared.damage {
+                k.vehicle_damage = input.shared.damage;
+            }
+            if k.vehicle_hurt > 0 {
+                k.vehicle_hurt -= 1;
+            }
+            if k.vehicle_damage > 0.0 {
+                k.vehicle_damage -= 1.0;
             }
 
             let step = if input.shared.bubble_time > 0.0 {
@@ -1853,6 +1884,41 @@ impl EntityAnim {
         self.core.seat(pos);
     }
 
+    pub fn out_of_control_ticks(&self) -> f32 {
+        self.k().out_of_control_ticks
+    }
+
+    pub fn turn_in_boat(&mut self, boat_y_rot: f32, animal_offset: Option<f32>) {
+        boat_rider_turn(&mut self.core, self.is_living, boat_y_rot, animal_offset);
+    }
+}
+
+pub fn boat_rider_turn(
+    core: &mut LivingCore,
+    living: bool,
+    boat_y_rot: f32,
+    animal_offset: Option<f32>,
+) {
+    let delta = wrap_degrees(core.y_rot - boat_y_rot);
+    let step = delta.clamp(-105.0, 105.0) - delta;
+    core.y_rot_old += step;
+    core.y_rot += step;
+    if !living {
+        core.body_rot_old += step;
+        core.head_rot_old += step;
+        core.body_rot = core.y_rot;
+        core.head_rot = core.y_rot;
+        return;
+    }
+    core.body_rot = boat_y_rot;
+    core.head_rot = core.y_rot;
+    if let Some(offset) = animal_offset {
+        core.body_rot += offset;
+        core.head_rot += offset;
+    }
+}
+
+impl EntityAnim {
     pub fn shared(&self) -> &crate::entities::state::ExtrasShared {
         &self.sampled.shared
     }
@@ -1894,8 +1960,8 @@ impl EntityAnim {
         extras.ticks_since_kinetic_hit = self
             .kinetic_hit_at
             .map_or(0.0, |at| self.ticks.wrapping_sub(at) as f32 + partial);
-        extras.vehicle_hurt = extras.hurt_time - partial;
-        extras.vehicle_damage = (extras.damage - partial).max(0.0);
+        extras.vehicle_hurt = self.k().vehicle_hurt as f32 - partial;
+        extras.vehicle_damage = (self.k().vehicle_damage - partial).max(0.0);
         extras.parrot_pose = if self.sampled.shared.sitting {
             2
         } else if self.sampled.on_ground {

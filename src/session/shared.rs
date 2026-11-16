@@ -18,6 +18,7 @@ pub struct SharedState {
     pub move_keys: u8,
     pub hand_move_keys: u8,
     pub screen_open: bool,
+    pub pause_screen: bool,
     pub profiling: ChunkProfiling,
     pub quit_requested: bool,
     pub disconnect_requested: bool,

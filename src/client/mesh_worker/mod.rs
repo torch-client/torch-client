@@ -17,21 +17,16 @@ mod seam {
         false
     }
 
-    pub(crate) fn offer_chunk_packet(_p: &ChunkPacket) -> bool {
-        false
-    }
-
     pub(crate) fn offer_light_update(_cx: i32, _cz: i32, _data: &LightPacket) -> bool {
         false
     }
-
-    pub(crate) fn drop_chunk_packet(_cx: i32, _cz: i32) {}
 
     pub(crate) fn forward_chunk(
         _world: &WorldRef,
         _cx: i32,
         _cz: i32,
         _mesh: &[ColumnPos],
+        _packet: Option<&ChunkPacket>,
     ) -> bool {
         false
     }
@@ -54,13 +49,11 @@ mod seam {
 
     pub(crate) fn note_backlog(_sections: usize) {}
 
-    pub(crate) fn sweep_parked(_world: &WorldRef) {}
-
     pub(crate) fn take_died() -> bool {
         false
     }
 
-    pub(crate) fn sync_options(_lighting: bool, _smooth: bool) {}
+    pub(crate) fn sync_options() {}
 
     #[cfg(resource_packs)]
     pub(crate) fn forward_packs() -> bool {
@@ -85,8 +78,6 @@ mod seam {
     pub(crate) use host::{active, spawn, take_died};
 
     thread_local! {
-        static PARKED: RefCell<HashMap<(i32, i32), (Vec<u8>, u32)>> = RefCell::new(HashMap::new());
-        static PARK_TICK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         static SENT_LEVEL: RefCell<Option<(u8, i32, u32)>> = const { RefCell::new(None) };
         static SENT_BIOMES: RefCell<Option<std::sync::Arc<Vec<u8>>>> =
             const { RefCell::new(None) };
@@ -99,26 +90,6 @@ mod seam {
         #[cfg(resource_packs)]
         static SENT_PACKS: RefCell<Vec<std::sync::Arc<crate::platform::assets::archive::OwnedLayer>>> =
             const { RefCell::new(Vec::new()) };
-    }
-
-    pub(crate) fn offer_chunk_packet(p: &ChunkPacket) -> bool {
-        if !active() {
-            return false;
-        }
-        let mut bytes = Vec::new();
-        let written = super::tally::time("re-encode", || p.azalea_write(&mut bytes), |_| 0);
-        if written.is_err() {
-            crate::log_error!(
-                "mesh",
-                "the chunk packet for {},{} would not encode",
-                p.x,
-                p.z
-            );
-            return false;
-        }
-        let tick = PARK_TICK.with(std::cell::Cell::get);
-        PARKED.with(|parked| parked.borrow_mut().insert((p.x, p.z), (bytes, tick)));
-        true
     }
 
     pub(crate) fn offer_light_update(cx: i32, cz: i32, data: &LightPacket) -> bool {
@@ -137,20 +108,27 @@ mod seam {
         true
     }
 
-    pub(crate) fn drop_chunk_packet(cx: i32, cz: i32) {
-        PARKED.with(|parked| parked.borrow_mut().remove(&(cx, cz)));
-    }
-
-    pub(crate) fn forward_chunk(world: &WorldRef, cx: i32, cz: i32, mesh: &[ColumnPos]) -> bool {
+    pub(crate) fn forward_chunk(
+        world: &WorldRef,
+        cx: i32,
+        cz: i32,
+        mesh: &[ColumnPos],
+        packet: Option<&ChunkPacket>,
+    ) -> bool {
         if !active() {
             return false;
         }
         send_level(world);
         send_biomes(world);
-        let packet = PARKED
-            .with(|parked| parked.borrow_mut().remove(&(cx, cz)))
-            .map(|(bytes, _)| bytes)
-            .unwrap_or_default();
+        let packet = packet.map_or_else(Vec::new, |p| {
+            let mut bytes = Vec::new();
+            let written = super::tally::time("re-encode", || p.azalea_write(&mut bytes), |_| 0);
+            if written.is_err() {
+                crate::log_error!("mesh", "the chunk packet for {cx},{cz} would not encode");
+                bytes.clear();
+            }
+            bytes
+        });
         if !packet.is_empty() {
             forget_retries(cx, cz);
         }
@@ -255,7 +233,6 @@ mod seam {
             return false;
         }
         forget_retries(cx, cz);
-        drop_chunk_packet(cx, cz);
         send(&ToWorker::Unload { cx, cz });
         true
     }
@@ -279,7 +256,6 @@ mod seam {
             list.clear();
             at.clear();
         });
-        PARKED.with(|parked| parked.borrow_mut().clear());
         SENT_LEVEL.with(|sent| *sent.borrow_mut() = None);
         SENT_BIOMES.with(|sent| *sent.borrow_mut() = None);
         send(&ToWorker::ResetLevel);
@@ -307,40 +283,15 @@ mod seam {
         });
     }
 
-    pub(crate) fn sweep_parked(world: &WorldRef) {
-        const PARK_TTL: u32 = 40;
-        let now = PARK_TICK.with(|t| {
-            let now = t.get().wrapping_add(1);
-            t.set(now);
-            now
-        });
-        PARKED.with(|parked| {
-            let mut parked = parked.borrow_mut();
-            if parked.is_empty() {
-                return;
-            }
-            let world = world.read();
-            parked.retain(|&(x, z), (_, at)| {
-                if now.wrapping_sub(*at) < PARK_TTL {
-                    return true;
-                }
-                world
-                    .chunks
-                    .get(&azalea_core::position::ChunkPos::new(x, z))
-                    .is_some()
-            });
-        });
-    }
-
     pub(crate) fn note_received(n: usize) {
         RECEIVED.with(|r| r.set(r.get().wrapping_add(n as u32)));
     }
 
-    pub(crate) fn sync_options(lighting: bool, smooth: bool) {
+    pub(crate) fn sync_options() {
         if !active() {
             return;
         }
-        send(&ToWorker::Options { lighting, smooth });
+        send(&ToWorker::current_options());
     }
 
     #[cfg(resource_packs)]

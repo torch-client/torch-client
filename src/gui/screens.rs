@@ -423,6 +423,15 @@ pub fn draw(
         state.slots.touch_lift = lift;
         state.slots.tooltip_anchor = None;
     }
+    #[cfg(feature = "ui_utils")]
+    let ui_utils_input = crate::modules::ui_utils::mask(state, ctx.input);
+    #[cfg(feature = "ui_utils")]
+    let raw_ctx = ctx.with_input(ctx.input);
+    #[cfg(feature = "ui_utils")]
+    let ctx = match &ui_utils_input {
+        Some(masked) => raw_ctx.with_input(masked),
+        None => raw_ctx.with_input(raw_ctx.input),
+    };
     let hovered: Option<SlotStack> = match state.screen {
         Screen::None | Screen::Chat => None,
         Screen::Inventory => draw_inventory(p, state, &ctx, &snap, &mut actions),
@@ -465,6 +474,12 @@ pub fn draw(
                 Screen::ManageStorage => options::draw_manage_storage(p, state, &ctx),
                 _ => options::draw(p, state, &ctx),
             }
+            None
+        }
+        #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+        Screen::ExportAssets => {
+            backdrop(p, state, &ctx);
+            crate::gui::assetexport::draw(p, state, &ctx);
             None
         }
         #[cfg(feature = "mobile_ui")]
@@ -643,6 +658,12 @@ pub fn draw(
             crate::gui::configphase::draw_reconfig(p, state, &ctx);
             None
         }
+        Screen::LevelLoading => {
+            if let Some(next) = crate::gui::level_loading::draw(p, state, &ctx) {
+                state.nav = Some(next);
+            }
+            None
+        }
         Screen::GameModeSwitcher => {
             let select_key = state
                 .keybinds
@@ -737,6 +758,8 @@ pub fn draw(
             None
         }
     };
+    #[cfg(feature = "ui_utils")]
+    crate::modules::ui_utils::draw(p, state, &raw_ctx, shared);
     #[cfg(feature = "mobile_ui")]
     if lift > 0.0 {
         p.set_lift(0.0);

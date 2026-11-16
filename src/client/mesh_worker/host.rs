@@ -106,6 +106,7 @@ pub fn spawn(assets: &[u8]) -> bool {
         });
     });
     ACTIVE.store(true, Ordering::Relaxed);
+    send(&ToWorker::current_options());
     log_info!("mesh", "meshing and lighting moved to a worker");
     true
 }

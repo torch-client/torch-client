@@ -224,6 +224,35 @@ pub struct TerrainPipelineKey {
     pub specular: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct KeyInputs {
+    pub direct: bool,
+    pub fancy: bool,
+    pub specular: bool,
+}
+
+impl KeyInputs {
+    pub(crate) fn current(tier: &TerrainTier) -> KeyInputs {
+        let fancy = crate::renderer::terrain::builtin_world_shading();
+        KeyInputs {
+            direct: !tier.indirect,
+            fancy,
+            specular: fancy && crate::renderer::terrain::sun_specular_enabled(),
+        }
+    }
+
+    pub(crate) fn main(self, view: MeshPipelineKey, stream: u32) -> TerrainPipelineKey {
+        TerrainPipelineKey {
+            view,
+            stream,
+            direct: self.direct,
+            shadow: false,
+            fancy: self.fancy,
+            specular: self.specular,
+        }
+    }
+}
+
 #[cfg(feature = "shader_support")]
 pub const SLOT_TABLE_BINDING: u32 = 5;
 
@@ -740,9 +769,7 @@ pub fn queue_terrain(
     if pools.pools.is_empty() {
         return;
     }
-    let direct = !tier.indirect;
-    let fancy = crate::renderer::terrain::builtin_world_shading();
-    let specular = fancy && crate::renderer::terrain::sun_specular_enabled();
+    let inputs = KeyInputs::current(&tier);
     let transparent_draw = transparent_draws.read().id::<DrawTerrainMain>();
     #[cfg(feature = "builtin_shaders")]
     let shadow_draw = shadow_draws.read().id::<DrawTerrainShadow>();
@@ -764,25 +791,18 @@ pub fn queue_terrain(
         };
 
         for pool in 0..pools.pools.len() as u32 {
-            let mut specialize = |stream: u32, shadow: bool, key: MeshPipelineKey| {
+            let mut specialize = |stream: u32| {
                 pipelines.specialize(
                     &pipeline_cache,
                     &terrain_pipeline,
-                    TerrainPipelineKey {
-                        view: key,
-                        stream,
-                        direct,
-                        shadow,
-                        fancy,
-                        specular,
-                    },
+                    inputs.main(view_key, stream),
                 )
             };
 
             if let Some(phase) = opaque_phases.get_mut(&view.retained_view_entity) {
                 phase.add(
                     Opaque3dBatchSetKey {
-                        pipeline: specialize(STREAM_SOLID, false, view_key),
+                        pipeline: specialize(STREAM_SOLID),
                         draw_function: opaque_draw,
                         material_bind_group_index: None,
                         slabs: MeshSlabs::default(),
@@ -800,7 +820,7 @@ pub fn queue_terrain(
             if let Some(phase) = alpha_phases.get_mut(&view.retained_view_entity) {
                 phase.add(
                     OpaqueNoLightmap3dBatchSetKey {
-                        pipeline: specialize(STREAM_CUTOUT, false, view_key),
+                        pipeline: specialize(STREAM_CUTOUT),
                         draw_function: alpha_draw,
                         material_bind_group_index: None,
                         slabs: MeshSlabs::default(),
@@ -821,7 +841,7 @@ pub fn queue_terrain(
                         depth_bias: f32::MIN,
                     },
                     distance: f32::MIN,
-                    pipeline: specialize(STREAM_WATER, false, view_key),
+                    pipeline: specialize(STREAM_WATER),
                     entity: item_entity(pool, STREAM_WATER),
                     draw_function: transparent_draw,
                     batch_range: 0..1,
@@ -832,7 +852,7 @@ pub fn queue_terrain(
         }
 
         #[cfg(feature = "builtin_shaders")]
-        if fancy {
+        if inputs.fancy {
             let Some(lights) = lights else { continue };
             for &light_entity in &lights.lights {
                 let Ok((light_view, kind)) = light_views.get(light_entity) else {
@@ -855,9 +875,9 @@ pub fn queue_terrain(
                             TerrainPipelineKey {
                                 view: light_key,
                                 stream,
-                                direct,
+                                direct: inputs.direct,
                                 shadow: true,
-                                fancy,
+                                fancy: inputs.fancy,
                                 specular: false,
                             },
                         );

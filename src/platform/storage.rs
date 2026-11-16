@@ -18,6 +18,9 @@ slots! {
     OPTIONS = "options.json";
     KEYBINDS = "keybinds.json";
     MODULES = "modules.json";
+    FRIENDS = "friends.json";
+    #[cfg(feature = "click_gui")]
+    CLICKGUI = "clickgui.json";
     #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
     PROXY = "proxy.txt";
     PROFILE = "profile.json";
@@ -57,6 +60,8 @@ slots! {
     LANGUAGE_LIST = "language_list.txt";
     #[cfg(feature = "seed_cracker")]
     SEED_CRACKER_CACHE = ".seedcracker_cache";
+    #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+    BEDROCK_TOUCH = ".bedrock_touch";
 }
 
 impl Slot {

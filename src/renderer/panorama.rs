@@ -12,7 +12,7 @@ use crate::renderer::systems::WorldCamera;
 
 const PANORAMA_LAYER: usize = 3;
 
-const PANORAMA_CAMERA_ORDER: isize = -1;
+pub(crate) const PANORAMA_CAMERA_ORDER: isize = -1;
 
 const FOV_DEGREES: f32 = 85.0;
 const NEAR: f32 = 0.05;
@@ -238,14 +238,25 @@ fn toggle_cameras(
         set(&mut c, show_hand && pack);
     }
     if let Ok((mut c, mut layers)) = world.single_mut() {
-        set(&mut c, !in_menu);
-        let want = if pack {
-            RenderLayers::layer(0)
-        } else {
-            RenderLayers::from_layers(&[0, HAND_LAYER])
-        };
-        if *layers != want {
-            *layers = want;
+        #[cfg(target_arch = "wasm32")]
+        let borrowed = crate::renderer::warmup::steer_world_camera(
+            in_menu,
+            !panorama.is_empty(),
+            &mut c,
+            &mut layers,
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        let borrowed = false;
+        if !borrowed {
+            set(&mut c, !in_menu);
+            let want = if pack {
+                RenderLayers::layer(0)
+            } else {
+                RenderLayers::from_layers(&[0, HAND_LAYER])
+            };
+            if *layers != want {
+                *layers = want;
+            }
         }
     }
     let shown = |visible: bool| {

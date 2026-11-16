@@ -32,27 +32,62 @@ impl SendGamePacketEvent {
     }
 }
 
-pub fn handle_outgoing_packets_observer(
-    trigger: On<SendGamePacketEvent>,
-    mut query: Query<(&mut RawConnection, Option<&InGameState>)>,
+static OUTGOING_GAME_FILTER: std::sync::OnceLock<fn(&ServerboundGamePacket) -> bool> =
+    std::sync::OnceLock::new();
+
+pub fn set_outgoing_game_filter(
+    filter: fn(&ServerboundGamePacket) -> bool,
+) -> Result<(), fn(&ServerboundGamePacket) -> bool> {
+    OUTGOING_GAME_FILTER.set(filter)
+}
+
+#[derive(Clone, Debug, EntityEvent)]
+pub struct SendGamePacketBypassEvent {
+    #[event_target]
+    pub sent_by: Entity,
+    pub packet: ServerboundGamePacket,
+}
+
+pub fn handle_outgoing_packets_bypass_observer(
+    trigger: On<SendGamePacketBypassEvent>,
+    query: Query<(&mut RawConnection, Option<&InGameState>)>,
 ) {
     let event = trigger.event();
+    write_game_packet(query, event.sent_by, &event.packet);
+}
 
-    if let Ok((mut raw_connection, in_game_state)) = query.get_mut(event.sent_by) {
+pub fn handle_outgoing_packets_observer(
+    trigger: On<SendGamePacketEvent>,
+    query: Query<(&mut RawConnection, Option<&InGameState>)>,
+) {
+    let event = trigger.event();
+    if OUTGOING_GAME_FILTER.get().is_some_and(|f| !f(&event.packet)) {
+        trace!("Filtered game packet: {:?}", event.packet);
+        return;
+    }
+    write_game_packet(query, event.sent_by, &event.packet);
+}
+
+fn write_game_packet(
+    mut query: Query<(&mut RawConnection, Option<&InGameState>)>,
+    sent_by: Entity,
+    packet: &ServerboundGamePacket,
+) {
+    if let Ok((mut raw_connection, in_game_state)) = query.get_mut(sent_by) {
         if in_game_state.is_none() {
             error!(
                 "Tried to send a game packet {:?} while not in game state",
-                event.packet
+                packet
             );
             return;
         }
 
-        trace!("Sending game packet: {:?}", event.packet);
-        if let Err(e) = raw_connection.write(event.packet.clone()) {
+        trace!("Sending game packet: {:?}", packet);
+        if let Err(e) = raw_connection.write(packet.clone()) {
             error!("Failed to send packet: {e}");
         }
     } else {
-        trace!("Not sending game packet: {:?}", event.packet);
+        trace!("Not sending game packet: {:?}", packet);
     }
 }
 

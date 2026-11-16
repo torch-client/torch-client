@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use super::blocks::LAVA_RGB;
 use super::{COUNT, ESPS, Shape};
 use crate::modules::list::{BitList, NO_ROW};
 use crate::modules::store;
@@ -30,6 +31,7 @@ pub struct Slot {
     pub lines: bool,
     pub sides: bool,
     pub range2: u32,
+    pub exposed: bool,
 }
 
 pub struct Merged {
@@ -37,6 +39,7 @@ pub struct Merged {
     pub slots: Vec<Slot>,
     pub max_range: i32,
     pub any: bool,
+    pub exposed: bool,
 }
 
 impl Merged {
@@ -47,7 +50,50 @@ impl Merged {
             .copied()
             .unwrap_or(NONE_ENTRY)
     }
+
+    pub(in crate::modules) fn of_groups(
+        groups: u16,
+        group: impl Fn(azalea::block::BlockState) -> Option<u16>,
+    ) -> Merged {
+        let mut of_state = vec![NONE_ENTRY; azalea::block::BlockState::MAX_STATE as usize + 1];
+        for id in 0..=azalea::block::BlockState::MAX_STATE {
+            let Ok(state) = azalea::block::BlockState::try_from(id) else {
+                continue;
+            };
+            if let Some(g) = group(state).filter(|g| *g < groups) {
+                of_state[id as usize] = entry(g, g);
+            }
+        }
+        let slot = Slot {
+            rgb: 0,
+            alpha: 0,
+            lines: false,
+            sides: false,
+            range2: u32::MAX,
+            exposed: false,
+        };
+        Merged {
+            of_state: of_state.into_boxed_slice(),
+            slots: vec![slot; groups as usize],
+            max_range: ALL_LOADED,
+            any: groups > 0,
+            exposed: false,
+        }
+    }
+
+    pub(in crate::modules) fn with_range(&self, range: i32) -> Merged {
+        let range2 = (range * range) as u32;
+        Merged {
+            of_state: self.of_state.clone(),
+            slots: self.slots.iter().map(|s| Slot { range2, ..*s }).collect(),
+            max_range: range,
+            any: self.any,
+            exposed: self.exposed,
+        }
+    }
 }
+
+const ALL_LOADED: i32 = 1 << 16;
 
 struct Source {
     list: &'static BitList,
@@ -55,6 +101,8 @@ struct Source {
     alpha: u8,
     lines: bool,
     sides: bool,
+    lava: bool,
+    exposed: bool,
 }
 
 fn key(sources: &[Option<Source>; COUNT]) -> u64 {
@@ -69,7 +117,11 @@ fn key(sources: &[Option<Source>; COUNT]) -> u64 {
             Some(s) => {
                 eat(s.list.generation() as u64 | 1 << 32);
                 eat(s.range as u64);
-                eat(s.alpha as u64 | (s.lines as u64) << 8 | (s.sides as u64) << 9);
+                eat(s.alpha as u64
+                    | (s.lines as u64) << 8
+                    | (s.sides as u64) << 9
+                    | (s.lava as u64) << 10
+                    | (s.exposed as u64) << 11);
             }
         }
     }
@@ -98,6 +150,8 @@ fn sources() -> [Option<Source>; COUNT] {
             alpha,
             lines,
             sides,
+            lava: e.lava.is_some_and(|t| s.flag(t)),
+            exposed: e.exposed.is_some_and(|t| s.flag(t)),
         })
     })
 }
@@ -116,6 +170,11 @@ fn fold(sources: &[Option<Source>; COUNT]) -> Merged {
         max_range = max_range.max(source.range);
         of_row[m] = vec![NO_ROW; source.list.count()];
         let index = source.list.index();
+        let lava = if source.lava {
+            source.list.find("lava").map(|r| r as u16)
+        } else {
+            None
+        };
 
         for (state_id, dst) in of_state.iter_mut().enumerate() {
             if *dst != NONE_ENTRY {
@@ -124,17 +183,23 @@ fn fold(sources: &[Option<Source>; COUNT]) -> Merged {
             let Some(&row) = index.get(state_id) else {
                 continue;
             };
-            if row == NO_ROW || !source.list.enabled(row as usize) {
+            let forced = lava == Some(row);
+            if row == NO_ROW || !(forced || source.list.enabled(row as usize)) {
                 continue;
             }
             let cached = &mut of_row[m][row as usize];
             if *cached == NO_ROW {
                 let slot = Slot {
-                    rgb: source.list.color(row as usize),
+                    rgb: if forced {
+                        LAVA_RGB
+                    } else {
+                        source.list.color(row as usize)
+                    },
                     alpha: source.alpha,
                     lines: source.lines,
                     sides: source.sides,
                     range2: (source.range * source.range) as u32,
+                    exposed: source.exposed,
                 };
                 *cached = match slots.iter().position(|s| *s == slot) {
                     Some(i) => i as u16,
@@ -148,11 +213,13 @@ fn fold(sources: &[Option<Source>; COUNT]) -> Merged {
         }
     }
 
+    let exposed = slots.iter().any(|s| s.exposed);
     Merged {
         of_state: of_state.into_boxed_slice(),
         slots,
         max_range,
         any,
+        exposed,
     }
 }
 

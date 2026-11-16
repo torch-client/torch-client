@@ -13,8 +13,8 @@ use azalea::entity::dimensions::EntityDimensions;
 use azalea::entity::indexing::EntityIdIndex;
 use azalea::entity::inventory::Inventory;
 use azalea::entity::metadata::{
-    AbstractHorseStanding, AbstractNautilusDash, CamelDash, LastPoseChangeTick, PigBoostTime,
-    Sprinting, StaysStill, StriderBoostTime, Suffocating,
+    AbstractHorseStanding, AbstractNautilusDash, CamelDash, LastPoseChangeTick, NoGravity,
+    PigBoostTime, Sprinting, StaysStill, StriderBoostTime, Suffocating,
 };
 use azalea::entity::{
     ActiveEffects, Attributes, EntityKindComponent, HasClientLoaded, Jumping, LastSentPosition,
@@ -30,7 +30,7 @@ use azalea::physics::collision::entity_collisions::{
 use azalea::physics::collision::{
     BorderSource, MoveCtx, MoverType, block_speed_factor_for, move_colliding,
 };
-use azalea::physics::fluids::{FluidPush, update_fluid_interaction};
+use azalea::physics::fluids::{FluidPush, PassengerFluidBox, update_fluid_interaction};
 use azalea::physics::travel::no_collision;
 use azalea::physics::{
     EntityMovement, InsideKind, apply_effects_from_blocks_for, block_jump_factor, jump_boost_power,
@@ -41,7 +41,8 @@ use azalea_core::math;
 use azalea_core::position::Vec3;
 use azalea_core::tick::GameTick;
 use azalea_inventory::components::EquipmentSlot;
-use azalea_protocol::common::movements::MoveFlags;
+use azalea_protocol::common::movements::{MoveFlags, PositionMoveRotation, RelativeMovements};
+use azalea_protocol::packets::game::c_teleport_entity::ClientboundTeleportEntity;
 use azalea_protocol::packets::game::s_move_player_rot::ServerboundMovePlayerRot;
 use azalea_protocol::packets::game::s_move_vehicle::ServerboundMoveVehicle;
 use azalea_protocol::packets::game::s_paddle_boat::ServerboundPaddleBoat;
@@ -55,6 +56,7 @@ pub(crate) use mount::{
 };
 
 use crate::entities::feed::stand_anim_step;
+use crate::util::interp::{Interpolation, Target};
 use crate::util::mth::DEG_TO_RAD;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -163,6 +165,118 @@ struct Driven {
     steering: Steering,
     jump: Option<JumpGate>,
     boat: Boat,
+    interp: Interpolation,
+    moved: bool,
+}
+
+impl Driven {
+    fn new(id: i32, mount: Mount, pos: Vec3, look: LookDirection, on_ground: bool) -> Driven {
+        Driven {
+            id,
+            mount,
+            pos,
+            y_rot: look.y_rot(),
+            x_rot: look.x_rot(),
+            on_ground,
+            dash_cooldown: 0,
+            dash_synced: false,
+            steering: Steering::default(),
+            jump: None,
+            boat: Boat::default(),
+            interp: Interpolation::new(),
+            moved: false,
+        }
+    }
+
+    fn packet(&self) -> ServerboundMoveVehicle {
+        ServerboundMoveVehicle {
+            pos: self.pos,
+            look_direction: LookDirection::new(self.y_rot, self.x_rot),
+            on_ground: self.on_ground,
+        }
+    }
+
+    fn with_target<R>(&mut self, f: impl FnOnce(&mut Interpolation, Target<'_>) -> R) -> R {
+        let mut pos = [self.pos.x, self.pos.y, self.pos.z];
+        let r = f(
+            &mut self.interp,
+            Target {
+                pos: &mut pos,
+                y_rot: &mut self.y_rot,
+                x_rot: &mut self.x_rot,
+            },
+        );
+        self.pos = Vec3::new(pos[0], pos[1], pos[2]);
+        r
+    }
+
+    fn correct(&mut self, pos: Vec3, y_rot: f32, x_rot: f32) -> ServerboundMoveVehicle {
+        let current = self.interp.position([self.pos.x, self.pos.y, self.pos.z]);
+        if pos.distance_to(Vec3::new(current[0], current[1], current[2])) > 9.999999747378752E-6 {
+            self.interp.cancel();
+            self.pos = pos;
+            self.y_rot = y_rot % 360.0;
+            self.x_rot = x_rot.clamp(-90.0, 90.0) % 360.0;
+        }
+        self.packet()
+    }
+
+    fn teleport(
+        &mut self,
+        change: &PositionMoveRotation,
+        relative: &RelativeMovements,
+        on_ground: bool,
+        physics: &mut Physics,
+    ) -> Option<ServerboundMoveVehicle> {
+        let velocity = physics.velocity;
+        let mut position = Position::new(self.pos);
+        let mut look = LookDirection::new(self.y_rot, self.x_rot);
+        relative.apply(change, &mut position, &mut look, physics);
+        physics.velocity = velocity;
+        let target = *position;
+        let echo = if self.pos.distance_squared_to(target) > 4096.0 {
+            self.interp.cancel();
+            self.pos = target;
+            self.y_rot = look.y_rot();
+            self.x_rot = look.x_rot();
+            true
+        } else {
+            self.with_target(|interp, entity| {
+                interp.interpolate_to(
+                    entity,
+                    [target.x, target.y, target.z],
+                    look.y_rot(),
+                    look.x_rot(),
+                );
+            });
+            false
+        };
+        self.on_ground = on_ground;
+        echo.then(|| self.packet())
+    }
+}
+
+enum VehicleUpdate {
+    Correction {
+        id: i32,
+        pos: Vec3,
+        y_rot: f32,
+        x_rot: f32,
+    },
+    Teleport {
+        id: i32,
+        change: PositionMoveRotation,
+        relative: RelativeMovements,
+        on_ground: bool,
+    },
+}
+
+impl VehicleUpdate {
+    fn id(&self) -> i32 {
+        match self {
+            VehicleUpdate::Correction { id, .. } | VehicleUpdate::Teleport { id, .. } => *id,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -186,6 +300,8 @@ struct Riding {
     driven: Option<Driven>,
     seat: Seat,
     turn: Option<RiderTurn>,
+    updates: Vec<VehicleUpdate>,
+    boarded: Option<i32>,
 }
 
 impl Riding {
@@ -199,6 +315,8 @@ impl Riding {
             stand: 0.0,
         },
         turn: None,
+        updates: Vec::new(),
+        boarded: None,
     };
 
     fn hands_busy(&self) -> bool {
@@ -210,6 +328,11 @@ impl Riding {
     fn stop_driving(&mut self) {
         self.driven = None;
         self.pending_jump = 0.0;
+    }
+
+    fn idle(&mut self) {
+        self.stop_driving();
+        self.updates.clear();
     }
 }
 
@@ -249,6 +372,10 @@ pub(crate) fn set_keys(keys: Keys) {
     RIDING.lock().unwrap().keys = keys;
 }
 
+pub(crate) fn boat_yaw() -> Option<f32> {
+    RIDING.lock().unwrap().turn.map(|t| t.boat_yaw)
+}
+
 pub(crate) fn hands_busy() -> bool {
     RIDING.lock().unwrap().hands_busy()
 }
@@ -285,17 +412,36 @@ pub(crate) fn note_vehicle_correction(pos: Vec3, y_rot: f32, x_rot: f32) {
     let Some(id) = crate::client::tracking::local_vehicle_id() else {
         return;
     };
-    if let Some(d) = RIDING
+    RIDING
         .lock()
         .unwrap()
-        .driven
-        .as_mut()
-        .filter(|d| d.id == id)
-    {
-        d.pos = pos;
-        d.y_rot = y_rot;
-        d.x_rot = x_rot;
+        .updates
+        .push(VehicleUpdate::Correction {
+            id,
+            pos,
+            y_rot,
+            x_rot,
+        });
+}
+
+pub(crate) fn note_vehicle_teleport(p: &ClientboundTeleportEntity) {
+    if crate::client::tracking::local_vehicle_id() != Some(p.id.0) {
+        return;
     }
+    RIDING
+        .lock()
+        .unwrap()
+        .updates
+        .push(VehicleUpdate::Teleport {
+            id: p.id.0,
+            change: p.change.clone(),
+            relative: p.relative.clone(),
+            on_ground: p.on_ground,
+        });
+}
+
+pub(crate) fn note_boarded(vehicle: i32) {
+    RIDING.lock().unwrap().boarded = Some(vehicle);
 }
 
 pub(crate) fn reset(blocking: bool) {
@@ -328,12 +474,15 @@ impl Plugin for RidingPlugin {
                 ride_pre_travel
                     .in_set(PhysicsSystems)
                     .after(azalea::physics::ai_step)
-                    .before(azalea::physics::travel::travel),
+                    .before(azalea::physics::travel::travel)
+                    .before(azalea::movement::send_player_input_packet),
                 ride_post_travel
                     .after(PhysicsSystems)
                     .before(azalea::movement::send_position),
                 send_rider_rotation
                     .after(ride_post_travel)
+                    .after(azalea::movement::send_player_input_packet)
+                    .before(azalea::movement::send_sprinting_if_needed)
                     .before(azalea::movement::send_position),
             ),
         );
@@ -374,6 +523,15 @@ fn send_rider_rotation(
                 },
             },
         ));
+        let vehicle_move = RIDING
+            .lock()
+            .unwrap()
+            .driven
+            .as_mut()
+            .and_then(|d| std::mem::take(&mut d.moved).then(|| d.packet()));
+        if let Some(packet) = vehicle_move {
+            commands.trigger(SendGamePacketEvent::new(entity, packet));
+        }
         **last_pos = **position;
         last_look.y_rot = direction.y_rot();
         last_look.x_rot = direction.x_rot();
@@ -392,6 +550,7 @@ type MountMeta = (
     Option<&'static StriderBoostTime>,
     Option<&'static Suffocating>,
     Option<&'static StaysStill>,
+    Option<&'static NoGravity>,
 );
 
 pub(crate) fn camel_pose(last_change: Option<&LastPoseChangeTick>) -> (bool, i64) {
@@ -444,7 +603,7 @@ fn ride_pre_travel(
 ) {
     let mut riding = RIDING.lock().unwrap();
     let Some(vehicle_id) = crate::client::tracking::local_vehicle_id() else {
-        riding.stop_driving();
+        riding.idle();
         return;
     };
     let Ok((rider, rider_look, id_index, movement, inventory, jumping, sprinting, border)) =
@@ -454,7 +613,7 @@ fn ride_pre_travel(
     };
     let Some(vehicle) = id_index.get_by_minecraft_entity(MinecraftEntityId(vehicle_id)) else {
         crate::client::tracking::LOCAL_VEHICLE_ID.store(-1, Ordering::Relaxed);
-        riding.stop_driving();
+        riding.idle();
         return;
     };
     let Ok((
@@ -477,16 +636,17 @@ fn ride_pre_travel(
             strider_boost,
             suffocating,
             still,
+            no_gravity,
         ),
     )) = mounts.get_mut(vehicle)
     else {
-        riding.stop_driving();
+        riding.idle();
         return;
     };
 
     let kind = **kind;
     let Some(mount) = Mount::of(kind) else {
-        riding.stop_driving();
+        riding.idle();
         return;
     };
     let worn = crate::client::tracking::equipment()
@@ -506,7 +666,7 @@ fn ride_pre_travel(
         ],
     };
     if seat(vehicle_id).is_none_or(|(index, _)| index != 0) || !mount.steered(&gear) {
-        riding.stop_driving();
+        riding.idle();
         return;
     }
 
@@ -520,31 +680,45 @@ fn ride_pre_travel(
     let riding = &mut *riding;
     if riding.driven.as_ref().is_none_or(|d| d.id != vehicle_id) {
         riding.stop_driving();
-        riding.driven = Some(Driven {
-            id: vehicle_id,
+        let mut driven = Driven::new(
+            vehicle_id,
             mount,
-            pos: **position,
-            y_rot: direction.y_rot(),
-            x_rot: direction.x_rot(),
-            on_ground: physics.on_ground(),
-            dash_cooldown: 0,
-            dash_synced: dashing.unwrap_or(false),
-            steering: Steering {
-                total: boost_total.unwrap_or(0),
-                ..Steering::default()
-            },
-            jump: None,
-            boat: Boat::default(),
-        });
+            **position,
+            *direction,
+            physics.on_ground(),
+        );
+        driven.dash_synced = dashing.unwrap_or(false);
+        driven.steering.total = boost_total.unwrap_or(0);
+        riding.driven = Some(driven);
     }
     let Some(driven) = riding.driven.as_mut() else {
         return;
     };
+
+    for update in riding.updates.drain(..) {
+        if update.id() != vehicle_id {
+            continue;
+        }
+        let echo = match update {
+            VehicleUpdate::Correction {
+                pos, y_rot, x_rot, ..
+            } => Some(driven.correct(pos, y_rot, x_rot)),
+            VehicleUpdate::Teleport {
+                change,
+                relative,
+                on_ground,
+                ..
+            } => driven.teleport(&change, &relative, on_ground, &mut physics),
+        };
+        if let Some(packet) = echo {
+            commands.trigger(SendGamePacketEvent::new(rider, packet));
+        }
+    }
+
     **position = driven.pos;
     *direction = LookDirection::new(driven.y_rot, driven.x_rot);
     physics.set_on_ground(driven.on_ground);
     physics.bounding_box = dimensions.make_bounding_box(driven.pos);
-    let start = driven.pos;
 
     let (movement_speed, jump_strength, step_height, flying_speed) = {
         let map = crate::client::tracking::attributes().lock().unwrap();
@@ -567,7 +741,29 @@ fn ride_pre_travel(
     } else {
         FluidPush::None
     };
-    update_fluid_interaction(&mut physics, &world, world_name, push);
+    update_fluid_interaction(&mut physics, &world, world_name, push, None);
+
+    if driven.interp.has_active_interpolation() {
+        let border_source = BorderSource::at(border, driven.pos.x, driven.pos.z);
+        driven.with_target(|interp, target| {
+            interp.interpolate_with(target, |shifted| {
+                no_collision(
+                    &world,
+                    Some(entity),
+                    &aabb_query,
+                    &collidable_entity_query,
+                    border_source,
+                    &dimensions.make_bounding_box(Vec3::new(shifted[0], shifted[1], shifted[2])),
+                    false,
+                    Default::default(),
+                )
+            });
+        });
+        **position = driven.pos;
+        *direction = LookDirection::new(driven.y_rot, driven.x_rot);
+        physics.bounding_box = dimensions.make_bounding_box(driven.pos);
+    }
+    let start = driven.pos;
 
     let ridden = if let Mount::Boat(_) = mount {
         None
@@ -695,7 +891,12 @@ fn ride_pre_travel(
             let mut velocity = ctx.physics.velocity;
             let start_y = pos.y;
             let border_source = BorderSource::at(border, pos.x, pos.z);
-            boat.float(&world, &hull, &mut pos, &mut velocity, |target| {
+            let gravity = if no_gravity.is_some_and(|g| g.0) {
+                0.0
+            } else {
+                boat::GRAVITY
+            };
+            boat.float(&world, &hull, gravity, &mut pos, &mut velocity, |target| {
                 no_collision(
                     &world,
                     Some(entity),
@@ -722,7 +923,8 @@ fn ride_pre_travel(
                     right: paddles[1],
                 },
             ));
-            boat.moved(velocity.y);
+            let stuck = ctx.physics.stuck_speed_multiplier.length_squared() > 1.0e-7;
+            boat.moved(if stuck { 0.0 } else { velocity.y });
             move_colliding(&mut ctx, velocity);
             drop(ctx);
 
@@ -789,15 +991,26 @@ fn ride_pre_travel(
     *direction = LookDirection::new(driven.y_rot, driven.x_rot);
     driven.pos = **position;
     driven.on_ground = physics.on_ground();
+    driven.moved = true;
+}
 
-    commands.trigger(SendGamePacketEvent::new(
-        rider,
-        ServerboundMoveVehicle {
-            pos: driven.pos,
-            look_direction: *direction,
-            on_ground: driven.on_ground,
-        },
-    ));
+fn set_fluid_box(
+    commands: &mut Commands,
+    local: Entity,
+    now: Option<PassengerFluidBox>,
+    want: Option<PassengerFluidBox>,
+) {
+    if now == want {
+        return;
+    }
+    match want {
+        Some(b) => {
+            commands.entity(local).insert(b);
+        }
+        None => {
+            commands.entity(local).remove::<PassengerFluidBox>();
+        }
+    }
 }
 
 struct Ridden {
@@ -851,38 +1064,85 @@ fn riders_jump(
 
 #[allow(clippy::type_complexity)]
 fn ride_post_travel(
-    mut rider: Query<(&mut Position, &mut Physics, &EntityIdIndex), With<LocalEntity>>,
+    mut rider: Query<
+        (
+            Entity,
+            &mut Position,
+            &mut Physics,
+            &mut LookDirection,
+            &EntityIdIndex,
+            Option<&PassengerFluidBox>,
+        ),
+        With<LocalEntity>,
+    >,
     mounts: Query<
         (
             &Position,
             &Physics,
             &LookDirection,
             &EntityKindComponent,
+            &WorldName,
             Option<&AbstractHorseStanding>,
             Option<&LastPoseChangeTick>,
         ),
         Without<LocalEntity>,
     >,
+    worlds: Res<Worlds>,
+    mut commands: Commands,
 ) {
     let mut riding = RIDING.lock().unwrap();
     riding.turn = None;
-    let Some(vehicle_id) = crate::client::tracking::local_vehicle_id() else {
-        return;
-    };
-    let Some((index, riders)) = seat(vehicle_id) else {
-        return;
-    };
-    let Ok((mut position, mut physics, id_index)) = rider.single_mut() else {
-        return;
-    };
-    let Some(mount) = id_index.get_by_minecraft_entity(MinecraftEntityId(vehicle_id)) else {
-        return;
-    };
-    let Ok((mount_position, mount_physics, mount_direction, kind, standing, pose_change)) =
-        mounts.get(mount)
+    let Ok((local, mut position, mut physics, mut look, id_index, fluid_box_now)) =
+        rider.single_mut()
     else {
         return;
     };
+    let fluid_box_now = fluid_box_now.copied();
+    let Some(vehicle_id) = crate::client::tracking::local_vehicle_id() else {
+        set_fluid_box(&mut commands, local, fluid_box_now, None);
+        return;
+    };
+    let Some((index, riders)) = seat(vehicle_id) else {
+        set_fluid_box(&mut commands, local, fluid_box_now, None);
+        return;
+    };
+    let Some(mount) = id_index.get_by_minecraft_entity(MinecraftEntityId(vehicle_id)) else {
+        set_fluid_box(&mut commands, local, fluid_box_now, None);
+        return;
+    };
+    let Ok((
+        mount_position,
+        mount_physics,
+        mount_direction,
+        kind,
+        world_name,
+        standing,
+        pose_change,
+    )) = mounts.get(mount)
+    else {
+        set_fluid_box(&mut commands, local, fluid_box_now, None);
+        return;
+    };
+
+    let fluid_box = Hull::of(**kind).and_then(|_| {
+        let under_water = match &riding.driven {
+            Some(d) if d.id == vehicle_id => d.boat.is_under_water(),
+            _ => worlds
+                .get(world_name)
+                .is_some_and(|w| hull_under_water(&w.read(), &mount_physics.bounding_box)),
+        };
+        (!under_water).then_some(PassengerFluidBox::AboveHull(
+            mount_physics.bounding_box.max.y,
+        ))
+    });
+    set_fluid_box(&mut commands, local, fluid_box_now, fluid_box);
+
+    if riding.boarded.take() == Some(vehicle_id) && Hull::of(**kind).is_some() {
+        *look = LookDirection::new(mount_direction.y_rot(), look.x_rot());
+        commands
+            .entity(local)
+            .insert(azalea::movement::ServerSetLook);
+    }
 
     let riding = &mut *riding;
     if riding.seat.vehicle != vehicle_id {
@@ -1009,6 +1269,68 @@ mod tests {
         assert_eq!(s.factor(), 1.0);
     }
 
+    fn boat_at(pos: Vec3, y_rot: f32) -> Driven {
+        Driven::new(
+            7,
+            Mount::Boat(Hull::Boat),
+            pos,
+            LookDirection::new(y_rot, 0.0),
+            false,
+        )
+    }
+
+    #[test]
+    fn a_correction_in_place_keeps_the_heading_but_still_answers() {
+        let mut d = boat_at(Vec3::new(1.0, 2.0, 3.0), 30.0);
+        let echo = d.correct(Vec3::new(1.0, 2.0, 3.0), 120.0, 5.0);
+        assert_eq!(d.y_rot, 30.0);
+        assert_eq!(echo.look_direction.y_rot(), 30.0);
+        assert_eq!(echo.pos, Vec3::new(1.0, 2.0, 3.0));
+
+        let echo = d.correct(Vec3::new(1.0, 2.0, 4.0), 400.0, 5.0);
+        assert_eq!(d.pos, Vec3::new(1.0, 2.0, 4.0));
+        assert_eq!(d.y_rot, 40.0);
+        assert_eq!(echo.look_direction.y_rot(), 40.0);
+    }
+
+    #[test]
+    fn a_teleport_interpolates_near_and_snaps_far() {
+        let absolute = RelativeMovements::default();
+        let mut physics = Physics::new(&EntityDimensions::new(1.375, 0.5625), Vec3::ZERO);
+        let change = |pos| PositionMoveRotation {
+            pos,
+            delta: Vec3::ZERO,
+            look_direction: LookDirection::new(90.0, 0.0),
+        };
+
+        let mut d = boat_at(Vec3::ZERO, 0.0);
+        assert!(
+            d.teleport(
+                &change(Vec3::new(3.0, 0.0, 0.0)),
+                &absolute,
+                true,
+                &mut physics
+            )
+            .is_none()
+        );
+        assert!(d.interp.has_active_interpolation());
+        assert_eq!(d.pos, Vec3::ZERO);
+        assert!(d.on_ground);
+        d.with_target(|interp, target| interp.interpolate(target));
+        assert!((d.pos.x - 1.0).abs() < 1e-9);
+
+        let mut d = boat_at(Vec3::ZERO, 0.0);
+        let echo = d.teleport(
+            &change(Vec3::new(100.0, 0.0, 0.0)),
+            &absolute,
+            false,
+            &mut physics,
+        );
+        assert_eq!(echo.map(|e| e.pos), Some(Vec3::new(100.0, 0.0, 0.0)));
+        assert_eq!(d.y_rot, 90.0);
+        assert!(!d.interp.has_active_interpolation());
+    }
+
     #[test]
     fn reset_clears_the_charge_and_the_mount_either_way() {
         for blocking in [true, false] {
@@ -1020,19 +1342,20 @@ mod tests {
                     was_jumping: true,
                 };
                 riding.pending_jump = 0.75;
-                riding.driven = Some(Driven {
+                riding.driven = Some(Driven::new(
+                    42,
+                    Mount::Horse,
+                    Vec3::new(1.0, 2.0, 3.0),
+                    LookDirection::default(),
+                    true,
+                ));
+                riding.updates.push(VehicleUpdate::Correction {
                     id: 42,
-                    mount: Mount::Horse,
-                    pos: Vec3::new(1.0, 2.0, 3.0),
+                    pos: Vec3::ZERO,
                     y_rot: 0.0,
                     x_rot: 0.0,
-                    on_ground: true,
-                    dash_cooldown: 0,
-                    dash_synced: false,
-                    steering: Steering::default(),
-                    jump: None,
-                    boat: Boat::default(),
                 });
+                riding.boarded = Some(42);
             }
             crate::client::tracking::LOCAL_VEHICLE_ID.store(42, Ordering::Relaxed);
 
@@ -1045,6 +1368,8 @@ mod tests {
                 assert!(!riding.charge.was_jumping, "{blocking}");
                 assert_eq!(riding.pending_jump, 0.0, "{blocking}");
                 assert!(riding.driven.is_none(), "{blocking}");
+                assert!(riding.updates.is_empty(), "{blocking}");
+                assert_eq!(riding.boarded, None, "{blocking}");
             }
             assert_eq!(
                 crate::client::tracking::LOCAL_VEHICLE_ID.load(Ordering::Relaxed),

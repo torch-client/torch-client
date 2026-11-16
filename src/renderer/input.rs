@@ -103,7 +103,10 @@ fn save_on_session_end() {
     crate::modules::script::leave();
     crate::modules::pathfinder::reset();
     crate::modules::auto_mine::reset();
+    crate::modules::ore_miner::reset();
     crate::modules::save();
+    #[cfg(feature = "click_gui")]
+    crate::gui::clickgui::flush_look();
     crate::gui::command_history::save();
 }
 
@@ -125,6 +128,7 @@ struct NavPoll {
     ended: Option<Option<Vec<crate::text::Span>>>,
     container_id: i32,
     container_kind: crate::session::ContainerKind,
+    reopen: bool,
     sign_editor_open: Option<crate::session::SignEditRequest>,
     signing_prompt: bool,
     server_pack_prompt: bool,
@@ -137,6 +141,7 @@ struct NavPoll {
     win_game: bool,
     code_of_conduct: Option<String>,
     reconfiguring: bool,
+    level_loading: Option<crate::session::LevelLoading>,
     sleeping: bool,
     dead: bool,
     death_opening: Option<(Option<Vec<crate::text::Span>>, i32, bool)>,
@@ -190,6 +195,10 @@ pub(super) fn apply_gui_nav(
             ended,
             container_id: s.session.container_id,
             container_kind: s.session.container_kind,
+            #[cfg(feature = "ui_utils")]
+            reopen: std::mem::take(&mut s.session.ui_utils.reopen),
+            #[cfg(not(feature = "ui_utils"))]
+            reopen: false,
             sign_editor_open: s.session.sign_editor_open.take(),
             signing_prompt: std::mem::take(&mut s.session.chat_signing_prompt),
             server_pack_prompt: std::mem::take(&mut s.session.server_packs.open_prompt),
@@ -202,6 +211,7 @@ pub(super) fn apply_gui_nav(
             win_game: std::mem::take(&mut s.session.win_game),
             code_of_conduct: s.session.code_of_conduct.take(),
             reconfiguring: s.session.reconfiguring,
+            level_loading: s.session.level_loading,
             sleeping: s.session.sleeping,
             dead,
             death_opening: death_opening.then(|| {
@@ -229,7 +239,7 @@ pub(super) fn apply_gui_nav(
         s.skin_prefs_sent = None;
     }
     let (container_id, kind) = (poll.container_id, poll.container_kind);
-    if container_id != *last_container_id && container_id != 0 {
+    if (container_id != *last_container_id || poll.reopen) && container_id != 0 {
         if kind.is_some() {
             crate::renderer::systems::reset_menu_state(&mut state, &shared);
             state.nav = Some(Screen::Container(kind));
@@ -241,6 +251,31 @@ pub(super) fn apply_gui_nav(
         state.nav = Some(Screen::None);
     }
     *last_container_id = container_id;
+
+    if state.nav != Some(Screen::Disconnected) && !poll.reconfiguring {
+        #[cfg(target_arch = "wasm32")]
+        let warming = crate::renderer::warmup::holds_level_screen(state.level_loading.opened_at);
+        #[cfg(not(target_arch = "wasm32"))]
+        let warming = false;
+        match poll.level_loading {
+            Some(load) if load.id != state.level_loading.shown_id => {
+                state.level_loading.open(load.id, load.reason);
+                state.nav = Some(Screen::LevelLoading);
+            }
+            None if state.screen == Screen::LevelLoading && state.nav.is_none() && !warming => {
+                state.nav = Some(Screen::None);
+            }
+            Some(_)
+                if state.screen == Screen::LevelLoading
+                    && state.nav.is_none()
+                    && state.level_loading.overdue()
+                    && !warming =>
+            {
+                state.nav = Some(Screen::None);
+            }
+            _ => {}
+        }
+    }
 
     let sign_editor_open = poll.sign_editor_open;
     let signing_prompt = poll.signing_prompt;
@@ -324,7 +359,7 @@ pub(super) fn apply_gui_nav(
     }
     if state.nav.is_none() {
         if poll.reconfiguring
-            && !state.screen_is_menu()
+            && (!state.screen_is_menu() || state.screen == Screen::LevelLoading)
             && !matches!(
                 state.screen,
                 Screen::Reconfiguring
@@ -364,11 +399,15 @@ pub(super) fn apply_gui_nav(
     crate::gui::lua_list::poll(&mut state);
 
     let Some(next) = state.nav.take() else { return };
+    #[cfg(feature = "ui_utils")]
+    let (silent_close, silent_sign) = state.ui_utils.take_skips();
+    #[cfg(not(feature = "ui_utils"))]
+    let (silent_close, silent_sign) = (false, false);
     if next == state.screen {
         return;
     }
     let is_container_screen = |s: Screen| s.is_modal();
-    if is_container_screen(state.screen) && !is_container_screen(next) {
+    if is_container_screen(state.screen) && !is_container_screen(next) && !silent_close {
         shared
             .0
             .lock()
@@ -397,7 +436,10 @@ pub(super) fn apply_gui_nav(
             .block_entities
             .get(&state.sign_edit.key())
             .map(|info| info.rev);
-        s.session.sign_update = Some(state.sign_edit.close(rev));
+        let update = state.sign_edit.close(rev);
+        if !silent_sign {
+            s.session.sign_update = Some(update);
+        }
         s.session.sign_edit_open_pos = None;
     }
     enter_screen(next, &mut state, &shared, &mut windows, &buttons);
@@ -676,8 +718,16 @@ pub(super) fn track_lifecycle(
 ) {
     for event in lifecycle.read() {
         match event {
-            bevy::window::AppLifecycle::Suspended => crate::platform::notify::suspended(),
-            bevy::window::AppLifecycle::Running => crate::platform::notify::resumed(),
+            bevy::window::AppLifecycle::Suspended => {
+                crate::platform::notify::suspended();
+                #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+                crate::audio::devices::set_suspended(true);
+            }
+            bevy::window::AppLifecycle::Running => {
+                crate::platform::notify::resumed();
+                #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+                crate::audio::devices::set_suspended(false);
+            }
             _ => {}
         }
     }
@@ -817,6 +867,8 @@ pub(super) fn poll_module_binds(
     if state.screen.is_open() {
         return;
     }
+    #[cfg(feature = "ui_utils")]
+    crate::modules::ui_utils::poll_restore(&keys, &buttons);
     #[cfg(lua_mods)]
     if crate::modules::script::wants_keys() {
         let pressed = (keys.get_just_pressed().map(|&k| Bound::Key(k)))
@@ -1159,8 +1211,8 @@ pub(super) fn handle_spectator_fly_speed_scroll(
     }
 }
 
-fn send_typed(shared: &Shared, line: String) {
-    let Some(line) = crate::modules::commands::intercept(&shared.0, line) else {
+pub(crate) fn send_typed(shared: &crate::session::SharedMutex, line: String) {
+    let Some(line) = crate::modules::commands::intercept(shared, line) else {
         return;
     };
     #[cfg(target_arch = "wasm32")]
@@ -1171,7 +1223,7 @@ fn send_typed(shared: &Shared, line: String) {
         crate::modules::script::typed(line);
     }
     #[cfg(not(lua_mods))]
-    shared.0.lock().unwrap().session.outgoing_chat.push(line);
+    shared.lock().unwrap().session.outgoing_chat.push(line);
 }
 
 pub(super) fn toggle_screen(
@@ -1250,6 +1302,10 @@ pub(super) fn toggle_screen(
 
     let creative_search_focused =
         state.screen == Screen::Creative && state.creative.search_focused();
+    #[cfg(feature = "ui_utils")]
+    let ui_utils_typing = state.ui_utils.holds_keyboard();
+    #[cfg(not(feature = "ui_utils"))]
+    let ui_utils_typing = false;
     let toggle_key = state.keybinds.just(Action::Inventory, &keys, &buttons)
         && !state.screen.chat_open()
         && state.screen != Screen::SignEdit
@@ -1261,8 +1317,11 @@ pub(super) fn toggle_screen(
         )
         && !state.screen.is_local_overlay()
         && !creative_search_focused
-        && !state.anvil_typing();
+        && !state.anvil_typing()
+        && !ui_utils_typing;
     let close_key = keys.just_pressed(KeyCode::Escape) || field_escape;
+    #[cfg(feature = "ui_utils")]
+    let close_key = close_key && !state.ui_utils.take_escape();
     #[cfg(lua_mods)]
     let close_key = close_key
         || (state.screen == Screen::LuaList
@@ -1316,6 +1375,8 @@ pub(super) fn toggle_screen(
                     Screen::ExplorePacks => Screen::ResourcePacks,
                     #[cfg(feature = "mobile_ui")]
                     Screen::TouchLayout => Screen::Controls,
+                    #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+                    Screen::ExportAssets => Screen::ManageStorage,
                     s if s.is_options() => Screen::Options,
                     _ => Screen::None,
                 })
@@ -1330,7 +1391,7 @@ pub(super) fn toggle_screen(
             None
         } else if close_key || submit_key {
             if submit_key && let Some(line) = state.chat.submit() {
-                send_typed(&shared, line);
+                send_typed(&shared.0, line);
             }
             if submit_key && crate::gui::chat::texting() {
                 None
@@ -1366,7 +1427,7 @@ pub(super) fn toggle_screen(
             || (close_key && state.chat.hide_suggestions());
         if !taken && submit_key {
             if let Some(line) = state.chat.submit() {
-                send_typed(&shared, line);
+                send_typed(&shared.0, line);
             }
         } else if !taken && close_key {
             shared.0.lock().unwrap().leave_bed_requested = true;

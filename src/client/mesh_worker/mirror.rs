@@ -199,9 +199,17 @@ impl Mirror {
 
     fn apply(&mut self, message: ToWorker) {
         match message {
-            ToWorker::Options { lighting, smooth } => {
+            ToWorker::Options {
+                lighting,
+                smooth,
+                cutout_leaves,
+            } => {
                 crate::renderer::set_lighting_enabled(lighting);
                 crate::renderer::set_smooth_lighting(smooth);
+                if crate::renderer::cutout_leaves_enabled() != cutout_leaves {
+                    crate::renderer::set_cutout_leaves(cutout_leaves);
+                    self.remesh_meshed();
+                }
             }
             ToWorker::Level { dim, min_y, height } => {
                 crate::renderer::dimension::set_current(crate::renderer::dimension::from_id(dim));
@@ -284,11 +292,15 @@ impl Mirror {
                     "worker baked the block atlas again for the packs in {:.0} ms",
                     started.elapsed().as_secs_f32() * 1000.0
                 );
-                if let Some(world) = self.level.as_ref().map(|l| l.world.clone()) {
-                    for &(cx, cz) in &self.meshed {
-                        self.queue.push(world.clone(), cx, cz, JobScope::Column);
-                    }
-                }
+                self.remesh_meshed();
+            }
+        }
+    }
+
+    fn remesh_meshed(&mut self) {
+        if let Some(world) = self.level.as_ref().map(|l| l.world.clone()) {
+            for &(cx, cz) in &self.meshed {
+                self.queue.push(world.clone(), cx, cz, JobScope::Column);
             }
         }
     }
@@ -341,25 +353,28 @@ impl Mirror {
             )
             .flatten();
         if let Some(p) = decoded {
-            match Chunk::read_with_dimension_height(
-                &mut Cursor::new(&p.chunk_data.data[..]),
+            let (chunk, failure) = Chunk::read_lenient(
+                &p.chunk_data.data,
                 level.height,
                 level.min_y,
                 &p.chunk_data.heightmaps,
-            ) {
-                Ok(chunk) => {
-                    let arc = level
-                        .world
-                        .write()
-                        .chunks
-                        .upsert(AzChunkPos { x: cx, z: cz }, chunk);
-                    level.resident.insert((cx, cz), arc);
-                    light = Some(crate::client::packets::server_light(&p.light_data));
-                }
-                Err(e) => {
-                    log_error!("mesh", "the chunk data for {cx},{cz} would not decode: {e}");
-                }
+                crate::client::worker::installed_biome_count(),
+            );
+            if let Some(failure) = failure {
+                crate::log_debug!(
+                    "mesh",
+                    "column {cx},{cz} decoded up to section {} of {}",
+                    failure.section,
+                    failure.sections
+                );
             }
+            let arc = level
+                .world
+                .write()
+                .chunks
+                .upsert(AzChunkPos { x: cx, z: cz }, chunk);
+            level.resident.insert((cx, cz), arc);
+            light = Some(crate::client::packets::server_light(&p.light_data));
         }
         for col in &mesh {
             self.meshed.insert(*col);

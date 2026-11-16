@@ -25,10 +25,12 @@ pub(crate) fn check_missing(state: &mut GuiState) -> bool {
 }
 
 fn begin(dl: &'static Download) {
-    dl.start(
-        crate::ASSET_VERSION.to_string(),
-        INSTALL_AUDIO.load(Ordering::Relaxed),
-    );
+    #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+    let sounds =
+        INSTALL_AUDIO.load(Ordering::Relaxed) && !crate::client::assets::transfer::kept_sounds();
+    #[cfg(not(all(target_arch = "wasm32", feature = "asset_download")))]
+    let sounds = INSTALL_AUDIO.load(Ordering::Relaxed);
+    dl.start(crate::ASSET_VERSION.to_string(), sounds);
 }
 
 fn leave_label() -> &'static str {
@@ -83,7 +85,7 @@ const BOX_TEXT_TOP: f32 = 3.0;
 const PERCENT_INSET: f32 = 18.0;
 
 const ASSETS_SIZE: &str = "43.7 MiB";
-const AUDIO_SIZE: &str = if cfg!(target_arch = "wasm32") {
+const AUDIO_SIZE: &str = if cfg!(feature = "small_audio") {
     "2.1 MiB"
 } else {
     "330 MiB"
@@ -91,6 +93,22 @@ const AUDIO_SIZE: &str = if cfg!(target_arch = "wasm32") {
 const CONTACTING: &str = "Contacting Mojang";
 const ASSETS_NAME: &str = "Built in";
 const AUDIO_NAME: &str = "Install audio";
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+const IMPORT_NAME: &str = "Import assets file";
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+const IMPORT_DETAIL: &str = "From another Torch page";
+const FROM_FILE: &str = "From the imported file";
+
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+static IMPORT_LINE: std::sync::Mutex<Option<(&'static str, String, u32)>> =
+    std::sync::Mutex::new(None);
+
+fn sounds_from_file() -> bool {
+    #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+    return crate::client::assets::transfer::kept_sounds();
+    #[cfg(not(all(target_arch = "wasm32", feature = "asset_download")))]
+    false
+}
 
 const CHECK_SIZE: f32 = 14.0;
 const CHECK_INSET: f32 = 3.0;
@@ -229,7 +247,11 @@ fn prompt_boxes(p: &mut Painter, ctx: &ScreenCtx, mut y: f32) -> f32 {
         box_text(p, x + BOX_PAD, y, ASSETS_NAME, ASSETS_SIZE, DETAIL);
         y += BOX_H + BOX_GAP;
     }
-    if offers_sounds() {
+    if offers_sounds() && sounds_from_file() {
+        chrome(p, x, y, w, BOX_H, false);
+        box_text(p, x + BOX_PAD, y, AUDIO_NAME, FROM_FILE, DETAIL);
+        y += BOX_H + BOX_GAP;
+    } else if offers_sounds() {
         let hovered = ctx.hovering(x, y, w, BOX_H);
         if hovered && ctx.input.left_click {
             INSTALL_AUDIO.fetch_xor(true, Ordering::Relaxed);
@@ -252,7 +274,44 @@ fn prompt_boxes(p: &mut Painter, ctx: &ScreenCtx, mut y: f32) -> f32 {
         box_text(p, x + BOX_PAD, y, AUDIO_NAME, AUDIO_SIZE, DETAIL);
         y += BOX_H + BOX_GAP;
     }
+    #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+    if !TOP_UP.load(Ordering::Relaxed) {
+        y = import_box(p, ctx, x, y, w);
+    }
     y + BOX_GAP
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+fn import_box(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, w: f32) -> f32 {
+    use crate::client::assets::transfer::{self, Prepared};
+
+    if let Some(bytes) = crate::platform::upload::take_assets() {
+        let line = match transfer::import_for_install(&bytes) {
+            Ok(Prepared::Installed) => None,
+            Ok(Prepared::Kept(words)) if words.is_empty() => Some((
+                IMPORT_NAME,
+                "Language applied".to_owned(),
+                GREEN & 0xFF_FFFF,
+            )),
+            Ok(Prepared::Kept(words)) => {
+                Some(("Ready. Continue gets the jar", words, GREEN & 0xFF_FFFF))
+            }
+            Err(e) => Some((IMPORT_NAME, e.short(), 0xFF5555)),
+        };
+        *IMPORT_LINE.lock().unwrap() = line;
+    }
+
+    let hovered = ctx.hovering(x, y, w, BOX_H);
+    if hovered && ctx.input.left_click {
+        crate::platform::upload::choose_assets();
+    }
+    chrome(p, x, y, w, BOX_H, hovered);
+    let line = IMPORT_LINE.lock().unwrap().clone();
+    match line {
+        Some((name, detail, rgb)) => box_text(p, x + BOX_PAD, y, name, &detail, rgb),
+        None => box_text(p, x + BOX_PAD, y, IMPORT_NAME, IMPORT_DETAIL, DETAIL),
+    }
+    y + BOX_H + BOX_GAP
 }
 
 fn progress_boxes(
@@ -274,7 +333,9 @@ fn progress_boxes(
     }
     if offers_sounds() {
         let (done, total) = dl.sound_progress();
-        let line = if dl.sounds_skipped() {
+        let line = if sounds_from_file() {
+            FROM_FILE.to_string()
+        } else if dl.sounds_skipped() {
             "Skipped".to_string()
         } else if total > 0 {
             of_total(done, total)
@@ -285,7 +346,11 @@ fn progress_boxes(
         } else {
             "Already installed".to_string()
         };
-        let total = if dl.sounds_skipped() { 0 } else { total };
+        let total = if dl.sounds_skipped() || sounds_from_file() {
+            0
+        } else {
+            total
+        };
         running_box(p, ctx, y, AUDIO_NAME, &line, done, total);
         y += BOX_H + BOX_GAP;
     }

@@ -81,7 +81,6 @@ struct TickSnapshot {
 fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot> {
     if let Ok(world) = bot.world() {
         set_current_world(&world);
-        crate::client::mesh_worker::sweep_parked(&world);
     }
 
     let pos = bot.position().ok()?;
@@ -97,9 +96,8 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
         },
         None => pos,
     };
-    if let Ok(partial) = bot.partial_world() {
-        viewwindow::keep_view_center_on_the_player(&partial, pos);
-    }
+    viewwindow::sweep_far_columns(bot, shared, pos);
+    crate::client::worldsync::mesh_waiting_columns(bot);
     #[cfg(feature = "render_lod")]
     crate::client::lod::cache::tick(bot, shared, pos);
 
@@ -546,19 +544,18 @@ fn take_server_look(bot: &Client) -> Option<(f32, f32)> {
     let look = bot
         .component::<azalea::entity::LookDirection>()
         .ok()
-        .map(|l| (-l.y_rot() - 180.0, -l.x_rot()));
+        .map(|l| {
+            crate::modules::sent::Look {
+                yaw: l.y_rot(),
+                pitch: l.x_rot(),
+            }
+            .camera()
+        });
     bot.ecs
         .write()
         .entity_mut(bot.entity)
         .remove::<ServerSetLook>();
     look
-}
-
-fn follow_route_look(shared: &SharedMutex, look: crate::modules::sent::Look) {
-    let look = (-look.yaw - 180.0, -look.pitch);
-    let mut s = shared.lock().unwrap();
-    (s.camera_yaw, s.camera_pitch) = look;
-    s.pending_look = Some(look);
 }
 
 static ATTACK_TICKER_RESET: std::sync::atomic::AtomicBool =
@@ -782,6 +779,8 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
     if closing {
         shared.lock().unwrap().session.horse = None;
     }
+    #[cfg(feature = "ui_utils")]
+    crate::modules::ui_utils::tick(bot, shared);
 
     let Some(snapshot) = read_tick_snapshot(bot, shared) else {
         return;
@@ -1109,24 +1108,30 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
     }
 
     if swap_hands {
-        bot.write_packet(ServerboundPlayerAction {
-            action: Action::SwapItemWithOffhand,
-            pos: AzBlockPos::new(0, 0, 0),
-            direction: Direction::Down,
-            seq: 0,
-        });
+        crate::client::outbox::send(
+            bot,
+            ServerboundPlayerAction {
+                action: Action::SwapItemWithOffhand,
+                pos: AzBlockPos::new(0, 0, 0),
+                direction: Direction::Down,
+                seq: 0,
+            },
+        );
     }
 
     for (drop, held) in drops {
-        bot.write_packet(ServerboundPlayerAction {
-            action: match drop {
-                DropRequest::HeldItem => Action::DropItem,
-                DropRequest::HeldStack => Action::DropAllItems,
+        crate::client::outbox::send(
+            bot,
+            ServerboundPlayerAction {
+                action: match drop {
+                    DropRequest::HeldItem => Action::DropItem,
+                    DropRequest::HeldStack => Action::DropAllItems,
+                },
+                pos: AzBlockPos::new(0, 0, 0),
+                direction: Direction::Down,
+                seq: 0,
             },
-            pos: AzBlockPos::new(0, 0, 0),
-            direction: Direction::Down,
-            seq: 0,
-        });
+        );
         {
             let idx = 36 + hotbar_sel as usize;
             let mut ecs = bot.ecs.write();
@@ -1282,24 +1287,26 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
             s.pending_look = Some(look);
             look
         }
-        None => script_look.map_or((yaw, pitch), |(y, p)| (-y - 180.0, -p)),
+        None => script_look.map_or((yaw, pitch), |(y, p)| {
+            crate::modules::sent::Look { yaw: y, pitch: p }.camera()
+        }),
     };
 
+    let camera = crate::modules::sent::Look::from_camera(yaw, pitch);
     let (sent_yaw, sent_pitch, flags) =
-        crate::modules::hooks::sent_look(bot, shared, -yaw - 180.0, -pitch, flags);
+        crate::modules::hooks::sent_look(bot, shared, camera.yaw, camera.pitch, flags);
+    if let Err(e) = bot.set_direction(sent_yaw, sent_pitch) {
+        note_movement_write("the look direction", e);
+    }
     if crate::modules::pathfinder::drives(bot, hand_keys) {
-        if let Some((look, keys)) = crate::modules::pathfinder::steer(bot) {
-            if let Err(e) = bot.set_direction(look.yaw, look.pitch) {
-                note_movement_write("the look direction", e);
-            }
-            follow_route_look(shared, look);
-            apply_movement(bot, keys, false);
-        }
+        let sent = crate::modules::sent::Look {
+            yaw: sent_yaw,
+            pitch: sent_pitch,
+        };
+        let keys = crate::modules::pathfinder::steer(bot, shared, camera, sent);
+        apply_movement(bot, keys, false);
     } else {
-        if let Err(e) = bot.set_direction(sent_yaw, sent_pitch) {
-            note_movement_write("the look direction", e);
-        }
-
+        crate::modules::pathfinder::publish_look(shared, None);
         apply_movement(bot, flags, auto_jump_enabled);
     }
 
@@ -1714,6 +1721,7 @@ fn tick_local_anim(
         .component::<azalea::entity::ActiveEffects>()
         .map(|e| crate::play::mob_effects::swing_adjust(&e))
         .unwrap_or_default();
+    let boat_yaw = crate::play::riding::boat_yaw();
     let mut anims = anim_states().lock().unwrap();
     let anim = anims.entry(LOCAL_ANIM_ID).or_default();
     anim.set_swing_effect(swing_effect);
@@ -1721,6 +1729,9 @@ fn tick_local_anim(
         anim.swing(prefs.main_hand_left);
     }
     anim.tick(input);
+    if let Some(boat_yaw) = boat_yaw {
+        anim.turn_in_boat(boat_yaw);
+    }
     (anim.clone(), reads)
 }
 

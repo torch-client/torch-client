@@ -32,7 +32,7 @@ pub(crate) mod orientation;
     feature = "shader_support",
     resource_packs,
     lua_mods,
-    all(target_arch = "wasm32", eagler_skins)
+    all(target_arch = "wasm32", any(eagler_skins, feature = "asset_download"))
 ))]
 pub(crate) mod packfs;
 pub(crate) mod pointer;
@@ -43,7 +43,13 @@ pub(crate) mod storage;
 pub(crate) mod time;
 #[cfg(all(
     target_arch = "wasm32",
-    any(feature = "shader_support", resource_packs, eagler_skins, lua_mods)
+    any(
+        feature = "shader_support",
+        resource_packs,
+        eagler_skins,
+        lua_mods,
+        feature = "asset_download"
+    )
 ))]
 pub(crate) mod upload;
 pub(crate) mod url;

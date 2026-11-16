@@ -125,6 +125,11 @@ impl MaterialExtension for FarPlane {
         super::embedded_shader("renderer/sky_far.wgsl")
     }
 
+    #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+    fn fragment_shader() -> ShaderRef {
+        super::embedded_shader("renderer/unlit_fragment.wgsl")
+    }
+
     fn enable_prepass() -> bool {
         false
     }
@@ -135,6 +140,7 @@ impl MaterialExtension for FarPlane {
 }
 
 fn backdrop(base: StandardMaterial) -> BackdropMaterial {
+    debug_assert!(base.unlit, "the WebGL2 sky fragment has no lit branch");
     ExtendedMaterial {
         base,
         extension: FarPlane {},
@@ -146,6 +152,10 @@ pub struct SkyPlugin;
 impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "sky_far.wgsl");
+        #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+        {
+            embedded_asset!(app, "unlit_fragment.wgsl");
+        }
         app.add_plugins(MaterialPlugin::<BackdropMaterial>::default());
         super::reload::touch_on_reload::<BackdropMaterial>(app);
         #[cfg(feature = "builtin_shaders")]

@@ -26,6 +26,10 @@ pub enum Spot {
     ZoomArea,
     #[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
     NewArea,
+    #[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
+    TouchLayout,
+    #[cfg_attr(not(feature = "mobile_ui"), allow(dead_code))]
+    TouchMovement,
     Reset,
     Done,
     EditHud,
@@ -49,8 +53,29 @@ enum Place {
     Editor(Layer),
     #[cfg(feature = "mobile_ui")]
     Chat,
+    #[cfg(feature = "mobile_ui")]
+    Controls,
+    #[cfg(feature = "mobile_ui")]
+    TouchLayout,
+    #[cfg(feature = "mobile_ui")]
+    BedrockLook,
     Options,
     Storage,
+}
+
+impl Place {
+    #[cfg(feature = "mobile_ui")]
+    fn previews_bedrock(self) -> bool {
+        matches!(self, Place::TouchLayout | Place::BedrockLook)
+    }
+
+    fn dims(self) -> bool {
+        #[cfg(feature = "mobile_ui")]
+        if self == Place::BedrockLook {
+            return false;
+        }
+        true
+    }
 }
 
 struct Step {
@@ -184,6 +209,24 @@ fn steps() -> Vec<Step> {
             text: "Reopen the editor from here.",
         },
     ]);
+    #[cfg(feature = "mobile_ui")]
+    steps.extend([
+    Step {
+        place: Place::Controls,
+        spot: Some(Spot::TouchLayout),
+        text: "Controls, then Edit control layout, changes the touch controls.",
+    },
+    Step {
+        place: Place::TouchLayout,
+        spot: Some(Spot::TouchMovement),
+        text: "Tap Movement until it reads Bedrock D-Pad or Bedrock Joystick for Bedrock Edition's controls.",
+    },
+    Step {
+        place: Place::BedrockLook,
+        spot: None,
+        text: "The Bedrock controls, in Mojang's art. Your own controls come back after this step.",
+    },
+    ]);
     steps.extend([
         Step {
             place: Place::Options,
@@ -218,6 +261,8 @@ static SPOTS: Mutex<Vec<(Spot, Rect)>> = Mutex::new(Vec::new());
 pub struct Tutorial {
     checked: bool,
     run: Option<Run>,
+    #[cfg(feature = "mobile_ui")]
+    kept: Option<crate::gui::TouchMovement>,
 }
 
 #[derive(Clone, Copy)]
@@ -283,16 +328,47 @@ fn start(state: &mut GuiState) {
         in_game: !state.in_menu(),
         arrived: false,
     });
+    show_off(state);
 }
 
 fn finish(state: &mut GuiState, go_home: bool) {
     if let Some(run) = state.tutorial.run.take() {
         TUTORIAL.store("1");
-        if go_home && state.screen != run.home {
-            state.nav = Some(run.home);
+        let end = if run.in_game { run.home } else { Screen::Title };
+        if go_home && state.screen != end {
+            state.nav = Some(end);
         }
     }
+    show_off(state);
 }
+
+#[cfg(feature = "mobile_ui")]
+fn show_off(state: &mut GuiState) {
+    use crate::gui::TouchMovement;
+    let place = state.tutorial.run.map(|r| STEPS[r.step].place);
+    let previewing = place.is_some_and(Place::previews_bedrock);
+    match (previewing, state.tutorial.kept) {
+        (true, None) => {
+            let own = state.options.touch_movement;
+            state.tutorial.kept = Some(own);
+            if own.bedrock().is_none() {
+                state.options.touch_movement = TouchMovement::BedrockDpad;
+            }
+        }
+        (false, Some(own)) => {
+            state.tutorial.kept = None;
+            state.options.touch_movement = own;
+        }
+        _ => {}
+    }
+    #[cfg(feature = "asset_download")]
+    if previewing || place == Some(Place::Controls) {
+        crate::client::bedrock_art::request();
+    }
+}
+
+#[cfg(not(feature = "mobile_ui"))]
+fn show_off(_: &mut GuiState) {}
 
 fn want(place: Place, home: Screen) -> Screen {
     match place {
@@ -307,6 +383,10 @@ fn want(place: Place, home: Screen) -> Screen {
         Place::Editor(_) => Screen::HudEditor,
         #[cfg(feature = "mobile_ui")]
         Place::Chat => Screen::Chat,
+        #[cfg(feature = "mobile_ui")]
+        Place::Controls => Screen::Controls,
+        #[cfg(feature = "mobile_ui")]
+        Place::TouchLayout | Place::BedrockLook => Screen::TouchLayout,
         Place::Options => Screen::Options,
         Place::Storage => Screen::ManageStorage,
     }
@@ -399,6 +479,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, input: &GuiInput) {
         });
     let (vw, vh) = (input.size.x, input.size.y);
     match target {
+        _ if !step.place.dims() => {}
         Some(r) => {
             let (x0, y0, x1, y1) = (r.x - PAD, r.y - PAD, r.x + r.w + PAD, r.y + r.h + PAD);
             p.fill(0.0, 0.0, vw, y0.max(0.0), DIM);
@@ -456,9 +537,13 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, input: &GuiInput) {
         finish(state, true);
         return;
     }
-    if let Some(i) = next_step.filter(|_| next).or(prev_step.filter(|_| back)) {
+    let moved = next_step.filter(|_| next).or(prev_step.filter(|_| back));
+    if let Some(i) = moved {
         run.step = i;
         run.arrived = false;
     }
     state.tutorial.run = Some(run);
+    if moved.is_some() {
+        show_off(state);
+    }
 }

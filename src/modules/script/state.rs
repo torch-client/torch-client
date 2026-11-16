@@ -52,7 +52,7 @@ pub(super) fn load(s: &Store, mods: &[Mod]) {
         };
         for module in &m.modules {
             if let Some(saved) = root.get(module.name).and_then(Json::as_object) {
-                persist::load_module(s, module.ix, saved, module.keyed());
+                persist::load_module(s, module.ix, saved, module.keyed(), &[]);
             }
         }
     }

@@ -37,7 +37,6 @@ static LIGHT_DEAD: AtomicBool = AtomicBool::new(false);
 
 static VIEW_CENTER: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
 static PLAYER_CHUNK: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
-static WINDOW_RADIUS: AtomicI32 = AtomicI32::new(-1);
 
 pub fn on_connected() {
     let mut s = SESSION.lock().unwrap();
@@ -48,7 +47,6 @@ pub fn on_connected() {
     FIRST_CHUNK_MS.store(0, Ordering::Relaxed);
     REPORTED.store(0, Ordering::Relaxed);
     super::stats::reset();
-    WINDOW_RADIUS.store(-1, Ordering::Relaxed);
     LIGHT_DEAD.store(false, Ordering::Relaxed);
 }
 
@@ -90,31 +88,8 @@ pub fn note_view(center: (i32, i32), player: (i32, i32)) {
     PLAYER_CHUNK[1].store(player.1, Ordering::Relaxed);
 }
 
-pub fn note_chunk_packet(pos: (i32, i32), in_window: bool, center: (i32, i32), radius: u32) {
+pub fn note_chunk_packet() {
     bump(Stat::ChunkPacketsSeen);
-    WINDOW_RADIUS.store(radius as i32, Ordering::Relaxed);
-    if in_window {
-        return;
-    }
-    let n = bump_counted(Stat::ChunkPacketsOutOfWindow);
-    if n >= LOUD_REJECTS && (n + 1) % REJECT_EVERY != 0 {
-        return;
-    }
-    let (_, player) = view_pair();
-    log_warn!(
-        "view",
-        "chunk {},{} arrived outside azalea's window (centred {},{}, radius {}), \
-         player in chunk {},{}; it will be dropped and the server will not send it \
-         again. {} dropped so far this session.",
-        pos.0,
-        pos.1,
-        center.0,
-        center.1,
-        radius,
-        player.0,
-        player.1,
-        n + 1
-    );
 }
 
 pub fn note_packet(name: &'static str) {
@@ -186,25 +161,15 @@ pub fn note_packet_detail(detail: &str) {
 
 const TRACE_PACKETS: u32 = 80;
 
-const LOUD_REJECTS: u64 = 5;
-const REJECT_EVERY: u64 = 200;
-
 pub fn note_cache_center(center: (i32, i32)) {
     let n = bump_counted(Stat::CacheCenterMoves);
     if n == 0 {
         log_info!(
             "view",
-            "server centred the chunk window on {},{}",
+            "server centred its chunk stream on {},{}",
             center.0,
             center.1
         );
-    }
-}
-
-fn window_radius() -> Option<u32> {
-    match WINDOW_RADIUS.load(Ordering::Relaxed) {
-        -1 => None,
-        r => Some(r as u32),
     }
 }
 
@@ -628,42 +593,30 @@ pub fn watchdog() {
             );
         } else if c[Stat::ChunksReceived] == 0 {
             log_warn!(
-                "view",
-                "{:.0}s after joining, the server sent {} chunk packets and azalea \
-                 kept none of them: {} fell outside its window, which is centred on \
-                 {},{} with radius {} while the player is in chunk {},{}. The window \
-                 is the problem, not the server and not the renderer.",
+                "net",
+                "{:.0}s after joining, the server sent {} chunk packets and not one \
+                 was recorded. azalea stores every column it is sent and the packet \
+                 relay (`bot::relay_packet`, installed with azalea's packet observer) \
+                 records it, so that hook is where to look.",
                 connected_for.as_secs_f32(),
                 c[Stat::ChunkPacketsSeen],
-                c[Stat::ChunkPacketsOutOfWindow],
-                center.0,
-                center.1,
-                window_radius()
-                    .map(|r| r.to_string())
-                    .unwrap_or_else(|| "?".to_string()),
-                player.0,
-                player.1
             );
         } else {
             log_warn!(
                 "net",
-                "{:.0}s after joining, the server sent {} chunk packets, azalea kept \
-                 {} and dropped {}, but it has not reported the player's own chunk \
-                 ({},{}) loaded, so no spawn event has fired and the client is still \
-                 on the menu. The window is centred {},{} with radius {}. A column is \
-                 only kept if it is inside that window, and the player's own column \
-                 has to be one of them.",
+                "{:.0}s after joining, the server sent {} chunk packets and {} columns \
+                 arrived ({} with sections that would not decode), but the player's \
+                 own column ({},{}) has not been reported loaded, so no spawn event \
+                 has fired. The server last centred its stream on {},{}; if that is \
+                 far from the player, the server is streaming somewhere else.",
                 connected_for.as_secs_f32(),
                 c[Stat::ChunkPacketsSeen],
                 c[Stat::ChunksReceived],
-                c[Stat::ChunkPacketsOutOfWindow],
+                c[Stat::ChunkDecodeFailed],
                 player.0,
                 player.1,
                 center.0,
                 center.1,
-                window_radius()
-                    .map(|r| r.to_string())
-                    .unwrap_or_else(|| "?".to_string())
             );
         }
     }
@@ -692,18 +645,13 @@ pub fn watchdog() {
         );
     }
 
-    if c[Stat::ChunksDropped] > 0 && c[Stat::ChunksReceived] > 0 && !latch(Report::NoChunks) {
-        let (center, player) = view_pair();
+    if c[Stat::ChunkDecodeFailed] > 0 && !latch(Report::NoChunks) {
         log_warn!(
-            "view",
-            "azalea has dropped {} chunk columns for falling outside its window \
-             (centred {},{}, player in {},{}); those columns will not be sent again \
-             and will read as air until the server resends them.",
-            c[Stat::ChunksDropped],
-            center.0,
-            center.1,
-            player.0,
-            player.1
+            "chunks",
+            "{} chunk columns had a section that would not decode and were kept with \
+             air above it; each one is logged above with its position, section and \
+             palette. Terrain there is missing until the server sends the column again.",
+            c[Stat::ChunkDecodeFailed],
         );
     }
 }

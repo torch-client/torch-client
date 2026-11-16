@@ -1,6 +1,5 @@
 use azalea_client::{
     InConfigState,
-    chunks::handle_chunk_batch_finished_event,
     client_information::send_client_information,
     inventory::InventorySystems,
     packet::{
@@ -28,7 +27,6 @@ impl Plugin for AcceptResourcePacksPlugin {
             accept_resource_pack
                 .before(perform_respawn)
                 .after(death_event_on_0_health)
-                .after(handle_chunk_batch_finished_event)
                 .after(InventorySystems)
                 .after(send_client_information),
         );

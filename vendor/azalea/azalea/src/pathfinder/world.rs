@@ -42,6 +42,7 @@ pub struct CachedWorld {
 
     #[allow(clippy::type_complexity)]
     cached_mining_costs: UnsafeCell<Option<Box<[(RelBlockPos, f32)]>>>,
+    cost_table: bool,
 }
 
 type CachedChunk = Box<[PalettedContainer<BlockState>]>;
@@ -176,7 +177,13 @@ impl CachedWorld {
             unbounded_chunk_cache: Default::default(),
             cached_blocks: Default::default(),
             cached_mining_costs: UnsafeCell::new(None),
+            cost_table: true,
         }
+    }
+
+    pub fn without_cost_table(mut self) -> Self {
+        self.cost_table = false;
+        self
     }
 
     fn with_section<T>(
@@ -374,6 +381,10 @@ impl CachedWorld {
                     f32::INFINITY
                 }
             });
+        }
+
+        if !self.cost_table {
+            return self.uncached_cost_for_breaking_block(pos, mining_cache);
         }
 
         let cached_mining_costs = self.cached_mining_costs();

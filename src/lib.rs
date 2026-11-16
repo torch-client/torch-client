@@ -167,6 +167,8 @@ pub fn start_web(assets: Vec<u8>, username: String, address: String) -> Result<(
 
     #[cfg(feature = "webgpu")]
     require_webgpu()?;
+    #[cfg(not(feature = "webgpu"))]
+    claim_webgl2_context()?;
 
     if assets.is_empty() && cfg!(feature = "asset_download") {
         step("no stored assets; the download screen will ask");
@@ -236,6 +238,96 @@ pub fn ships_assets() -> bool {
 pub fn asset_cache_key() -> String {
     let magic = std::str::from_utf8(platform::assets::ARCHIVE_MAGIC).unwrap_or("archive");
     format!("{magic}-{ASSET_VERSION}")
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+fn claim_webgl2_context() -> Result<(), String> {
+    use wasm_bindgen::{JsCast, JsValue};
+
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return Ok(());
+    };
+    let Some(canvas) = document
+        .get_element_by_id("canvas")
+        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+    else {
+        return Ok(());
+    };
+    let options = js_sys::Object::new();
+    let set = |name: &str, value: JsValue| {
+        let _ = js_sys::Reflect::set(&options, &name.into(), &value);
+    };
+    set("alpha", JsValue::FALSE);
+    set("antialias", JsValue::FALSE);
+    set("depth", JsValue::FALSE);
+    set("stencil", JsValue::FALSE);
+    set("powerPreference", "high-performance".into());
+    let (made, reason) = webgl2_attempt(&canvas, Some(&options));
+    if made {
+        step("WebGL2 context created: opaque, no depth or stencil, high-performance");
+        return Ok(());
+    }
+
+    let probe = document
+        .create_element("canvas")
+        .ok()
+        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok());
+    let (probe_made, probe_reason) = match &probe {
+        Some(probe) => webgl2_attempt(probe, None),
+        None => (false, None),
+    };
+    if probe_made {
+        step("WebGL2 context not created here; wgpu will ask for its own");
+        return Ok(());
+    }
+
+    let reason = reason.or(probe_reason);
+    let mut message = String::from(
+        "this browser would not create a WebGL2 context, which the client needs \
+         to draw anything. This usually means the computer has no GPU the \
+         browser will use, or hardware acceleration is turned off or blocked \
+         for this graphics driver. Turn on \"Use graphics acceleration when \
+         available\" in the browser's settings and restart it, check what \
+         chrome://gpu says about WebGL2, or try another browser.",
+    );
+    if let Some(reason) = reason {
+        message.push_str(&format!(" The browser said: {reason}"));
+    }
+    Err(message)
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
+fn webgl2_attempt(
+    canvas: &web_sys::HtmlCanvasElement,
+    options: Option<&js_sys::Object>,
+) -> (bool, Option<String>) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::{JsCast, JsValue};
+
+    let reason: Rc<RefCell<Option<String>>> = Rc::default();
+    let sink = reason.clone();
+    let listener = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        let text = js_sys::Reflect::get(&event, &JsValue::from_str("statusMessage"))
+            .ok()
+            .and_then(|v| v.as_string())
+            .filter(|s| !s.trim().is_empty());
+        if text.is_some() {
+            *sink.borrow_mut() = text;
+        }
+    });
+    const EVENT: &str = "webglcontextcreationerror";
+    let callback = listener.as_ref().unchecked_ref();
+    let _ = canvas.add_event_listener_with_callback(EVENT, callback);
+    let made = match options {
+        Some(options) => canvas.get_context_with_context_options("webgl2", options),
+        None => canvas.get_context("webgl2"),
+    };
+    let _ = canvas.remove_event_listener_with_callback(EVENT, callback);
+    drop(listener);
+    let reason = reason.borrow_mut().take();
+    (matches!(made, Ok(Some(_))), reason)
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
@@ -500,8 +592,11 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
     step("starting workers");
     client::worldsync::start_light_thread();
     client::worldsync::install_block_change_hook();
+    azalea_world::chunk::set_decode_failure_hook(client::worldsync::chunk_decode_failed);
     #[cfg(feature = "render_lod")]
     client::lod::cache::install();
+    #[cfg(feature = "ui_utils")]
+    crate::modules::ui_utils::install();
     if crate::diag::trace_enabled()
         && azalea_protocol::packet_trace::set_sent_packet_hook(Box::new(|p| {
             if let Some(name) = p.name {

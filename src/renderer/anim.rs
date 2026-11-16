@@ -611,6 +611,10 @@ impl HumanoidAnim {
         self.core.seat(pos);
     }
 
+    pub fn turn_in_boat(&mut self, boat_y_rot: f32) {
+        crate::entities::feed::boat_rider_turn(&mut self.core, true, boat_y_rot, None);
+    }
+
     #[cfg(feature = "skins")]
     fn move_cloak(&mut self) {
         const TELEPORT: f64 = 10.0;

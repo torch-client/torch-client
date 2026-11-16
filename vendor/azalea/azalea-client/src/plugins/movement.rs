@@ -194,13 +194,17 @@ pub fn send_position(
 
 #[derive(Clone, Component, Debug, Default, Eq, PartialEq)]
 pub struct LastSentInput(pub ServerboundPlayerInput);
+#[allow(clippy::type_complexity)]
 pub fn send_player_input_packet(
-    mut query: Query<(
-        Entity,
-        &ClientMovementState,
-        &Jumping,
-        Option<&LastSentInput>,
-    )>,
+    mut query: Query<
+        (
+            Entity,
+            &ClientMovementState,
+            &Jumping,
+            Option<&LastSentInput>,
+        ),
+        With<HasClientLoaded>,
+    >,
     mut commands: Commands,
 ) {
     for (entity, physics_state, jumping, last_sent_input) in query.iter_mut() {
@@ -227,13 +231,17 @@ pub fn send_player_input_packet(
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub fn send_sprinting_if_needed(
-    mut query: Query<(
-        Entity,
-        &MinecraftEntityId,
-        &Sprinting,
-        &mut ClientMovementState,
-    )>,
+    mut query: Query<
+        (
+            Entity,
+            &MinecraftEntityId,
+            &Sprinting,
+            &mut ClientMovementState,
+        ),
+        With<HasClientLoaded>,
+    >,
     mut commands: Commands,
 ) {
     for (entity, minecraft_entity_id, sprinting, mut physics_state) in query.iter_mut() {
@@ -257,7 +265,7 @@ pub fn send_sprinting_if_needed(
     }
 }
 
-pub(crate) fn tick_controls(mut query: Query<&mut ClientMovementState>) {
+pub(crate) fn tick_controls(mut query: Query<&mut ClientMovementState, With<HasClientLoaded>>) {
     for mut physics_state in query.iter_mut() {
         let mut forward_impulse: f32 = 0.;
         let mut left_impulse: f32 = 0.;
@@ -585,19 +593,23 @@ pub fn handle_knockback(
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub fn update_pose(
-    mut query: Query<(
-        Entity,
-        &mut Pose,
-        Option<&azalea_world::WorldBorder>,
-        &ClientMovementState,
-        &GameMode,
-        &WorldHolder,
-        &Position,
-        &metadata::Swimming,
-        Option<&metadata::FallFlying>,
-        Option<&metadata::AutoSpinAttack>,
-    )>,
+    mut query: Query<
+        (
+            Entity,
+            &mut Pose,
+            Option<&azalea_world::WorldBorder>,
+            &ClientMovementState,
+            &GameMode,
+            &WorldHolder,
+            &Position,
+            &metadata::Swimming,
+            Option<&metadata::FallFlying>,
+            Option<&metadata::AutoSpinAttack>,
+        ),
+        With<HasClientLoaded>,
+    >,
     aabb_query: AabbQuery,
     collidable_entity_query: CollidableEntityQuery,
 ) {

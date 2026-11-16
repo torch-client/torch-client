@@ -12,6 +12,19 @@ pub struct Look {
     pub pitch: f32,
 }
 
+impl Look {
+    pub fn from_camera(yaw: f32, pitch: f32) -> Look {
+        Look {
+            yaw: -yaw - 180.0,
+            pitch: -pitch,
+        }
+    }
+
+    pub fn camera(self) -> (f32, f32) {
+        (-self.yaw - 180.0, -self.pitch)
+    }
+}
+
 pub fn view_vector(l: Look) -> [f64; 3] {
     let (y, p) = ((l.yaw as f64).to_radians(), (l.pitch as f64).to_radians());
     [-y.sin() * p.cos(), -p.sin(), y.cos() * p.cos()]
@@ -80,11 +93,21 @@ pub fn box_distance(p: [f64; 3], min: [f64; 3], max: [f64; 3]) -> f64 {
 }
 
 pub fn ray_hits(origin: [f64; 3], dir: [f64; 3], len: f64, min: [f64; 3], max: [f64; 3]) -> bool {
+    ray_entry(origin, dir, len, min, max).is_some()
+}
+
+pub fn ray_entry(
+    origin: [f64; 3],
+    dir: [f64; 3],
+    len: f64,
+    min: [f64; 3],
+    max: [f64; 3],
+) -> Option<f64> {
     let (mut near, mut far) = (0.0_f64, len);
     for i in 0..3 {
         if dir[i].abs() < 1e-12 {
             if origin[i] < min[i] || origin[i] > max[i] {
-                return false;
+                return None;
             }
             continue;
         }
@@ -92,10 +115,10 @@ pub fn ray_hits(origin: [f64; 3], dir: [f64; 3], len: f64, min: [f64; 3], max: [
         near = near.max(a.min(b));
         far = far.min(a.max(b));
         if near > far {
-            return false;
+            return None;
         }
     }
-    true
+    Some(near)
 }
 
 #[cfg(test)]

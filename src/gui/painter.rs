@@ -1076,6 +1076,22 @@ impl<'a> Painter<'a> {
         self.region_part(r, 0.0, 0.0, r.w as f32, r.h as f32, x, y, w, h, [1.0; 4]);
     }
 
+    #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+    pub fn region_tinted(&mut self, r: Region, x: f32, y: f32, w: f32, h: f32, argb: u32) {
+        self.region_part(
+            r,
+            0.0,
+            0.0,
+            r.w as f32,
+            r.h as f32,
+            x,
+            y,
+            w,
+            h,
+            unpack(argb),
+        );
+    }
+
     pub fn slot_highlight_back(&mut self, x: f32, y: f32) {
         self.sprite(
             "container/slot_highlight_back",

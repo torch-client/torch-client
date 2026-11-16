@@ -164,7 +164,6 @@ pub fn sound_name(event: SoundEvent) -> &'static str {
     event.to_str().trim_start_matches("minecraft:")
 }
 
-#[cfg_attr(not(any(feature = "audio", lua_mods)), allow(dead_code))]
 pub(crate) fn event_name(sound: &Holder<SoundEvent, CustomSound>) -> Cow<'_, str> {
     match sound {
         Holder::Reference(event) => sound_name(*event).into(),

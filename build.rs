@@ -9,10 +9,14 @@ fn main() {
 
     println!("cargo::rustc-check-cfg=cfg(resource_packs)");
     println!("cargo::rustc-check-cfg=cfg(explore_modrinth)");
+    println!("cargo::rustc-check-cfg=cfg(cem)");
     if std::env::var_os("CARGO_FEATURE_RESOURCEPACKS").is_some() && os != "android" {
         println!("cargo::rustc-cfg=resource_packs");
         if std::env::var_os("CARGO_FEATURE_EXPLORE_MODRINTH").is_some() {
             println!("cargo::rustc-cfg=explore_modrinth");
+        }
+        if std::env::var_os("CARGO_FEATURE_CEM").is_some() {
+            println!("cargo::rustc-cfg=cem");
         }
     }
 

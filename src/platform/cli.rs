@@ -22,9 +22,17 @@ pub(crate) fn valid_username(name: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Dir,
-    Reset { scope: Scope, assume_yes: bool },
+    Reset {
+        scope: Scope,
+        assume_yes: bool,
+    },
     Env,
     Ping(String),
+    #[cfg(feature = "native_shaders")]
+    CheckShader {
+        path: String,
+        json: bool,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -135,6 +143,18 @@ ACTIONS
     directory this client reads and does not own.
 ";
 
+#[cfg(all(feature = "native_shaders", not(target_arch = "wasm32")))]
+const HELP_SHADER: &str = "
+SHADER PACKS
+        --check-shader <PATH>
+                            Check the native shader pack at PATH, a folder or a
+                            zip with pack.toml at its root, and print every
+                            problem as file:line:column. Exits 0 with no
+                            problems and 1 otherwise, before any window opens.
+        --json              With --check-shader, print the report as JSON,
+                            each module's composed WGSL included.
+";
+
 #[cfg(not(target_arch = "wasm32"))]
 const HELP_ADDRESSES: &str = "
 ADDRESSES
@@ -173,6 +193,10 @@ EXAMPLES
     torch-client --ping play.example.com
 ";
 
+#[cfg(all(feature = "native_shaders", not(target_arch = "wasm32")))]
+const EXAMPLES_SHADER: &str = "    torch-client --check-shader shaderpacks/native/deferred --json
+";
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn parse() -> Args {
     match parse_from(std::env::args().skip(1)) {
@@ -192,6 +216,8 @@ fn parse_from(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut access_token = None;
     let mut action: Option<Action> = None;
     let mut assume_yes = false;
+    #[cfg(feature = "native_shaders")]
+    let mut json = false;
     let mut positional = Vec::new();
     let mut args = args;
 
@@ -215,7 +241,12 @@ fn parse_from(args: impl Iterator<Item = String>) -> Result<Command, String> {
         };
         match arg.as_str() {
             "-h" | "--help" => {
-                print!("{HELP}{HELP_TOKEN}{HELP_ACTIONS}{HELP_ADDRESSES}{HELP_EAGLER}{EXAMPLES}");
+                print!("{HELP}{HELP_TOKEN}{HELP_ACTIONS}");
+                #[cfg(feature = "native_shaders")]
+                print!("{HELP_SHADER}");
+                print!("{HELP_ADDRESSES}{HELP_EAGLER}{EXAMPLES}");
+                #[cfg(feature = "native_shaders")]
+                print!("{EXAMPLES_SHADER}");
                 std::process::exit(0);
             }
             "-V" | "--version" => {
@@ -232,6 +263,16 @@ fn parse_from(args: impl Iterator<Item = String>) -> Result<Command, String> {
             "--env" | "--print-env" => set_action(&mut action, Action::Env)?,
             "--ping" => set_action(&mut action, Action::Ping(value("--ping")?))?,
             "-y" | "--yes" => assume_yes = true,
+            #[cfg(feature = "native_shaders")]
+            "--check-shader" => set_action(
+                &mut action,
+                Action::CheckShader {
+                    path: value("--check-shader")?,
+                    json: false,
+                },
+            )?,
+            #[cfg(feature = "native_shaders")]
+            "--json" => json = true,
             other if other.starts_with('-') && other != "-" => {
                 return Err(format!("Unknown option `{other}`."));
             }
@@ -271,6 +312,17 @@ fn parse_from(args: impl Iterator<Item = String>) -> Result<Command, String> {
         }
     } else if assume_yes {
         return Err("`--yes` only means something with a reset.".to_string());
+    }
+
+    #[cfg(feature = "native_shaders")]
+    {
+        match &mut action {
+            Some(Action::CheckShader { json: wanted, .. }) => *wanted = json,
+            _ if json => {
+                return Err("`--json` only means something with `--check-shader`.".to_string());
+            }
+            _ => {}
+        }
     }
 
     if let Some(username) = &username
@@ -327,6 +379,8 @@ fn name_of(action: &Action) -> &'static str {
         Action::Reset { scope, .. } => scope.flag(),
         Action::Env => "--env",
         Action::Ping(_) => "--ping",
+        #[cfg(feature = "native_shaders")]
+        Action::CheckShader { .. } => "--check-shader",
     }
 }
 
@@ -343,6 +397,10 @@ fn run_action(action: Action) -> i32 {
         }
         Action::Reset { scope, assume_yes } => delete(scope, assume_yes),
         Action::Ping(address) => ping(&address),
+        #[cfg(feature = "native_shaders")]
+        Action::CheckShader { path, json } => {
+            crate::shaderpack::native::check::run_cli(&path, json)
+        }
     }
 }
 
@@ -872,6 +930,22 @@ mod tests {
         assert!(parse_from(["--reset", "--yes"].iter().map(|a| a.to_string())).is_ok());
         assert!(parse_from(["--dir", "--yes"].iter().map(|a| a.to_string())).is_err());
         assert!(parse_from(["-y", "play.example"].iter().map(|a| a.to_string())).is_err());
+    }
+
+    #[cfg(feature = "native_shaders")]
+    #[test]
+    fn check_shader_takes_a_path_and_json_belongs_to_it() {
+        let check = |json| {
+            Ok(Some(Action::CheckShader {
+                path: "pack".into(),
+                json,
+            }))
+        };
+        assert_eq!(action(&["--check-shader", "pack"]), check(false));
+        assert_eq!(action(&["--json", "--check-shader", "pack"]), check(true));
+        assert!(action(&["--json"]).is_err());
+        assert!(action(&["--check-shader"]).is_err());
+        assert!(action(&["--check-shader", "pack", "play.example"]).is_err());
     }
 
     #[test]

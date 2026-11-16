@@ -132,18 +132,18 @@ fn fall_damage(bot: &Client) -> f32 {
     };
     match landing(bot, feet) {
         Landing::Ground(drop) => fall_formula(fallen + drop),
-        Landing::Fluid => 0.0,
+        Landing::Fluid(_) => 0.0,
         Landing::None => f32::INFINITY,
     }
 }
 
-enum Landing {
+pub(super) enum Landing {
     Ground(f64),
-    Fluid,
+    Fluid(f64),
     None,
 }
 
-fn landing(bot: &Client, feet: AzVec3) -> Landing {
+pub(super) fn landing(bot: &Client, feet: AzVec3) -> Landing {
     let Ok(world) = bot.world() else {
         return Landing::None;
     };
@@ -170,7 +170,7 @@ fn landing(bot: &Client, feet: AzVec3) -> Landing {
         .get_block_state(hit.block_pos)
         .is_some_and(|st| FluidState::from(st).kind != FluidKind::Empty);
     if fluid {
-        Landing::Fluid
+        Landing::Fluid(feet.y - hit.location.y)
     } else {
         Landing::Ground(feet.y - hit.location.y)
     }

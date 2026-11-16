@@ -396,6 +396,14 @@ fn drive(
 }
 
 pub(crate) fn tick(bot: &Client, end_clock: i64) {
+    let mut splashes = Vec::new();
+    tick_sounds(bot, end_clock, &mut splashes);
+    if let Some(shared) = crate::SHARED.get() {
+        crate::play::emit::queue(shared, splashes, crate::session::ParticleEmit::Level);
+    }
+}
+
+fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::LevelParticle>) {
     use EntityKind as K;
     let Ok(origin) = bot.position() else { return };
     let world_name = {
@@ -794,6 +802,14 @@ pub(crate) fn tick(bot: &Client, end_clock: i64) {
                                 1.0,
                                 pitch,
                             );
+                            let x = at[0] + f64::from(rng.next_f32());
+                            let y = at[1] + 0.7;
+                            let z = at[2] + f64::from(rng.next_f32());
+                            splashes.push(crate::session::LevelParticle::add(
+                                azalea::entity::particle::Particle::Splash,
+                                [x, y, z],
+                                [0.0; 3],
+                            ));
                         }
                     }
                 }

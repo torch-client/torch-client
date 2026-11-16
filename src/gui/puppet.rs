@@ -195,6 +195,8 @@ fn model(slim: bool) -> [Part; 6] {
             mirror: false,
             tex_scale: [1.0, 1.0],
             faces: geom::Faces::ALL,
+            #[cfg(cem)]
+            cem: None,
         };
         let (part, sheet) = if i < 6 {
             (i, Sheet::Skin)

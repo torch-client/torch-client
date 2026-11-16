@@ -95,6 +95,10 @@ impl Interpolation {
     }
 
     pub fn interpolate(&mut self, entity: Target<'_>) {
+        self.interpolate_with(entity, |_| true);
+    }
+
+    pub fn interpolate_with(&mut self, entity: Target<'_>, fits: impl FnOnce([f64; 3]) -> bool) {
         if !self.has_active_interpolation() {
             self.cancel();
             return;
@@ -108,11 +112,14 @@ impl Interpolation {
                 entity.pos[1] - previous[1],
                 entity.pos[2] - previous[2],
             ];
-            self.position = [
+            let shifted = [
                 self.position[0] + delta[0],
                 self.position[1] + delta[1],
                 self.position[2] + delta[2],
             ];
+            if fits(shifted) {
+                self.position = shifted;
+            }
         }
 
         if let Some((previous_x, previous_y)) = self.previous_tick_rot {

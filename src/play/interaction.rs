@@ -100,7 +100,19 @@ pub(crate) fn reset_session_state() {
 pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
     let hit = block_hit(bot);
 
-    let target = hit
+    let freecam = freecam_click(bot);
+    let hand_hit = match &freecam {
+        FreecamClick::At(HitResult::Block(h)) => Some(h.clone()),
+        FreecamClick::At(HitResult::Entity(_)) | FreecamClick::Nothing => None,
+        FreecamClick::Attached | FreecamClick::Swallow => hit.clone(),
+    };
+    let crosshair = match &freecam {
+        FreecamClick::At(h) => Some(h.clone()),
+        FreecamClick::Nothing => None,
+        FreecamClick::Attached | FreecamClick::Swallow => bot.hit_result().ok(),
+    };
+
+    let target = hand_hit
         .as_ref()
         .filter(|h| within_border(bot, h.block_pos))
         .and_then(|h| {
@@ -125,8 +137,8 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
 
     let (local, mining_particle) = mining_overlay(bot);
     let breaking = breaking_overlays(bot, local, &remote);
-    let targeted_entity = living_target(bot);
-    let crosshair_entity = picked_entity(bot);
+    let targeted_entity = living_target(bot, crosshair.as_ref());
+    let crosshair_entity = picked_entity(bot, crosshair.as_ref());
 
     let (attack_held, attack_clicked, use_held, use_clicked, pick, attack_strength) = {
         let mut s = shared.lock().unwrap();
@@ -160,37 +172,43 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
 
     let (attack_held, attack_clicked, use_held, use_clicked) =
         crate::modules::auto_mine::pick_gate(attack_held, attack_clicked, use_held, use_clicked);
-    let freecam = if !crate::modules::freecam::active() {
-        FreecamClick::Attached
-    } else if attack_held || attack_clicked || use_held || use_clicked {
-        freecam_click(bot)
-    } else {
-        FreecamClick::Swallow
-    };
+    let (use_held, use_clicked) =
+        crate::modules::safe_anchor::use_gate(bot, use_held, use_clicked, hand_hit.as_ref());
     let (attack_held, attack_clicked, use_held, use_clicked) = match freecam {
-        FreecamClick::Swallow => (false, false, false, false),
-        _ => (attack_held, attack_clicked, use_held, use_clicked),
+        FreecamClick::Swallow | FreecamClick::Nothing => (false, false, false, false),
+        FreecamClick::Attached | FreecamClick::At(_) => {
+            (attack_held, attack_clicked, use_held, use_clicked)
+        }
     };
-    let forced_face = matches!(freecam, FreecamClick::At(_));
-    let hand_hit = match &freecam {
-        FreecamClick::At(h) => Some(h.clone()),
-        _ => hit.clone(),
-    };
+    let forced_face = matches!(freecam, FreecamClick::At(HitResult::Block(_)));
 
     if let Some(include_data) = pick {
         apply_pick_block(bot, include_data);
     }
     let hands_busy = crate::play::riding::hands_busy();
     let attack_clicked = attack_clicked && !hands_busy;
+    let publishes = crate::renderer::intent::publishes();
+    let confirmed = SEEN_PUBLISHES.swap(publishes, Ordering::Relaxed) != publishes;
+    let (use_held, use_clicked) = if crate::modules::crystal_macro::tick(
+        bot,
+        shared,
+        crosshair.as_ref(),
+        use_held && confirmed,
+        hands_busy,
+    ) {
+        (false, false)
+    } else {
+        (use_held, use_clicked)
+    };
     #[cfg(feature = "mobile_ui")]
     let attack_entity = attack_clicked || (attack_held && attack_strength >= 1.0 && !hands_busy);
     #[cfg(not(feature = "mobile_ui"))]
     let attack_entity = attack_clicked;
-    let attack_entity = attack_entity && !forced_face;
-
     crate::modules::esp::tick(bot, shared);
 
     crate::modules::seed_cracker::tick(bot, shared);
+
+    crate::modules::basefinder::tick(bot, shared);
 
     crate::modules::aim_assist::tick(bot, shared);
 
@@ -201,10 +219,14 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
     crate::modules::auto_totem::tick(bot, shared);
 
     let attack_held = crate::modules::auto_mine::tick(bot, shared, hit.as_ref()) || attack_held;
+    let attack_held = crate::modules::pathfinder::attack(shared, hit.as_ref()) || attack_held;
+    let attack_held = crate::modules::ore_miner::tick(bot, shared, hit.as_ref()) || attack_held;
 
     crate::modules::auto_mace::tick(bot, shared);
 
     crate::modules::crystal_aura::tick(bot, shared);
+
+    crate::modules::safe_anchor::tick(bot, shared);
 
     crate::modules::scaffold::tick(bot, shared);
 
@@ -212,7 +234,16 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
 
     let attack_entity = attack_entity
         || (crate::modules::triggerbot::enabled() && {
-            let kind = crosshair_kind(bot);
+            let mut kind = crosshair_kind(bot, crosshair.as_ref());
+            if kind == Some(azalea_registry::builtin::EntityKind::Player)
+                && crate::modules::friends::guarding()
+                && let Some(HitResult::Entity(hit)) = crosshair.as_ref()
+                && bot
+                    .entity_component::<azalea::player::GameProfileComponent>(hit.entity)
+                    .is_ok_and(|p| crate::modules::friends::is_friend(&p.0.name))
+            {
+                kind = None;
+            }
             let (strength, weapon) = {
                 let s = shared.lock().unwrap();
                 let weapon = s
@@ -232,8 +263,8 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
         .is_ok_and(|gm| *gm == GameMode::Spectator)
     {
         if attack_clicked {
-            let target = match bot.hit_result() {
-                Ok(HitResult::Entity(e)) => bot
+            let target = match &crosshair {
+                Some(HitResult::Entity(e)) => bot
                     .entity_component::<azalea_core::entity_id::MinecraftEntityId>(e.entity)
                     .map(|id| *id)
                     .ok(),
@@ -253,7 +284,7 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
             attack_clicked,
             forced_face,
         );
-        apply_place(bot, shared, use_held, use_clicked, hands_busy);
+        apply_place(bot, shared, use_held, use_clicked, hands_busy, confirmed);
         publish_item_in_use(bot);
         return;
     }
@@ -279,12 +310,12 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
 
     let attacked_entity = !piercing
         && attack_entity
-        && match bot.hit_result() {
+        && match &crosshair {
             #[cfg(lua_mods)]
-            Ok(HitResult::Entity(e)) if crate::modules::script::attack(bot, shared, e.entity) => {
+            Some(HitResult::Entity(e)) if crate::modules::script::attack(bot, shared, e.entity) => {
                 true
             }
-            Ok(HitResult::Entity(e)) => {
+            Some(HitResult::Entity(e)) => {
                 bot.attack(e.entity);
                 crate::client::tick::swing_local_player(false, shared);
                 true
@@ -292,7 +323,7 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
             _ => false,
         };
 
-    if !piercing && attack_clicked && !attacked_entity && hit.is_none() {
+    if !piercing && attack_clicked && !attacked_entity && hand_hit.is_none() {
         crate::client::tick::request_attack_ticker_reset();
     }
 
@@ -307,12 +338,10 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
         );
     }
     let restore = match &freecam {
-        FreecamClick::At(h) if use_held || use_clicked => {
-            swap_hit_result(bot, HitResult::Block(h.clone()))
-        }
+        FreecamClick::At(h) if use_held || use_clicked => swap_hit_result(bot, h.clone()),
         _ => None,
     };
-    apply_place(bot, shared, use_held, use_clicked, hands_busy);
+    apply_place(bot, shared, use_held, use_clicked, hands_busy, confirmed);
     if let Some(old) = restore {
         swap_hit_result(bot, old);
     }
@@ -444,37 +473,69 @@ fn mining_overlay(bot: &Client) -> (Option<BreakingBlock>, Option<ParticleSpawn>
 enum FreecamClick {
     Attached,
     Swallow,
-    At(BlockHitResult),
+    At(HitResult),
+    Nothing,
 }
 
 const FREECAM_PICK: f64 = 128.0;
 
 fn freecam_click(bot: &Client) -> FreecamClick {
-    if crate::modules::freecam::pause_clicks() || crate::modules::auto_mine::enabled() {
+    use crate::modules::freecam::{self, InputMode};
+
+    if !freecam::active() {
+        return FreecamClick::Attached;
+    }
+    if crate::modules::auto_mine::enabled()
+        || crate::modules::ore_miner::enabled()
+        || crate::modules::pathfinder::mining()
+    {
         return FreecamClick::Swallow;
     }
-    let Some((eye, dir)) = crate::modules::freecam::ray() else {
-        return FreecamClick::Attached;
-    };
+    match freecam::input_mode() {
+        InputMode::None => return FreecamClick::Swallow,
+        InputMode::Player => return FreecamClick::Attached,
+        InputMode::Camera => {}
+    }
     let (Ok(body), Ok(attrs)) = (
         bot.eye_position(),
         bot.component::<azalea::entity::Attributes>(),
     ) else {
-        return FreecamClick::Swallow;
+        return FreecamClick::Nothing;
     };
-    let range = attrs.block_interaction_range.calculate() + 1.0;
+    let block_range = attrs.block_interaction_range.calculate() + 1.0;
+    let entity_range = attrs.entity_interaction_range.calculate();
     drop(attrs);
     let held_item = main_hand_kind(bot);
-    let Some(hit) = crate::modules::freecam::far_hit(bot, eye, dir, FREECAM_PICK, held_item) else {
-        return FreecamClick::Swallow;
+    let Some(hit) = freecam::pick(bot, FREECAM_PICK, held_item) else {
+        return FreecamClick::Nothing;
     };
-    let p = hit.block_pos;
-    let gap = |e: f64, lo: i32| (f64::from(lo) - e).max(0.0).max(e - f64::from(lo) - 1.0);
-    let d2 = gap(body.x, p.x).powi(2) + gap(body.y, p.y).powi(2) + gap(body.z, p.z).powi(2);
-    if d2 >= range * range {
-        return FreecamClick::Swallow;
+    let d2 = |min: [f64; 3], max: [f64; 3]| {
+        let gap = |e: f64, lo: f64, hi: f64| (lo - e).max(0.0).max(e - hi);
+        gap(body.x, min[0], max[0]).powi(2)
+            + gap(body.y, min[1], max[1]).powi(2)
+            + gap(body.z, min[2], max[2]).powi(2)
+    };
+    let reachable = match &hit {
+        HitResult::Block(b) if !b.miss => {
+            let p = b.block_pos;
+            let lo = [f64::from(p.x), f64::from(p.y), f64::from(p.z)];
+            d2(lo, lo.map(|v| v + 1.0)) < block_range * block_range
+        }
+        HitResult::Block(_) => false,
+        HitResult::Entity(e) => bot
+            .entity_component::<azalea::physics::collision::entity_collisions::LastBoundingBox>(
+                e.entity,
+            )
+            .is_ok_and(|b| {
+                let (min, max) = (b.0.min, b.0.max);
+                d2([min.x, min.y, min.z], [max.x, max.y, max.z]) < entity_range * entity_range
+            }),
+    };
+    if reachable {
+        FreecamClick::At(hit)
+    } else {
+        FreecamClick::Nothing
     }
-    FreecamClick::At(hit)
 }
 
 fn swap_hit_result(bot: &Client, with: HitResult) -> Option<HitResult> {
@@ -620,7 +681,14 @@ fn place_step(
     (swing, RIGHT_CLICK_DELAY)
 }
 
-fn apply_place(bot: &Client, shared: &SharedMutex, held: bool, clicked: bool, hands_busy: bool) {
+fn apply_place(
+    bot: &Client,
+    shared: &SharedMutex,
+    held: bool,
+    clicked: bool,
+    hands_busy: bool,
+    confirmed: bool,
+) {
     let game_mode = bot
         .component::<GameMode>()
         .map(|gm| *gm)
@@ -639,8 +707,6 @@ fn apply_place(bot: &Client, shared: &SharedMutex, held: bool, clicked: bool, ha
     if was_using && !held {
         release_using_item(bot);
     }
-    let publishes = crate::renderer::intent::publishes();
-    let confirmed = SEEN_PUBLISHES.swap(publishes, Ordering::Relaxed) != publishes;
     let mut swung = InteractionHand::Main;
     let (swing, delay) = place_step(
         game_mode,
@@ -819,14 +885,28 @@ fn interact_entity(
     hand: InteractionHand,
     held: Option<ItemKind>,
 ) -> EntityUse {
-    use azalea::interact::EntityInteractEvent;
+    use azalea_protocol::packets::game::ServerboundInteract;
 
-    bot.ecs.write().trigger(EntityInteractEvent {
-        client: bot.entity,
-        target: hit.entity,
-        location: Some(hit.location),
-        hand: hand.packet(),
-    });
+    let target = bot
+        .entity_component::<azalea_core::entity_id::MinecraftEntityId>(hit.entity)
+        .ok();
+    let at = bot
+        .entity_component::<azalea::entity::Position>(hit.entity)
+        .ok();
+    let sneak = bot
+        .component::<azalea::physics::client_movement::ClientMovementState>()
+        .is_ok_and(|m| m.trying_to_crouch);
+    if let (Some(entity_id), Some(at)) = (target, at) {
+        crate::client::outbox::send(
+            bot,
+            ServerboundInteract {
+                entity_id: *entity_id,
+                hand: hand.packet(),
+                location: azalea_core::delta::LpVec3::from(hit.location - **at),
+                using_secondary_action: sneak,
+            },
+        );
+    }
 
     if click.spectator {
         return EntityUse::Pass;
@@ -845,7 +925,7 @@ fn interact_entity(
 struct EntityTarget {
     kind: azalea_registry::builtin::EntityKind,
     has_riders: bool,
-    hull_under_water: bool,
+    out_of_control_ticks: Option<f32>,
 }
 
 fn entity_target(bot: &Client, entity: azalea::ecs::entity::Entity) -> Option<EntityTarget> {
@@ -866,15 +946,24 @@ fn entity_target(bot: &Client, entity: azalea::ecs::entity::Entity) -> Option<En
         .unwrap()
         .get(&id)
         .is_some_and(|riders| !riders.is_empty());
-    let hull_under_water = crate::play::riding::Hull::of(kind).is_some() && {
-        let hull = EntityDimensions::from(kind).make_bounding_box(pos);
-        bot.world()
-            .is_ok_and(|world| crate::play::riding::hull_under_water(&world.read(), &hull))
-    };
+    let counted = crate::client::tracking::entity_anims()
+        .lock()
+        .unwrap()
+        .get(&id)
+        .filter(|a| a.kind == kind)
+        .map(|a| a.out_of_control_ticks());
+    let out_of_control_ticks = counted.or_else(|| {
+        let under_water = crate::play::riding::Hull::of(kind).is_some() && {
+            let hull = EntityDimensions::from(kind).make_bounding_box(pos);
+            bot.world()
+                .is_ok_and(|world| crate::play::riding::hull_under_water(&world.read(), &hull))
+        };
+        (!under_water).then_some(0.0)
+    });
     Some(EntityTarget {
         kind,
         has_riders,
-        hull_under_water,
+        out_of_control_ticks,
     })
 }
 
@@ -899,8 +988,10 @@ fn entity_use(target: EntityTarget, secondary_use: bool, held: Option<ItemKind>)
         return EntityUse::Pass;
     }
     if boat {
-        if target.hull_under_water {
-            return EntityUse::Unknown;
+        match target.out_of_control_ticks {
+            None => return EntityUse::Unknown,
+            Some(ticks) if ticks >= 60.0 => return EntityUse::Pass,
+            Some(_) => {}
         }
     } else if target.has_riders {
         return EntityUse::Pass;
@@ -1226,9 +1317,7 @@ fn instant_use(bot: &Client, hand: InteractionHand, stack: &HandStack) -> Used {
             start_using_item(stack.kind, 140, hand, None);
             CONSUME
         }
-        _ if id.ends_with("_boat") || id.ends_with("_raft") => {
-            pass_unless(pov_hit(bot, Fluid::Any).is_some(), SUCCESS)
-        }
+        _ if id.ends_with("_boat") || id.ends_with("_raft") => pass_unless(boat_fits(bot), SUCCESS),
         _ if id.ends_with("_spawn_egg") => {
             pass_unless(pov_hit(bot, Fluid::SourceOnly).is_some(), SUCCESS)
         }
@@ -1241,6 +1330,105 @@ fn instant_use(bot: &Client, hand: InteractionHand, stack: &HandStack) -> Used {
 fn pov_hit(bot: &Client, fluid: azalea::physics::clip::FluidPickType) -> Option<BlockState> {
     let hit = pov_block_hit(bot, fluid)?;
     bot.world().ok()?.read().get_block_state(hit.block_pos)
+}
+
+fn boat_fits(bot: &Client) -> bool {
+    use azalea::ecs::prelude::{Query, Res};
+    use azalea::ecs::system::SystemState;
+    use azalea::entity::dimensions::EntityDimensions;
+    use azalea::entity::{EntityKindComponent, LookDirection, Physics, view_vector};
+    use azalea::interact::pick::{MaybePickableEntityQuery, PickBoxQuery};
+    use azalea::physics::collision::BorderSource;
+    use azalea::physics::collision::Shapes;
+    use azalea::physics::collision::entity_collisions::{
+        AabbQuery, VehicleCollidableQuery, get_entities, get_entity_collisions_matching,
+    };
+    use azalea::physics::collision::world_collisions::{
+        PowderSnowCollision, get_block_collisions_for,
+    };
+    use azalea::world::{WorldBorder, WorldName, Worlds};
+    use azalea_registry::builtin::EntityKind;
+
+    const RANGE: f64 = 5.0;
+
+    let Some(hit) = pov_block_hit(bot, azalea::physics::clip::FluidPickType::Any) else {
+        return false;
+    };
+    let Ok(eye) = bot.eye_position() else {
+        return false;
+    };
+    let mut ecs = bot.ecs.write();
+    let mut state = SystemState::<(
+        Query<(&WorldName, &Physics, &LookDirection, Option<&WorldBorder>)>,
+        Res<Worlds>,
+        AabbQuery,
+        MaybePickableEntityQuery,
+        PickBoxQuery,
+        VehicleCollidableQuery,
+    )>::new(&mut ecs);
+    let Ok((local, worlds, aabb_query, pickable, pick_boxes, collidable)) = state.get(&ecs) else {
+        return false;
+    };
+    let Ok((name, physics, look, border)) = local.get(bot.entity) else {
+        return false;
+    };
+    let Some(world) = worlds.get(name) else {
+        return false;
+    };
+    let world = world.read();
+
+    let search = physics
+        .bounding_box
+        .expand_towards(view_vector(*look) * RANGE)
+        .inflate_all(1.0);
+    let is_pickable = |e: azalea::ecs::entity::Entity| {
+        pickable
+            .get(e)
+            .is_ok_and(|(stand, arrow)| stand.is_none_or(|s| !s.0) && arrow.is_none_or(|a| !a.0))
+    };
+    let in_entity = get_entities(&world, Some(bot.entity), &search, &is_pickable, &aabb_query)
+        .into_iter()
+        .any(|(e, aabb)| {
+            let aabb = pick_boxes.get(e).map_or(aabb, |b| b.0);
+            let kind = ecs.get::<EntityKindComponent>(e).map(|k| **k);
+            let radius = match kind {
+                Some(EntityKind::Arrow | EntityKind::SpectralArrow | EntityKind::Trident) => {
+                    return false;
+                }
+                Some(
+                    EntityKind::Fireball
+                    | EntityKind::WindCharge
+                    | EntityKind::BreezeWindCharge
+                    | EntityKind::ShulkerBullet,
+                ) => 1.0,
+                _ => 0.0,
+            };
+            aabb.inflate_all(radius).contains(eye)
+        });
+    if in_entity {
+        return false;
+    }
+
+    let at = hit.location;
+    let boat = EntityDimensions::from(EntityKind::OakBoat).make_bounding_box(at);
+    let context = PowderSnowCollision {
+        entity_bottom: boat.min.y,
+        has_entity: true,
+        ..Default::default()
+    };
+    if get_block_collisions_for(&world, &boat, context)
+        .iter()
+        .any(|shape| !shape.is_empty())
+    {
+        return false;
+    }
+    let pushes = |e: azalea::ecs::entity::Entity| collidable.get(e).is_ok();
+    if !get_entity_collisions_matching(&world, &boat, None, &aabb_query, &pushes).is_empty() {
+        return false;
+    }
+    BorderSource::at(border, at.x, at.z)
+        .and_then(|b| b.collision(&boat))
+        .is_none_or(|wall| !Shapes::matches_anywhere(&wall, &(&boat).into(), |a, b| a && b))
 }
 
 fn main_hand_kind(bot: &Client) -> ItemKind {
@@ -1390,12 +1578,15 @@ fn complete_using_item(bot: &Client, shared: &SharedMutex) {
 }
 
 fn release_using_item(bot: &Client) {
-    bot.write_packet(ServerboundPlayerAction {
-        action: Action::ReleaseUseItem,
-        pos: BlockPos::new(0, 0, 0),
-        direction: Direction::Down,
-        seq: 0,
-    });
+    crate::client::outbox::send(
+        bot,
+        ServerboundPlayerAction {
+            action: Action::ReleaseUseItem,
+            pos: BlockPos::new(0, 0, 0),
+            direction: Direction::Down,
+            seq: 0,
+        },
+    );
     let (item, remaining, hand) = {
         let use_item = USE_ITEM.lock().unwrap();
         (use_item.item, use_item.remaining, use_item.hand)
@@ -1547,11 +1738,14 @@ fn send_use_item_on(bot: &Client, hit: &BlockHitResult, interacted: bool, hand: 
     if interacted {
         predict_open_toggle(bot, hit);
     }
-    bot.write_packet(ServerboundUseItemOn {
-        hand: hand.packet(),
-        block_hit: hit.into(),
-        seq,
-    });
+    crate::client::outbox::send(
+        bot,
+        ServerboundUseItemOn {
+            hand: hand.packet(),
+            block_hit: hit.into(),
+            seq,
+        },
+    );
 }
 
 #[cfg(lua_mods)]
@@ -1577,24 +1771,30 @@ pub(crate) fn place_at(
         .unwrap_or_default();
     let press = sneak && !input.shift;
     if press {
-        bot.write_packet(ServerboundPlayerInput {
-            shift: true,
-            ..input.clone()
-        });
+        crate::client::outbox::send(
+            bot,
+            ServerboundPlayerInput {
+                shift: true,
+                ..input.clone()
+            },
+        );
     }
     if let Some(seq) = next_sequence(bot) {
-        bot.write_packet(ServerboundUseItemOn {
-            hand: if offhand {
-                InteractionHand::OffHand
-            } else {
-                InteractionHand::MainHand
+        crate::client::outbox::send(
+            bot,
+            ServerboundUseItemOn {
+                hand: if offhand {
+                    InteractionHand::OffHand
+                } else {
+                    InteractionHand::MainHand
+                },
+                block_hit: hit.into(),
+                seq,
             },
-            block_hit: hit.into(),
-            seq,
-        });
+        );
     }
     if press {
-        bot.write_packet(input);
+        crate::client::outbox::send(bot, input);
     }
 }
 
@@ -1663,9 +1863,12 @@ pub(crate) fn swing_hand(bot: &Client, shared: &SharedMutex, hand: InteractionHa
     use azalea_protocol::packets::game::s_swing::ServerboundSwing;
 
     crate::client::tick::swing_local_player(hand == InteractionHand::Off, shared);
-    bot.write_packet(ServerboundSwing {
-        hand: hand.packet(),
-    });
+    crate::client::outbox::send(
+        bot,
+        ServerboundSwing {
+            hand: hand.packet(),
+        },
+    );
 }
 
 fn item_used(shared: &SharedMutex, hand: InteractionHand) {
@@ -1848,12 +2051,16 @@ fn predict_place(bot: &Client, secondary_use: bool, hand: InteractionHand) -> bo
         return false;
     };
 
-    bot.write_packet(ServerboundUseItemOn {
-        hand: hand.packet(),
-        block_hit: (&predicted.hit).into(),
-        seq: predicted.seq,
-    });
+    crate::client::outbox::send(
+        bot,
+        ServerboundUseItemOn {
+            hand: hand.packet(),
+            block_hit: (&predicted.hit).into(),
+            seq: predicted.seq,
+        },
+    );
     crate::modules::scaffold::note_hand_place(predicted.pos);
+    crate::modules::safe_anchor::note_hand_place(bot, predicted.pos);
     true
 }
 
@@ -1876,11 +2083,14 @@ pub(crate) fn module_place(
     ) else {
         return false;
     };
-    bot.write_packet(ServerboundUseItemOn {
-        hand: main.packet(),
-        block_hit: (&predicted.hit).into(),
-        seq: predicted.seq,
-    });
+    crate::client::outbox::send(
+        bot,
+        ServerboundUseItemOn {
+            hand: main.packet(),
+            block_hit: (&predicted.hit).into(),
+            seq: predicted.seq,
+        },
+    );
     consume_held_item(bot, main);
     item_used(shared, main);
     swing_hand(bot, shared, main);
@@ -1907,7 +2117,7 @@ pub(crate) fn select_hotbar_slot(bot: &Client, slot: u8) {
         return;
     }
     bot.set_selected_hotbar_slot(slot);
-    bot.write_packet(ServerboundSetCarriedItem { slot: slot as u16 });
+    crate::client::outbox::send(bot, ServerboundSetCarriedItem { slot: slot as u16 });
     bot.ecs
         .write()
         .entity_mut(bot.entity)
@@ -1923,18 +2133,24 @@ fn predict_bucket_use(bot: &Client, shared: &SharedMutex, hand: InteractionHand)
     };
 
     if let Some((hit, seq)) = &predicted.use_on {
-        bot.write_packet(ServerboundUseItemOn {
-            hand: hand.packet(),
-            block_hit: hit.into(),
-            seq: *seq,
-        });
+        crate::client::outbox::send(
+            bot,
+            ServerboundUseItemOn {
+                hand: hand.packet(),
+                block_hit: hit.into(),
+                seq: *seq,
+            },
+        );
     }
-    bot.write_packet(ServerboundUseItem {
-        hand: hand.packet(),
-        seq: predicted.seq,
-        x_rot: predicted.x_rot,
-        y_rot: predicted.y_rot,
-    });
+    crate::client::outbox::send(
+        bot,
+        ServerboundUseItem {
+            hand: hand.packet(),
+            seq: predicted.seq,
+            x_rot: predicted.x_rot,
+            y_rot: predicted.y_rot,
+        },
+    );
     if predicted.evaporated {
         evaporate(shared, predicted.pos);
     }
@@ -1992,12 +2208,15 @@ fn send_use_item(bot: &Client, hand: InteractionHand) {
         return;
     };
 
-    bot.write_packet(ServerboundUseItem {
-        hand: hand.packet(),
-        seq,
-        x_rot,
-        y_rot,
-    });
+    crate::client::outbox::send(
+        bot,
+        ServerboundUseItem {
+            hand: hand.packet(),
+            seq,
+            x_rot,
+            y_rot,
+        },
+    );
 }
 
 enum UseKind {
@@ -2233,8 +2452,8 @@ fn predict_use(
     })
 }
 
-fn living_target(bot: &Client) -> bool {
-    let Ok(HitResult::Entity(hit)) = bot.hit_result() else {
+fn living_target(bot: &Client, crosshair: Option<&HitResult>) -> bool {
+    let Some(HitResult::Entity(hit)) = crosshair else {
         return false;
     };
     bot.entity_component::<azalea::entity::metadata::Health>(hit.entity)
@@ -2242,8 +2461,11 @@ fn living_target(bot: &Client) -> bool {
         .unwrap_or(false)
 }
 
-fn crosshair_kind(bot: &Client) -> Option<azalea_registry::builtin::EntityKind> {
-    let Ok(HitResult::Entity(hit)) = bot.hit_result() else {
+fn crosshair_kind(
+    bot: &Client,
+    crosshair: Option<&HitResult>,
+) -> Option<azalea_registry::builtin::EntityKind> {
+    let Some(HitResult::Entity(hit)) = crosshair else {
         return None;
     };
     if !bot
@@ -2257,8 +2479,8 @@ fn crosshair_kind(bot: &Client) -> Option<azalea_registry::builtin::EntityKind> 
         .map(|k| k.0)
 }
 
-fn picked_entity(bot: &Client) -> Option<i32> {
-    let Ok(HitResult::Entity(hit)) = bot.hit_result() else {
+fn picked_entity(bot: &Client, crosshair: Option<&HitResult>) -> Option<i32> {
+    let Some(HitResult::Entity(hit)) = crosshair else {
         return None;
     };
     bot.entity_component::<azalea_core::entity_id::MinecraftEntityId>(hit.entity)
@@ -2305,7 +2527,7 @@ mod tests {
         EntityTarget {
             kind,
             has_riders: false,
-            hull_under_water: false,
+            out_of_control_ticks: Some(0.0),
         }
     }
 
@@ -2346,10 +2568,15 @@ mod tests {
         );
 
         let sunk = EntityTarget {
-            hull_under_water: true,
+            out_of_control_ticks: None,
             ..target(EntityKind::OakBoat)
         };
         assert_eq!(entity_use(sunk, false, None), EntityUse::Unknown);
+        let adrift = EntityTarget {
+            out_of_control_ticks: Some(60.0),
+            ..target(EntityKind::OakBoat)
+        };
+        assert_eq!(entity_use(adrift, false, None), EntityUse::Pass);
         assert_eq!(
             entity_use(target(EntityKind::OakBoat), false, Some(ItemKind::Lead)),
             EntityUse::Unknown

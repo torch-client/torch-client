@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering::Relaxed};
 
-use azalea_core::position::ChunkPos;
+use azalea_core::position::{BlockPos, ChunkPos};
 
 use super::chat_math::say;
 use super::esp::scan::{
@@ -39,9 +39,9 @@ static SERVER_HASH: AtomicI64 = AtomicI64::new(0);
 static CHUNK_ARRIVED: AtomicBool = AtomicBool::new(false);
 static CHECK: AtomicBool = AtomicBool::new(false);
 
-static GROUPS: [&str; 1] = ["Ores"];
+pub(in crate::modules) static GROUPS: [&str; 1] = ["Ores"];
 
-fn build_ores() -> Built {
+pub(in crate::modules) fn build_ores() -> Built {
     let entries = Kind::ALL
         .iter()
         .map(|k| Entry {
@@ -319,6 +319,7 @@ pub fn append(
                     lines,
                     sides,
                     range2: range2 as u32,
+                    exposed: false,
                 };
                 slots.iter().position(|s| *s == slot).unwrap_or_else(|| {
                     slots.push(slot);
@@ -343,6 +344,30 @@ pub fn append(
             }
         }
     });
+}
+
+pub(in crate::modules) fn predicted(
+    mask: u16,
+    centre: BlockPos,
+    range: i32,
+    out: &mut Vec<BlockPos>,
+) -> bool {
+    STATE.with_borrow(|st| {
+        if st.seed.is_none() {
+            return false;
+        }
+        let range2 = i64::from(range) * i64::from(range);
+        for f in st.chunks.values().flatten() {
+            if mask >> f.slot & 1 == 0 {
+                continue;
+            }
+            let d = [f.x - centre.x, f.y - centre.y, f.z - centre.z].map(i64::from);
+            if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= range2 {
+                out.push(BlockPos::new(f.x, f.y, f.z));
+            }
+        }
+        true
+    })
 }
 
 fn check(bot: &azalea::Client, shared: &SharedMutex, st: &State) {

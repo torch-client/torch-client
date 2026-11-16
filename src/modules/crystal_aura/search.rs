@@ -8,13 +8,13 @@ use azalea_registry::builtin::{BlockKind, EntityKind};
 use azalea_world::World;
 
 use super::Me;
-use crate::modules::sent::{Look, box_distance, view_vector};
+use crate::modules::sent::{Look, box_distance, ray_entry, view_vector};
 use crate::util::combat::{self, CRYSTAL_POWER, Defense, seen_percent};
 
 const FACE_MIN: f32 = 1.5;
 
 #[derive(Clone, Copy)]
-pub(super) struct Body {
+pub(in crate::modules) struct Body {
     pub feet: [f64; 3],
     pub min: [f64; 3],
     pub max: [f64; 3],
@@ -97,6 +97,7 @@ impl Scene {
             };
             if !crate::modules::entities::kind_enabled(e.kind)
                 || distance(body.feet, me.body.feet) > rules.target_range
+                || e.protected()
             {
                 return;
             }
@@ -189,7 +190,15 @@ impl Scene {
             if skip(c.id) || box_distance(me.eye, c.body.min, c.body.max) > reach {
                 continue;
             }
-            let aim = aim_into(me.eye, c.body.min, c.body.max);
+            let inside = (0..3).all(|i| me.eye[i] >= c.body.min[i] && me.eye[i] <= c.body.max[i]);
+            let aim = if inside {
+                None
+            } else {
+                match aim_in_reach(me.eye, c.body.min, c.body.max, reach) {
+                    Some(p) => Some(p),
+                    None => continue,
+                }
+            };
             if !walls && aim.is_some_and(|p| blocked(w, me.eye, p)) {
                 continue;
             }
@@ -208,6 +217,7 @@ impl Scene {
         rules: &Rules,
         reach: f64,
         walls: bool,
+        break_reach: Option<f64>,
         gone: impl Fn(i32) -> bool,
     ) -> Option<(BlockPos, [f64; 3], f32)> {
         let r = reach.ceil() as i32 + 1;
@@ -242,6 +252,11 @@ impl Scene {
                         continue;
                     }
                     if self.obstructed(me, base, &gone) {
+                        continue;
+                    }
+                    if let Some(hit) = break_reach
+                        && !can_hit(me.eye, crystal_box(base), hit)
+                    {
                         continue;
                     }
                     let aim = if walls {
@@ -294,6 +309,26 @@ pub(super) fn click_on(
         .then_some(hit)
 }
 
+pub(super) fn sees_box(
+    w: &World,
+    eye: [f64; 3],
+    look: Look,
+    reach: f64,
+    min: [f64; 3],
+    max: [f64; 3],
+) -> bool {
+    let d = view_vector(look);
+    let Some(t) = ray_entry(eye, d, reach, min, max) else {
+        return false;
+    };
+    t <= 0.0
+        || !blocked(
+            w,
+            eye,
+            [eye[0] + d[0] * t, eye[1] + d[1] * t, eye[2] + d[2] * t],
+        )
+}
+
 pub(super) fn top_click(base: BlockPos) -> BlockHitResult {
     BlockHitResult {
         location: Vec3::new(
@@ -325,19 +360,45 @@ fn face_point(w: &World, eye: [f64; 3], base: BlockPos, reach: f64) -> Option<[f
     })
 }
 
-fn aim_into(eye: [f64; 3], min: [f64; 3], max: [f64; 3]) -> Option<[f64; 3]> {
-    if (0..3).all(|i| eye[i] >= min[i] && eye[i] <= max[i]) {
-        return None;
-    }
+fn crystal_box(base: BlockPos) -> ([f64; 3], [f64; 3]) {
+    let (x, y, z) = (
+        base.x as f64 + 0.5,
+        base.y as f64 + 1.0,
+        base.z as f64 + 0.5,
+    );
+    ([x - 1.0, y, z - 1.0], [x + 1.0, y + 2.0, z + 1.0])
+}
+
+fn can_hit(eye: [f64; 3], (min, max): ([f64; 3], [f64; 3]), reach: f64) -> bool {
+    (0..3).all(|i| eye[i] >= min[i] && eye[i] <= max[i])
+        || aim_in_reach(eye, min, max, reach).is_some()
+}
+
+const AIM_DEPTHS: [f64; 3] = [0.5, 0.25, 0.1];
+const AIM_SLACK: f64 = 0.05;
+
+fn aim_in_reach(eye: [f64; 3], min: [f64; 3], max: [f64; 3], reach: f64) -> Option<[f64; 3]> {
+    AIM_DEPTHS
+        .iter()
+        .map(|&depth| aim_into(eye, min, max, depth))
+        .find(|p| {
+            let d = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let dir = [d[0] / len, d[1] / len, d[2] / len];
+            ray_entry(eye, dir, reach, min, max).is_some_and(|t| t <= reach - AIM_SLACK)
+        })
+}
+
+fn aim_into(eye: [f64; 3], min: [f64; 3], max: [f64; 3], depth: f64) -> [f64; 3] {
     let core = [
         (min[0] + max[0]) * 0.5,
         min[1] + (max[1] - min[1]) * 0.4,
         (min[2] + max[2]) * 0.5,
     ];
-    Some(std::array::from_fn(|i| {
+    std::array::from_fn(|i| {
         let near = eye[i].clamp(min[i], max[i]);
-        near + (core[i] - near) * 0.1
-    }))
+        near + (core[i] - near) * depth
+    })
 }
 
 fn blocked(w: &World, eye: [f64; 3], to: [f64; 3]) -> bool {
@@ -368,10 +429,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_aim_point_is_inside_the_box_and_none_from_inside() {
+    fn the_aim_point_is_inside_the_box() {
         let (min, max) = ([0.0, 65.0, 0.0], [2.0, 67.0, 2.0]);
-        assert!(aim_into([1.0, 66.0, 1.0], min, max).is_none());
-        let p = aim_into([5.0, 70.0, 1.0], min, max).unwrap();
+        let p = aim_in_reach([5.0, 70.0, 1.0], min, max, 8.0).unwrap();
         assert!((0..3).all(|i| p[i] > min[i] && p[i] < max[i]), "{p:?}");
+    }
+
+    #[test]
+    fn a_box_in_reach_only_at_its_edge_is_aimed_shallow_or_skipped() {
+        let (min, max) = ([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+        assert!(aim_in_reach([5.0, 1.0, 1.0], min, max, 3.0).is_none());
+        let eye = [4.68, 3.0, 1.0];
+        let p = aim_in_reach(eye, min, max, 3.0).unwrap();
+        assert!(p != aim_into(eye, min, max, 0.5), "{p:?}");
     }
 }

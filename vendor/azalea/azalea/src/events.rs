@@ -3,7 +3,7 @@ use std::sync::Arc;
 use azalea_chat::FormattedText;
 use azalea_client::join::ConnectionFailedEvent;
 use azalea_core::{entity_id::MinecraftEntityId, position::ChunkPos, tick::GameTick};
-use azalea_entity::{Dead, InLoadedChunk};
+use azalea_entity::{Dead, HasClientLoaded, InLoadedChunk};
 use azalea_protocol::{
     connect::ConnectionError, packets::game::c_player_combat_kill::ClientboundPlayerCombatKill,
 };
@@ -95,7 +95,13 @@ pub fn login_listener(
 pub struct SentSpawnEvent;
 #[allow(clippy::type_complexity)]
 pub fn spawn_listener(
-    query: Query<(Entity, &LocalPlayerEvents), (Added<InLoadedChunk>, Without<SentSpawnEvent>)>,
+    query: Query<
+        (Entity, &LocalPlayerEvents),
+        (
+            Or<(Added<InLoadedChunk>, Added<HasClientLoaded>)>,
+            Without<SentSpawnEvent>,
+        ),
+    >,
     mut commands: Commands,
 ) {
     for (entity, local_player_events) in &query {
@@ -214,10 +220,7 @@ pub fn receive_chunk_listener(
 ) {
     for event in events.read() {
         if let Ok(local_player_events) = query.get(event.entity) {
-            let _ = local_player_events.send(Event::ReceiveChunk(ChunkPos::new(
-                event.packet.x,
-                event.packet.z,
-            )));
+            let _ = local_player_events.send(Event::ReceiveChunk(event.pos));
         }
     }
 }

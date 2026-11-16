@@ -235,6 +235,17 @@ impl Occupancy {
     }
 
     #[inline]
+    pub fn takes_fluid_overlay(&self, x: i32, y: i32, z: i32) -> bool {
+        match self.index(x, y, z) {
+            Some(i) => {
+                let group = self.cull_group[i];
+                group != 0 && group != crate::util::block_model::POWDER_SNOW_CULL_GROUP
+            }
+            None => false,
+        }
+    }
+
+    #[inline]
     pub fn fluid_amount(&self, x: i32, y: i32, z: i32) -> u8 {
         match self.index(x, y, z) {
             Some(i) => self.fluid[i] & !LAVA_BIT,

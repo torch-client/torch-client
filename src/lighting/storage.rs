@@ -91,7 +91,6 @@ impl LightStorage {
                 if !self.storing_light_for_section(sec) {
                     continue;
                 }
-                #[cfg(target_arch = "wasm32")]
                 if self.sections.get(&sec) == Some(&data) {
                     continue;
                 }

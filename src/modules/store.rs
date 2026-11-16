@@ -302,6 +302,10 @@ impl Store {
         self.text_at(h.0 as usize)
     }
 
+    pub fn key(&self, h: handle::Key) -> crate::gui::keybinds::Bound {
+        crate::gui::keybinds::Bound::from_bits(self.bits(h.0) as u32)
+    }
+
     pub fn value(&self, slot: usize) -> Option<Value> {
         #[cfg(lua_mods)]
         if slot >= SETTING_COUNT {

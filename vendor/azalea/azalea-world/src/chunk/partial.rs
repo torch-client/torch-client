@@ -1,42 +1,43 @@
 use std::{
     fmt::{self, Debug},
-    io::Cursor,
     sync::Arc,
 };
 
 use azalea_block::BlockState;
-use azalea_buf::BufReadError;
 use azalea_core::{
     heightmap_kind::HeightmapKind,
     position::{BlockPos, ChunkBlockPos, ChunkPos},
 };
+use nohash_hasher::IntMap;
 use parking_lot::RwLock;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
-use crate::{Chunk, chunk::storage::ChunkStorage};
+use crate::{
+    Chunk,
+    chunk::{ChunkDecodeFailure, storage::ChunkStorage},
+};
 
 pub struct PartialChunkStorage {
     view_center: ChunkPos,
     pub(crate) chunk_radius: u32,
-    view_range: u32,
-    chunks: Box<[Option<LoadedChunk>]>,
+    chunks: IntMap<ChunkPos, Arc<RwLock<Chunk>>>,
+    generation: u64,
 }
 
-#[derive(Clone)]
-struct LoadedChunk {
-    pos: ChunkPos,
-    chunk: Arc<RwLock<Chunk>>,
-}
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl PartialChunkStorage {
     pub fn new(chunk_radius: u32) -> Self {
-        let view_range = chunk_radius * 2 + 1;
         PartialChunkStorage {
             view_center: ChunkPos::new(0, 0),
             chunk_radius,
-            view_range,
-            chunks: vec![None; (view_range * view_range) as usize].into(),
+            chunks: IntMap::default(),
+            generation: NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn update_view_center(&mut self, view_center: ChunkPos) {
@@ -44,18 +45,7 @@ impl PartialChunkStorage {
     }
 
     pub fn update_view_radius(&mut self, chunk_radius: u32) {
-        if chunk_radius == self.chunk_radius {
-            return;
-        }
-        let mut resized = Self::new(chunk_radius);
-        resized.view_center = self.view_center;
-        for slot in self.chunks.iter().flatten() {
-            if resized.in_range(&slot.pos) {
-                let index = resized.index_from_chunk_pos(&slot.pos);
-                resized.chunks[index] = Some(slot.clone());
-            }
-        }
-        *self = resized;
+        self.chunk_radius = chunk_radius;
     }
 
     pub fn view_center(&self) -> ChunkPos {
@@ -63,35 +53,11 @@ impl PartialChunkStorage {
     }
 
     pub fn view_range(&self) -> u32 {
-        self.view_range
+        self.chunk_radius * 2 + 1
     }
 
     pub fn chunk_radius(&self) -> u32 {
         self.chunk_radius
-    }
-
-    pub fn index_from_chunk_pos(&self, chunk_pos: &ChunkPos) -> usize {
-        let view_range = self.view_range as i32;
-
-        let x = i32::rem_euclid(chunk_pos.x, view_range) * view_range;
-        let z = i32::rem_euclid(chunk_pos.z, view_range);
-        (x + z) as usize
-    }
-
-    pub fn chunk_pos_from_index(&self, index: usize) -> ChunkPos {
-        let view_range = self.view_range as i32;
-        let offset_x = index as i32 / view_range;
-        let offset_z = index as i32 % view_range;
-
-        fn in_window(center: i32, residue: i32, view_range: i32) -> i32 {
-            let start = center - (view_range - 1) / 2;
-            start + (residue - start).rem_euclid(view_range)
-        }
-
-        ChunkPos::new(
-            in_window(self.view_center.x, offset_x, view_range),
-            in_window(self.view_center.z, offset_z, view_range),
-        )
     }
 
     pub fn in_range(&self, chunk_pos: &ChunkPos) -> bool {
@@ -122,40 +88,26 @@ impl PartialChunkStorage {
     pub fn replace_with_packet_data(
         &mut self,
         pos: &ChunkPos,
-        data: &mut Cursor<&[u8]>,
+        data: &[u8],
         heightmaps: &[(HeightmapKind, Box<[u64]>)],
         chunk_storage: &mut ChunkStorage,
-    ) -> Result<(), BufReadError> {
+        biome_registry_len: usize,
+    ) -> Option<ChunkDecodeFailure> {
         debug!("Replacing chunk at {:?}", pos);
-        if !self.in_range(pos) {
-            warn!("Ignoring chunk since it's not in the view range: {pos:?}");
-            return Ok(());
-        }
-
-        let chunk = Chunk::read_with_dimension_height(
+        let (chunk, failure) = Chunk::read_lenient(
             data,
             chunk_storage.height(),
             chunk_storage.min_y(),
             heightmaps,
-        )?;
-
+            biome_registry_len,
+        );
         self.set(pos, Some(chunk), chunk_storage);
         trace!("Loaded chunk {pos:?}");
-
-        Ok(())
+        failure
     }
 
     pub fn limited_get(&self, pos: &ChunkPos) -> Option<&Arc<RwLock<Chunk>>> {
-        if !self.in_range(pos) {
-            warn!(
-                "Chunk at {:?} is not in the render distance (center: {:?}, {} chunks)",
-                pos, self.view_center, self.chunk_radius,
-            );
-            return None;
-        }
-
-        let slot = self.chunks[self.index_from_chunk_pos(pos)].as_ref()?;
-        (slot.pos == *pos).then_some(&slot.chunk)
+        self.chunks.get(pos)
     }
 
     pub fn set(&mut self, pos: &ChunkPos, chunk: Option<Chunk>, chunk_storage: &mut ChunkStorage) {
@@ -164,32 +116,42 @@ impl PartialChunkStorage {
     }
 
     pub fn limited_set(&mut self, pos: &ChunkPos, chunk: Option<Arc<RwLock<Chunk>>>) {
-        if !self.in_range(pos) {
-            return;
-        }
-        let index = self.index_from_chunk_pos(pos);
         match chunk {
-            Some(chunk) => self.chunks[index] = Some(LoadedChunk { pos: *pos, chunk }),
+            Some(chunk) => {
+                self.chunks.insert(*pos, chunk);
+            }
             None => {
-                if self.chunks[index].as_ref().is_some_and(|s| s.pos == *pos) {
-                    self.chunks[index] = None;
-                }
+                self.chunks.remove(pos);
             }
         }
     }
 
     pub fn forget_held(&mut self, pos: &ChunkPos) {
-        let index = self.index_from_chunk_pos(pos);
-        if self.chunks[index].as_ref().is_some_and(|s| s.pos == *pos) {
-            self.chunks[index] = None;
-        }
+        self.chunks.remove(pos);
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(ChunkPos) -> bool) -> Vec<ChunkPos> {
+        let mut dropped = Vec::new();
+        self.chunks.retain(|pos, _| {
+            let kept = keep(*pos);
+            if !kept {
+                dropped.push(*pos);
+            }
+            kept
+        });
+        dropped
+    }
+
+    pub fn len(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
     }
 
     pub fn loaded(&self) -> impl Iterator<Item = (ChunkPos, &Arc<RwLock<Chunk>>)> {
-        self.chunks
-            .iter()
-            .flatten()
-            .map(|slot| (slot.pos, &slot.chunk))
+        self.chunks.iter().map(|(pos, chunk)| (*pos, chunk))
     }
 }
 
@@ -198,7 +160,6 @@ impl Debug for PartialChunkStorage {
         f.debug_struct("PartialChunkStorage")
             .field("view_center", &self.view_center)
             .field("chunk_radius", &self.chunk_radius)
-            .field("view_range", &self.view_range)
             .field("chunks", &format_args!("{} items", self.chunks.len()))
             .finish()
     }
@@ -228,122 +189,42 @@ mod tests {
 
     use crate::{Chunk, chunk::partial::PartialChunkStorage};
 
-    #[test]
-    fn index_round_trips_over_the_whole_window() {
-        for center in [
-            ChunkPos::new(0, 0),
-            ChunkPos::new(-1, 7),
-            ChunkPos::new(23, -46),
-            ChunkPos::new(-8, -8),
-        ] {
-            let mut storage = PartialChunkStorage::new(5);
-            storage.update_view_center(center);
-            let radius = 5i32;
-            for x in center.x - radius..=center.x + radius {
-                for z in center.z - radius..=center.z + radius {
-                    let pos = ChunkPos::new(x, z);
-                    let index = storage.index_from_chunk_pos(&pos);
-                    assert_eq!(
-                        storage.chunk_pos_from_index(index),
-                        pos,
-                        "centre {center:?}"
-                    );
-                }
-            }
-        }
+    fn chunk() -> Option<Arc<RwLock<Chunk>>> {
+        Some(Arc::new(RwLock::new(Chunk::default())))
     }
 
     #[test]
-    fn a_slot_is_only_read_for_the_column_it_was_filled_for() {
-        let mut storage = PartialChunkStorage::new(5);
-        let view_range = storage.view_range() as i32;
-        storage.update_view_center(ChunkPos::new(0, 0));
-
-        let stored = ChunkPos::new(2, 0);
-        let chunk = Arc::new(RwLock::new(Chunk::default()));
-        storage.limited_set(&stored, Some(chunk));
-        assert!(storage.limited_get(&stored).is_some());
-
-        let aliased = ChunkPos::new(2 + view_range, 0);
-        assert_eq!(
-            storage.index_from_chunk_pos(&aliased),
-            storage.index_from_chunk_pos(&stored)
-        );
-        storage.update_view_center(aliased);
-        assert!(storage.limited_get(&aliased).is_none());
-    }
-
-    #[test]
-    fn forgetting_a_column_leaves_its_slots_neighbour_alone() {
-        let mut storage = PartialChunkStorage::new(5);
-        let view_range = storage.view_range() as i32;
-        let here = ChunkPos::new(0, 0);
-        let away = ChunkPos::new(view_range, 0);
-
-        storage.update_view_center(here);
-        storage.limited_set(&here, Some(Arc::new(RwLock::new(Chunk::default()))));
-        storage.limited_set(&away, None);
-        assert!(storage.limited_get(&here).is_some());
-
-        storage.limited_set(&here, None);
-        assert!(storage.limited_get(&here).is_none());
-    }
-
-    #[test]
-    fn widening_the_window_keeps_every_chunk_where_it_belongs() {
+    fn a_column_outside_the_window_is_kept() {
         let mut storage = PartialChunkStorage::new(5);
         storage.update_view_center(ChunkPos::new(0, 0));
-        for x in -5..=5 {
-            for z in -5..=5 {
-                storage.limited_set(
-                    &ChunkPos::new(x, z),
-                    Some(Arc::new(RwLock::new(Chunk::default()))),
-                );
-            }
-        }
-
-        storage.update_view_radius(11);
-        assert_eq!(storage.chunk_radius(), 11);
-        for x in -5..=5 {
-            for z in -5..=5 {
-                let pos = ChunkPos::new(x, z);
-                assert!(storage.limited_get(&pos).is_some(), "lost {pos:?}");
-            }
-        }
+        let far = ChunkPos::new(500, -300);
+        storage.limited_set(&far, chunk());
+        assert!(!storage.in_range(&far));
+        assert!(storage.limited_get(&far).is_some());
     }
 
     #[test]
-    fn narrowing_the_window_drops_only_what_no_longer_fits() {
+    fn moving_or_narrowing_the_window_drops_nothing() {
         let mut storage = PartialChunkStorage::new(8);
-        storage.update_view_center(ChunkPos::new(0, 0));
         for x in -8..=8 {
             for z in -8..=8 {
-                storage.limited_set(
-                    &ChunkPos::new(x, z),
-                    Some(Arc::new(RwLock::new(Chunk::default()))),
-                );
+                storage.limited_set(&ChunkPos::new(x, z), chunk());
             }
         }
-
+        storage.update_view_center(ChunkPos::new(100, 100));
         storage.update_view_radius(3);
-        for x in -3..=3 {
-            for z in -3..=3 {
-                let pos = ChunkPos::new(x, z);
-                assert!(storage.limited_get(&pos).is_some(), "lost {pos:?}");
-            }
-        }
-        assert_eq!(storage.loaded().count(), 7 * 7);
+        assert_eq!(storage.len(), 17 * 17);
     }
 
     #[test]
-    fn test_chunk_pos_from_index() {
-        let mut partial_chunk_storage = PartialChunkStorage::new(5);
-        partial_chunk_storage.update_view_center(ChunkPos::new(0, -1));
-        assert_eq!(
-            partial_chunk_storage.chunk_pos_from_index(
-                partial_chunk_storage.index_from_chunk_pos(&ChunkPos::new(2, -1))
-            ),
-            ChunkPos::new(2, -1),
-        );
+    fn retain_reports_what_it_dropped() {
+        let mut storage = PartialChunkStorage::new(8);
+        for x in -2..=2 {
+            storage.limited_set(&ChunkPos::new(x, 0), chunk());
+        }
+        let mut dropped = storage.retain(|pos| pos.x >= 0);
+        dropped.sort_by_key(|p| p.x);
+        assert_eq!(dropped, vec![ChunkPos::new(-2, 0), ChunkPos::new(-1, 0)]);
+        assert_eq!(storage.len(), 3);
     }
 }

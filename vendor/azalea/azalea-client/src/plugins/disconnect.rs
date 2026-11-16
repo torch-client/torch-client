@@ -51,6 +51,7 @@ pub struct RemoveOnDisconnectBundle {
     pub chat_signing_session: chat_signing::ChatSigningSession,
     pub is_authenticated: IsAuthenticated,
     pub has_client_loaded: HasClientLoaded,
+    pub level_load_tracker: crate::loading::LevelLoadTracker,
     pub ticks_alive: TicksConnected,
 
     pub mining: mining::Mining,

@@ -35,6 +35,35 @@ const META_KEY: &str = ".meta";
 #[cfg(feature = "asset_download")]
 const LANGUAGES_KEY: &str = ".languages";
 
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+pub(crate) mod transfer;
+
+#[derive(Default)]
+struct Kept {
+    entries: Vec<(String, Vec<u8>)>,
+    objects: u8,
+    #[cfg_attr(not(feature = "asset_download"), allow(dead_code))]
+    languages: bool,
+}
+
+impl Kept {
+    fn current() -> Kept {
+        #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+        return transfer::kept();
+        #[cfg(not(all(target_arch = "wasm32", feature = "asset_download")))]
+        Kept::default()
+    }
+}
+
+fn fold(entries: &mut Vec<(String, Vec<u8>)>, add: Vec<(String, Vec<u8>)>) {
+    for (key, bytes) in add {
+        match entries.iter().position(|(k, _)| *k == key) {
+            Some(at) => entries[at].1 = bytes,
+            None => entries.push((key, bytes)),
+        }
+    }
+}
+
 const KEEP_LIST: &str = include_str!("../../tools/asset_keep_list.txt");
 
 pub(crate) const CAN_FETCH_OBJECTS: bool = true;
@@ -891,9 +920,10 @@ impl Download {
             .as_str()
             .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
         let index = get_json(index_url).await?;
+        let kept = Kept::current();
         #[cfg(all(feature = "audio", target_arch = "wasm32"))]
         let web_sounds = WebSounds::spawn(self, index.clone());
-        let expected = expected_objects(id);
+        let expected = expected_objects(id) & !kept.objects;
         let objects_size =
             listed_size(&listed_objects(&index, |key| object_wanted(expected, key))?);
         self.total.store(size + objects_size, Ordering::Relaxed);
@@ -912,16 +942,18 @@ impl Download {
                 .iter()
                 .find(|(k, _)| k.as_str() == key)
                 .map(|(_, bytes)| bytes.as_slice())
-        });
+        }) & !kept.objects;
         let wants_sounds = cfg!(feature = "audio");
         let wants_languages = cfg!(feature = "asset_download");
         let mut index_id = None;
         if CAN_FETCH_OBJECTS && (wants_objects != 0 || wants_sounds || wants_languages) {
             #[cfg(feature = "asset_download")]
-            match super::language::table_from_index(&index, &|| self.cancelled()).await {
-                Ok(Some(table)) => entries.push((LANGUAGES_KEY.to_owned(), table)),
-                Ok(None) => return Ok(false),
-                Err(e) => log_warn!("assets", "no language list: {}", e.detail),
+            if !kept.languages {
+                match super::language::table_from_index(&index, &|| self.cancelled()).await {
+                    Ok(Some(table)) => entries.push((LANGUAGES_KEY.to_owned(), table)),
+                    Ok(None) => return Ok(false),
+                    Err(e) => log_warn!("assets", "no language list: {}", e.detail),
+                }
             }
 
             if wants_objects != 0 {
@@ -981,10 +1013,19 @@ impl Download {
             return Ok(false);
         }
 
+        let had_kept = !kept.entries.is_empty();
+        fold(&mut entries, kept.entries);
+        entries.retain(|(k, _)| k != META_KEY);
         entries.push((META_KEY.to_owned(), meta_blob(version, index_id.as_deref())));
         let packed = pack(entries);
         store::save_version(version, &packed)
             .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+        #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+        if had_kept {
+            transfer::forget_kept();
+        }
+        #[cfg(not(all(target_arch = "wasm32", feature = "asset_download")))]
+        let _ = had_kept;
         #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
         if let Err(e) = call_page("keepStoredAssets") {
             log_warn!("assets", "{e}; the assets last until the tab closes");
@@ -1160,6 +1201,9 @@ impl Download {
         let Some(defs_text) = self.fetch_sound_defs(&index).await? else {
             return Ok(false);
         };
+        #[cfg(feature = "small_audio")]
+        let defs_text = crate::audio::subset::trim(&defs_text)
+            .map_err(|e| Failure::new("sounds.json will not parse", e))?;
         let defs = crate::audio::defs::Defs::parse(&defs_text)
             .map_err(|e| Failure::new("sounds.json will not parse", e))?;
         let wanted = sound_files(&index, &defs);
@@ -1343,10 +1387,7 @@ impl Download {
             return Err(Failure::plain("Mojang lists none of the missing assets"));
         }
 
-        let mut entries: Vec<(String, Vec<u8>)> = crate::platform::assets::archive::entries()
-            .into_iter()
-            .map(|(key, bytes)| (key.to_owned(), bytes.to_vec()))
-            .collect();
+        let mut entries = transfer::current_entries();
         for (key, bytes) in objects {
             match entries.iter().position(|(k, _)| *k == key) {
                 Some(at) => entries[at].1 = bytes,
@@ -1379,13 +1420,10 @@ impl Download {
             return Ok(!self.cancelled());
         };
 
-        let mut entries: Vec<(String, Vec<u8>)> = crate::platform::assets::archive::entries()
-            .into_iter()
-            .filter(|(key, _)| {
-                *key != sounds_store::DEFS_KEY && !key.starts_with(sounds_store::PREFIX)
-            })
-            .map(|(key, bytes)| (key.to_owned(), bytes.to_vec()))
-            .collect();
+        let mut entries = transfer::current_entries();
+        entries.retain(|(key, _)| {
+            key.as_str() != sounds_store::DEFS_KEY && !key.starts_with(sounds_store::PREFIX)
+        });
         entries.extend(sounds.iter().cloned());
         store::save_version(version, &pack(entries))
             .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
@@ -1713,7 +1751,7 @@ impl Failure {
         }
     }
 
-    fn http(short: &'static str, e: crate::platform::http::HttpError) -> Failure {
+    pub(super) fn http(short: &'static str, e: crate::platform::http::HttpError) -> Failure {
         if e.network {
             Failure::new(NETWORK_FAILURE, e)
         } else {

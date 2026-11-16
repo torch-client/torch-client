@@ -88,6 +88,7 @@ pub struct ExecutorIntent {
     pub sprint: bool,
     pub jump: bool,
     pub sneak: bool,
+    pub mine: Option<BlockPos>,
     walk: WalkDirection,
 }
 
@@ -224,6 +225,15 @@ impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
             return false;
         }
 
+        if self.intent.is_some() {
+            self.walk(WalkDirection::None);
+            self.look_at_exact(block.center());
+            if let Some(intent) = self.intent.as_deref_mut() {
+                intent.mine = Some(block);
+            }
+            return true;
+        }
+
         let best_tool_result = best_tool_in_hotbar_for_block(block_state, self.menu);
         trace!("best tool for {block_state:?}: {best_tool_result:?}");
 
@@ -250,8 +260,9 @@ impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
         let horizontal_distance_from_start = (self.start.center() - self.position)
             .horizontal_distance_squared()
             .sqrt();
-        let at_start_position = player_pos_to_block_pos(self.position) == self.start
-            && horizontal_distance_from_start < 0.25;
+        let at_start_position = self.is_currently_mining
+            || (player_pos_to_block_pos(self.position) == self.start
+                && horizontal_distance_from_start < 0.25);
 
         if self.should_mine(block) {
             if at_start_position {

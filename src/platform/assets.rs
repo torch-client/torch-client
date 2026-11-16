@@ -66,6 +66,28 @@ pub(crate) fn read_metadata(png: impl AsRef<Path>) -> Option<Cow<'static, [u8]>>
     read_base(&png.with_extension("png.mcmeta"))
 }
 
+#[cfg(cem)]
+pub(crate) fn exists(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+    if pack_key(path).is_some_and(|key| archive::pack_has(&key)) {
+        return true;
+    }
+    if let Some(key) = archive_key(path) {
+        return archive::get(&key).is_some();
+    }
+    #[cfg(packed_assets)]
+    {
+        false
+    }
+    #[cfg(not(packed_assets))]
+    path.is_file()
+}
+
+#[cfg(cem)]
+pub(crate) fn read_pack_ranked(path: impl AsRef<Path>) -> Option<(usize, Vec<u8>)> {
+    archive::pack_rank_get(&pack_key(path.as_ref())?)
+}
+
 pub(crate) fn read_dir(dir: impl AsRef<Path>) -> Vec<PathBuf> {
     let dir = dir.as_ref();
     #[cfg_attr(not(resource_packs), allow(unused_mut))]
@@ -363,7 +385,16 @@ pub(crate) mod archive {
             .map(<[u8]>::to_vec)
     }
 
-    #[cfg(all(resource_packs, feature = "audio"))]
+    #[cfg(cem)]
+    pub(crate) fn pack_rank_get(key: &str) -> Option<(usize, Vec<u8>)> {
+        MOUNTED
+            .read()
+            .layers()
+            .enumerate()
+            .find_map(|(rank, layer)| layer.get(key).map(|bytes| (rank, bytes.to_vec())))
+    }
+
+    #[cfg(all(resource_packs, any(feature = "audio", cem)))]
     pub(crate) fn pack_has(key: &str) -> bool {
         MOUNTED
             .read()

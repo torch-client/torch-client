@@ -639,11 +639,16 @@ fn esp_mesh(frame: &crate::modules::esp::EspFrame, origin: RenderOrigin) -> Mesh
 
 #[cfg(feature = "click_gui")]
 pub(super) fn empty_esp_mesh() -> Mesh {
+    empty_esp_mesh_of(PrimitiveTopology::TriangleList)
+}
+
+#[cfg(feature = "click_gui")]
+fn empty_esp_mesh_of(topology: PrimitiveTopology) -> Mesh {
     use crate::renderer::esp_material::{ATTRIBUTE_COLOR, ATTRIBUTE_PACKED};
     use bevy::mesh::VertexAttributeValues;
 
     let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
+        topology,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
@@ -699,6 +704,28 @@ pub(super) struct WorldDrawOverlay {
 pub(super) struct WorldDrawMarker;
 
 #[cfg(feature = "click_gui")]
+fn box_quads(
+    lo: Vec3,
+    hi: Vec3,
+    color: [u8; 4],
+    outline: bool,
+    mut quad: impl FnMut([Vec3; 4], [u8; 4], u32, u32),
+) {
+    let i = OUTLINE_INFLATE;
+    let lo = lo - Vec3::splat(i);
+    let size = hi + Vec3::splat(i) - lo;
+    let edges = if outline { 15 } else { 0 };
+    for (f, face) in FACES.iter().enumerate() {
+        quad(
+            face.corners.map(|c| lo + Vec3::from_array(c) * size),
+            color,
+            edges,
+            f as u32,
+        );
+    }
+}
+
+#[cfg(feature = "click_gui")]
 fn world_draw_mesh(
     nodes: &[crate::renderer::world_draw::Node],
     through: bool,
@@ -730,18 +757,13 @@ fn world_draw_mesh(
         ];
         match n.shape {
             Shape::Box { min, max } => {
-                let i = OUTLINE_INFLATE;
-                let lo = origin.to_render_array(min) - Vec3::splat(i);
-                let size = origin.to_render_array(max) + Vec3::splat(i) - lo;
-                let edges = if n.outline { 15 } else { 0 };
-                for (f, face) in FACES.iter().enumerate() {
-                    quad(
-                        face.corners.map(|c| lo + Vec3::from_array(c) * size),
-                        color,
-                        edges,
-                        f as u32,
-                    );
-                }
+                box_quads(
+                    origin.to_render_array(min),
+                    origin.to_render_array(max),
+                    color,
+                    n.outline,
+                    &mut quad,
+                );
             }
             Shape::Line { from, to, width } => {
                 let (a, b) = (origin.to_render_array(from), origin.to_render_array(to));
@@ -810,6 +832,181 @@ pub(super) fn update_world_draw(
         }
     }
     overlay.shown = scene;
+}
+
+#[cfg(feature = "click_gui")]
+#[derive(Resource)]
+pub(super) struct PlayerEspOverlay {
+    pub(super) boxes: (Entity, Handle<Mesh>),
+    pub(super) tracers: (Entity, Handle<Mesh>),
+    pub(super) shown: bool,
+    pub(super) empty: bool,
+}
+
+#[cfg(feature = "click_gui")]
+#[derive(Component)]
+pub(super) struct PlayerEspMarker;
+
+#[cfg(feature = "click_gui")]
+pub(super) fn empty_esp_lines() -> Mesh {
+    empty_esp_mesh_of(PrimitiveTopology::LineList)
+}
+
+#[cfg(feature = "click_gui")]
+fn take_esp_buffers(mesh: &mut Mesh) -> (Vec<[f32; 3]>, Vec<[u8; 4]>, Vec<u32>, Vec<u32>) {
+    use crate::renderer::esp_material::{ATTRIBUTE_COLOR, ATTRIBUTE_PACKED};
+    use bevy::mesh::VertexAttributeValues as V;
+    let mut positions = match mesh.try_remove_attribute(Mesh::ATTRIBUTE_POSITION) {
+        Ok(V::Float32x3(v)) => v,
+        _ => Vec::new(),
+    };
+    let mut colors = match mesh.try_remove_attribute(ATTRIBUTE_COLOR) {
+        Ok(V::Unorm8x4(v)) => v,
+        _ => Vec::new(),
+    };
+    let mut packed = match mesh.try_remove_attribute(ATTRIBUTE_PACKED) {
+        Ok(V::Uint32(v)) => v,
+        _ => Vec::new(),
+    };
+    let mut indices = match mesh.try_remove_indices() {
+        Ok(Some(Indices::U32(v))) => v,
+        _ => Vec::new(),
+    };
+    positions.clear();
+    colors.clear();
+    packed.clear();
+    indices.clear();
+    (positions, colors, packed, indices)
+}
+
+#[cfg(feature = "click_gui")]
+fn put_esp_buffers(
+    mesh: &mut Mesh,
+    (positions, colors, packed, indices): (Vec<[f32; 3]>, Vec<[u8; 4]>, Vec<u32>, Vec<u32>),
+) {
+    use crate::renderer::esp_material::{ATTRIBUTE_COLOR, ATTRIBUTE_PACKED};
+    use bevy::mesh::VertexAttributeValues as V;
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(ATTRIBUTE_COLOR, V::Unorm8x4(colors));
+    mesh.insert_attribute(ATTRIBUTE_PACKED, V::Uint32(packed));
+    mesh.insert_indices(Indices::U32(indices));
+}
+
+#[cfg(feature = "click_gui")]
+type EspPlayer = ([f64; 3], [f32; 2], bool);
+
+#[cfg(feature = "click_gui")]
+#[allow(clippy::too_many_arguments, reason = "a Bevy system's parameters")]
+pub(super) fn update_player_esp(
+    shared: Res<super::systems::Shared>,
+    view: Res<FrameView>,
+    gui: Res<crate::gui::GuiState>,
+    origin: Res<RenderOrigin>,
+    mut overlay: ResMut<PlayerEspOverlay>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut targets: Query<&mut Visibility, With<PlayerEspMarker>>,
+    mut players: Local<Vec<EspPlayer>>,
+) {
+    let Some(cfg) = crate::modules::player_esp::config() else {
+        if overlay.shown {
+            overlay.shown = false;
+            for (entity, _) in [&overlay.boxes, &overlay.tracers] {
+                if let Ok(mut v) = targets.get_mut(*entity) {
+                    *v = Visibility::Hidden;
+                }
+            }
+        }
+        return;
+    };
+
+    players.clear();
+    {
+        let s = shared.0.lock().unwrap();
+        for p in &s.session.other_players {
+            if p.health.is_some_and(|h| h <= 0.0) {
+                continue;
+            }
+            let friend = cfg.friend_color && crate::modules::friends::is_friend(&p.username);
+            players.push((p.anim.position(view.partial), p.body.bounding_box, friend));
+        }
+    }
+
+    let any = !players.is_empty();
+    if !any && overlay.empty && overlay.shown {
+        return;
+    }
+    overlay.empty = !any;
+
+    let white = [0xFF, 0xFF, 0xFF];
+    let accent = gui.clickgui.look().accent();
+    let accent = [(accent >> 16) as u8, (accent >> 8) as u8, accent as u8];
+    let rgb = |friend: bool| if friend { accent } else { white };
+
+    let (boxes, box_mesh) = overlay.boxes.clone();
+    if let Some(mut mesh) = meshes.get_mut(&box_mesh) {
+        let (mut positions, mut colors, mut packed, mut indices) = take_esp_buffers(&mut mesh);
+        for &(feet, [w, h], friend) in players.iter() {
+            let feet = origin.to_render_array(feet);
+            let half = Vec3::new(w * 0.5, 0.0, w * 0.5);
+            let [r, g, b] = rgb(friend);
+            box_quads(
+                feet - half,
+                feet + half + Vec3::Y * h,
+                [r, g, b, cfg.alpha],
+                cfg.lines,
+                |corners, color, edges, face| {
+                    let base = positions.len() as u32;
+                    for (c, p) in corners.iter().enumerate() {
+                        positions.push(p.to_array());
+                        colors.push(color);
+                        packed.push(c as u32 | edges << 2 | face << 6);
+                    }
+                    indices.extend_from_slice(&[
+                        base,
+                        base + 1,
+                        base + 2,
+                        base + 2,
+                        base + 1,
+                        base + 3,
+                    ]);
+                },
+            );
+        }
+        put_esp_buffers(&mut mesh, (positions, colors, packed, indices));
+    }
+
+    let (tracers, line_mesh) = overlay.tracers.clone();
+    if cfg.tracers
+        && let Some(mut mesh) = meshes.get_mut(&line_mesh)
+    {
+        let forward = view.camera_rotation * view.hurt_tilt.inverse() * Vec3::NEG_Z;
+        let start = (view.camera_render + forward).to_array();
+        let (mut positions, mut colors, mut packed, mut indices) = take_esp_buffers(&mut mesh);
+        for &(feet, [_, h], friend) in players.iter() {
+            let [r, g, b] = rgb(friend);
+            let base = positions.len() as u32;
+            positions.push(start);
+            positions.push((origin.to_render_array(feet) + Vec3::Y * (h * 0.5)).to_array());
+            colors.extend_from_slice(&[[r, g, b, 0xFF]; 2]);
+            packed.extend_from_slice(&[0, 0]);
+            indices.extend_from_slice(&[base, base + 1]);
+        }
+        put_esp_buffers(&mut mesh, (positions, colors, packed, indices));
+    }
+
+    for (entity, on) in [(boxes, any), (tracers, any && cfg.tracers)] {
+        if let Ok(mut v) = targets.get_mut(entity) {
+            let want = if on {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+            if *v != want {
+                *v = want;
+            }
+        }
+    }
+    overlay.shown = true;
 }
 
 pub(super) fn update_chunk_borders(

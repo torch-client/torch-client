@@ -131,10 +131,6 @@ async fn pump(
                     log_info!("net", "eagler: azalea closed the connection");
                     return Ok(());
                 };
-                let body = match wisp.as_mut() {
-                    Some(stream) => stream.data(&body),
-                    None => body,
-                };
                 tx.send_binary(body).await?;
             }
             message = rx.recv() => {

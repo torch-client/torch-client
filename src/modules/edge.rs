@@ -59,6 +59,10 @@ pub fn roll(lo: f32, hi: f32) -> f32 {
     lo + (hi - lo) * t
 }
 
+pub fn delay_ticks((lo, hi): (f32, f32)) -> i64 {
+    (roll(lo, hi) / MS_PER_TICK).round() as i64
+}
+
 #[cfg(all(test, feature = "click_gui"))]
 mod tests {
     use super::*;

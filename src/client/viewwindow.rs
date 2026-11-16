@@ -1,101 +1,130 @@
 use crate::log_warn;
 use azalea::{Client, ClientInformation};
+use azalea_core::position::ChunkPos;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::session::SharedMutex;
 
-pub(crate) fn keep_view_center_on_the_player(partial: &PartialWorldRef, pos: azalea::Vec3) {
-    let here = azalea_core::position::ChunkPos::new(
-        (pos.x.floor() as i32) >> 4,
-        (pos.z.floor() as i32) >> 4,
-    );
-    recenter_view(partial, here);
-}
+static POSITIONED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) type PartialWorldRef = std::sync::Arc<parking_lot::RwLock<azalea_world::PartialWorld>>;
+static POSITIONED_IN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-const CENTER_SLACK: i32 = 3;
-
-static SERVER_CENTRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub(crate) fn note_server_centre() {
-    SERVER_CENTRED.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub(crate) fn reset_server_centre() {
-    SERVER_CENTRED.store(false, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn server_centred() -> bool {
-    SERVER_CENTRED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-static POSITIONED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub(crate) fn note_player_positioned() {
-    POSITIONED.store(true, std::sync::atomic::Ordering::Relaxed);
+pub(crate) fn note_player_positioned(partial: &azalea_world::PartialWorld) {
+    POSITIONED_IN.store(partial.chunks.generation(), Ordering::Relaxed);
+    POSITIONED.store(true, Ordering::Relaxed);
 }
 
 pub(crate) fn reset_positioned() {
-    POSITIONED.store(false, std::sync::atomic::Ordering::Relaxed);
+    POSITIONED.store(false, Ordering::Relaxed);
+    STREAM_REACH.store(0, Ordering::Relaxed);
+    *LAST_SWEEP.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-fn recenter_view(partial: &PartialWorldRef, here: azalea_core::position::ChunkPos) {
-    if !POSITIONED.load(std::sync::atomic::Ordering::Relaxed) {
+const SWEEP_MARGIN: u32 = 4;
+
+static STREAM_REACH: AtomicU32 = AtomicU32::new(0);
+
+const MAX_STREAM_REACH: u32 = 34;
+
+static PLAYER_CHUNK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+pub(crate) fn note_stream_reach(x: i32, z: i32) {
+    if !POSITIONED.load(Ordering::Relaxed) {
         return;
     }
-    let out_of_range;
-    {
+    let packed = PLAYER_CHUNK.load(Ordering::Relaxed);
+    let (px, pz) = ((packed >> 32) as i32, packed as i32);
+    let reach = (x - px).unsigned_abs().max((z - pz).unsigned_abs());
+    if reach <= MAX_STREAM_REACH {
+        STREAM_REACH.fetch_max(reach, Ordering::Relaxed);
+    }
+}
+
+static LAST_SWEEP: Mutex<Option<(ChunkPos, ChunkPos, u32)>> = Mutex::new(None);
+
+fn chunk_distance(a: ChunkPos, b: ChunkPos) -> u32 {
+    (a.x - b.x).unsigned_abs().max((a.z - b.z).unsigned_abs())
+}
+
+pub(crate) fn sweep_far_columns(bot: &Client, shared: &SharedMutex, pos: azalea::Vec3) {
+    if !POSITIONED.load(Ordering::Relaxed) {
+        return;
+    }
+    let here = ChunkPos::new((pos.x.floor() as i32) >> 4, (pos.z.floor() as i32) >> 4);
+    PLAYER_CHUNK.store(
+        ((here.x as i64) << 32) | (here.z as u32 as i64),
+        Ordering::Relaxed,
+    );
+    let (Ok(partial), Ok(world)) = (bot.partial_world(), bot.world()) else {
+        return;
+    };
+    let requested = bot
+        .component::<ClientInformation>()
+        .map(|info| info.view_distance as u32)
+        .unwrap_or(0);
+    let (center, announced) = {
         let guard = partial.read();
-        let center = guard.chunks.view_center();
-        crate::diag::note_view((center.x, center.z), (here.x, here.z));
-        let drift = (here.x - center.x).abs().max((here.z - center.z).abs());
-        let adrift = drift > CENTER_SLACK;
-        if guard.chunks.in_range(&here) && !adrift {
+        if guard.chunks.generation() != POSITIONED_IN.load(Ordering::Relaxed) {
             return;
         }
-        out_of_range = !guard.chunks.in_range(&here);
+        (guard.chunks.view_center(), guard.chunks.chunk_radius())
+    };
+    crate::diag::note_view((center.x, center.z), (here.x, here.z));
+    let reach = announced
+        .max(azalea_world::chunk::calculate_chunk_storage_range(
+            requested,
+        ))
+        .max(STREAM_REACH.load(Ordering::Relaxed))
+        + SWEEP_MARGIN;
+    {
+        let mut last = LAST_SWEEP.lock().unwrap_or_else(|e| e.into_inner());
+        if *last == Some((center, here, reach)) {
+            return;
+        }
+        *last = Some((center, here, reach));
     }
-    let mut guard = partial.write();
-    let was = guard.chunks.view_center();
-    guard.chunks.update_view_center(here);
-    drop(guard);
-    let n = crate::diag::get(crate::diag::Stat::ViewRecentred);
-    crate::diag::bump(crate::diag::Stat::ViewRecentred);
-    if n >= 4 && (n + 1) % 100 != 0 {
+    let far: Vec<ChunkPos> = partial
+        .read()
+        .chunks
+        .loaded()
+        .map(|(col, _)| col)
+        .filter(|&col| chunk_distance(col, here) > reach && chunk_distance(col, center) > reach)
+        .collect();
+    let dropped: Vec<ChunkPos> = far
+        .into_iter()
+        .filter(|col| !crate::client::worldsync::column_kept_by_lod(col.x, col.z))
+        .collect();
+    if !dropped.is_empty() {
+        let mut guard = partial.write();
+        for col in &dropped {
+            guard.chunks.forget_held(col);
+        }
+    }
+    if dropped.is_empty() {
         return;
     }
-    let why = if !out_of_range {
-        "the far side of what the server streams around the player was falling \
-         outside it"
-    } else if server_centred() {
-        "the player had left it entirely, so no chunk of theirs could be stored"
-    } else {
-        "the server has not said where it belongs, so everything it streamed was \
-         being dropped on arrival"
+    let before = crate::diag::get(crate::diag::Stat::ChunksSwept);
+    crate::diag::add(crate::diag::Stat::ChunksSwept, dropped.len() as u64);
+    if before < 64 {
+        log_warn!(
+            "chunks",
+            "let go of {} columns more than {reach} chunks from both the player ({},{}) and the \
+             server's centre ({},{}) that the server never forgot",
+            dropped.len(),
+            here.x,
+            here.z,
+            center.x,
+            center.z
+        );
+    }
+    let holder = azalea::local_player::WorldHolder {
+        partial,
+        shared: world,
     };
-    log_warn!(
-        "view",
-        "azalea's chunk window was centred on {},{} with the player in chunk {},{} \
-         ({} chunks adrift, {} tolerated) and {why}; recentred on the player",
-        was.x,
-        was.z,
-        here.x,
-        here.z,
-        (here.x - was.x).abs().max((here.z - was.z).abs()),
-        CENTER_SLACK
-    );
-}
-
-pub(crate) fn note_chunk_packet(partial: &PartialWorldRef, x: i32, z: i32) {
-    let pos = azalea_core::position::ChunkPos::new(x, z);
-    let guard = partial.read();
-    let center = guard.chunks.view_center();
-    crate::diag::note_chunk_packet(
-        (x, z),
-        guard.chunks.in_range(&pos),
-        (center.x, center.z),
-        (guard.chunks.view_range().saturating_sub(1)) / 2,
-    );
+    for col in dropped {
+        crate::client::worldsync::forget_chunk(&holder, shared, col.x, col.z);
+    }
 }
 
 pub(crate) fn apply_client_information_requests(bot: &Client, shared: &SharedMutex) {

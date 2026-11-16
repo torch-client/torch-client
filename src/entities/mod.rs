@@ -1,6 +1,8 @@
 pub mod bake;
 pub mod beams;
 pub mod blockmodel;
+#[cfg(cem)]
+pub mod cem;
 pub mod elder_guardian;
 pub mod feed;
 pub mod fishing_line;
@@ -1060,13 +1062,24 @@ pub(crate) fn env_entity_cap(var: &str, default: usize) -> usize {
 }
 
 impl EntityAssets {
-    fn spec(&mut self, idx: usize, model: &ModelGeom) -> &GpuSpec {
+    #[cfg_attr(not(cem), allow(unused_variables))]
+    fn spec(&mut self, idx: usize, name: &'static str, model: &ModelGeom) -> &GpuSpec {
         if self.specs.len() <= idx {
             self.specs.resize_with(idx + 1, || None);
         }
-        self.specs[idx].get_or_insert_with(|| GpuSpec {
-            model: geom::bake(&(model.layer)()),
+        self.specs[idx].get_or_insert_with(|| {
+            let layer = (model.layer)();
+            #[cfg(cem)]
+            let layer = cem::layer(name, layer);
+            GpuSpec {
+                model: geom::bake(&layer),
+            }
         })
+    }
+
+    #[cfg(cem)]
+    pub(crate) fn forget_models(&mut self) {
+        self.specs.clear();
     }
 
     fn material(
@@ -1261,6 +1274,12 @@ impl EntityImages {
         self.load(path, false, images)
     }
 
+    #[cfg(cem)]
+    pub(crate) fn forget(&mut self, ours: fn(&str) -> bool) {
+        self.nearest.retain(|path, _| !ours(path));
+        self.tiled.retain(|path, _| !ours(path));
+    }
+
     pub(crate) fn tiled(
         &mut self,
         path: &str,
@@ -1319,6 +1338,10 @@ pub(crate) fn load_entity_image(path: &str, images: &mut Assets<Image>) -> Optio
 }
 
 pub(crate) fn decode_entity_texture(path: &str) -> Option<image::RgbaImage> {
+    #[cfg(cem)]
+    if let Some(decoded) = cem::decode(path) {
+        return decoded;
+    }
     let (path, frame) = match path.rsplit_once('#') {
         Some((sheet, frame)) => (sheet, frame.parse::<u32>().ok()),
         None => (path, None),
@@ -1682,6 +1705,15 @@ impl EntityRigs {
         self.live.len()
     }
 
+    #[cfg(cem)]
+    pub(crate) fn despawn_all(&mut self, commands: &mut Commands) {
+        for (_, rig) in self.live.drain() {
+            for layer in rig.layers.iter().flatten() {
+                commands.entity(layer.pose_root).despawn();
+            }
+        }
+    }
+
     #[cfg(feature = "shader_support")]
     pub(crate) fn roots(&self) -> impl Iterator<Item = (Entity, EntityKind)> + '_ {
         self.live.values().flat_map(|rig| {
@@ -1751,6 +1783,8 @@ impl Plugin for EntityPlugin {
                     shadow::hide_shadows,
                 ),
             );
+        #[cfg(cem)]
+        app.add_systems(OnExit(crate::renderer::AppState::InGame), cem::forget);
     }
 }
 
@@ -1956,7 +1990,7 @@ fn sync_entities(
                 && wants_anchors(st, spec_ids, &registry)
                 && (spec.visible)(st)
             {
-                let gpu = assets.spec(idx, model);
+                let gpu = assets.spec(idx, spec.name, model);
                 hidden_states.clear();
                 hidden_states.extend(gpu.model.parts.iter().map(|p| PartState::from(p.initial)));
                 gpu.model.reset_pose(&mut hidden_states);
@@ -2031,7 +2065,7 @@ fn sync_entities(
             match (&spec.geom, &mut layer.body) {
                 (Geom::Model(model), RigBody::Baked(baked)) => {
                     if recompute_variants {
-                        let texture = (model.texture)(st);
+                        let texture = model_texture(spec, model, st);
                         let glint = assets.armor_glint(spec, st);
                         if texture != layer.texture || glint != layer.glint {
                             if let Some((material, tex)) = assets.layer_material(
@@ -2507,7 +2541,7 @@ fn spawn_layer(
 ) -> LayerRig {
     match &spec.geom {
         Geom::Model(model) => {
-            let texture = (model.texture)(st);
+            let texture = model_texture(spec, model, st);
             let lit = Lit {
                 tint: (spec.tint)(st),
                 overlay_alpha: overlay_alpha(st, spec),
@@ -2527,7 +2561,7 @@ fn spawn_layer(
                 Some((material, tex)) => (Some(material), Some(tex)),
                 None => (None, None),
             };
-            let states = assets.spec(idx, model).model.rest_pose();
+            let states = assets.spec(idx, spec.name, model).model.rest_pose();
             let mut rig = spawn_model_rig(
                 commands, idx, states, spec.name, texture, lit, material, tex, meshes,
             );
@@ -2542,6 +2576,14 @@ fn spawn_layer(
             spawn_single_rig(commands, idx, spec.name, copies)
         }
     }
+}
+
+#[cfg_attr(not(cem), allow(unused_variables))]
+fn model_texture(spec: &RenderSpec, model: &ModelGeom, st: &EntityState) -> TexturePath {
+    let texture = (model.texture)(st);
+    #[cfg(cem)]
+    let texture = cem::texture(spec.name, texture);
+    texture
 }
 
 #[allow(

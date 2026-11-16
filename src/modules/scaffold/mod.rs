@@ -805,8 +805,7 @@ fn turn_back_due(ctx: &Ctx, start_y: f64) -> bool {
     let (mut y, mut vy) = (me.pos[1], me.vel[1]);
     let mut ticks = 0;
     while y > start_y && ticks < 40 {
-        y += vy;
-        vy = (vy - 0.08) * 0.98;
+        (y, vy) = crate::util::fall::step_y(y, vy);
         ticks += 1;
     }
     ticks <= turn_ticks + 1

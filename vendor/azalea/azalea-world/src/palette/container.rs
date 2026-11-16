@@ -51,8 +51,7 @@ impl PalletedContainerKind for BlockState {
             0 => 0,
             1..=4 => 4,
             5..=8 => bits_per_entry,
-            _ => bits_per_entry
-                .max((u32::BITS - u32::from(BlockState::MAX_STATE).leading_zeros()) as u8),
+            _ => bits_per_entry.max(block_state_registry_bits()),
         }
     }
 
@@ -88,6 +87,27 @@ impl PalletedContainerKind for Biome {
             _ => PaletteKind::Global,
         }
     }
+}
+
+pub fn block_state_registry_bits() -> u8 {
+    (u32::BITS - u32::from(BlockState::MAX_STATE).leading_zeros()) as u8
+}
+
+pub fn registry_bits(count: usize) -> u8 {
+    azalea_core::math::ceil_log2(count.min(u32::MAX as usize) as u32) as u8
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlobalBits {
+    Registry(u8),
+    AsSent,
+}
+
+#[derive(Debug)]
+pub struct ContainerReadError {
+    pub sent_bits: Option<u8>,
+    pub kind: Option<PaletteKind>,
+    pub error: BufReadError,
 }
 
 pub trait SectionPos {
@@ -135,15 +155,47 @@ impl<S: PalletedContainerKind> PalettedContainer<S> {
     }
 
     pub fn read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let sent = u8::azalea_read(buf)?;
-        let bits_per_entry = S::storage_bits(sent);
+        Self::read_inner(buf, S::storage_bits)
+            .map(|(container, _)| container)
+            .map_err(|e| e.error)
+    }
+
+    pub fn read_with(
+        buf: &mut Cursor<&[u8]>,
+        global: GlobalBits,
+    ) -> Result<(Self, u8), ContainerReadError> {
+        Self::read_inner(buf, |sent| match global {
+            GlobalBits::Registry(bits) => bits,
+            GlobalBits::AsSent => sent,
+        })
+    }
+
+    fn read_inner(
+        buf: &mut Cursor<&[u8]>,
+        global_bits: impl Fn(u8) -> u8,
+    ) -> Result<(Self, u8), ContainerReadError> {
+        let sent = u8::azalea_read(buf).map_err(|error| ContainerReadError {
+            sent_bits: None,
+            kind: None,
+            error,
+        })?;
+        let palette_type = S::bits_per_entry_to_palette_kind(S::storage_bits(sent));
+        let fail = |error: BufReadError| ContainerReadError {
+            sent_bits: Some(sent),
+            kind: Some(palette_type.clone()),
+            error,
+        };
+        let bits_per_entry = if palette_type == PaletteKind::Global {
+            global_bits(sent)
+        } else {
+            S::storage_bits(sent)
+        };
         if bits_per_entry > 32 {
-            return Err(BufReadError::Custom(format!(
+            return Err(fail(BufReadError::Custom(format!(
                 "a paletted container claimed {sent} bits per entry"
-            )));
+            ))));
         }
-        let palette_type = S::bits_per_entry_to_palette_kind(bits_per_entry);
-        let palette = palette_type.read(buf)?;
+        let palette = palette_type.read(buf).map_err(&fail)?;
         let size = S::size();
 
         let mut storage = match BitStorage::new(
@@ -158,21 +210,24 @@ impl<S: PalletedContainerKind> PalettedContainer<S> {
             Ok(storage) => storage,
             Err(e) => {
                 warn!("Failed to create bit storage: {:?}", e);
-                return Err(BufReadError::Custom(
+                return Err(fail(BufReadError::Custom(
                     "Failed to create bit storage".to_owned(),
-                ));
+                )));
             }
         };
 
         for i in 0..storage.data.len() {
-            storage.data[i] = u64::azalea_read(buf)?;
+            storage.data[i] = u64::azalea_read(buf).map_err(&fail)?;
         }
 
-        Ok(PalettedContainer {
-            bits_per_entry,
-            palette,
-            storage,
-        })
+        Ok((
+            PalettedContainer {
+                bits_per_entry,
+                palette,
+                storage,
+            },
+            sent,
+        ))
     }
 
     pub fn index_from_pos(&self, pos: S::SectionPos) -> usize {

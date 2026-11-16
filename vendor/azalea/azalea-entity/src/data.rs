@@ -84,7 +84,7 @@ pub enum EntityDataValue {
     ChickenSoundVariant(azalea_registry::data::ChickenSoundVariant),
     ZombieNautilusVariant(azalea_registry::data::ZombieNautilusVariant),
     OptionalGlobalPos(Option<Box<GlobalPos>>),
-    PaintingVariant(azalea_registry::data::PaintingVariant),
+    PaintingVariant(PaintingVariantHolder),
     SnifferState(SnifferStateKind),
     ArmadilloState(ArmadilloStateKind),
     CopperGolemState(CopperGolemStateKind),
@@ -96,6 +96,11 @@ pub enum EntityDataValue {
 }
 
 const _: () = assert!(size_of::<EntityDataValue>() == 24);
+
+pub type PaintingVariantHolder = azalea_registry::Holder<
+    azalea_registry::data::PaintingVariant,
+    Box<components::PaintingVariantData>,
+>;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct OptionalUnsignedInt(pub Option<u32>);

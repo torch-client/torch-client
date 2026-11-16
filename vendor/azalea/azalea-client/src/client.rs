@@ -12,6 +12,7 @@ use azalea_entity::{
     EntityUpdateSystems, PlayerAbilities, indexing::EntityIdIndex, inventory::Inventory,
 };
 use azalea_physics::client_movement::ClientMovementState;
+use azalea_protocol::packets::ConnectionProtocol;
 use azalea_world::Worlds;
 use bevy_app::{App, AppExit, Plugin, PluginsState, SubApp, Update};
 use bevy_ecs::{
@@ -142,13 +143,30 @@ async fn run_schedule_loop(
     #[cfg(not(target_arch = "wasm32"))]
     const UPDATE_DURATION_TARGET: Duration = Duration::from_micros(1_000_000 / 60);
     #[cfg(target_arch = "wasm32")]
-    const UPDATE_DURATION_TARGET: Duration = Duration::from_micros(1_000_000 / 30);
+    const UPDATE_DURATION_TARGET: Duration = Duration::from_micros(1_000_000 / 20);
+    #[cfg(target_arch = "wasm32")]
+    const BACKLOG_UPDATE_DURATION: Duration = Duration::from_micros(1_000_000 / 30);
     const GAME_TICK_DURATION_TARGET: Duration = Duration::from_micros(1_000_000 / 20);
     const MIN_YIELD: Duration = Duration::from_millis(1);
+    const PRE_GAME_UPDATE_DURATION: Duration = Duration::from_millis(4);
+    let mut pre_game = true;
+    #[cfg(target_arch = "wasm32")]
+    let mut read_backlog = false;
 
     loop {
         let now = Instant::now();
-        let next_update = last_update.map(|t| t + UPDATE_DURATION_TARGET);
+        let update_period = if pre_game {
+            PRE_GAME_UPDATE_DURATION
+        } else {
+            UPDATE_DURATION_TARGET
+        };
+        #[cfg(target_arch = "wasm32")]
+        let update_period = if !pre_game && read_backlog {
+            BACKLOG_UPDATE_DURATION
+        } else {
+            update_period
+        };
+        let next_update = last_update.map(|t| t + update_period);
         let next_tick = last_tick.map(|t| t + GAME_TICK_DURATION_TARGET);
         let wake = match (next_update, next_tick) {
             (Some(u), Some(t)) => Some(u.min(t)),
@@ -181,6 +199,18 @@ async fn run_schedule_loop(
                 last_tick = Some(now);
             }
             ecs.run_schedule(GameTick);
+        }
+
+        pre_game = !ecs
+            .query::<&RawConnection>()
+            .iter(&ecs)
+            .any(|conn| matches!(conn.state, ConnectionProtocol::Game));
+        #[cfg(target_arch = "wasm32")]
+        {
+            read_backlog = ecs
+                .query::<&RawConnection>()
+                .iter(&ecs)
+                .any(|conn| conn.read_backlog);
         }
 
         ecs.clear_trackers();

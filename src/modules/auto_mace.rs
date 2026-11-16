@@ -4,13 +4,15 @@ use azalea::Client;
 use azalea::attack::AttackQueued;
 use azalea::ecs::entity::Entity as AzEntity;
 use azalea::entity::Physics;
-use azalea::entity::metadata::FallFlying;
+use azalea::entity::metadata::{FallFlying, Sprinting};
 
+use super::auto_totem::{Landing, landing};
 use super::registry::{Id, auto_mace as setting, options};
-use super::sent::{Look, box_distance, look_at, move_fix, ray_hits, sent_ray, view_vector};
-use super::{Edge, MS_PER_TICK, Phase, roll, store, turn};
-use crate::session::{Gamemode, MaceAim, SharedMutex, SharedState, SlotStack};
-use crate::util::mth::wrap_degrees;
+use super::sent::{Look, box_distance, look_at, ray_hits, sent_ray, view_vector};
+use super::turn::{Shape, SilentTurn};
+use super::{Edge, Phase, roll, store, turn};
+use crate::session::{CameraAim, Gamemode, MOVE_FORWARD, MOVE_SPRINT, SharedMutex, SlotStack};
+use crate::util::fall::airborne_path;
 
 options! {
     pub enum AimPoint {
@@ -36,9 +38,19 @@ options! {
     }
 }
 
-const TICK: f32 = MS_PER_TICK / 1000.0;
-
 const STUCK_TICKS: i64 = 5;
+
+const HORIZON: usize = 60;
+
+const MARGIN: usize = 1;
+
+const TARGET_SLACK: f64 = 0.5;
+
+const TARGET_SPEED_CAP: f64 = 1.0;
+
+const SPRINT_TICKS: usize = 2;
+
+const STOP_SPRINT_LEAD: usize = SPRINT_TICKS + 4;
 
 static EDGE: Edge = Edge::new(Id::AutoMace);
 
@@ -46,23 +58,47 @@ static RUN: Mutex<Run> = Mutex::new(Run::IDLE);
 
 struct Run {
     target: Option<Target>,
-    silent: Option<Look>,
+    silent: SilentTurn,
     turn: f32,
     swung: Option<Swung>,
+    stop_sprint: bool,
+    reason: Option<Reason>,
 }
 
 impl Run {
     const IDLE: Run = Run {
         target: None,
-        silent: None,
+        silent: SilentTurn::IDLE,
         turn: 0.0,
         swung: None,
+        stop_sprint: false,
+        reason: None,
     };
 }
 
 struct Target {
     id: i32,
     aim: [f64; 3],
+    centre: [f64; 3],
+    vel: [f64; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reason {
+    NoFall,
+    Hands,
+    NoTarget,
+    Approach,
+    Strength,
+    RayMiss,
+    Swung,
+}
+
+fn note(run: &mut Run, why: Reason) {
+    if run.reason != Some(why) {
+        run.reason = Some(why);
+        crate::log_debug!("mace", "{why:?}");
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -81,48 +117,50 @@ pub fn drives_camera() -> bool {
 }
 
 pub fn steer(bot: &Client, yaw: f32, pitch: f32, flags: u8) -> (f32, f32, u8) {
-    let s = store();
-    let camera = Look { yaw, pitch };
     let mut run = RUN.lock().unwrap();
-    if !s.flag(setting::SILENT) {
-        run.silent = None;
-        return (yaw, pitch, flags);
-    }
-
-    let target_aim = run.target.as_ref().map(|t| t.aim);
-    let want = match target_aim {
-        Some(aim) => {
-            let Ok(eye) = bot.eye_position() else {
-                run.silent = None;
-                return (yaw, pitch, flags);
-            };
-            look_at([eye.x, eye.y, eye.z], aim)
-        }
-        None if run.silent.is_some() => camera,
-        None => return (yaw, pitch, flags),
-    };
-
-    let from = run.silent.unwrap_or(camera);
-    let next = Look {
-        yaw: from.yaw + turn::step(wrap_degrees(want.yaw - from.yaw), run.turn, TICK),
-        pitch: (from.pitch + turn::step(want.pitch - from.pitch, run.turn, TICK))
-            .clamp(-90.0, 90.0),
-    };
-    if run.target.is_none()
-        && wrap_degrees(next.yaw - yaw).abs() < turn::DEADZONE
-        && (next.pitch - pitch).abs() < turn::DEADZONE
-    {
-        run.silent = None;
-        return (yaw, pitch, flags);
-    }
-    run.silent = Some(next);
-
-    let flags = if s.flag(setting::MOVE_FIX) {
-        move_fix(flags, yaw, next.yaw)
+    let (yaw, pitch, flags) = steer_look(bot, &mut run, yaw, pitch, flags);
+    let flags = if run.stop_sprint {
+        flags & !(MOVE_FORWARD | MOVE_SPRINT)
     } else {
         flags
     };
-    (next.yaw, next.pitch, flags)
+    (yaw, pitch, flags)
+}
+
+fn steer_look(bot: &Client, run: &mut Run, yaw: f32, pitch: f32, flags: u8) -> (f32, f32, u8) {
+    let s = store();
+    if !s.flag(setting::SILENT) {
+        run.silent.drop_out();
+        return (yaw, pitch, flags);
+    }
+    let want = match &run.target {
+        Some(t) => {
+            let aim = [t.aim[0] + t.vel[0], t.aim[1], t.aim[2] + t.vel[2]];
+            let Ok(eye) = bot.eye_position() else {
+                run.silent.drop_out();
+                return (yaw, pitch, flags);
+            };
+            let v = bot
+                .component::<Physics>()
+                .map_or(Default::default(), |p| p.velocity);
+            Some(look_at([eye.x + v.x, eye.y + v.y, eye.z + v.z], aim))
+        }
+        None => None,
+    };
+    let shape = if want.is_some() {
+        Shape::Capped
+    } else {
+        Shape::Eased
+    };
+    let rate = run.turn;
+    match run.silent.next(bot, Look { yaw, pitch }, want, rate, shape) {
+        Some(next) => (
+            next.yaw,
+            next.pitch,
+            turn::walk_keys(flags, yaw, next.yaw, s.flag(setting::MOVE_FIX)),
+        ),
+        None => (yaw, pitch, flags),
+    }
 }
 
 pub fn tick(bot: &Client, shared: &SharedMutex) {
@@ -160,49 +198,103 @@ pub fn tick(bot: &Client, shared: &SharedMutex) {
     }
 
     let silent = s.flag(setting::SILENT);
-    let Some(ready) = ready(bot, shared) else {
-        run.target = None;
-        shared.lock().unwrap().session.auto_mace = None;
-        return;
+    let ready = match ready(bot, shared) {
+        Ok(r) => r,
+        Err(why) => {
+            run.target = None;
+            run.stop_sprint = false;
+            shared.lock().unwrap().session.auto_mace = None;
+            note(&mut run, why);
+            return;
+        }
     };
 
     let range = s.num(setting::RANGE) as f64;
     let aim = s.choice(setting::AIM);
     let Some(found) = pick(
         bot,
-        ready.eye,
-        ready.camera,
+        &ready,
         range,
         s.num(setting::FOV),
         s.flag(setting::WALLS),
         aim,
     ) else {
         run.target = None;
+        run.stop_sprint = false;
         shared.lock().unwrap().session.auto_mace = None;
+        note(&mut run, Reason::NoTarget);
         return;
     };
 
-    if run.target.as_ref().is_none_or(|t| t.id != found.id) {
-        let (lo, hi) = s.range(setting::TURN);
-        run.turn = roll(lo, hi);
-    }
+    let centre = centre(found.min, found.max);
+    let before = run
+        .target
+        .as_ref()
+        .filter(|t| t.id == found.id)
+        .map(|t| t.centre);
+    let vel = match before {
+        Some(c) => {
+            let (dx, dz) = (centre[0] - c[0], centre[2] - c[2]);
+            if dx.hypot(dz) <= TARGET_SPEED_CAP {
+                [dx, 0.0, dz]
+            } else {
+                [0.0; 3]
+            }
+        }
+        None => {
+            let (lo, hi) = s.range(setting::TURN);
+            run.turn = roll(lo, hi);
+            [0.0; 3]
+        }
+    };
     let point = aim_point(found.min, found.max, ready.eye, aim);
     run.target = Some(Target {
         id: found.id,
         aim: point,
+        centre,
+        vel,
     });
-    shared.lock().unwrap().session.auto_mace = (!silent).then_some(MaceAim {
+    shared.lock().unwrap().session.auto_mace = (!silent).then_some(CameraAim {
         aim: point,
         turn: run.turn,
     });
 
-    if ready.strength < s.num(setting::COOLDOWN) / 100.0 {
+    let min_fall = s.num(setting::MIN_FALL) as f64;
+    let last = last_in_reach(
+        &ready.path,
+        ready.eye_height,
+        ready.fall,
+        min_fall,
+        found.min,
+        found.max,
+        vel,
+        range,
+    );
+    let charge = Charge {
+        strength: ready.strength,
+        delay: ready.delay,
+        threshold: s.num(setting::COOLDOWN) / 100.0,
+        sprinting: ready.sprinting,
+        stop_sprint: s.flag(setting::STOP_SPRINT),
+    };
+    run.stop_sprint = charge.stop_sprint
+        && (charge.sprinting || run.stop_sprint)
+        && last.is_some_and(|l| l <= STOP_SPRINT_LEAD && charge.crit_within(l));
+
+    if ready.fall < min_fall || box_distance(ready.eye, found.min, found.max) > range {
+        note(&mut run, Reason::Approach);
+        return;
+    }
+    let last = last.unwrap_or(0);
+    if !swing_now(&charge, last, s.flag(setting::WAIT_CHARGE)) {
+        note(&mut run, Reason::Strength);
         return;
     }
     let Some((origin, dir)) = sent_ray(bot) else {
         return;
     };
     if !ray_hits(origin, dir, range, found.min, found.max) {
+        note(&mut run, Reason::RayMiss);
         return;
     }
 
@@ -222,55 +314,150 @@ pub fn tick(bot: &Client, shared: &SharedMutex) {
         restore,
         queued_at: now,
     });
+    run.stop_sprint = false;
+    run.reason = Some(Reason::Swung);
+    crate::log_debug!(
+        "mace",
+        "Swung: strength {:.2}, fall {:.1}, last tick in reach {last}, crit {}",
+        ready.strength,
+        ready.fall,
+        charge.crit_ready(0)
+    );
 }
 
 struct Ready {
     eye: [f64; 3],
+    eye_height: f64,
+    path: Vec<[f64; 3]>,
+    fall: f64,
     camera: Look,
     strength: f32,
+    delay: f32,
+    sprinting: bool,
     mace: u8,
 }
 
-fn ready(bot: &Client, shared: &SharedMutex) -> Option<Ready> {
+fn ready(bot: &Client, shared: &SharedMutex) -> Result<Ready, Reason> {
     let s = store();
-    let falling = {
-        let physics = bot.component::<Physics>().ok()?;
-        !physics.on_ground()
-            && !physics.was_touching_water
-            && physics.fall_distance >= s.num(setting::MIN_FALL) as f64
+    let min_fall = s.num(setting::MIN_FALL) as f64;
+    let (fall, vel) = {
+        let physics = bot.component::<Physics>().map_err(|_| Reason::NoFall)?;
+        if physics.on_ground() || physics.was_touching_water {
+            return Err(Reason::NoFall);
+        }
+        let v = physics.velocity;
+        (physics.fall_distance, [v.x, v.y, v.z])
     };
-    if !falling || bot.component::<FallFlying>().is_ok_and(|f| **f) {
-        return None;
+    if bot.component::<FallFlying>().is_ok_and(|f| **f) {
+        return Err(Reason::NoFall);
     }
 
-    let (camera, strength, mace) = {
+    let (camera, strength, delay, mace) = {
         let st = shared.lock().unwrap();
         if !st.in_world
             || st.screen_open
             || st.session.dead
             || st.session.gamemode == Gamemode::Spectator
         {
-            return None;
+            return Err(Reason::Hands);
         }
         let mace = mace_slot(
             &st.session.hotbar,
             st.session.hotbar_selected,
             s.choice(setting::SLOT),
-        )?;
-        let camera = Look {
-            yaw: -st.camera_yaw - 180.0,
-            pitch: -st.camera_pitch,
-        };
-        (camera, st.session.attack_strength, mace)
+        )
+        .ok_or(Reason::Hands)?;
+        let camera = Look::from_camera(st.camera_yaw, st.camera_pitch);
+        (
+            camera,
+            st.session.attack_strength,
+            st.session.attack_delay,
+            mace,
+        )
     };
+    let sprinting = bot.component::<Sprinting>().is_ok_and(|f| **f);
 
-    let eye = bot.eye_position().ok()?;
-    Some(Ready {
+    let feet = bot.position().map_err(|_| Reason::NoFall)?;
+    let eye = bot.eye_position().map_err(|_| Reason::NoFall)?;
+    let floor = match landing(bot, feet) {
+        Landing::Ground(drop) | Landing::Fluid(drop) => Some(feet.y - drop),
+        Landing::None => None,
+    };
+    if floor.is_some_and(|f| fall + (feet.y - f) < min_fall) {
+        return Err(Reason::NoFall);
+    }
+    let path = airborne_path([feet.x, feet.y, feet.z], vel, floor, HORIZON);
+    if path.is_empty() {
+        return Err(Reason::NoFall);
+    }
+
+    Ok(Ready {
         eye: [eye.x, eye.y, eye.z],
+        eye_height: eye.y - feet.y,
+        path,
+        fall,
         camera,
         strength,
+        delay,
+        sprinting,
         mace,
     })
+}
+
+struct Charge {
+    strength: f32,
+    delay: f32,
+    threshold: f32,
+    sprinting: bool,
+    stop_sprint: bool,
+}
+
+impl Charge {
+    fn charged(&self, k: usize) -> bool {
+        self.strength + k as f32 / self.delay.max(1.0) >= self.threshold
+    }
+
+    fn crit_ready(&self, k: usize) -> bool {
+        self.charged(k) && (!self.sprinting || (self.stop_sprint && k >= SPRINT_TICKS))
+    }
+
+    fn crit_within(&self, last: usize) -> bool {
+        (0..=last).any(|k| self.crit_ready(k))
+    }
+}
+
+fn swing_now(c: &Charge, last: usize, wait: bool) -> bool {
+    if wait {
+        return c.charged(0);
+    }
+    c.crit_ready(0) || last <= MARGIN
+}
+
+#[allow(clippy::too_many_arguments)]
+fn last_in_reach(
+    path: &[[f64; 3]],
+    eye_height: f64,
+    fall: f64,
+    min_fall: f64,
+    min: [f64; 3],
+    max: [f64; 3],
+    vel: [f64; 3],
+    range: f64,
+) -> Option<usize> {
+    let mut fallen = fall;
+    let mut prev = path.first()?[1];
+    let mut last = None;
+    for (k, p) in path.iter().enumerate() {
+        fallen += (prev - p[1]).max(0.0);
+        prev = p[1];
+        let t = k as f64;
+        let shift = |b: [f64; 3]| [b[0] + vel[0] * t, b[1], b[2] + vel[2] * t];
+        let eye = [p[0], p[1] + eye_height, p[2]];
+        if fallen >= min_fall && box_distance(eye, shift(min), shift(max)) <= range {
+            last = Some(k);
+        }
+    }
+    last
 }
 
 fn settle(bot: &Client, sw: Swung, swap_back: bool) {
@@ -309,15 +496,15 @@ struct Found {
 
 fn pick(
     bot: &Client,
-    eye: [f64; 3],
-    camera: Look,
+    ready: &Ready,
     range: f64,
     fov: f32,
     walls: bool,
     aim: AimPoint,
 ) -> Option<Found> {
     let cone = (fov < 360.0).then(|| ((fov as f64) * 0.5).to_radians().cos());
-    let mut found = candidates(bot, eye, view_vector(camera), range, cone);
+    let eye = ready.eye;
+    let mut found = candidates(bot, ready, view_vector(ready.camera), range, cone);
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
     found.into_iter().map(|(_, f)| f).find(|f| {
         walls || {
@@ -329,28 +516,48 @@ fn pick(
 
 fn candidates(
     bot: &Client,
-    eye: [f64; 3],
+    ready: &Ready,
     forward: [f64; 3],
     range: f64,
     cone: Option<f64>,
 ) -> Vec<(f64, Found)> {
+    let eye = ready.eye;
+    let reach = range + TARGET_SLACK;
+    let travel = match (ready.path.first(), ready.path.last()) {
+        (Some(a), Some(b)) => {
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        }
+        _ => 0.0,
+    };
     let mut out = Vec::new();
     super::nearby::each(bot, |e| {
-        if !e.health.is_some_and(|h| h > 0.0) || !super::entities::kind_enabled(e.kind) {
+        if !e.health.is_some_and(|h| h > 0.0)
+            || !super::entities::kind_enabled(e.kind)
+            || e.protected()
+        {
             return;
         }
         let b = &e.physics.bounding_box;
         let (min, max) = ([b.min.x, b.min.y, b.min.z], [b.max.x, b.max.y, b.max.z]);
         let dist = box_distance(eye, min, max);
-        if dist > range {
+        if dist > reach + travel
+            || (dist > reach
+                && last_in_reach(
+                    &ready.path,
+                    ready.eye_height,
+                    0.0,
+                    f64::NEG_INFINITY,
+                    min,
+                    max,
+                    [0.0; 3],
+                    reach,
+                )
+                .is_none())
+        {
             return;
         }
         if let Some(limit) = cone {
-            let c = [
-                (min[0] + max[0]) * 0.5,
-                (min[1] + max[1]) * 0.5,
-                (min[2] + max[2]) * 0.5,
-            ];
+            let c = centre(min, max);
             let to = [c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]];
             let len = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
             let cos = (forward[0] * to[0] + forward[1] * to[1] + forward[2] * to[2]) / len;
@@ -371,11 +578,12 @@ fn candidates(
     out
 }
 
-pub fn look_step(s: &SharedState, yaw: f32, pitch: f32, dt: f32, d: (f32, f32)) -> (f32, f32) {
-    let Some(intent) = s.session.auto_mace else {
-        return d;
-    };
-    turn::look_toward(s, yaw, pitch, dt, d, intent.aim, intent.turn)
+fn centre(min: [f64; 3], max: [f64; 3]) -> [f64; 3] {
+    [
+        (min[0] + max[0]) * 0.5,
+        (min[1] + max[1]) * 0.5,
+        (min[2] + max[2]) * 0.5,
+    ]
 }
 
 fn aim_point(min: [f64; 3], max: [f64; 3], eye: [f64; 3], at: AimPoint) -> [f64; 3] {
@@ -446,6 +654,109 @@ mod tests {
                 }
             }
         }
+    }
+
+    const EYE: f64 = 1.62;
+
+    fn fall_from(drop: f64) -> Vec<[f64; 3]> {
+        airborne_path([0.0, MIN[1] + drop, 0.0], [0.0; 3], Some(MIN[1]), HORIZON)
+    }
+
+    #[test]
+    fn a_ten_block_fall_is_in_reach_for_three_ticks() {
+        let path = fall_from(10.0);
+        assert_eq!(path.len(), 18);
+        assert_eq!(
+            last_in_reach(&path, EYE, 0.0, 3.0, MIN, MAX, [0.0; 3], 3.0),
+            Some(17)
+        );
+        let eye = |k: usize| [path[k][0], path[k][1] + EYE, path[k][2]];
+        assert!(box_distance(eye(15), MIN, MAX) <= 3.0);
+        assert!(
+            box_distance(eye(14), MIN, MAX) > 3.0,
+            "the tick before is out of reach"
+        );
+    }
+
+    #[test]
+    fn a_twenty_block_fall_is_in_reach_for_two_ticks() {
+        let path = fall_from(20.0);
+        assert_eq!(path.len(), 25);
+        assert_eq!(
+            last_in_reach(&path, EYE, 0.0, 3.0, MIN, MAX, [0.0; 3], 3.0),
+            Some(24)
+        );
+        let eye = [path[22][0], path[22][1] + EYE, path[22][2]];
+        assert!(box_distance(eye, MIN, MAX) > 3.0);
+    }
+
+    #[test]
+    fn min_fall_is_counted_per_tick() {
+        let path = fall_from(10.0);
+        assert_eq!(
+            last_in_reach(&path, EYE, 0.0, 9.0, MIN, MAX, [0.0; 3], 3.0),
+            Some(17)
+        );
+        assert_eq!(
+            last_in_reach(&path, EYE, 0.0, 10.0, MIN, MAX, [0.0; 3], 3.0),
+            None
+        );
+        assert_eq!(
+            last_in_reach(&path, EYE, 1.0, 10.0, MIN, MAX, [0.0; 3], 3.0),
+            Some(17)
+        );
+    }
+
+    #[test]
+    fn a_target_that_moves_away_is_out_of_reach() {
+        let path = fall_from(10.0);
+        assert_eq!(
+            last_in_reach(&path, EYE, 0.0, 3.0, MIN, MAX, [1.0, 0.0, 0.0], 3.0),
+            None
+        );
+    }
+
+    fn charge(strength: f32, sprinting: bool, stop_sprint: bool) -> Charge {
+        Charge {
+            strength,
+            delay: 10.0,
+            threshold: 0.95,
+            sprinting,
+            stop_sprint,
+        }
+    }
+
+    #[test]
+    fn short_of_the_charge_it_swings_at_the_last_tick() {
+        assert!(swing_now(&charge(1.0, false, true), 10, false));
+        let half = charge(0.5, false, true);
+        assert!(!half.charged(4) && half.charged(5), "a tenth a tick");
+        assert!(!swing_now(&half, 10, false), "a later tick is in reach");
+        assert!(swing_now(&half, MARGIN, false));
+        assert!(swing_now(&half, 0, false));
+        assert!(!swing_now(&half, 0, true), "the hard gate");
+        assert!(
+            swing_now(&charge(1.0, true, false), 0, true),
+            "the hard gate ignores sprint"
+        );
+    }
+
+    #[test]
+    fn a_sprint_delays_the_crit() {
+        let sprinting = charge(1.0, true, true);
+        assert!(!sprinting.crit_ready(0));
+        assert!(sprinting.crit_ready(SPRINT_TICKS));
+        assert!(
+            !swing_now(&sprinting, 5, false),
+            "waits for the sprint to end"
+        );
+        assert!(sprinting.crit_within(SPRINT_TICKS) && !sprinting.crit_within(SPRINT_TICKS - 1));
+        let kept = charge(1.0, true, false);
+        assert!(!kept.crit_within(10), "no crit while the sprint is kept");
+        assert!(
+            swing_now(&kept, MARGIN, false),
+            "but the smash still goes in"
+        );
     }
 
     #[test]

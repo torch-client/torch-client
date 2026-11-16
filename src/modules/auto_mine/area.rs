@@ -3,39 +3,26 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use azalea::Client;
-use azalea::block::{BlockState, BlockTrait};
-use azalea::entity::inventory::Inventory;
+use azalea::block::BlockState;
 use azalea::mining::MineBlockPos;
 use azalea::pathfinder::player_pos_to_block_pos;
 use azalea::pathfinder::world::{is_block_state_passable, is_block_state_standable};
-use azalea::physics::clip::{BlockShapeType, ClipContext, FluidPickType, clip};
-use azalea::physics::collision::BlockWithShape;
 use azalea_core::hit_result::{BlockHitResult, HitResult};
 use azalea_core::position::{BlockPos, Vec3};
-use azalea_inventory::ItemStack;
 use azalea_registry::builtin::BlockKind;
 
-use super::{
-    FluidRule, InvFull, ReachMode, STALL_TICKS, draw, exposes_fluid, hud, is_fluid, present,
+use super::shared::{
+    EYE, MAX_STALLS, STALL_TICKS, TRAVEL_PROGRESS, TRAVEL_TICKS, aim_at, breakable, exposes_fluid,
+    inventory_full, present, solid,
 };
-use crate::modules::pathfinder::{self, Travel};
+use super::{FluidRule, InvFull, ReachMode, draw, hud};
+use crate::modules::pathfinder::{self, QuietGoal, QuietOpts, Travel};
 use crate::modules::registry::{Id, auto_mine as setting};
 use crate::modules::{MS_PER_TICK, Store, roll, store};
 use crate::session::{MineIntent, SharedMutex};
 
 pub const MAX_VOLUME: i64 = 1 << 20;
 pub const MAX_SIDE: i32 = 128;
-
-const REACH: f64 = 4.2;
-
-const EYE: f64 = 1.62;
-
-const JITTER: f64 = 0.22;
-
-const MAX_STALLS: u32 = 5;
-
-const TRAVEL_TICKS: i64 = 600;
-const TRAVEL_PROGRESS: i32 = 4;
 
 const FIRST_TRIES: u32 = 3;
 
@@ -163,10 +150,6 @@ pub fn block_changed(pos: BlockPos, old: BlockState, new: BlockState) {
     if delta != 0 {
         hud::changed(delta);
     }
-}
-
-pub fn solid(state: BlockState) -> bool {
-    !state.is_air() && !is_fluid(state)
 }
 
 static RUN: Mutex<Option<Run>> = Mutex::new(None);
@@ -316,7 +299,14 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>, s:
                     continue;
                 }
                 Next::Travel(spot) => {
-                    pathfinder::goto_quiet(bot, spot, false);
+                    pathfinder::goto_quiet(
+                        bot,
+                        QuietGoal::Block(spot),
+                        QuietOpts {
+                            parkour: false,
+                            mining: false,
+                        },
+                    );
                     run.stage = Stage::Travel {
                         spot,
                         until: now + TRAVEL_TICKS,
@@ -356,7 +346,14 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>, s:
                                 + (feet.z - from.z).abs();
                             pathfinder::cancel_quiet(bot);
                             if moved >= TRAVEL_PROGRESS {
-                                pathfinder::goto_quiet(bot, spot, false);
+                                pathfinder::goto_quiet(
+                                    bot,
+                                    QuietGoal::Block(spot),
+                                    QuietOpts {
+                                        parkour: false,
+                                        mining: false,
+                                    },
+                                );
                                 run.stage = Stage::Travel {
                                     spot,
                                     until: now + TRAVEL_TICKS,
@@ -606,13 +603,6 @@ fn falls(state: BlockState) -> bool {
     )
 }
 
-fn breakable(cache: &mut HashMap<u32, bool>, state: BlockState) -> bool {
-    *cache.entry(state.id() as u32).or_insert_with(|| {
-        let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
-        block.behavior().destroy_time >= 0.0
-    })
-}
-
 fn allowed(mode: ReachMode, feet: BlockPos, t: BlockPos) -> bool {
     let (dx, dy, dz) = (t.x - feet.x, t.y - feet.y, t.z - feet.z);
     if dx == 0 && dz == 0 {
@@ -685,79 +675,6 @@ fn from_here(
         let state = world.get_block_state(t).filter(|st| solid(*st))?;
         aim_at(&world.chunks, eye, t, state).map(|aim| (t, aim))
     })
-}
-
-fn aim_at(
-    chunks: &azalea_world::ChunkStorage,
-    eye: [f64; 3],
-    t: BlockPos,
-    state: BlockState,
-) -> Option<[f64; 3]> {
-    let shape = state.outline_shape(t);
-    if shape.is_empty() {
-        return None;
-    }
-    let b = shape.bounds();
-    let base = [f64::from(t.x), f64::from(t.y), f64::from(t.z)];
-    let lo = [base[0] + b.min.x, base[1] + b.min.y, base[2] + b.min.z];
-    let hi = [base[0] + b.max.x, base[1] + b.max.y, base[2] + b.max.z];
-    let mut faces: Vec<(usize, [f64; 3])> = Vec::with_capacity(3);
-    for axis in 0..3 {
-        let plane = if eye[axis] < lo[axis] {
-            lo[axis]
-        } else if eye[axis] > hi[axis] {
-            hi[axis]
-        } else {
-            continue;
-        };
-        let mut c = [
-            (lo[0] + hi[0]) * 0.5,
-            (lo[1] + hi[1]) * 0.5,
-            (lo[2] + hi[2]) * 0.5,
-        ];
-        c[axis] = plane;
-        faces.push((axis, c));
-    }
-    let d2 = |p: &[f64; 3]| (0..3).map(|i| (p[i] - eye[i]).powi(2)).sum::<f64>();
-    faces.sort_by(|a, b| d2(&a.1).total_cmp(&d2(&b.1)));
-    for (axis, centre) in faces {
-        let mut jittered = centre;
-        for i in (0..3).filter(|&i| i != axis) {
-            let half = JITTER.min((hi[i] - lo[i]) * 0.4);
-            jittered[i] += f64::from(roll(0.0, 2.0 * half as f32)) - half;
-        }
-        for p in [jittered, centre] {
-            let len = d2(&p).sqrt();
-            if len > REACH {
-                continue;
-            }
-            let len = len.max(1e-6);
-            let dir = [
-                (p[0] - eye[0]) / len,
-                (p[1] - eye[1]) / len,
-                (p[2] - eye[2]) / len,
-            ];
-            let hit = clip(
-                chunks,
-                ClipContext {
-                    from: Vec3::new(eye[0], eye[1], eye[2]),
-                    to: Vec3::new(
-                        p[0] + dir[0] * 0.05,
-                        p[1] + dir[1] * 0.05,
-                        p[2] + dir[2] * 0.05,
-                    ),
-                    block_shape_type: BlockShapeType::Outline,
-                    fluid_pick_type: FluidPickType::None,
-                    held_item: azalea_registry::builtin::ItemKind::Air,
-                    entity: None,
-                },
-            );
-            if !hit.miss && hit.block_pos == t {
-                return Some(p);
-            }
-        }
-    }
-    None
 }
 
 enum Search {
@@ -879,19 +796,6 @@ fn stairs(min: BlockPos, max: BlockPos, near: (i32, i32)) -> HashSet<BlockPos> {
             BlockPos::new(x, max.y - k, z)
         })
         .collect()
-}
-
-fn inventory_full(bot: &Client) -> bool {
-    let Ok(inv) = bot.component::<Inventory>() else {
-        return false;
-    };
-    let menu = &inv.inventory_menu;
-    menu.player_slots_without_hotbar_range()
-        .chain(menu.hotbar_slots_range())
-        .all(|i| match menu.slot(i) {
-            Some(ItemStack::Present(d)) => d.count >= azalea_inventory::bundle::max_stack_size(d),
-            _ => false,
-        })
 }
 
 fn say(shared: &SharedMutex, text: &str) {

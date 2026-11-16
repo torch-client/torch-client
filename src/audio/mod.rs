@@ -1,26 +1,23 @@
-#[cfg(target_os = "android")]
+#[cfg(all(
+    any(target_arch = "wasm32", target_os = "android"),
+    not(feature = "small_audio")
+))]
 compile_error!(
-    "the `audio` feature is not built for Android: the sounds are 331 MiB, and \
-     the mixer's backend is not built for this target. See the feature's comment \
-     in Cargo.toml."
+    "on the web and Android, ask for `small_audio` rather than `audio`. See its comment in Cargo.toml."
 );
 
-#[cfg(all(target_arch = "wasm32", not(feature = "browser_audio")))]
-compile_error!(
-    "on the web, ask for `browser_audio` rather than `audio`. See its comment in Cargo.toml."
-);
-
-#[cfg(all(feature = "browser_audio", not(target_arch = "wasm32")))]
-compile_error!(
-    "`browser_audio` is the web build's sound and needs the Web Audio API; use `audio` here."
-);
+#[cfg(all(
+    feature = "small_audio",
+    not(any(target_arch = "wasm32", target_os = "android"))
+))]
+compile_error!("`small_audio` is the web and Android build's sound; use `audio` here.");
 
 mod ambience;
 mod attributes;
 pub mod category;
 pub(crate) mod defs;
 mod music;
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(feature = "small_audio", test))]
 pub(crate) mod subset;
 mod voice;
 

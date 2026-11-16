@@ -1,38 +1,19 @@
 use bevy_platform::time::Instant;
-use std::{
-    io::Cursor,
-    time::Duration,
-};
+use std::time::Duration;
 
 use azalea_core::position::ChunkPos;
-use azalea_protocol::packets::game::{
-    c_level_chunk_with_light::ClientboundLevelChunkWithLight,
-    s_chunk_batch_received::ServerboundChunkBatchReceived,
-};
-use bevy_app::{App, Plugin, Update};
+use azalea_protocol::packets::game::c_level_chunk_with_light::ClientboundLevelChunkWithLight;
+use azalea_world::Chunk;
+use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
-use tracing::{error, trace};
+use tracing::trace;
 
-use crate::{
-    inventory::InventorySystems, local_player::WorldHolder, packet::game::SendGamePacketEvent,
-    respawn::perform_respawn,
-};
+use crate::local_player::WorldHolder;
 
 pub struct ChunksPlugin;
 impl Plugin for ChunksPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (
-                handle_chunk_batch_start_event,
-                handle_receive_chunk_event,
-                handle_chunk_batch_finished_event,
-            )
-                .chain()
-                .before(InventorySystems)
-                .before(perform_respawn),
-        )
-        .add_message::<ReceiveChunkEvent>()
+        app.add_message::<ReceiveChunkEvent>()
         .add_message::<ChunkBatchStartEvent>()
         .add_message::<ChunkBatchFinishedEvent>();
     }
@@ -41,7 +22,7 @@ impl Plugin for ChunksPlugin {
 #[derive(Message)]
 pub struct ReceiveChunkEvent {
     pub entity: Entity,
-    pub packet: ClientboundLevelChunkWithLight,
+    pub pos: ChunkPos,
 }
 
 #[derive(Clone, Component, Debug)]
@@ -61,42 +42,35 @@ pub struct ChunkBatchFinishedEvent {
     pub batch_size: u32,
 }
 
-pub fn handle_receive_chunk_event(
-    mut events: MessageReader<ReceiveChunkEvent>,
-    mut query: Query<&WorldHolder>,
-) {
-    for event in events.read() {
-        let pos = ChunkPos::new(event.packet.x, event.packet.z);
-
-        let local_player = query.get_mut(event.entity).unwrap();
-
-        let mut world = local_player.shared.write();
-        let mut partial_world = local_player.partial.write();
-
-        let shared_chunk = world.chunks.get(&pos);
-        let this_client_has_chunk = partial_world.chunks.limited_get(&pos).is_some();
-
-        if !this_client_has_chunk && let Some(shared_chunk) = shared_chunk {
-            trace!("Skipping parsing chunk {pos:?} because we already know about it");
-            partial_world.chunks.limited_set(&pos, Some(shared_chunk));
-            continue;
+pub fn store_chunk(holder: &WorldHolder, packet: &ClientboundLevelChunkWithLight) {
+    let pos = ChunkPos::new(packet.x, packet.z);
+    let (height, min_y, biomes) = {
+        let world = holder.shared.read();
+        (
+            world.chunks.height(),
+            world.chunks.min_y(),
+            azalea_world::chunk::biome_registry_len(&world.registries),
+        )
+    };
+    let (chunk, failure) = Chunk::read_lenient(
+        &packet.chunk_data.data,
+        height,
+        min_y,
+        &packet.chunk_data.heightmaps,
+        biomes,
+    );
+    {
+        let mut world = holder.shared.write();
+        if world.chunks.height() != height || world.chunks.min_y() != min_y {
+            trace!("Dropping chunk {pos:?}: the level changed while it was decoded");
+            return;
         }
-
-        let heightmaps = &event.packet.chunk_data.heightmaps;
-
-        if let Err(e) = partial_world.chunks.replace_with_packet_data(
-            &pos,
-            &mut Cursor::new(&event.packet.chunk_data.data),
-            heightmaps,
-            &mut world.chunks,
-        ) {
-            if azalea_registry::unknown::note_packet("level_chunk_with_light") {
-                error!(
-                    "Couldn't set chunk data: {e}. World height: {}",
-                    world.chunks.height()
-                );
-            }
-        }
+        let mut partial = holder.partial.write();
+        partial.chunks.set(&pos, Some(chunk), &mut world.chunks);
+    }
+    trace!("Stored chunk {pos:?}");
+    if let Some(failure) = failure {
+        azalea_world::chunk::report_decode_failure(pos, &failure);
     }
 }
 
@@ -135,40 +109,19 @@ fn min_chunks_per_tick() -> f32 {
     })
 }
 
-pub fn handle_chunk_batch_start_event(
-    mut query: Query<&mut ChunkBatchInfo>,
-    mut events: MessageReader<ChunkBatchStartEvent>,
-) {
-    for event in events.read() {
-        if let Ok(mut chunk_batch_info) = query.get_mut(event.entity) {
-            chunk_batch_info.start_time = Instant::now();
-        }
-    }
+pub fn start_chunk_batch(info: &mut ChunkBatchInfo) {
+    info.start_time = Instant::now();
 }
 
-pub fn handle_chunk_batch_finished_event(
-    mut query: Query<&mut ChunkBatchInfo>,
-    mut events: MessageReader<ChunkBatchFinishedEvent>,
-    mut commands: Commands,
-) {
-    for event in events.read() {
-        if let Ok(mut chunk_batch_info) = query.get_mut(event.entity) {
-            chunk_batch_info.batch_finished(event.batch_size);
-            let desired_chunks_per_tick = chunk_batch_info.desired_chunks_per_tick();
-            tracing::debug!(
-                "chunk batch: {} chunks, {:?} per chunk, asking for {desired_chunks_per_tick:.3} \
-                 chunks/tick",
-                event.batch_size,
-                chunk_batch_info.aggregated_duration_per_chunk,
-            );
-            commands.trigger(SendGamePacketEvent::new(
-                event.entity,
-                ServerboundChunkBatchReceived {
-                    desired_chunks_per_tick,
-                },
-            ));
-        }
-    }
+pub fn finish_chunk_batch(info: &mut ChunkBatchInfo, batch_size: u32) -> f32 {
+    info.batch_finished(batch_size);
+    let desired_chunks_per_tick = info.desired_chunks_per_tick();
+    tracing::debug!(
+        "chunk batch: {batch_size} chunks, {:?} per chunk, asking for \
+         {desired_chunks_per_tick:.3} chunks/tick",
+        info.aggregated_duration_per_chunk,
+    );
+    desired_chunks_per_tick
 }
 
 #[derive(Clone, Debug)]

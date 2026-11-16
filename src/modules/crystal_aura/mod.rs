@@ -4,22 +4,22 @@ use std::sync::Mutex;
 
 use azalea::Client;
 use azalea::attack::AttackQueued;
-use azalea::entity::Physics;
 use azalea::entity::inventory::Inventory;
+use azalea::entity::{LookDirection, Physics};
 use azalea_core::position::BlockPos;
 use azalea_inventory::ItemStack;
 use azalea_inventory::components::EquipmentSlotGroup as Group;
 use azalea_registry::builtin::ItemKind;
 
-use self::search::{Body, Crystal, Rules, Scene, click_on, top_click};
+use self::search::{Body, Crystal, Rules, Scene, click_on, sees_box, top_click};
 use super::registry::{Id, crystal_aura as setting, options};
-use super::sent::{Look, look_at, move_fix, ray_hits, sent_ray, sent_view};
-use super::{Edge, MS_PER_TICK, Phase, Store, roll, store, turn};
+use super::sent::{Look, look_at, sent_view};
+use super::turn::{Shape, SilentTurn};
+use super::{Edge, Phase, Store, delay_ticks, roll, store, turn};
 use crate::play::interaction::{module_use_on, select_hotbar_slot};
 use crate::renderer::world_draw::{self, Node};
 use crate::session::{Gamemode, InteractionHand, SharedMutex};
 use crate::util::combat::{Defense, Worn};
-use crate::util::mth::wrap_degrees;
 
 options! {
     pub enum CrystalSwitch {
@@ -29,7 +29,6 @@ options! {
     }
 }
 
-const TICK: f32 = MS_PER_TICK / 1000.0;
 const BLOCK_REACH: f32 = 4.5;
 const ENTITY_REACH: f32 = 3.0;
 const RETRY_TICKS: i64 = 4;
@@ -44,7 +43,7 @@ static RUN: Mutex<Run> = Mutex::new(Run::IDLE);
 struct Run {
     aim: Option<[f64; 3]>,
     spot: Option<Spot>,
-    silent: Option<Look>,
+    silent: SilentTurn,
     turn: f32,
     next_place: i64,
     next_break: i64,
@@ -59,7 +58,7 @@ impl Run {
     const IDLE: Run = Run {
         aim: None,
         spot: None,
-        silent: None,
+        silent: SilentTurn::IDLE,
         turn: 0.0,
         next_place: 0,
         next_break: 0,
@@ -110,7 +109,7 @@ pub(super) struct Me {
 
 enum Plan {
     Idle,
-    Break(Crystal, Option<[f64; 3]>),
+    Break(Crystal, Option<[f64; 3]>, bool),
     Place {
         base: BlockPos,
         aim: [f64; 3],
@@ -123,39 +122,26 @@ pub fn enabled() -> bool {
 }
 
 pub fn steer(bot: &Client, yaw: f32, pitch: f32, flags: u8) -> Option<(f32, f32, u8)> {
-    let camera = Look { yaw, pitch };
     let mut run = RUN.lock().unwrap();
     let want = match run.aim {
         Some(aim) => {
             let Ok(eye) = bot.eye_position() else {
-                run.silent = None;
+                run.silent.drop_out();
                 return None;
             };
-            look_at([eye.x, eye.y, eye.z], aim)
+            Some(look_at([eye.x, eye.y, eye.z], aim))
         }
-        None if run.silent.is_some() => camera,
-        None => return None,
+        None => None,
     };
-    let from = run.silent.unwrap_or(camera);
-    let next = Look {
-        yaw: from.yaw + turn::step(wrap_degrees(want.yaw - from.yaw), run.turn, TICK),
-        pitch: (from.pitch + turn::step(want.pitch - from.pitch, run.turn, TICK))
-            .clamp(-90.0, 90.0),
-    };
-    if run.aim.is_none()
-        && wrap_degrees(next.yaw - yaw).abs() < turn::DEADZONE
-        && (next.pitch - pitch).abs() < turn::DEADZONE
-    {
-        run.silent = None;
-        return None;
-    }
-    run.silent = Some(next);
-    let flags = if store().flag(setting::MOVE_FIX) {
-        move_fix(flags, yaw, next.yaw)
-    } else {
-        flags
-    };
-    Some((next.yaw, next.pitch, flags))
+    let rate = run.turn;
+    let next = run
+        .silent
+        .next(bot, Look { yaw, pitch }, want, rate, Shape::Eased)?;
+    Some((
+        next.yaw,
+        next.pitch,
+        turn::walk_keys(flags, yaw, next.yaw, store().flag(setting::MOVE_FIX)),
+    ))
 }
 
 pub fn tick(bot: &Client, shared: &SharedMutex) {
@@ -239,7 +225,7 @@ fn act(bot: &Client, shared: &SharedMutex, s: &Store, run: &mut Run, now: i64) -
         let hits = &run.hits;
         let gone = |id: i32| hits.iter().any(|h| h.id == id && now - h.at < RETRY_TICKS);
         let spent = |id: i32| gone(id) || hits.iter().any(|h| h.id == id && h.count >= attempts);
-        let sent = sent_view(bot);
+        let views = if strict { judged(bot, shared) } else { None };
         let Ok(world) = bot.world() else {
             return false;
         };
@@ -250,12 +236,30 @@ fn act(bot: &Client, shared: &SharedMutex, s: &Store, run: &mut Run, now: i64) -
             None
         };
         match crystal {
-            Some((c, aim)) => Plan::Break(c, aim),
+            Some((c, aim)) => {
+                let seen = !strict
+                    || views.as_ref().is_some_and(|v| {
+                        v.iter().all(|&(eye, look)| {
+                            sees_box(&w, eye, look, break_reach, c.body.min, c.body.max)
+                        })
+                    });
+                Plan::Break(c, aim, seen)
+            }
             None if s.flag(setting::PLACE) && me.crystals.is_some() => {
-                match scene.best_base(&w, &me, &rules, place_reach, !strict, &gone) {
+                match scene.best_base(
+                    &w,
+                    &me,
+                    &rules,
+                    place_reach,
+                    !strict,
+                    s.flag(setting::BREAK).then_some(break_reach),
+                    &gone,
+                ) {
                     Some((base, aim, _)) => {
                         let click = if strict {
-                            sent.and_then(|(eye, look)| click_on(&w, eye, look, base, place_reach))
+                            views
+                                .as_ref()
+                                .and_then(|v| agreed_click(&w, v, base, place_reach))
                         } else {
                             Some(top_click(base))
                         };
@@ -273,7 +277,7 @@ fn act(bot: &Client, shared: &SharedMutex, s: &Store, run: &mut Run, now: i64) -
             idle(run);
             false
         }
-        Plan::Break(c, aim) => {
+        Plan::Break(c, aim, seen) => {
             face(run, s, Spot::Crystal(c.id), aim);
             let own =
                 s.flag(setting::FAST_BREAK) && run.placed.iter().any(|&(cell, _)| cell == c.cell());
@@ -283,10 +287,7 @@ fn act(bot: &Client, shared: &SharedMutex, s: &Store, run: &mut Run, now: i64) -
             if bot.component::<AttackQueued>().is_ok() {
                 return true;
             }
-            if strict
-                && !sent_ray(bot)
-                    .is_some_and(|(o, d)| ray_hits(o, d, break_reach, c.body.min, c.body.max))
-            {
+            if !seen {
                 return true;
             }
             if me.weak && s.flag(setting::ANTI_WEAKNESS) {
@@ -385,8 +386,49 @@ fn put_back(bot: &Client, r: Restore) {
     }
 }
 
-fn delay_ticks((lo, hi): (f32, f32)) -> i64 {
-    (roll(lo, hi) / MS_PER_TICK).round() as i64
+fn judged(bot: &Client, shared: &SharedMutex) -> Option<[([f64; 3], Look); 4]> {
+    let (last_eye, last) = sent_view(bot)?;
+    let next = {
+        let l = bot.component::<LookDirection>().ok()?;
+        Look {
+            yaw: l.y_rot(),
+            pitch: l.x_rot(),
+        }
+    };
+    let eye = bot.eye_position().ok()?;
+    let (v, ground) = {
+        let p = bot.component::<Physics>().ok()?;
+        (p.velocity, p.on_ground())
+    };
+    let jump = shared.lock().unwrap().move_flags & crate::session::MOVE_JUMP != 0;
+    let dy = match (ground, jump) {
+        (true, true) => 0.42,
+        (true, false) => v.y.max(0.0),
+        (false, _) => v.y,
+    };
+    let moved = [eye.x + v.x, eye.y + dy, eye.z + v.z];
+    Some([
+        (last_eye, last),
+        (moved, last),
+        (last_eye, next),
+        (moved, next),
+    ])
+}
+
+fn agreed_click(
+    w: &azalea_world::World,
+    views: &[([f64; 3], Look); 4],
+    base: BlockPos,
+    reach: f64,
+) -> Option<azalea_core::hit_result::BlockHitResult> {
+    let (eye, look) = views[0];
+    let hit = click_on(w, eye, look, base, reach)?;
+    views[1..]
+        .iter()
+        .all(|&(eye, look)| {
+            click_on(w, eye, look, base, reach).is_some_and(|h| h.direction == hit.direction)
+        })
+        .then_some(hit)
 }
 
 fn me(bot: &Client, shared: &SharedMutex, s: &Store) -> Option<Me> {

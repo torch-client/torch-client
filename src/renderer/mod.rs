@@ -78,6 +78,8 @@ pub mod terrain_pool;
 pub mod tile_colors;
 pub mod timeline;
 pub mod visgraph;
+#[cfg(target_arch = "wasm32")]
+pub mod warmup;
 pub mod weather;
 pub mod world_border;
 pub mod world_draw;
@@ -90,8 +92,8 @@ pub use atlas::{
 };
 pub use frame_view::{FrameView, FrameViewSystems};
 pub use mesh::{
-    MeshBuf, build_section_mesh, lighting_enabled, set_lighting_enabled, set_smooth_lighting,
-    smooth_lighting_enabled,
+    MeshBuf, build_section_mesh, cutout_leaves_enabled, lighting_enabled, set_cutout_leaves,
+    set_lighting_enabled, set_smooth_lighting, smooth_lighting_enabled,
 };
 pub use occupancy::Occupancy;
 pub use origin::RenderOrigin;

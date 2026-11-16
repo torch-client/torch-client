@@ -2,9 +2,13 @@ pub(crate) mod biome_color;
 pub(crate) mod block_model;
 pub(crate) mod bytes;
 pub(crate) mod calendar;
+pub(crate) mod chunk_tracking;
 pub(crate) mod combat;
 pub(crate) mod datapack;
+#[cfg(feature = "ui_utils")]
+pub(crate) mod dismount;
 pub(crate) mod dye;
+pub(crate) mod fall;
 pub(crate) mod hash;
 pub(crate) mod interp;
 pub(crate) mod javarandom;

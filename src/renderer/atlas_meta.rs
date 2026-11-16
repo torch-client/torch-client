@@ -29,6 +29,18 @@ pub fn parse_meta(bytes: &[u8]) -> Option<SpriteMeta> {
     Some(parse_animation(animation).map_or(SpriteMeta::Broken, SpriteMeta::Animated))
 }
 
+pub fn is_dark_cutout(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(crate::platform::assets::skip_bom(bytes))
+        .ok()
+        .and_then(|json| {
+            json.get("texture")?
+                .get("mipmap_strategy")?
+                .as_str()
+                .map(|s| s == "dark_cutout")
+        })
+        .unwrap_or(false)
+}
+
 fn int(value: &serde_json::Value) -> Option<i64> {
     value.as_i64().or_else(|| value.as_f64().map(|v| v as i64))
 }
@@ -243,6 +255,18 @@ mod tests {
             None
         );
         assert_eq!(parse_meta(b"{}"), None);
+    }
+
+    #[test]
+    fn dark_cutout_reads_the_texture_section() {
+        assert!(is_dark_cutout(
+            br#"{"texture":{"mipmap_strategy":"dark_cutout"}}"#
+        ));
+        assert!(!is_dark_cutout(
+            br#"{"texture":{"mipmap_strategy":"cutout"}}"#
+        ));
+        assert!(!is_dark_cutout(br#"{"animation":{}}"#));
+        assert!(!is_dark_cutout(b"not json"));
     }
 
     #[test]

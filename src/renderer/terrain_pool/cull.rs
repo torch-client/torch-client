@@ -876,14 +876,61 @@ pub fn prepare_cull(
 
     stats.drawn.store(camera_drawn, Ordering::Relaxed);
 
-    for per_view in lists.0.values_mut() {
+    let web = cfg!(target_arch = "wasm32");
+    for view in assigned.iter() {
+        let Some(per_view) = lists.0.get_mut(&view.key) else {
+            continue;
+        };
         for (stream, list) in (0u32..).zip(per_view.iter_mut()) {
-            list.sort_unstable_by_key(|&slot| {
-                let meta = &pools.meta_cpu[slot as usize];
-                (meta.pool, meta.stream_range(stream).0)
-            });
+            let order = list_order(web, view.flags, stream);
+            sort_list(list, &pools.meta_cpu, stream, order, view.eye, origin);
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListOrder {
+    Buffer,
+    NearFirst,
+    FarFirst,
+}
+
+const NEAR_FIRST_BAND: f32 = 16.0;
+
+fn list_order(web: bool, view_flags: u32, stream: u32) -> ListOrder {
+    if !web {
+        ListOrder::Buffer
+    } else if stream == super::STREAM_WATER {
+        ListOrder::FarFirst
+    } else if view_flags == CAMERA_FLAGS {
+        ListOrder::NearFirst
+    } else {
+        ListOrder::Buffer
+    }
+}
+
+fn sort_list(
+    list: &mut [u32],
+    meta: &[SlotMeta],
+    stream: u32,
+    order: ListOrder,
+    eye: Vec3,
+    origin: IVec3,
+) {
+    list.sort_unstable_by_key(|&slot| {
+        let meta = &meta[slot as usize];
+        let first = meta.stream_range(stream).0;
+        let distance_sq = || {
+            let (lo, hi) = meta.render_box(origin);
+            ((Vec3::from(lo) + Vec3::from(hi)) * 0.5).distance_squared(eye)
+        };
+        let middle = match order {
+            ListOrder::Buffer => 0,
+            ListOrder::NearFirst => (distance_sq().sqrt() / NEAR_FIRST_BAND) as u32,
+            ListOrder::FarFirst => u32::MAX - distance_sq().to_bits(),
+        };
+        (meta.pool, middle, first)
+    });
 }
 
 fn frustum_planes(view: &ExtractedView) -> [[f32; 4]; 6] {
@@ -1147,5 +1194,129 @@ mod tests {
             bevy::render::view::RetainedViewEntity::new(Entity::PLACEHOLDER.into(), None, 0);
         assert_ne!(pack_shadow_view(camera), camera);
         assert_eq!(pack_shadow_view(camera), pack_shadow_view(camera));
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::super::{STREAM_CUTOUT, STREAM_SOLID, STREAM_WATER};
+    use super::*;
+
+    fn slot(origin: [i32; 3], pool: u32, first: u32) -> SlotMeta {
+        SlotMeta {
+            min: [0.0; 3],
+            max: [16.0; 3],
+            origin,
+            pool,
+            first_index: first,
+            solid_count: 6,
+            index_count: 12,
+            cutout_first: first,
+            ..Default::default()
+        }
+    }
+
+    fn sorted(
+        metas: &[SlotMeta],
+        stream: u32,
+        order: ListOrder,
+        eye: Vec3,
+        origin: IVec3,
+    ) -> Vec<u32> {
+        let mut list: Vec<u32> = (0..metas.len() as u32).collect();
+        sort_list(&mut list, metas, stream, order, eye, origin);
+        list
+    }
+
+    const EYE: Vec3 = Vec3::new(8.0, 8.0, 8.0);
+
+    #[test]
+    fn only_the_web_reorders() {
+        for stream in [STREAM_SOLID, STREAM_CUTOUT, STREAM_WATER] {
+            for flags in [CAMERA_FLAGS, 0] {
+                assert_eq!(list_order(false, flags, stream), ListOrder::Buffer);
+            }
+        }
+        assert_eq!(
+            list_order(true, CAMERA_FLAGS, STREAM_SOLID),
+            ListOrder::NearFirst
+        );
+        assert_eq!(
+            list_order(true, CAMERA_FLAGS, STREAM_CUTOUT),
+            ListOrder::NearFirst
+        );
+        assert_eq!(
+            list_order(true, CAMERA_FLAGS, STREAM_WATER),
+            ListOrder::FarFirst
+        );
+        assert_eq!(list_order(true, 0, STREAM_SOLID), ListOrder::Buffer);
+        assert_eq!(list_order(true, 0, STREAM_CUTOUT), ListOrder::Buffer);
+    }
+
+    #[test]
+    fn buffer_order_is_pool_then_first_index() {
+        let metas = [
+            slot([0, 0, 0], 1, 0),
+            slot([64, 0, 0], 0, 6),
+            slot([0, 0, 0], 0, 0),
+        ];
+        assert_eq!(
+            sorted(&metas, STREAM_SOLID, ListOrder::Buffer, EYE, IVec3::ZERO),
+            [2, 1, 0]
+        );
+    }
+
+    #[test]
+    fn near_first_orders_bands_inside_each_pool() {
+        let metas = [
+            slot([64, 0, 0], 0, 0),
+            slot([0, 0, 0], 0, 6),
+            slot([16, 0, 0], 0, 12),
+            slot([0, 16, 0], 0, 18),
+            slot([0, 0, 0], 1, 0),
+        ];
+        assert_eq!(
+            sorted(&metas, STREAM_SOLID, ListOrder::NearFirst, EYE, IVec3::ZERO),
+            [1, 2, 3, 0, 4]
+        );
+    }
+
+    #[test]
+    fn a_band_keeps_buffer_order() {
+        let metas = [slot([16, 0, 0], 0, 6), slot([16, 16, 0], 0, 0)];
+        assert_eq!(
+            sorted(
+                &metas,
+                STREAM_CUTOUT,
+                ListOrder::NearFirst,
+                EYE,
+                IVec3::ZERO
+            ),
+            [1, 0]
+        );
+    }
+
+    #[test]
+    fn water_draws_farthest_first() {
+        let metas = [
+            slot([0, 0, 0], 0, 0),
+            slot([32, 0, 0], 0, 12),
+            slot([16, 0, 0], 0, 24),
+            slot([64, 0, 0], 1, 0),
+        ];
+        assert_eq!(
+            sorted(&metas, STREAM_WATER, ListOrder::FarFirst, EYE, IVec3::ZERO),
+            [1, 2, 0, 3]
+        );
+    }
+
+    #[test]
+    fn distance_is_measured_in_render_space() {
+        let metas = [slot([32, 0, 0], 0, 6), slot([0, 0, 0], 0, 0)];
+        let origin = IVec3::new(32, 0, 0);
+        assert_eq!(
+            sorted(&metas, STREAM_SOLID, ListOrder::NearFirst, EYE, origin),
+            [0, 1]
+        );
     }
 }

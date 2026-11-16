@@ -111,6 +111,7 @@ fn create_simulation_player_complete_bundle(
         BlockStatePredictionHandler::default(),
         azalea_client::local_player::PermissionLevel::default(),
         azalea_entity::PlayerAbilities::default(),
+        azalea_entity::HasClientLoaded,
     )
 }
 

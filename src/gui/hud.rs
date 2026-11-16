@@ -719,15 +719,24 @@ fn world_items(info: &HudInfo, d: &DebugInfo) -> Vec<Item<'static>> {
     let pipe = &d.pipeline;
     let mem = &d.memory;
     let in_world = info.in_world;
-    let dropped_total = pipe[Stat::ChunksDropped]
-        + pipe[Stat::LightJobsDropped]
-        + pipe[Stat::MeshPanics]
-        + pipe[Stat::MeshGaveUp];
+    let dropped_total =
+        pipe[Stat::LightJobsDropped] + pipe[Stat::MeshPanics] + pipe[Stat::MeshGaveUp];
     vec![
         na_row(
             "Chunks in",
             in_world,
             format!("{}", pipe[Stat::ChunksReceived]),
+        ),
+        na_row_c(
+            "Chunk faults",
+            in_world,
+            format!(
+                "{} undecodable / {} swept / {} edge-meshed",
+                pipe[Stat::ChunkDecodeFailed],
+                pipe[Stat::ChunksSwept],
+                pipe[Stat::MeshedWithoutNeighbours]
+            ),
+            count_color(pipe[Stat::ChunkDecodeFailed], 1, 10),
         ),
         na_row(
             "Columns lit",
@@ -738,8 +747,7 @@ fn world_items(info: &HudInfo, d: &DebugInfo) -> Vec<Item<'static>> {
             "Dropped",
             in_world,
             format!(
-                "{} chunk / {} light / {} panic / {} lost",
-                pipe[Stat::ChunksDropped],
+                "{} light / {} panic / {} lost",
                 pipe[Stat::LightJobsDropped],
                 pipe[Stat::MeshPanics],
                 pipe[Stat::MeshGaveUp]
@@ -1002,7 +1010,7 @@ fn overview_sections(info: &HudInfo, d: &DebugInfo) -> Vec<(&'static str, Vec<It
     let pipe = &d.pipeline;
     let mem = &d.memory;
     let in_world = info.in_world;
-    let dropped_total = pipe[Stat::ChunksDropped]
+    let dropped_total = pipe[Stat::ChunkDecodeFailed]
         + pipe[Stat::LightJobsDropped]
         + pipe[Stat::MeshPanics]
         + pipe[Stat::MeshGaveUp];

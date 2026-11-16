@@ -8,12 +8,18 @@ pub(crate) fn dir() -> PathBuf {
     crate::client::assets::root().join("sounds")
 }
 
+const SET: &str = if cfg!(feature = "small_audio") {
+    ".small"
+} else {
+    ""
+};
+
 fn pack_path(index_id: &str) -> PathBuf {
-    dir().join(format!("{index_id}.bin"))
+    dir().join(format!("{index_id}{SET}.bin"))
 }
 
 fn defs_path(index_id: &str) -> PathBuf {
-    dir().join(format!("{index_id}.json"))
+    dir().join(format!("{index_id}{SET}.json"))
 }
 
 pub(crate) fn installed(index_id: &str) -> bool {

@@ -147,6 +147,8 @@ pub struct CubeDef {
     pub mirror: bool,
     pub tex_scale: [f32; 2],
     pub faces: Faces,
+    #[cfg(cem)]
+    pub cem: Option<super::cem::cube::CemCube>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -287,6 +289,8 @@ impl CubeList {
             mirror,
             tex_scale,
             faces,
+            #[cfg(cem)]
+            cem: None,
         });
         self
     }
@@ -391,6 +395,21 @@ impl PartDef {
 
     pub fn pose(&self) -> PartPose {
         self.pose
+    }
+
+    #[cfg(cem)]
+    pub(crate) fn from_cubes(cubes: Vec<CubeDef>, pose: PartPose) -> PartDef {
+        PartDef::new(cubes, pose)
+    }
+
+    #[cfg(cem)]
+    pub(crate) fn cubes_mut(&mut self) -> &mut Vec<CubeDef> {
+        &mut self.cubes
+    }
+
+    #[cfg(cem)]
+    pub(crate) fn children_mut(&mut self) -> &mut Vec<(String, PartDef)> {
+        &mut self.children
     }
 
     fn find(&self, name: &str) -> Option<&PartDef> {
@@ -765,6 +784,13 @@ fn cube_mesh(cubes: &[CubeDef], tex_w: u32, tex_h: u32) -> Option<Mesh> {
 }
 
 pub fn push_cube(out: &mut QuadMesh, cube: &CubeDef, sheet: [f32; 2], scale: f32) {
+    #[cfg(cem)]
+    if let Some(cem) = &cube.cem
+        && cem.is_custom()
+    {
+        super::cem::cube::push(out, cube, cem, sheet, scale);
+        return;
+    }
     let [w, h, d] = cube.size;
     let sx = sheet[0] * cube.tex_scale[0];
     let sy = sheet[1] * cube.tex_scale[1];
@@ -815,6 +841,10 @@ pub fn push_cube(out: &mut QuadMesh, cube: &CubeDef, sheet: [f32; 2], scale: f32
             [fu0 / sx, fv1 / sy],
             [fu1 / sx, fv1 / sy],
         ];
+        #[cfg(cem)]
+        if let Some(cem) = &cube.cem {
+            uvs = cem.slot_uvs(uvs);
+        }
         if cube.mirror {
             corners.reverse();
             uvs.reverse();

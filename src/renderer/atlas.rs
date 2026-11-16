@@ -124,6 +124,7 @@ impl Sprites {
             grid: self.grid,
             water_still: self.sprite("water_still").unwrap_or_default(),
             water_flow: self.sprite("water_flow").unwrap_or_default(),
+            water_overlay: self.sprite("water_overlay").unwrap_or_default(),
         }
     }
 }
@@ -165,6 +166,7 @@ pub struct MeshTiles {
     pub grid: AtlasGrid,
     pub water_still: SpriteTile,
     pub water_flow: SpriteTile,
+    pub water_overlay: SpriteTile,
 }
 
 const MAX_SPAN: u32 = 4;
@@ -370,9 +372,16 @@ fn decode_dir(dir: &str) -> Vec<Decoded> {
             .replace('\\', "/");
         let bytes = crate::platform::assets::read(path)?;
         let decoded = image::load_from_memory(&bytes).ok()?;
-        let meta = crate::platform::assets::read_metadata(path)
-            .and_then(|bytes| atlas_meta::parse_meta(&bytes));
-        Some((stem, decoded.to_rgba8(), meta))
+        let meta_bytes = crate::platform::assets::read_metadata(path);
+        let meta = meta_bytes.as_deref().and_then(atlas_meta::parse_meta);
+        let mut rgba = decoded.to_rgba8();
+        if meta_bytes
+            .as_deref()
+            .is_some_and(atlas_meta::is_dark_cutout)
+        {
+            fill_empty_areas_with_dark_color(&mut rgba);
+        }
+        Some((stem, rgba, meta))
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -913,7 +922,7 @@ fn tinted(
         None
     } else if GRASS_TINTED.contains(&stem) {
         Some(grass_tint)
-    } else if stem == "water_still" || stem == "water_flow" {
+    } else if matches!(stem, "water_still" | "water_flow" | "water_overlay") {
         Some([0x3F, 0x76, 0xE4, 0xFF])
     } else if FOLIAGE_TINTED.contains(&stem) || stem.ends_with("_leaves") {
         Some(foliage_tint)
@@ -941,10 +950,35 @@ fn tinted(
 fn tint_rgba(img: &mut image::RgbaImage, tint: [u8; 4]) {
     let (tr, tg, tb) = (tint[0] as u32, tint[1] as u32, tint[2] as u32);
     for px in img.pixels_mut() {
-        if px[3] > 0 {
-            px[0] = ((px[0] as u32 * tr) / 255) as u8;
-            px[1] = ((px[1] as u32 * tg) / 255) as u8;
-            px[2] = ((px[2] as u32 * tb) / 255) as u8;
+        px[0] = ((px[0] as u32 * tr) / 255) as u8;
+        px[1] = ((px[1] as u32 * tg) / 255) as u8;
+        px[2] = ((px[2] as u32 * tb) / 255) as u8;
+    }
+}
+
+const DARK_FILL_NUMERATOR: u32 = 3;
+const DARK_FILL_DENOMINATOR: u32 = 4;
+
+fn fill_empty_areas_with_dark_color(img: &mut image::RgbaImage) {
+    let mut darkest = [u8::MAX; 3];
+    let mut min_brightness = u32::MAX;
+    for x in 0..img.width() {
+        for y in 0..img.height() {
+            let px = img.get_pixel(x, y);
+            if px[3] != 0 {
+                let brightness = u32::from(px[0]) + u32::from(px[1]) + u32::from(px[2]);
+                if brightness < min_brightness {
+                    min_brightness = brightness;
+                    darkest = [px[0], px[1], px[2]];
+                }
+            }
+        }
+    }
+    let [r, g, b] =
+        darkest.map(|c| (DARK_FILL_NUMERATOR * u32::from(c) / DARK_FILL_DENOMINATOR) as u8);
+    for px in img.pixels_mut() {
+        if px[3] == 0 {
+            *px = image::Rgba([r, g, b, 0]);
         }
     }
 }

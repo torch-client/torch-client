@@ -252,10 +252,10 @@ fn input() -> Option<HtmlInputElement> {
     })
 }
 
-#[cfg(any(eagler_skins, lua_mods))]
+#[cfg(any(eagler_skins, lua_mods, feature = "asset_download"))]
 type Chosen = Mutex<Option<(String, Vec<u8>)>>;
 
-#[cfg(any(eagler_skins, lua_mods))]
+#[cfg(any(eagler_skins, lua_mods, feature = "asset_download"))]
 fn read_one(files: Vec<File>, slot: &'static Chosen, tag: &'static str) {
     let Some(file) = files.into_iter().next() else {
         return;
@@ -284,6 +284,24 @@ pub(crate) fn choose_png() {
 #[cfg(eagler_skins)]
 pub(crate) fn take_png() -> Option<(String, Vec<u8>)> {
     PNG.lock().take()
+}
+
+#[cfg(feature = "asset_download")]
+static ASSETS: Chosen = Mutex::new(None);
+
+#[cfg(feature = "asset_download")]
+pub(crate) fn choose_assets() {
+    match hidden_input("mc-assets-input", ".mcasset", false, |files| {
+        read_one(files, &ASSETS, "assets")
+    }) {
+        Some(input) => input.click(),
+        None => crate::log_warn!("assets", "could not make the file input"),
+    }
+}
+
+#[cfg(feature = "asset_download")]
+pub(crate) fn take_assets() -> Option<Vec<u8>> {
+    ASSETS.lock().take().map(|(_, bytes)| bytes)
 }
 
 #[cfg(lua_mods)]

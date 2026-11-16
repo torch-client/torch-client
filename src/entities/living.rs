@@ -153,7 +153,7 @@ impl LivingCore {
         self.pos_old = pos;
         self.y_rot = y_rot;
         self.x_rot = x_rot;
-        self.body_rot = y_rot;
+        self.body_rot = head_rot;
         self.head_rot = head_rot;
         self.raw_pos = pos;
         self.raw_y_rot = y_rot;

@@ -184,6 +184,10 @@ const CFG: &[CfgRow] = &[
         name: "Text shadow",
         field: |l| &mut l.shadow,
     },
+    CfgRow::Toggle {
+        name: "Attack friends",
+        field: |l| &mut l.attack_friends,
+    },
     #[cfg(feature = "audio")]
     CfgRow::Toggle {
         name: "UI Sounds",
@@ -201,7 +205,7 @@ const SCALE_MIN: f32 = 0.6;
 const SCALE_MAX: f32 = 1.8;
 const AUTO_SCALE_MIN: f32 = 0.6;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Look {
     accent: u8,
     surface: u8,
@@ -213,6 +217,7 @@ pub(crate) struct Look {
     animate: bool,
     pub(crate) shadow: bool,
     scrim: bool,
+    attack_friends: bool,
     #[cfg(feature = "audio")]
     ui_sounds: bool,
     #[cfg(feature = "audio")]
@@ -236,6 +241,7 @@ impl Default for Look {
             animate: true,
             shadow: false,
             scrim: true,
+            attack_friends: false,
             #[cfg(feature = "audio")]
             ui_sounds: false,
             #[cfg(feature = "audio")]
@@ -244,7 +250,92 @@ impl Default for Look {
     }
 }
 
+static PENDING_LOOK: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub(crate) fn flush_look() {
+    let pending = PENDING_LOOK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(text) = pending {
+        crate::platform::storage::CLICKGUI.store(&text);
+    }
+}
+
 impl Look {
+    fn to_json(self, scale_set: bool) -> String {
+        let mut map = serde_json::Map::new();
+        map.insert("accent".into(), self.accent.into());
+        map.insert("surface".into(), self.surface.into());
+        if scale_set {
+            map.insert("scale".into(), self.scale.into());
+        }
+        let mut look = self;
+        for row in CFG {
+            match *row {
+                CfgRow::Slider { name, field, .. } => {
+                    map.insert(name.into(), (*field(&mut look)).into());
+                }
+                CfgRow::Toggle { name, field } => {
+                    map.insert(name.into(), (*field(&mut look)).into());
+                }
+                CfgRow::Profile | CfgRow::Accent | CfgRow::Surface | CfgRow::Scale => {}
+            }
+        }
+        serde_json::Value::Object(map).to_string()
+    }
+
+    fn from_json(text: &str) -> (Look, bool) {
+        let mut look = Look::default();
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str(text) else {
+            return (look, false);
+        };
+        let index = |key: &str, len: usize| {
+            map.get(key)
+                .and_then(|v| v.as_u64())
+                .filter(|&i| (i as usize) < len)
+                .map(|i| i as u8)
+        };
+        if let Some(i) = index("accent", theme::ACCENTS.len()) {
+            look.accent = i;
+        }
+        if let Some(i) = index("surface", theme::SURFACES.len()) {
+            look.surface = i;
+        }
+        let scale = map
+            .get("scale")
+            .and_then(|v| v.as_f64())
+            .map(|s| (s as f32).clamp(SCALE_MIN, SCALE_MAX));
+        if let Some(s) = scale {
+            look.scale = s;
+        }
+        for row in CFG {
+            match *row {
+                CfgRow::Slider {
+                    name,
+                    min,
+                    max,
+                    shown,
+                    whole,
+                    field,
+                    ..
+                } => {
+                    if let Some(v) = map.get(name).and_then(|v| v.as_f64()) {
+                        let v = (v as f32 * shown).clamp(min, max);
+                        *field(&mut look) = if whole { v.round() } else { v } / shown;
+                    }
+                }
+                CfgRow::Toggle { name, field } => {
+                    if let Some(on) = map.get(name).and_then(|v| v.as_bool()) {
+                        *field(&mut look) = on;
+                    }
+                }
+                CfgRow::Profile | CfgRow::Accent | CfgRow::Surface | CfgRow::Scale => {}
+            }
+        }
+        (look, scale.is_some())
+    }
+
     pub(crate) fn accent(self) -> u32 {
         0xFF00_0000 | theme::ACCENTS[self.accent as usize % theme::ACCENTS.len()].base
     }
@@ -615,6 +706,7 @@ pub struct ClickGuiState {
     placed_vw: f32,
     applied: f32,
     scale_set: bool,
+    saved: (Look, bool),
     opened_at: Option<f32>,
     #[cfg(feature = "audio")]
     hover_row: Option<ModuleIx>,
@@ -627,8 +719,14 @@ pub struct ClickGuiState {
 
 impl Default for ClickGuiState {
     fn default() -> Self {
+        let (look, scale_set) = crate::platform::storage::CLICKGUI
+            .load()
+            .map_or((Look::default(), false), |text| Look::from_json(&text));
+        crate::modules::friends::set_attack(look.attack_friends);
+        crate::modules::friends::load();
         ClickGuiState {
-            look: Look::default(),
+            look,
+            saved: (look, scale_set),
             tab: Tab::Modules,
             panels: [Panel::at(0.0, 0.0); COLUMNS],
             order: (0..COLUMNS as u8).collect(),
@@ -675,8 +773,8 @@ impl Default for ClickGuiState {
             capture_rect: None,
             placed: false,
             placed_vw: 0.0,
-            applied: 1.0,
-            scale_set: false,
+            applied: look.scale,
+            scale_set,
             opened_at: None,
             #[cfg(feature = "audio")]
             hover_row: None,
@@ -1235,7 +1333,10 @@ impl ClickGuiState {
             return;
         }
         for m in Category::ALL.iter().flat_map(|c| c.modules()) {
-            if store().allowed(m.id) && contains_ci(m.name, &self.field.text) {
+            if store().allowed(m.id)
+                && (contains_ci(m.name, &self.field.text)
+                    || m.aliases().iter().any(|a| contains_ci(a, &self.field.text)))
+            {
                 self.matches.push(m.id);
             }
         }
@@ -1634,7 +1735,6 @@ impl ClickGuiState {
         self.matches.get(self.selected).copied()
     }
 
-    #[cfg(lua_mods)]
     pub(crate) fn look(&self) -> Look {
         self.look
     }
@@ -1736,6 +1836,7 @@ impl ClickGuiState {
                         max,
                         crate::modules::registry::typed_max(slot, max),
                         decimals,
+                        crate::modules::registry::slider_log(slot),
                         ctl,
                         active,
                     );
@@ -2212,6 +2313,7 @@ impl ClickGuiState {
                             255.0,
                             255.0,
                             0,
+                            false,
                             Control::Channel(c as u8),
                             active,
                         )
@@ -2370,6 +2472,7 @@ impl ClickGuiState {
                         max,
                         max,
                         decimals,
+                        false,
                         Control::Config(ctl),
                         active,
                     );
@@ -2396,6 +2499,14 @@ impl ClickGuiState {
         }
 
         p.pop_clip(guard);
+
+        let now = (self.look, self.scale_set);
+        if now != self.saved {
+            self.saved = now;
+            crate::modules::friends::set_attack(self.look.attack_friends);
+            *PENDING_LOOK.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(self.look.to_json(self.scale_set));
+        }
     }
 
     #[allow(clippy::too_many_arguments, reason = "one widget, flat arguments")]
@@ -2422,6 +2533,7 @@ impl ClickGuiState {
             SCALE_MAX * 100.0,
             SCALE_MAX * 100.0,
             0,
+            false,
             Control::Config(Cfg::Scale),
             active,
         );
@@ -2861,6 +2973,7 @@ impl ClickGuiState {
         max: f32,
         typed_max: f32,
         decimals: u8,
+        log: bool,
         id: Control,
         active: bool,
     ) -> f32 {
@@ -2870,14 +2983,14 @@ impl ClickGuiState {
         if self.grab(ui, id, 0, x, w, y, active)
             && let Some(t) = self.track_t(ui, x, w)
         {
-            v = track_value(t, min, max, false);
+            v = track_value(t, min, max, log);
         }
 
         let (tw, typed) = self.readout(p, ui, x + w, y, v, min, typed_max, decimals, id, 0, active);
         if let Some(t) = typed {
             v = t;
         }
-        let f = track_t_of(v, min, max, false);
+        let f = track_t_of(v, min, max, log);
         self.label(p, name, x, y + 1.0, w - tw - 4.0, look.text());
 
         p.rounded_rect(x, ty, w, TRACK_H, TRACK_H * 0.5, look.track());

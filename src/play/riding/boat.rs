@@ -75,6 +75,7 @@ impl Boat {
         &mut self,
         world: &World,
         hull: &Aabb,
+        gravity: f64,
         position: &mut Vec3,
         velocity: &mut Vec3,
         snap_free: impl FnOnce(f64) -> bool,
@@ -95,7 +96,7 @@ impl Boat {
             return;
         }
 
-        let mut vspeed = -GRAVITY;
+        let mut vspeed = -gravity;
         let mut buoyancy = 0.0;
         let inv_friction = match status {
             Some(Status::InWater) => {
@@ -147,12 +148,19 @@ impl Boat {
         self.paddles
     }
 
+    pub(crate) fn is_under_water(&self) -> bool {
+        matches!(
+            self.status,
+            Some(Status::UnderWater | Status::UnderFlowingWater)
+        )
+    }
+
     pub(crate) fn moved(&mut self, delta_y: f64) {
         self.last_yd = delta_y;
     }
 }
 
-const GRAVITY: f64 = 0.04;
+pub(super) const GRAVITY: f64 = 0.04;
 
 fn water(world: &World, pos: BlockPos) -> Option<(FluidState, f32)> {
     let fluid = world
@@ -322,7 +330,7 @@ mod tests {
         let mut velocity = Vec3::ZERO;
         let mut yaw = 0.0;
         for _ in 0..ticks {
-            b.float(&world, &hull, &mut pos, &mut velocity, |_| true);
+            b.float(&world, &hull, GRAVITY, &mut pos, &mut velocity, |_| true);
             b.control(up, &mut yaw, &mut velocity);
             velocity.y = 0.0;
         }
@@ -357,7 +365,14 @@ mod tests {
             min: Vec3::ZERO,
             max: Vec3::new(1.375, 0.5625, 1.375),
         };
-        b.float(&world, &hull, &mut Vec3::ZERO, &mut velocity, |_| true);
+        b.float(
+            &world,
+            &hull,
+            GRAVITY,
+            &mut Vec3::ZERO,
+            &mut velocity,
+            |_| true,
+        );
         assert!((b.delta_rotation + 0.9).abs() < 1e-6);
     }
 

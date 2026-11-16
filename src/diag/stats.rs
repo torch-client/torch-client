@@ -4,7 +4,7 @@ counted! {
     #[derive(PartialEq, Eq, Debug)]
     pub enum Stat / STAT_COUNT {
         ChunksReceived,
-        ChunksDropped,
+        ChunkDecodeFailed,
         ColumnsLit,
         LightJobsDropped,
         MeshJobs,
@@ -14,9 +14,9 @@ counted! {
         MeshGaveUp,
         MeshJobsSuperseded,
         SectionsUploaded,
-        ViewRecentred,
+        ChunksSwept,
+        MeshedWithoutNeighbours,
         ChunkPacketsSeen,
-        ChunkPacketsOutOfWindow,
         CacheCenterMoves,
     }
 }

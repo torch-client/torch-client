@@ -28,8 +28,9 @@ pub enum Shape {
     Category,
     Goto,
     Follow,
-    #[cfg_attr(not(feature = "seed_cracker"), allow(dead_code))]
+    Mine,
     Choice(&'static [&'static str]),
+    Friend,
 }
 
 #[derive(Default)]
@@ -93,7 +94,7 @@ impl Call<'_> {
     }
 }
 
-pub static BUILTINS: [Builtin; 12 + cfg!(feature = "seed_cracker") as usize] = [
+pub static BUILTINS: [Builtin; 15 + cfg!(feature = "seed_cracker") as usize] = [
     Builtin {
         name: "help",
         aliases: &[],
@@ -192,12 +193,36 @@ pub static BUILTINS: [Builtin; 12 + cfg!(feature = "seed_cracker") as usize] = [
         run: goto,
     },
     Builtin {
+        name: "mine",
+        aliases: &[],
+        usage: "[ore|log|wood|block|stop] [count]",
+        tip: "Switches OreMiner on with its Ores list, or for one ore family, logs, wood or one block this run, mining count blocks when given; stop switches it off",
+        shape: Shape::Mine,
+        run: mine,
+    },
+    Builtin {
+        name: "stop",
+        aliases: &[],
+        usage: "",
+        tip: "Switches OreMiner off, as .mine stop does",
+        shape: Shape::Choice(&[]),
+        run: stop,
+    },
+    Builtin {
         name: "follow",
         aliases: &[],
         usage: "[player]",
         tip: "Walks after a player in sight until they leave it; on its own, stops",
         shape: Shape::Follow,
         run: follow,
+    },
+    Builtin {
+        name: "friend",
+        aliases: &[],
+        usage: "[list] | add <player> | remove <player>",
+        tip: "Lists, adds or removes friends; combat modules leave friends alone unless Attack friends is on",
+        shape: Shape::Friend,
+        run: friend,
     },
 ];
 
@@ -211,7 +236,7 @@ pub fn norm(s: &str) -> String {
 fn find_module(name: &str) -> Result<&'static ModuleDef, String> {
     let want = norm(name);
     registry::modules()
-        .find(|m| norm(m.name) == want)
+        .find(|m| norm(m.name) == want || m.aliases().iter().any(|a| norm(a) == want))
         .ok_or_else(|| format!("No module named `{name}`"))
 }
 
@@ -634,6 +659,62 @@ fn goto(c: &mut Call) {
     request(Request::Goto(at));
 }
 
+fn mine(c: &mut Call) {
+    use crate::modules::ore_miner::{self, kind_name};
+    use crate::modules::seed_xray::table::Kind;
+    let stop = c.arg(0).is_some_and(is_stop);
+    if c.toks.len() > 2 || (stop && c.toks.len() > 1) {
+        let usage = format!("Usage: {}mine [ore|log|wood|block|stop] [count]", c.prefix);
+        return c.err(usage);
+    }
+    let count = match c.arg(1) {
+        None => None,
+        Some(t) => match mine_count(t) {
+            Some(n) => Some(n),
+            None => {
+                return c.err(format!(
+                    "`{t}` is not a count; use a whole number from 1 up"
+                ));
+            }
+        },
+    };
+    match c.arg(0) {
+        None => ore_miner::start(None, None),
+        Some(_) if stop => store().set_enabled(registry::Id::OreMiner, false),
+        Some(w) => match ore_miner::named(w) {
+            Some(want) => ore_miner::start(Some(want), count),
+            None => {
+                let names: Vec<String> = Kind::ALL.into_iter().map(kind_name).collect();
+                return c.err(format!(
+                    "`{w}` is not a block that can be mined; use a block id, log, wood or an ore family ({})",
+                    names.join(", ")
+                ));
+            }
+        },
+    }
+    c.line(state_line(registry::module(registry::Id::OreMiner)));
+}
+
+fn stop(c: &mut Call) {
+    if !c.toks.is_empty() {
+        return c.err(format!("Usage: {}stop", c.prefix));
+    }
+    store().set_enabled(registry::Id::OreMiner, false);
+    c.line(state_line(registry::module(registry::Id::OreMiner)));
+}
+
+pub(super) fn mine_count(t: &str) -> Option<u32> {
+    t.parse::<i32>().ok().filter(|n| *n >= 1).map(|n| n as u32)
+}
+
+fn is_stop(w: &str) -> bool {
+    let bare = w
+        .get(..10)
+        .filter(|p| p.eq_ignore_ascii_case("minecraft:"))
+        .map_or(w, |_| &w[10..]);
+    bare.eq_ignore_ascii_case("stop")
+}
+
 fn follow(c: &mut Call) {
     use crate::modules::pathfinder::{Request, request};
     if c.toks.len() > 1 {
@@ -641,6 +722,55 @@ fn follow(c: &mut Call) {
         return c.err(usage);
     }
     request(Request::Follow(c.arg(0).map(str::to_string)));
+}
+
+fn friend(c: &mut Call) {
+    use crate::modules::friends;
+    let usage = format!(
+        "Usage: {}friend [list] | add <player> | remove <player>",
+        c.prefix
+    );
+    match (
+        c.arg(0).map(str::to_ascii_lowercase).as_deref(),
+        c.arg(1),
+        c.toks.len(),
+    ) {
+        (None | Some("list"), None, _) => {
+            let names = friends::list();
+            if names.is_empty() {
+                let hint = format!("{}friend add <player>", c.prefix);
+                return c.line(Line::default().t("No friends. ").dim(hint));
+            }
+            let mut line = Line::default().t(format!("Friends ({}): ", names.len()));
+            for (i, n) in names.into_iter().enumerate() {
+                if i > 0 {
+                    line = line.dim(", ");
+                }
+                line = line.name(n);
+            }
+            c.line(line);
+        }
+        (Some("add"), Some(name), 2) => {
+            if !friends::valid_name(name) {
+                let msg = format!("{name} is not a valid player name");
+                return c.err(msg);
+            }
+            let name = name.to_string();
+            if friends::add(&name) {
+                c.line(Line::default().t("Added ").name(name).t(" as a friend"));
+            } else {
+                c.line(Line::default().name(name).t(" is already a friend"));
+            }
+        }
+        (Some("remove"), Some(name), 2) => match friends::remove(name) {
+            Some(gone) => c.line(Line::default().t("Removed ").name(gone).t(" from friends")),
+            None => {
+                let msg = format!("{name} is not a friend");
+                c.err(msg);
+            }
+        },
+        _ => c.err(usage),
+    }
 }
 
 fn modules(c: &mut Call) {

@@ -109,6 +109,14 @@ pub struct CloudPlugin;
 
 impl Plugin for CloudPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(all(
+            target_arch = "wasm32",
+            not(feature = "webgpu"),
+            not(feature = "shader_support")
+        ))]
+        {
+            app.add_plugins(bevy::pbr::MaterialPlugin::<CloudMaterial>::default());
+        }
         app.init_resource::<CloudEnd>()
             .add_systems(
                 Update,
@@ -153,11 +161,80 @@ const SOUTH_OPEN: u8 = 1 << 1;
 const WEST_OPEN: u8 = 1 << 0;
 const SOLID: u8 = 1 << 4;
 
+#[cfg(not(all(
+    target_arch = "wasm32",
+    not(feature = "webgpu"),
+    not(feature = "shader_support")
+)))]
+pub(crate) type CloudMaterial = StandardMaterial;
+#[cfg(all(
+    target_arch = "wasm32",
+    not(feature = "webgpu"),
+    not(feature = "shader_support")
+))]
+pub(crate) type CloudMaterial = bevy::pbr::ExtendedMaterial<StandardMaterial, UnlitShading>;
+
+#[cfg(all(
+    target_arch = "wasm32",
+    not(feature = "webgpu"),
+    not(feature = "shader_support")
+))]
+#[derive(Asset, bevy::render::render_resource::AsBindGroup, Reflect, Debug, Clone, Default)]
+pub(crate) struct UnlitShading {}
+
+#[cfg(all(
+    target_arch = "wasm32",
+    not(feature = "webgpu"),
+    not(feature = "shader_support")
+))]
+impl bevy::pbr::MaterialExtension for UnlitShading {
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        super::embedded_shader("renderer/unlit_fragment.wgsl")
+    }
+}
+
+#[cfg(all(
+    target_arch = "wasm32",
+    not(feature = "webgpu"),
+    not(feature = "shader_support")
+))]
+fn cloud_material(base: StandardMaterial) -> CloudMaterial {
+    bevy::pbr::ExtendedMaterial {
+        base,
+        extension: UnlitShading {},
+    }
+}
+#[cfg(not(all(
+    target_arch = "wasm32",
+    not(feature = "webgpu"),
+    not(feature = "shader_support")
+)))]
+fn cloud_material(base: StandardMaterial) -> CloudMaterial {
+    base
+}
+
+#[cfg(all(
+    target_arch = "wasm32",
+    not(feature = "webgpu"),
+    not(feature = "shader_support")
+))]
+fn standard(material: &mut CloudMaterial) -> &mut StandardMaterial {
+    &mut material.base
+}
+#[cfg(not(all(
+    target_arch = "wasm32",
+    not(feature = "webgpu"),
+    not(feature = "shader_support")
+)))]
+fn standard(material: &mut CloudMaterial) -> &mut StandardMaterial {
+    material
+}
+
 #[derive(Resource)]
 struct CloudAssets {
     texture: Option<CloudTexture>,
     mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
+    material: Handle<CloudMaterial>,
     built: Option<(i32, i32, RelativeCameraPos, CloudStatus)>,
     painted: Option<(timeline::Argb, CloudStatus)>,
 }
@@ -185,12 +262,12 @@ fn reload_texture(mut assets: ResMut<CloudAssets>) {
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<CloudMaterial>>,
 ) {
     let texture = load_texture();
 
     let mesh = meshes.add(empty_mesh());
-    let material = materials.add(StandardMaterial {
+    let material = materials.add(cloud_material(StandardMaterial {
         base_color: Color::WHITE,
         unlit: true,
         alpha_mode: AlphaMode::Blend,
@@ -198,7 +275,7 @@ fn setup(
         double_sided: false,
         fog_enabled: false,
         ..default()
-    });
+    }));
 
     commands.spawn((
         Mesh3d(mesh.clone()),
@@ -264,7 +341,7 @@ fn empty_mesh() -> Mesh {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
-    #[cfg(feature = "shader_support")]
+    #[cfg(any(feature = "shader_support", target_arch = "wasm32"))]
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
     mesh.insert_indices(Indices::U32(Vec::new()));
@@ -413,7 +490,7 @@ fn update_clouds(
     cloud_end: Res<CloudEnd>,
     mut assets: ResMut<CloudAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<CloudMaterial>>,
     camera: Query<&Transform, With<WorldCamera>>,
     mut layer: Query<(&mut Transform, &mut Visibility), (With<CloudLayer>, Without<WorldCamera>)>,
 ) {
@@ -494,6 +571,7 @@ fn update_clouds(
     if assets.painted != Some((color, status)) {
         assets.painted = Some((color, status));
         if let Some(mut material) = materials.get_mut(&assets.material) {
+            let material = standard(&mut material);
             material.base_color = color.to_color();
             material.cull_mode = match status {
                 CloudStatus::Fancy => Some(bevy::render::render_resource::Face::Back),

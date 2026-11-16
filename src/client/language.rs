@@ -71,18 +71,41 @@ fn applied() -> Applied {
 }
 
 fn read_stored() -> Applied {
-    let stored = storage::LANGUAGE.load().unwrap_or_default();
+    parse_stored(&storage::LANGUAGE.load().unwrap_or_default()).unwrap_or_else(Applied::english)
+}
+
+fn parse_stored(stored: &str) -> Option<Applied> {
     match stored.split_once('\n') {
         Some((code, text))
             if !code.trim().is_empty() && code.trim() != ENGLISH && !text.is_empty() =>
         {
-            Applied {
+            Some(Applied {
                 code: code.trim().to_owned(),
                 text: Arc::from(text),
-            }
+            })
         }
-        _ => Applied::english(),
+        _ => None,
     }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+pub(super) fn import_stored(stored: &str) -> Option<String> {
+    let applied = parse_stored(stored)?;
+    if !matches!(
+        serde_json::from_str::<serde_json::Value>(&applied.text),
+        Ok(serde_json::Value::Object(_))
+    ) {
+        log_warn!(
+            "language",
+            "the imported {} file is not readable",
+            applied.code
+        );
+        return None;
+    }
+    let code = applied.code.clone();
+    *FETCH.lock() = Fetch::Idle;
+    commit(applied);
+    Some(code)
 }
 
 pub(crate) fn current() -> String {
@@ -122,7 +145,7 @@ pub(crate) fn apply(lang: &Language) {
     }
     let (code, hash) = (lang.code.clone(), lang.hash.clone());
     log_info!("language", "fetching {code}");
-    spawn(move || async move {
+    spawn("language", move || async move {
         match fetch_file(&hash).await {
             Ok(text) => {
                 let saved = commit(Applied {
@@ -191,7 +214,7 @@ pub(crate) fn request_list() -> bool {
         *fetch = ListFetch::Fetching;
     }
     log_info!("language", "fetching the list");
-    spawn(|| async {
+    spawn("language", || async {
         let state = match fetch_list().await {
             Ok(table) => {
                 adopt(table.as_bytes());
@@ -330,21 +353,24 @@ fn parse_table(bytes: &[u8]) -> Option<Vec<Language>> {
     (!languages.is_empty()).then_some(languages)
 }
 
-fn spawn<F, Fut>(make: F)
+pub(super) fn spawn<F, Fut>(name: &'static str, make: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + 'static,
 {
     #[cfg(target_arch = "wasm32")]
-    crate::platform::executor::spawn(make());
+    {
+        let _ = name;
+        crate::platform::executor::spawn(make());
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
         let spawned = std::thread::Builder::new()
-            .name("language".into())
+            .name(name.into())
             .spawn(move || crate::platform::executor::block_on(make()));
         if let Err(e) = spawned {
-            log_warn!("language", "could not start the fetch: {e}");
+            log_warn!(name, "could not start the fetch: {e}");
         }
     }
 }

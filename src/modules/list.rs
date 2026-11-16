@@ -306,13 +306,16 @@ pub fn widest() -> f32 {
     ALL.iter().map(|l| l.width).fold(0.0, f32::max)
 }
 
-pub static ALL: [&BitList; 8] = [
+pub static ALL: [&BitList; 11] = [
     &super::esp::blocks::XRAY,
+    &super::esp::blocks::BLOCK_ESP,
     &super::esp::blocks::ORES,
     &super::seed_xray::ORES,
+    &super::ore_miner::ORES,
     &super::seed_cracker::FINDERS,
     &super::esp::blocks::STORAGE,
     &super::esp::blocks::SCAFFOLD,
     &super::entities::LIST,
     &super::items::LIST,
+    &super::sound_esp::SOUNDS,
 ];

@@ -319,8 +319,11 @@ pub fn draw_portal(p: &mut Painter, fx: &ScreenEffects, vw: f32, vh: f32) {
     if alpha < 1.0 {
         alpha = alpha.powi(4) * (1.0 - PORTAL_MIN_ALPHA) + PORTAL_MIN_ALPHA;
     }
-    let argb = painter::white(alpha);
-    let v0 = fx.portal_frame as f32 / PORTAL_FRAMES as f32;
+    portal_sprite(p, fx.portal_frame, painter::white(alpha), vw, vh);
+}
+
+pub(crate) fn portal_sprite(p: &mut Painter, frame: u64, argb: u32, vw: f32, vh: f32) {
+    let v0 = (frame % PORTAL_FRAMES) as f32 / PORTAL_FRAMES as f32;
     let v1 = v0 + 1.0 / PORTAL_FRAMES as f32;
     p.sprite_quad(
         "portal_overlay",

@@ -721,7 +721,7 @@ pub struct MineIntent {
 }
 
 #[derive(Clone, Copy)]
-pub struct MaceAim {
+pub struct CameraAim {
     pub aim: [f64; 3],
     pub turn: f32,
 }

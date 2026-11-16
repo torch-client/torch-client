@@ -512,7 +512,7 @@ impl Add<ChunkBlockPos> for ChunkPos {
 impl From<ChunkPos> for u64 {
     #[inline]
     fn from(pos: ChunkPos) -> Self {
-        (pos.x as u64) | ((pos.z as u64) << 32)
+        (pos.x as u32 as u64) | ((pos.z as u32 as u64) << 32)
     }
 }
 impl From<u64> for ChunkPos {
@@ -538,7 +538,8 @@ impl AzBuf for ChunkPos {
 impl Hash for ChunkPos {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        u64::from(*self).hash(state);
+        let mixed = u64::from(*self).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        (mixed ^ (mixed >> 32)).hash(state);
     }
 }
 impl nohash_hasher::IsEnabled for ChunkPos {}

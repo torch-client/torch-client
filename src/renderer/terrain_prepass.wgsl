@@ -64,8 +64,12 @@ fn casts(uv: vec2<f32>, material: f32) -> bool {
     if material == MATERIAL_PLANT {
         return false;
     }
+#ifdef ALPHA_CUTOUT
     return textureSampleLevel(atlas_texture, atlas_sampler, uv, params.misc.z).a
         >= SHADOW_ALPHA_CUTOFF;
+#else
+    return true;
+#endif
 }
 
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION

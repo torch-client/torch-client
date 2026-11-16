@@ -16,6 +16,8 @@ static PRESENT: AtomicBool = AtomicBool::new(false);
 
 static SCANNING: AtomicBool = AtomicBool::new(false);
 
+static SUSPENDED: AtomicBool = AtomicBool::new(false);
+
 #[cfg(any(
     target_os = "linux",
     target_os = "dragonfly",
@@ -34,6 +36,12 @@ pub fn set_device(name: Option<&'static str>) {
     *wanted = name;
     drop(wanted);
     request_open();
+}
+
+pub fn set_suspended(suspended: bool) {
+    if SUSPENDED.swap(suspended, Ordering::AcqRel) != suspended {
+        request_open();
+    }
 }
 
 pub fn fell_back() -> bool {
@@ -82,6 +90,10 @@ pub(super) fn changed() -> bool {
 
 pub(super) fn open() -> Option<(rodio::OutputStream, rodio::OutputStreamHandle)> {
     CHANGED.store(false, Ordering::Release);
+    if SUSPENDED.load(Ordering::Acquire) {
+        crate::log_info!("audio", "in the background; output closed");
+        return None;
+    }
     let wanted = *WANTED.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(name) = wanted {
         match open_named(name) {

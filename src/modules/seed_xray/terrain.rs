@@ -71,6 +71,13 @@ pub fn class_of(state: BlockState) -> Class {
     classes[state.id() as usize]
 }
 
+pub(in crate::modules) fn kind_of(state: BlockState) -> Option<Kind> {
+    match class_of(state) {
+        Class::Ore(kind) => Some(kind),
+        _ => None,
+    }
+}
+
 fn mask_of(rows: &[Row], biome: &str) -> u32 {
     rows.iter().enumerate().fold(0, |mask, (i, row)| {
         let listed = match row.biomes {

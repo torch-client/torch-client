@@ -7,11 +7,14 @@ use super::crystal_aura::CrystalSwitch;
 use super::esp::Shape;
 use super::extra_hud::{Durability, Shown};
 use super::flight::AntiKick;
+use super::freecam::InputMode;
 use super::fullbright::FullbrightMode;
 use super::list::BitList;
 use super::nametags::{Health, Sizing};
+use super::ore_miner::OreSource;
 use super::scaffold::{BlockFilter, ScaffoldMode, Tower};
 use crate::gui::keybinds::Bound;
+use bevy::input::keyboard::KeyCode;
 
 #[derive(Clone, Copy)]
 pub struct SettingDef {
@@ -86,7 +89,6 @@ pub enum Kind {
         expand: bool,
         hint: &'static str,
     },
-    #[cfg_attr(not(lua_mods), allow(dead_code))]
     Key {
         default: Bound,
     },
@@ -133,6 +135,8 @@ pub mod handle {
     pub struct Range(pub(in crate::modules) u16);
     #[derive(Clone, Copy)]
     pub struct Text(pub(in crate::modules) u16);
+    #[derive(Clone, Copy)]
+    pub struct Key(pub(in crate::modules) u16);
     #[derive(Clone, Copy)]
     pub struct Enum<T>(pub(in crate::modules) u16, PhantomData<T>);
 
@@ -211,7 +215,16 @@ pub struct ModuleDef {
     own: &'static [SettingDef],
 }
 
+const ALIASES: &[(&str, &[&str])] = &[];
+
 impl ModuleDef {
+    pub fn aliases(&self) -> &'static [&'static str] {
+        ALIASES
+            .iter()
+            .find(|(n, _)| *n == self.name)
+            .map_or(&[], |(_, a)| *a)
+    }
+
     pub fn slots(&self) -> Range<usize> {
         self.first as usize..(self.first + self.len) as usize
     }
@@ -475,12 +488,27 @@ const EXTRA_HUD_EMPTY: Show = Show::is(
     &[Shown::Always as u8, Shown::IfAny as u8],
 );
 
+const UI_UTILS_BYPASS: Show = Show::On(offset_of(ui_utils::BYPASS_PACK.0));
+
 const AUTO_MINE_AREA: Show = Show::is(auto_mine::MODE.0, &[MineMode::Area as u8]);
 const AUTO_MINE_CORRIDOR: Show = Show::is(auto_mine::MODE.0, &[MineMode::Corridor as u8]);
 const AUTO_MINE_DISCONNECT: Show =
     Show::is(auto_mine::LOW_HEALTH.0, &[LowHealth::Disconnect as u8]);
 
-const TYPED_MAX: &[(u16, f32)] = &[(auto_mine::HEALTH.0, i16::MAX as f32)];
+const ORE_MINER_DISCONNECT: Show =
+    Show::is(ore_miner::LOW_HEALTH.0, &[LowHealth::Disconnect as u8]);
+
+const TYPED_MAX: &[(u16, f32)] = &[
+    (auto_mine::HEALTH.0, i16::MAX as f32),
+    (ore_miner::HEALTH.0, i16::MAX as f32),
+    (sound_esp::DURATION.0, 86_400.0),
+];
+
+const LOG_SLIDERS: &[u16] = &[sound_esp::DURATION.0];
+
+pub fn slider_log(slot: usize) -> bool {
+    LOG_SLIDERS.iter().any(|&s| s as usize == slot)
+}
 
 pub fn typed_max(slot: usize, max: f32) -> f32 {
     TYPED_MAX
@@ -509,28 +537,31 @@ modules! {
     }
 
     AimAssist / aim_assist: Combat, Normal,
-        "Pulls your own turn toward the target you are already turning at" {
+        "Helps your aim onto the target nearest your crosshair" {
         TARGETS: "Targets",
             "Which entity kinds may be aimed at, shared with TriggerBot",
             List { list: &super::entities::LIST };
         RANGE: "Range",
             "How far away in blocks a target may be",
-            Slider { min: 1.0, max: 12.0, value: 4.5, decimals: 1 };
+            Slider { min: 1.0, max: 12.0, value: 5.0, decimals: 1 };
         FOV: "FOV",
             "Width in degrees of the cone ahead of you a target has to be inside",
-            Slider { min: 5.0, max: 180.0, value: 45.0, decimals: 0 };
+            Slider { min: 5.0, max: 180.0, value: 90.0, decimals: 0 };
         STRENGTH: "Strength",
             "Percent of your own mouse movement added on top of it toward the target, so 100 turns twice as fast",
-            Slider { min: 0.0, max: 300.0, value: 100.0, decimals: 0 };
+            Slider { min: 0.0, max: 300.0, value: 175.0, decimals: 0 };
         FRICTION: "Friction",
             "Percent of your own mouse movement swallowed when you drag off a target, full on it and none at the edge of the cone",
-            Slider { min: 0.0, max: 90.0, value: 40.0, decimals: 0 };
-        DEADZONE: "Deadzone",
-            "Degrees short of the target the pull stops, so the last of the aim is always yours",
-            Slider { min: 0.0, max: 5.0, value: 1.0, decimals: 1 };
+            Slider { min: 0.0, max: 90.0, value: 55.0, decimals: 0 };
+        PULL: "Pull",
+            "Degrees per second it turns toward the target with your mouse still, 0 for off",
+            Slider { min: 0.0, max: 360.0, value: 120.0, decimals: 0 };
         REACTION: "Reaction",
             "Milliseconds a newly acquired target is left alone for, rolled inside this range",
-            Range { min: 0.0, max: 400.0, low: 100.0, high: 220.0, decimals: 0, log: false };
+            Range { min: 0.0, max: 400.0, low: 40.0, high: 120.0, decimals: 0, log: false };
+        CLICK_ONLY: "Click only",
+            "Only help while the attack button is held",
+            Toggle { on: false };
         IGNORE_WALLS: "Ignore walls",
             "Keep pulling toward a target that has stepped behind blocks",
             Toggle { on: false };
@@ -551,8 +582,14 @@ modules! {
             "Width in degrees of the cone around your view a target must be inside, 360 for anywhere",
             Slider { min: 30.0, max: 360.0, value: 360.0, decimals: 0 };
         COOLDOWN: "Cooldown",
-            "Percent the held item's attack must have recharged. Over 90 lands a critical hit",
+            "Percent the held item's attack should have recharged. Over 90 lands a critical hit. Waited for while the fall allows, else it smashes anyway at the last tick in reach",
             Slider { min: 0.0, max: 100.0, value: 95.0, decimals: 0 };
+        WAIT_CHARGE: "Wait for charge",
+            "Never swing short of Cooldown, even when the fall ends first. Off smashes anyway",
+            Toggle { on: false };
+        STOP_SPRINT: "Stop sprint",
+            "Let go of forward for the ticks before a planned critical hit so the sprint ends, as releasing W does. The server refuses a crit while sprinting",
+            Toggle { on: true };
         SILENT: "Silent",
             "Turn the look sent to the server, a tick before the hit, and leave the camera alone. Off turns the camera",
             Toggle { on: true };
@@ -604,7 +641,7 @@ modules! {
             "Which entity kinds may be targeted, shared with TriggerBot and AimAssist",
             List { list: &super::entities::LIST };
         STRICT: "Strict",
-            "Only clicks a hand could make: the look the server has is on the block or crystal, survival reach, nothing through walls. Off lifts all three",
+            "Only clicks a hand could make: every look the server may check is on the block or crystal, survival reach, nothing through walls, Silent's slot kept a tick. Off lifts all four",
             Toggle { on: true };
         TARGET_RANGE: "Target range",
             "Blocks from you a target may stand",
@@ -637,8 +674,8 @@ modules! {
             "Blocks from your eye to the crystal's hitbox. Strict holds it to 3, survival attack reach",
             Slider { min: 1.0, max: 6.0, value: 3.0, decimals: 1 } if Show::On(offset_of(crystal_aura::BREAK.0));
         FAST_BREAK: "Fast break",
-            "Hit a crystal you placed as soon as it appears, without waiting out Break delay",
-            Toggle { on: true } if Show::On(offset_of(crystal_aura::BREAK.0));
+            "Hit a crystal you placed as soon as it appears, without waiting out Break delay. Off by default: no hand reacts in the tick a crystal spawns",
+            Toggle { on: false } if Show::On(offset_of(crystal_aura::BREAK.0));
         ATTEMPTS: "Break attempts",
             "Hits on one crystal before giving up on it",
             Slider { min: 1.0, max: 5.0, value: 2.0, decimals: 0 } if Show::On(offset_of(crystal_aura::BREAK.0));
@@ -671,11 +708,65 @@ modules! {
             Toggle { on: true };
     }
 
+    SafeAnchor / safe_anchor: Combat, Normal,
+        "After you place a respawn anchor, charges it with one glowstone and puts a glowstone block between you and it" {
+        SHIELD: "Shield",
+            "After the charge, place a glowstone block in the cell between you and the anchor to take the blast. Skipped when you stand in that cell",
+            Toggle { on: true };
+        SILENT: "Silent",
+            "Turn only the look sent to the server and leave the camera alone. Off turns the camera, so you see each click being aimed",
+            Toggle { on: false };
+        TURN: "Turn speed",
+            "Degrees per second the aim may travel, rolled fresh inside this range for every anchor",
+            Range { min: 90.0, max: 1800.0, low: 500.0, high: 800.0, decimals: 0, log: false };
+        MOVE_FIX: "Move fix",
+            "While the sent look is off your camera, re-pick the walk keys so you keep heading the same way",
+            Toggle { on: true } if Show::On(offset_of(safe_anchor::SILENT.0));
+        SWAP_BACK: "Swap back",
+            "Go back to the item you were holding once the glowstone is used",
+            Toggle { on: true };
+        HOLD: "Hold to detonate",
+            "Let a held right click set off a charged anchor, so you can hold the button instead of clicking. Off keeps every held click off anchors; only a fresh press detonates",
+            Toggle { on: true };
+    }
+
+    CrystalMacro / crystal_macro: Combat, Blatant,
+        "Hold right click with end crystals to place them on the obsidian or bedrock you look at and break the crystal you look at" {
+        PLACE_DELAY: "Place delay",
+            "Milliseconds between placements, rolled fresh inside this range. A tick is 50",
+            Range { min: 0.0, max: 500.0, low: 0.0, high: 50.0, decimals: 0, log: false };
+        BREAK_DELAY: "Break delay",
+            "Milliseconds between hits, rolled fresh inside this range. A tick is 50",
+            Range { min: 0.0, max: 500.0, low: 0.0, high: 50.0, decimals: 0, log: false };
+    }
+
     Xray / xray: Render, Legit,
         "Draws chosen blocks through terrain, each in its own colour" {
         BLOCKS: "Blocks",
             "Which blocks are drawn through terrain, and in what colour",
             List { list: &super::esp::blocks::XRAY };
+        LAVA: "Show lava",
+            "Draw lava in red, whether or not it is switched on in Blocks",
+            Toggle { on: true };
+        EXPOSED: "Exposed only",
+            "Draw only blocks with at least one side open to air, a fluid or a block that is not a full cube",
+            Toggle { on: false };
+        RANGE: "Range",
+            "How far from you in blocks the sweep looks",
+            Slider { min: 16.0, max: 256.0, value: 96.0, decimals: 0 };
+        SHAPE: "Shape",
+            "Lines draws the outline of a shape, Sides fills its faces, Both does each",
+            Enum<Shape> { default: Shape::Both };
+        FILL: "Fill",
+            "How solid the filled faces are, 0 to 255",
+            Slider { min: 0.0, max: 255.0, value: 25.0, decimals: 0 };
+    }
+
+    BlockEsp / block_esp: Render, Legit,
+        "Draws the blocks you pick through terrain; none ship switched on" {
+        BLOCKS: "Blocks",
+            "Which blocks are drawn through terrain, and in what colour",
+            List { list: &super::esp::blocks::BLOCK_ESP };
         RANGE: "Range",
             "How far from you in blocks the sweep looks",
             Slider { min: 16.0, max: 256.0, value: 64.0, decimals: 0 };
@@ -692,6 +783,9 @@ modules! {
         BLOCKS: "Blocks",
             "Which ores are drawn through terrain, and in what colour",
             List { list: &super::esp::blocks::ORES };
+        EXPOSED: "Exposed only",
+            "Draw only blocks with at least one side open to air, a fluid or a block that is not a full cube",
+            Toggle { on: false };
         RANGE: "Range",
             "How far from you in blocks the sweep looks",
             Slider { min: 16.0, max: 256.0, value: 64.0, decimals: 0 };
@@ -720,6 +814,53 @@ modules! {
         FILL: "Fill",
             "How solid the filled faces are, 0 to 255",
             Slider { min: 0.0, max: 255.0, value: 25.0, decimals: 0 };
+    }
+
+    SoundEsp / sound_esp: Render, Legit,
+        "Searches for sounds that do not occur naturally, to find a base" {
+        SOUNDS: "Sounds",
+            "Which sounds mark their block, and in what colour",
+            List { list: &super::sound_esp::SOUNDS };
+        DURATION: "Duration",
+            "Seconds a block stays marked after its sound; type a number for longer than the bar",
+            Slider { min: 1.0, max: 600.0, value: 60.0, decimals: 0 };
+        SHAPE: "Shape",
+            "Lines draws the outline of a shape, Sides fills its faces, Both does each",
+            Enum<Shape> { default: Shape::Both };
+        FILL: "Fill",
+            "How solid the filled faces are, 0 to 255",
+            Slider { min: 0.0, max: 255.0, value: 25.0, decimals: 0 };
+    }
+
+    Basefinder / basefinder: World, Legit,
+        "Outlines chunks with signs of players: grown amethyst, grown or cut plants and placed blocks" {
+        AMETHYST: "Amethyst",
+            "Score geodes whose bud stages are too skewed to be fresh from generation",
+            Toggle { on: true };
+        KELP: "Grown kelp",
+            "Score kelp that has grown past the ages generation gives it",
+            Toggle { on: true };
+        BROKEN: "Cut plants",
+            "Score kelp and nether vines whose tip was broken off",
+            Toggle { on: true };
+        CANE: "Grown sugar cane",
+            "Score sugar cane that has aged since generation; a farm has many, one or two can be a passing player",
+            Toggle { on: true };
+        PLACED: "Placed blocks",
+            "Score blocks no structure generates, like shulker boxes, beacons and lit furnaces",
+            Toggle { on: true };
+        MIN_BUDS: "Min buds",
+            "Amethyst buds a geode needs before its stages are tested",
+            Slider { min: 8.0, max: 200.0, value: 20.0, decimals: 0 };
+        MIN_SCORE: "Min score",
+            "Score out of 100 a chunk needs to be outlined",
+            Slider { min: 1.0, max: 100.0, value: 20.0, decimals: 0 };
+        RANGE: "Range",
+            "How far from you in chunks outlines are drawn",
+            Slider { min: 4.0, max: 128.0, value: 32.0, decimals: 0 };
+        EVIDENCE: "Show evidence",
+            "Also box each block that counted, coloured by signal",
+            Toggle { on: true };
     }
 
     SeedCracker / seed_cracker: World, Legit,
@@ -757,13 +898,29 @@ modules! {
             List { list: &super::esp::blocks::STORAGE };
         RANGE: "Range",
             "How far from you in blocks the sweep looks",
-            Slider { min: 16.0, max: 256.0, value: 64.0, decimals: 0 };
+            Slider { min: 16.0, max: 384.0, value: 384.0, decimals: 0 };
         SHAPE: "Shape",
             "Lines draws the outline of a shape, Sides fills its faces, Both does each",
             Enum<Shape> { default: Shape::Both };
         FILL: "Fill",
             "How solid the filled faces are, 0 to 255",
             Slider { min: 0.0, max: 255.0, value: 50.0, decimals: 0 };
+    }
+
+    PlayerEsp / player_esp: Render, Legit,
+        "Draws every player's hitbox through terrain, friends in the accent colour" {
+        SHAPE: "Shape",
+            "Lines draws the outline of a shape, Sides fills its faces, Both does each",
+            Enum<Shape> { default: Shape::Both };
+        FILL: "Fill",
+            "How solid the filled faces are, 0 to 255",
+            Slider { min: 0.0, max: 255.0, value: 50.0, decimals: 0 };
+        TRACERS: "Tracers",
+            "Draw a line from the crosshair to each player",
+            Toggle { on: false };
+        FRIEND_COLOR: "Friend color",
+            "Draw friends in the click GUI's accent colour instead of white",
+            Toggle { on: true };
     }
 
     Nametags / nametags: Render, Legit,
@@ -881,9 +1038,9 @@ modules! {
             Slider { min: 1.0, max: 60.0, value: 5.0, decimals: 1 };
         SPRINT_SPEED: "Sprint speed", "",
             Slider { min: 1.0, max: 120.0, value: 20.0, decimals: 1 };
-        PAUSE_CLICKS: "Pause clicks",
-            "Swallow left and right click while detached. Off, a click acts on the block under the freecam's crosshair, within your body's reach",
-            Toggle { on: true };
+        INPUT_MODE: "Input mode",
+            "Where left and right click go while detached. Player: what your body faces. Camera: the block or entity under the freecam's crosshair, within your body's reach. None: nowhere",
+            Enum<InputMode> { default: InputMode::None };
     }
 
     AutoMine / auto_mine: World, Normal,
@@ -921,6 +1078,61 @@ modules! {
         PROGRESS: "Progress HUD",
             "Show a bar of how much of the area is cleared",
             Toggle { on: false } if AUTO_MINE_AREA;
+        IN_GUI: "Allow in GUI",
+            "Keep digging while a screen is open, which no hand could do",
+            Toggle { on: false };
+    }
+
+    OreMiner / ore_miner: World, Normal,
+        "Walks to the nearest ore Xray, OreESP or Seed Xray shows and mines it" {
+        ORES: "Ores",
+            "Which ore families are mined; .mine <ore> narrows one run to one of them",
+            List { list: &super::ore_miner::ORES };
+        SOURCE: "Source",
+            "Where the ores come from. Xray takes what Xray or OreESP draws, one of which must be on. Seed Xray takes its predictions and needs a seed. Auto uses Seed Xray while it is on with a seed, otherwise Xray",
+            Enum<OreSource> { default: OreSource::Auto };
+        RANGE: "Range",
+            "How far from you in blocks ores are looked for",
+            Slider { min: 16.0, max: 256.0, value: 64.0, decimals: 0 };
+        MIN_Y: "Min Y",
+            "The lowest y an ore is mined at",
+            Slider { min: -64.0, max: 320.0, value: -64.0, decimals: 0 };
+        MAX_Y: "Max Y",
+            "The highest y an ore is mined at",
+            Slider { min: -64.0, max: 320.0, value: 320.0, decimals: 0 };
+        DIG: "Dig to ores",
+            "Dig through blocks when no walking route reaches an ore. Off walks only",
+            Toggle { on: true };
+        VEIN: "Follow veins",
+            "After an ore breaks, mine the ores of the same kind touching it before looking further",
+            Toggle { on: true };
+        AMOUNT: "Amount",
+            "Ore blocks to mine before switching off, or 0 to keep going",
+            Slider { min: 0.0, max: 512.0, value: 0.0, decimals: 0 };
+        HOME: "Return home",
+            "After the amount is mined, walk back to the home block before switching off",
+            Toggle { on: false };
+        SET_HOME: "Set home here",
+            "Stores the block you stand in as home; kept until you leave the server",
+            Button { text: "Set home here", key: "set_home" } if Show::On(offset_of(ore_miner::HOME.0));
+        TURN: "Turn speed",
+            "Degrees per second the aim may travel, rolled fresh inside this range for every block",
+            Range { min: 45.0, max: 900.0, low: 180.0, high: 400.0, decimals: 0, log: false };
+        DELAY: "Delay",
+            "Milliseconds between one block breaking and the next being dug, rolled fresh inside this range",
+            Range { min: 0.0, max: 600.0, low: 90.0, high: 260.0, decimals: 0, log: false };
+        FLUIDS: "Fluids",
+            "An ore with lava or water behind it: Skip leaves it standing, Stop switches off",
+            Enum<FluidRule> { default: FluidRule::Skip };
+        INV_FULL: "Inventory full",
+            "Stop switches off with a chat line once nothing more fits; Ignore keeps mining and leaves the drops",
+            Enum<InvFull> { default: InvFull::Stop };
+        LOW_HEALTH: "On low health",
+            "Disconnect leaves the server once health drops below the Health setting",
+            Enum<LowHealth> { default: LowHealth::Ignore };
+        HEALTH: "Health",
+            "Disconnect below this many half hearts. The bar stops at 20; type a larger number for more",
+            Slider { min: 1.0, max: 20.0, value: 6.0, decimals: 0 } if ORE_MINER_DISCONNECT;
         IN_GUI: "Allow in GUI",
             "Keep digging while a screen is open, which no hand could do",
             Toggle { on: false };
@@ -1105,6 +1317,19 @@ modules! {
         ONLY_ON_GROUND: "Only on ground",
             "Only apply while standing on a block",
             Toggle { on: false };
+    }
+
+    UiUtils / ui_utils: Misc, Blatant,
+        "UI-Utils' container buttons: close or de-sync a screen without the server agreeing, hold back or drop click packets, save a screen and forge clicks" {
+        RESTORE_KEY: "Restore GUI key",
+            "Reopens the screen kept by Save GUI, with no screen open",
+            Key { default: Bound::Key(KeyCode::KeyV) };
+        BYPASS_PACK: "Bypass resource pack",
+            "Answer a required server resource pack as accepted and loaded without downloading it",
+            Toggle { on: false };
+        FORCE_DENY: "Force deny",
+            "Bypass optional resource packs too, not only required ones",
+            Toggle { on: false } if UI_UTILS_BYPASS;
     }
 
 }

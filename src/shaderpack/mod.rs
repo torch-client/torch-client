@@ -14,6 +14,8 @@ pub(crate) mod features;
 pub(crate) mod include;
 pub(crate) mod lang;
 pub(crate) mod literal;
+#[cfg(feature = "native_shaders")]
+pub(crate) mod native;
 pub(crate) mod options;
 pub(crate) mod pipeline;
 pub(crate) mod preprocess;

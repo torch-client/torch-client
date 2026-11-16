@@ -118,6 +118,7 @@ pub enum ToWorker {
     Options {
         lighting: bool,
         smooth: bool,
+        cutout_leaves: bool,
     },
     Level {
         dim: u8,
@@ -154,6 +155,14 @@ pub enum ToWorker {
 }
 
 impl ToWorker {
+    pub fn current_options() -> Self {
+        ToWorker::Options {
+            lighting: crate::renderer::lighting_enabled(),
+            smooth: crate::renderer::smooth_lighting_enabled(),
+            cutout_leaves: crate::renderer::cutout_leaves_enabled(),
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             ToWorker::Options { .. } => "options",
@@ -175,10 +184,15 @@ impl ToWorker {
 
     pub fn encode(&self) -> Vec<u8> {
         match self {
-            ToWorker::Options { lighting, smooth } => {
+            ToWorker::Options {
+                lighting,
+                smooth,
+                cutout_leaves,
+            } => {
                 let mut w = Writer::new(TO_OPTIONS);
                 w.bool(*lighting);
                 w.bool(*smooth);
+                w.bool(*cutout_leaves);
                 w.finish()
             }
             ToWorker::Level { dim, min_y, height } => {
@@ -276,6 +290,7 @@ impl ToWorker {
             TO_OPTIONS => ToWorker::Options {
                 lighting: r.bool()?,
                 smooth: r.bool()?,
+                cutout_leaves: r.bool()?,
             },
             TO_LEVEL => ToWorker::Level {
                 dim: r.u8()?,

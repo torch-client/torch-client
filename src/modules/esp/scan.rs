@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use azalea_core::position::ChunkPos;
+use azalea::block::BlockState;
+use azalea::physics::collision::BlockWithShape;
+use azalea_core::position::{ChunkBlockPos, ChunkPos};
 use azalea_world::palette::Palette;
 
 use super::table::{Merged, NONE_ENTRY, row_of, slot_of};
+use crate::modules::auto_mine::shared::is_fluid;
 use crate::modules::list::NO_ROW;
 
 const SWAR_MAX: u32 = 4;
@@ -133,6 +137,7 @@ pub fn scan(
     out.clear();
     let range = table.max_range;
     let mut full = false;
+    let mut pending: Vec<(usize, u8)> = Vec::new();
 
     for (pos, chunk) in chunks {
         let chunk = chunk.read();
@@ -244,6 +249,47 @@ pub fn scan(
             }
         }
 
+        if table.exposed {
+            let height = (sections * 16) as i32;
+            let at = |p: [i32; 3]| -> Side {
+                let (lx, lz) = (p[0] - bx, p[2] - bz);
+                if !(0..16).contains(&lx) || !(0..16).contains(&lz) {
+                    return Side::Elsewhere;
+                }
+                if p[1] >= min_y + height {
+                    return Side::Open;
+                }
+                match chunk.get_block_state(&ChunkBlockPos::new(lx as u8, p[1], lz as u8), min_y) {
+                    Some(st) if exposes(st) => Side::Open,
+                    _ => Side::Hidden,
+                }
+            };
+            let mut keep = column_start;
+            for i in column_start..out.len() {
+                let f = out[i];
+                let mut kept = true;
+                if table.slots[f.slot as usize].exposed {
+                    let (open, elsewhere) = exposed_in(&f, &at);
+                    if !open {
+                        if elsewhere == 0 {
+                            kept = false;
+                        } else {
+                            pending.push((keep, elsewhere));
+                        }
+                    }
+                }
+                if kept {
+                    out[keep] = f;
+                    keep += 1;
+                } else {
+                    let (lx, lz) = ((f.x - bx) as usize, (f.z - bz) as usize);
+                    let gy = (f.y - min_y) as usize;
+                    scratch.rows[gy * 256 + lz * 16 + lx] = NO_ROW;
+                }
+            }
+            out.truncate(keep);
+        }
+
         neighbours(&mut out[column_start..], &scratch.rows, min_y, sections);
         for f in &out[column_start..] {
             let (lx, lz) = ((f.x - bx) as usize, (f.z - bz) as usize);
@@ -254,7 +300,92 @@ pub fn scan(
             break;
         }
     }
+    if !pending.is_empty() {
+        settle_pending(chunks, min_y, &pending, out);
+    }
     full
+}
+
+const FACES: [[i32; 3]; 6] = [
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 1, 0],
+    [0, -1, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    Open,
+    Hidden,
+    Elsewhere,
+}
+
+pub(in crate::modules) fn exposes(neighbour: BlockState) -> bool {
+    !neighbour.is_collision_shape_full() || is_fluid(neighbour)
+}
+
+fn exposed_in(f: &Found, at: impl Fn([i32; 3]) -> Side) -> (bool, u8) {
+    let mut elsewhere = 0u8;
+    for (i, d) in FACES.iter().enumerate() {
+        match at([f.x + d[0], f.y + d[1], f.z + d[2]]) {
+            Side::Open => return (true, 0),
+            Side::Hidden => {}
+            Side::Elsewhere => elsewhere |= 1 << i,
+        }
+    }
+    (false, elsewhere)
+}
+
+fn settle_pending(
+    chunks: &[(
+        ChunkPos,
+        std::sync::Arc<parking_lot::RwLock<azalea_world::Chunk>>,
+    )],
+    min_y: i32,
+    pending: &[(usize, u8)],
+    out: &mut Vec<Found>,
+) {
+    let index: HashMap<ChunkPos, usize> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _))| (*p, i))
+        .collect();
+    let mut dropped: Vec<usize> = Vec::new();
+    for &(i, faces) in pending {
+        let f = out[i];
+        let open = FACES
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| faces >> k & 1 != 0)
+            .any(|(_, d)| {
+                let (x, y, z) = (f.x + d[0], f.y + d[1], f.z + d[2]);
+                let Some(&ci) = index.get(&ChunkPos::new(x.div_euclid(16), z.div_euclid(16)))
+                else {
+                    return false;
+                };
+                let chunk = chunks[ci].1.read();
+                let cb = ChunkBlockPos::new(x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8);
+                chunk.get_block_state(&cb, min_y).is_some_and(exposes)
+            });
+        if !open {
+            dropped.push(i);
+        }
+    }
+    if dropped.is_empty() {
+        return;
+    }
+    let mut next = dropped.iter().peekable();
+    let mut i = 0;
+    out.retain(|_| {
+        let gone = next.peek().is_some_and(|&&d| d == i);
+        if gone {
+            next.next();
+        }
+        i += 1;
+        !gone
+    });
 }
 
 fn neighbours(found: &mut [Found], rows: &[u16], min_y: i32, sections: usize) {
@@ -393,6 +524,46 @@ mod tests {
         neighbours(&mut two, &rows, -64, 16);
         assert_eq!(two[0].neigh, TO);
         assert_eq!(two[1].neigh, BO);
+    }
+
+    #[test]
+    fn exposes_follows_the_neighbour_shape() {
+        use azalea_registry::builtin::BlockKind;
+        assert!(exposes(BlockState::AIR));
+        assert!(exposes(BlockState::from(BlockKind::Water)));
+        assert!(exposes(BlockState::from(BlockKind::Lava)));
+        assert!(exposes(BlockState::from(BlockKind::OakSlab)));
+        assert!(exposes(BlockState::from(BlockKind::Torch)));
+        assert!(!exposes(BlockState::from(BlockKind::Stone)));
+        assert!(!exposes(BlockState::from(BlockKind::Deepslate)));
+    }
+
+    #[test]
+    fn the_drop_rule_needs_one_open_face() {
+        let f = found(5, 10, 5);
+        let hidden = |_: [i32; 3]| Side::Hidden;
+        assert_eq!(exposed_in(&f, hidden), (false, 0));
+        let above = |p: [i32; 3]| {
+            if p == [5, 11, 5] {
+                Side::Open
+            } else {
+                Side::Hidden
+            }
+        };
+        assert_eq!(exposed_in(&f, above), (true, 0));
+        let east = |p: [i32; 3]| {
+            if p[0] == 6 {
+                Side::Elsewhere
+            } else {
+                Side::Hidden
+            }
+        };
+        assert_eq!(exposed_in(&f, east), (false, 1));
+        let both = |p: [i32; 3]| match p {
+            [6, _, _] | [_, _, 4] => Side::Elsewhere,
+            _ => Side::Hidden,
+        };
+        assert_eq!(exposed_in(&f, both), (false, 1 | 1 << 5));
     }
 
     #[test]

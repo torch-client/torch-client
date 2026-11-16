@@ -1,6 +1,6 @@
 #[cfg(feature = "click_gui")]
 use super::registry::Id;
-use super::registry::freecam as setting;
+use super::registry::{freecam as setting, options};
 use super::store;
 
 #[cfg(feature = "click_gui")]
@@ -63,10 +63,7 @@ pub fn ray() -> Option<([f64; 3], [f64; 3])> {
 }
 
 pub fn view_vector(yaw: f32, pitch: f32) -> [f64; 3] {
-    super::sent::view_vector(super::sent::Look {
-        yaw: -yaw - 180.0,
-        pitch: -pitch,
-    })
+    super::sent::view_vector(super::sent::Look::from_camera(yaw, pitch))
 }
 
 pub fn far_hit(
@@ -99,8 +96,44 @@ pub fn far_hit(
     (!hit.miss).then_some(hit)
 }
 
-pub fn pause_clicks() -> bool {
-    store().flag(setting::PAUSE_CLICKS)
+options! {
+    pub enum InputMode {
+        Player = "Player",
+        Camera = "Camera",
+        None = "None",
+    }
+}
+
+pub fn input_mode() -> InputMode {
+    store().choice(setting::INPUT_MODE)
+}
+
+pub fn pick(
+    bot: &azalea::Client,
+    range: f64,
+    held_item: azalea_registry::builtin::ItemKind,
+) -> Option<azalea_core::hit_result::HitResult> {
+    use azalea_core::{aabb::Aabb, position::Vec3};
+
+    if !active() {
+        return None;
+    }
+    let v = *EYE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let look = super::sent::Look::from_camera(v.yaw, v.pitch);
+    let eye = Vec3::new(v.eye[0], v.eye[1], v.eye[2]);
+    let mut ecs = bot.ecs.write();
+    azalea::interact::pick::pick_from(
+        &mut ecs,
+        bot.entity,
+        eye,
+        azalea::entity::LookDirection::new(look.yaw, look.pitch),
+        Aabb { min: eye, max: eye },
+        range,
+        range,
+        held_item,
+    )
 }
 
 pub fn speed(sprint: bool) -> f32 {

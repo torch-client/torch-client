@@ -36,6 +36,7 @@ mod tr {
         on = "options.on",
         off = "options.off",
         smooth_lighting = "options.ao",
+        cutout_leaves = "options.cutoutLeaves",
         max_framerate = "options.framerateLimit",
         unlimited = "options.framerateLimit.max",
         auto_jump = "options.autoJump",
@@ -149,6 +150,13 @@ const TOUCH_MOVEMENT: &str = "Movement";
 #[cfg(feature = "mobile_ui")]
 const TOUCH_SNEAK: &str = "Sneak";
 
+#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+const BEDROCK_FETCHING: &str = "Downloading Bedrock buttons";
+#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+const BEDROCK_FAILED: &str = "Bedrock buttons not downloaded.";
+#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+const BEDROCK_RETRY: &str = "Retry";
+
 #[cfg(feature = "mobile_ui")]
 const EDIT_CONTROL_LAYOUT: &str = "Edit control layout...";
 
@@ -169,6 +177,10 @@ const NOTHING_MISSING: &str = "Nothing is missing";
 const EXPORT_DATA: &str = "Export Client Data";
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
 const EXPORT_FILE: &str = "torch-client-data.zip";
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+const EXPORT_ASSETS: &str = "Export Assets...";
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+const IMPORT_ASSETS: &str = "Import Assets...";
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
 const EXPORT_TOOLTIP: [&str; 5] = [
     "Downloads a .zip with:",
@@ -301,9 +313,21 @@ const Y_QUALITY_ROW_3: f32 = Y_QUALITY_ROW_2 + ROW_H;
 const Y_QUALITY_ROW_4: f32 = Y_QUALITY_ROW_3 + ROW_H;
 
 #[cfg(feature = "builtin_shaders")]
-const Y_QUALITY_LAST: f32 = Y_QUALITY_ROW_4;
+const Y_ABOVE_LEAVES_ROW: f32 = Y_QUALITY_ROW_4;
 #[cfg(not(feature = "builtin_shaders"))]
-const Y_QUALITY_LAST: f32 = Y_QUALITY_ROW_3;
+const Y_ABOVE_LEAVES_ROW: f32 = Y_QUALITY_ROW_3;
+
+const Y_LEAVES_ROW: f32 = Y_ABOVE_LEAVES_ROW + ROW_H;
+
+const Y_QUALITY_GRID_LAST: f32 = Y_LEAVES_ROW;
+
+#[cfg(feature = "render_scale")]
+const Y_RENDER_SCALE_ROW: f32 = Y_QUALITY_GRID_LAST + ROW_H;
+
+#[cfg(feature = "render_scale")]
+const Y_QUALITY_LAST: f32 = Y_RENDER_SCALE_ROW;
+#[cfg(not(feature = "render_scale"))]
+const Y_QUALITY_LAST: f32 = Y_QUALITY_GRID_LAST;
 
 #[cfg(feature = "shader_support")]
 const Y_SHADERPACKS_ROW: f32 = Y_QUALITY_LAST + ROW_H;
@@ -676,6 +700,18 @@ const LOD_QUALITY_SLIDER_ID: u32 = 33;
 
 const DAMAGE_TILT_SLIDER_ID: u32 = 34;
 
+#[cfg(feature = "render_scale")]
+const RENDER_SCALE: &str = "Render Scale";
+
+#[cfg(feature = "render_scale")]
+const RENDER_SCALE_SLIDER_ID: u32 = 35;
+
+#[cfg(feature = "render_scale")]
+fn render_scale_label(step: i32) -> String {
+    let percent = crate::gui::render_scale_percent(step.max(0) as u32);
+    percent_value(RENDER_SCALE, percent as i32)
+}
+
 #[cfg(feature = "render_lod")]
 const LOD_DISTANCE_STOPS: [u32; 44] = [
     3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
@@ -871,8 +907,10 @@ const VIDEO_KEYS: &[&str] = &[
     "renderDistance",
     "gamma",
     "antialiasing",
+    "renderScale",
     "ao",
     "lightingEnabled",
+    "cutoutLeaves",
     "maxFps",
     "vsync",
     "inactivityFpsLimit",
@@ -1044,6 +1082,10 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                     state.confirm_clear_assets = false;
                     state.storage_nothing_missing = false;
                 }
+                #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+                {
+                    state.asset_transfer.import_line = None;
+                }
                 state.controls_scroll = 0.0;
                 state.controls_scroll_drag = None;
                 state.keybinds.capturing = None;
@@ -1099,7 +1141,7 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         count += 1;
     }
     if cfg!(all(target_arch = "wasm32", feature = "asset_download")) {
-        count += 1;
+        count += 3;
     }
     let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
     let top = LAYOUT.content_y(ctx.vh, menu_content_h(count));
@@ -1183,6 +1225,36 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         };
         if enable.draw(p, ctx) {
             crate::client::self_update::enable();
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+    {
+        let (x, y) = cell(next);
+        next += 1;
+        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, EXPORT_ASSETS).draw(p, ctx) {
+            state.asset_transfer.open();
+            state.asset_transfer.import_line = None;
+            state.nav = Some(Screen::ExportAssets);
+        }
+        let (x, y) = cell(next);
+        next += 1;
+        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, IMPORT_ASSETS).draw(p, ctx) {
+            crate::platform::upload::choose_assets();
+        }
+        if let Some(bytes) = crate::platform::upload::take_assets() {
+            state.asset_transfer.import_line = Some(
+                match crate::client::assets::transfer::import_into_running(&bytes) {
+                    Ok(line) => (line, false),
+                    Err(e) => (format!("Import failed: {}", e.long()), true),
+                },
+            );
+        }
+        if let Some((line, failed)) = &state.asset_transfer.import_line {
+            let rows = count.div_ceil(2) as f32;
+            let below = top + rows * (WIDGET_HEIGHT + ROW_SPACING) + 2.0;
+            let rgb = if *failed { 0xFF5555 } else { 0x55FF55 };
+            p.text_centered(line, ctx.vw / 2.0, below, rgb, true);
         }
     }
 
@@ -1439,6 +1511,9 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let (x, y) = cell(1.0, Y_QUALITY_ROW_3);
     opt_toggle!(p, ctx, state; x, y, tr::entity_shadows(), entity_shadows);
 
+    let (x, y) = cell(0.0, Y_LEAVES_ROW);
+    opt_toggle!(p, ctx, state; x, y, tr::cutout_leaves(), cutout_leaves);
+
     #[cfg(feature = "builtin_shaders")]
     {
         let (x, y) = cell(1.0, Y_QUALITY_ROW_2);
@@ -1470,6 +1545,13 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             state.options.player_shadows = !state.options.player_shadows;
             crate::gui::save_options(&state.options);
         }
+    }
+
+    #[cfg(feature = "render_scale")]
+    {
+        let (x, y) = cell(0.0, Y_RENDER_SCALE_ROW);
+        opt_slider!(p, ctx, state; x, y, RENDER_SCALE_SLIDER_ID, render_scale_step, 0,
+            crate::gui::RENDER_SCALE_PERCENTS.len() as i32 - 1, render_scale_label);
     }
 
     #[cfg(feature = "shader_support")]
@@ -1585,6 +1667,11 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             WIDGET_WIDTH_BIG,
             WIDGET_HEIGHT,
             EDIT_CONTROL_LAYOUT,
+        );
+        #[cfg(feature = "tutorial")]
+        crate::gui::tutorial::mark(
+            crate::gui::tutorial::Spot::TouchLayout,
+            crate::gui::hud_layout::Rect::new(edit.x, edit.y, edit.w, edit.h),
         );
         if edit.draw(p, screen_ctx) {
             state.keybinds.capturing = None;
@@ -1737,12 +1824,20 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 #[cfg(feature = "mobile_ui")]
 pub fn draw_touch_layout(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let other = crate::mobile::pad::top_controls_bottom(ctx.vw, ctx.vh);
-    let bedrock = crate::mobile::bedrock::Layout::new(ctx.vw, ctx.vh).top_bottom();
+    let bedrock = crate::mobile::bedrock::Scheme::ALL
+        .into_iter()
+        .map(|s| crate::mobile::bedrock::Layout::new(ctx.vw, ctx.vh, s).top_bottom())
+        .fold(0.0, f32::max);
     let y = (other.max(bedrock) + ROW_SPACING).ceil();
     let row_w = COLUMN_W + BIND_BUTTON_GAP + RESET_W;
     let clear = crate::mobile::pad::movement_right(ctx.vw, ctx.vh) + ROW_SPACING;
     let x = ((ctx.vw - row_w) / 2.0).floor().max(clear.ceil());
     let label = generic_value(TOUCH_MOVEMENT, state.options.touch_movement.caption());
+    #[cfg(feature = "tutorial")]
+    crate::gui::tutorial::mark(
+        crate::gui::tutorial::Spot::TouchMovement,
+        crate::gui::hud_layout::Rect::new(x, y, COLUMN_W, WIDGET_HEIGHT),
+    );
     if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &label).draw(p, ctx) {
         state.options.touch_movement = state.options.touch_movement.next();
         crate::gui::save_options(&state.options);
@@ -1776,10 +1871,46 @@ pub fn draw_touch_layout(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx)
     if reset.draw(p, ctx) {
         reset_touch_sneak(&mut state.options);
     }
-
     let y = y + WIDGET_HEIGHT + ROW_SPACING;
-    if Button::new(x, y, row_w, WIDGET_HEIGHT, tr::done()).draw(p, ctx) {
+
+    #[cfg(feature = "asset_download")]
+    let (y, retry) = if state.options.touch_movement.bedrock().is_some() {
+        use crate::client::bedrock_art::{self, Status};
+        let (text, failed) = match bedrock_art::status() {
+            Status::Fetching { done, total } => {
+                (Some(format!("{BEDROCK_FETCHING} {done}/{total}")), false)
+            }
+            Status::Failed(reason) => (Some(format!("{BEDROCK_FAILED} {reason}")), true),
+            Status::Idle | Status::Ready => (None, false),
+        };
+        if let Some(text) = text {
+            let w = p.atlas.font.width_str(&text);
+            let tx = (x + (row_w - w) / 2.0).min(x + row_w - w).max(0.0).floor();
+            p.text_plain(&text, tx, y, 0xFF_FFFF, true);
+        }
+        (y + LINE_HEIGHT + ROW_SPACING, failed)
+    } else {
+        (y, false)
+    };
+    #[cfg(not(feature = "asset_download"))]
+    let retry = false;
+
+    let done_w = if retry { COLUMN_W } else { row_w };
+    if Button::new(x, y, done_w, WIDGET_HEIGHT, tr::done()).draw(p, ctx) {
         state.nav = Some(Screen::Controls);
+    }
+    #[cfg(feature = "asset_download")]
+    if retry
+        && Button::new(
+            x + COLUMN_W + BIND_BUTTON_GAP,
+            y,
+            RESET_W,
+            WIDGET_HEIGHT,
+            BEDROCK_RETRY,
+        )
+        .draw(p, ctx)
+    {
+        crate::client::bedrock_art::retry();
     }
 }
 
@@ -2291,8 +2422,9 @@ mod tests {
         assert_eq!(Y_QUALITY_HEADER, 163.0 + LOD_GROUP);
         assert_eq!(Y_QUALITY_ROW_0, 194.0 + LOD_GROUP);
         const EXTRA_ROWS: f32 = cfg!(feature = "builtin_shaders") as u32 as f32
+            + cfg!(feature = "render_scale") as u32 as f32
             + cfg!(feature = "shader_support") as u32 as f32;
-        assert_eq!(Y_RESET_ROW, 294.0 + EXTRA_ROWS * ROW_H + LOD_GROUP);
+        assert_eq!(Y_RESET_ROW, 319.0 + EXTRA_ROWS * ROW_H + LOD_GROUP);
         assert_eq!(VIDEO_CONTENT_H, Y_RESET_ROW + ROW_H);
     }
 
@@ -2317,9 +2449,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(
+    #[cfg(not(any(
         feature = "render_lod",
-        any(feature = "builtin_shaders", feature = "shader_support")
+        all(
+            feature = "builtin_shaders",
+            feature = "render_scale",
+            feature = "shader_support"
+        )
     )))]
     fn a_tall_window_has_nothing_to_scroll() {
         let (_, _, _, list_h) = LAYOUT.content_rect(854.0, 480.0);

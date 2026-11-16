@@ -6,16 +6,19 @@ pub mod auto_mine;
 pub mod auto_sell;
 pub mod auto_totem;
 pub mod auto_walk;
+pub mod basefinder;
 pub mod better_tooltips;
 pub mod chat_math;
 pub mod commands;
 pub mod crystal_aura;
+pub mod crystal_macro;
 mod edge;
 pub mod entities;
 pub mod esp;
 pub mod extra_hud;
 pub mod flight;
 pub mod freecam;
+pub mod friends;
 pub mod fullbright;
 pub mod hooks;
 pub mod hud_panels;
@@ -25,10 +28,13 @@ pub mod nametags;
 mod nearby;
 pub mod no_fall;
 pub mod no_render;
+pub mod ore_miner;
 pub mod pathfinder;
 #[cfg(feature = "click_gui")]
 pub mod persist;
+pub mod player_esp;
 pub mod registry;
+pub mod safe_anchor;
 pub mod scaffold;
 #[cfg(lua_mods)]
 pub mod script;
@@ -36,6 +42,7 @@ pub mod seed_cracker;
 pub mod seed_xray;
 pub(crate) mod sent;
 pub mod sneak;
+pub mod sound_esp;
 pub mod spam;
 pub mod special;
 pub mod speed;
@@ -46,12 +53,14 @@ mod store;
 mod store;
 pub mod triggerbot;
 mod turn;
+#[cfg(feature = "ui_utils")]
+pub mod ui_utils;
 mod value;
 pub mod vclip;
 pub mod velocity;
 pub mod zoom;
 
-pub use edge::{Edge, MS_PER_TICK, Phase, roll};
+pub use edge::{Edge, MS_PER_TICK, Phase, delay_ticks, roll};
 pub use store::{Store, flush_changed, save, store};
 pub use value::Value;
 
@@ -74,6 +83,9 @@ pub(crate) fn nearest_first(
 pub fn builtin_button(ix: registry::ModuleIx, key: &'static str, now: f32) -> ButtonAction {
     if ix == registry::ModuleIx::from(registry::Id::AutoMine) {
         return auto_mine::button(key);
+    }
+    if ix == registry::ModuleIx::from(registry::Id::OreMiner) {
+        return ore_miner::button(key, now);
     }
     #[cfg(feature = "seed_cracker")]
     if ix == registry::ModuleIx::from(registry::Id::SeedCracker) {
@@ -101,6 +113,8 @@ pub fn builtin_button_text(
     if ix == registry::ModuleIx::from(registry::Id::SeedCracker) {
         return seed_cracker::button_text(key, text, now);
     }
-    let _ = (ix, key, now);
+    if ix == registry::ModuleIx::from(registry::Id::OreMiner) {
+        return ore_miner::button_text(key, text, now);
+    }
     text
 }

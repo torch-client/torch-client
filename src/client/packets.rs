@@ -1,7 +1,7 @@
 use azalea::local_player::WorldHolder;
 use azalea_core::bitset::BitSet;
-use azalea_core::position::ChunkPos;
 use azalea_protocol::packets::game::ClientboundGamePacket;
+use azalea_protocol::packets::game::c_add_entity::unpack_degrees;
 use azalea_protocol::packets::game::c_block_entity_data::ClientboundBlockEntityData;
 use azalea_protocol::packets::game::c_game_event::EventType;
 use azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData;
@@ -40,6 +40,7 @@ pub(crate) fn handle_packet(
 ) {
     #[cfg(lua_mods)]
     crate::modules::script::packet(packet);
+    crate::modules::sound_esp::packet(packet);
     #[cfg(lua_mods)]
     if let ClientboundGamePacket::TagQuery(p) = packet {
         crate::modules::script::tag_query(p);
@@ -118,8 +119,7 @@ pub(crate) fn handle_packet(
         && !p.relative.x
         && !p.relative.z
     {
-        viewwindow::note_player_positioned();
-        viewwindow::keep_view_center_on_the_player(&world.partial, p.change.pos);
+        viewwindow::note_player_positioned(&world.partial.read());
     }
 
     trace(packet);
@@ -138,11 +138,11 @@ pub(crate) fn handle_packet(
         _ => {}
     }
     weather(packet);
-    chunk_accounting(world, packet);
+    chunk_accounting(packet);
     server_lighting(world, packet);
     block_entities(world, shared, packet);
     animations(packet);
-    entity_state(packet);
+    entity_state(shared, packet);
     maps(shared, packet);
     session_state(world, shared, packet);
     level_lifecycle(world, shared, packet);
@@ -180,6 +180,21 @@ fn unsecure_server_warning(shared: &SharedMutex, enforces_secure_chat: bool) {
             multiline: true,
         }],
     );
+}
+
+fn onboard_hint(shared: &SharedMutex) {
+    use crate::gui::keybinds::{Action, KeyBinds};
+
+    let key = KeyBinds::default()
+        .bound(Action::Sneak)
+        .display_name()
+        .to_string();
+    let text = crate::gui::tooltip::translate("mount.onboard", &[key]);
+    shared
+        .lock()
+        .unwrap()
+        .session
+        .set_action_bar(vec![crate::text::Span::new(text)]);
 }
 
 fn demo_event(shared: &SharedMutex, param: f32) {
@@ -515,14 +530,14 @@ fn slot_display_stack(
     }
 }
 
-fn chunk_accounting(world: &WorldHolder, packet: &ClientboundGamePacket) {
+fn chunk_accounting(packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::LevelChunkWithLight(p) => {
-            viewwindow::note_chunk_packet(&world.partial, p.x, p.z);
+            crate::diag::note_chunk_packet();
+            viewwindow::note_stream_reach(p.x, p.z);
         }
         ClientboundGamePacket::SetChunkCacheCenter(p) => {
             crate::diag::note_cache_center((p.x, p.z));
-            viewwindow::note_server_centre();
         }
         _ => {}
     }
@@ -531,18 +546,7 @@ fn chunk_accounting(world: &WorldHolder, packet: &ClientboundGamePacket) {
 fn server_lighting(world: &WorldHolder, packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::LevelChunkWithLight(p) => {
-            if crate::client::mesh_worker::offer_chunk_packet(p) {
-                return;
-            }
-            if !world
-                .partial
-                .read()
-                .chunks
-                .in_range(&ChunkPos::new(p.x, p.z))
-            {
-                return;
-            }
-            worldsync::stash_server_light(p.x, p.z, server_light(&p.light_data));
+            worldsync::note_chunk_received(&world.shared, p.x, p.z, worldsync::Arrival::Packet(p));
         }
         ClientboundGamePacket::LightUpdate(p) => {
             if !crate::client::mesh_worker::offer_light_update(p.x, p.z, &p.light_data) {
@@ -630,7 +634,7 @@ fn animations(packet: &ClientboundGamePacket) {
             head_yaws()
                 .lock()
                 .unwrap()
-                .insert(p.entity_id.0, p.y_head_rot as f32 * 360.0 / 256.0);
+                .insert(p.entity_id.0, unpack_degrees(p.y_head_rot));
         }
         ClientboundGamePacket::Animate(p) => {
             use azalea_protocol::packets::game::c_animate::AnimationAction;
@@ -765,7 +769,7 @@ fn maps(shared: &SharedMutex, packet: &ClientboundGamePacket) {
     }
 }
 
-fn entity_state(packet: &ClientboundGamePacket) {
+fn entity_state(shared: &SharedMutex, packet: &ClientboundGamePacket) {
     use std::sync::atomic::Ordering;
 
     match packet {
@@ -781,7 +785,12 @@ fn entity_state(packet: &ClientboundGamePacket) {
             } else if LOCAL_VEHICLE_ID.load(Ordering::Relaxed) == p.vehicle.0 {
                 LOCAL_VEHICLE_ID.store(-1, Ordering::Relaxed);
             }
+            let boarded = new.contains(&local);
             let old = passengers().lock().unwrap().insert(p.vehicle.0, new);
+            if boarded && !old.as_ref().is_some_and(|o| o.contains(&local)) {
+                crate::play::riding::note_boarded(p.vehicle.0);
+                onboard_hint(shared);
+            }
             for id in old.into_iter().flatten() {
                 mark_meta_dirty(id);
             }
@@ -817,6 +826,10 @@ fn entity_state(packet: &ClientboundGamePacket) {
                 add_entity_data().lock().unwrap().insert(p.id.0, p.data);
             }
             record_velocity(p.id.0, p.movement.to_vec3());
+            head_yaws()
+                .lock()
+                .unwrap()
+                .insert(p.id.0, unpack_degrees(p.y_head_rot));
         }
         ClientboundGamePacket::SetEntityMotion(p) => {
             record_velocity(p.id.0, p.delta.to_vec3());
@@ -864,6 +877,7 @@ fn entity_state(packet: &ClientboundGamePacket) {
         }
         ClientboundGamePacket::TeleportEntity(p) => {
             on_grounds().lock().unwrap().insert(p.id.0, p.on_ground);
+            crate::play::riding::note_vehicle_teleport(p);
         }
         ClientboundGamePacket::EntityPositionSync(p) => {
             on_grounds().lock().unwrap().insert(p.id.0, p.on_ground);
@@ -1490,6 +1504,7 @@ fn level_lifecycle(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbou
             crate::audio::publish_synced(&world.shared.read().registries);
             #[cfg(feature = "seed_cracker")]
             crate::modules::seed_cracker::logged_in();
+            crate::modules::basefinder::logged_in();
             worldsync::set_dimension(world, &p.common);
             worldsync::reset_level(world, shared);
         }

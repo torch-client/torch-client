@@ -515,7 +515,10 @@ pub fn tick(bot: &Client, shared: &SharedMutex) -> Option<(f32, f32)> {
                 screen_open: s.screen_open,
                 yaw,
                 pitch,
-                camera: [-s.camera_yaw - 180.0, -s.camera_pitch],
+                camera: {
+                    let l = crate::modules::sent::Look::from_camera(s.camera_yaw, s.camera_pitch);
+                    [l.yaw, l.pitch]
+                },
                 on_ground,
                 physics: body,
                 gamemode: game::gamemode_name(s.session.gamemode),
@@ -964,7 +967,7 @@ fn flush(bot: &Client, shared: &SharedMutex) -> Option<(f32, f32)> {
         s.session.hotbar_target = Some(slot);
     }
     if let Some((yaw, pitch)) = act.look {
-        s.pending_look = Some((-yaw - 180.0, -pitch));
+        s.pending_look = Some(crate::modules::sent::Look { yaw, pitch }.camera());
     }
     act.look
 }

@@ -975,7 +975,7 @@ fn draw_overlay(p: &mut Painter, state: &mut DialogState, ctx: &ScreenCtx, out: 
             state.overlay = Overlay::None;
             if chosen == 0 {
                 out.disconnect = true;
-                out.nav = Some(Screen::Title);
+                out.nav = Some(Screen::Multiplayer);
             }
         }
     }

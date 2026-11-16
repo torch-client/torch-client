@@ -51,7 +51,7 @@ pub fn check_for_path_obstruction(
             .expect("Entity tried to pathfind but the entity isn't in a valid world");
 
         let origin = executing_path.last_reached_node;
-        let cached_world = CachedWorld::new(world_lock, origin);
+        let cached_world = CachedWorld::new(world_lock, origin).without_cost_table();
         let mining_cache = MiningCache::new(if opts.allow_mining {
             Some(inventory.inventory_menu.clone())
         } else {

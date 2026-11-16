@@ -14,8 +14,8 @@ const SSAA_SCALE: f32 = 2.0;
 
 const MIN_RENDER_SCALE: f32 = 0.5;
 
-fn render_scale(antialiasing: bool, scale_factor: f32) -> f32 {
-    let per_logical_pixel = if antialiasing { SSAA_SCALE } else { 1.0 };
+fn render_scale(antialiasing: bool, user_scale: f32, scale_factor: f32) -> f32 {
+    let per_logical_pixel = (if antialiasing { SSAA_SCALE } else { 1.0 }) * user_scale;
     let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
         scale_factor
     } else {
@@ -34,6 +34,7 @@ struct SsaaTarget {
     window_size: UVec2,
     scale: f32,
     camera_count: usize,
+    nearest: bool,
 }
 
 impl Default for SsaaTarget {
@@ -42,6 +43,7 @@ impl Default for SsaaTarget {
             window_size: UVec2::ZERO,
             scale: f32::NAN,
             camera_count: 0,
+            nearest: false,
         }
     }
 }
@@ -88,15 +90,23 @@ fn apply_ssaa(
     let antialiasing = state.options.antialiasing && !crate::renderer::packvertex::active();
     #[cfg(not(feature = "shader_support"))]
     let antialiasing = state.options.antialiasing;
-    let scale = render_scale(antialiasing, window.scale_factor());
+    #[cfg(feature = "render_scale")]
+    let user_scale =
+        crate::gui::render_scale_percent(state.options.render_scale_step) as f32 / 100.0;
+    #[cfg(not(feature = "render_scale"))]
+    let user_scale = 1.0;
+    let scale = render_scale(antialiasing, user_scale, window.scale_factor());
     let enabled = scale != 1.0;
     let camera_count = scene_cameras.iter().count();
+    let nearest = user_scale < 1.0 && scale < 1.0;
     if window_size == target.window_size
         && scale == target.scale
         && camera_count == target.camera_count
+        && nearest == target.nearest
     {
         return;
     }
+    target.nearest = nearest;
     target.window_size = window_size;
     target.scale = scale;
     target.camera_count = camera_count;
@@ -131,7 +141,7 @@ fn apply_ssaa(
         TextureFormat::Rgba8UnormSrgb,
         None,
     );
-    image.sampler = if scale != 1.0 {
+    image.sampler = if scale != 1.0 && !nearest {
         ImageSampler::linear()
     } else {
         ImageSampler::nearest()
@@ -171,7 +181,7 @@ mod tests {
             (3.5, true, (2.0f32 / 3.5).max(test_floor())),
         ];
         for (factor, antialiasing, want) in cases {
-            let got = render_scale(antialiasing, factor);
+            let got = render_scale(antialiasing, 1.0, factor);
             assert!(
                 (got - want).abs() < 1e-6,
                 "scale factor {factor}, antialiasing {antialiasing}: got {got}, want {want}",
@@ -186,7 +196,7 @@ mod tests {
             let mut previous = f32::INFINITY;
             for step in 1..=80 {
                 let factor = step as f32 * 0.1;
-                let scale = render_scale(antialiasing, factor);
+                let scale = render_scale(antialiasing, 1.0, factor);
 
                 assert!(
                     scale >= test_floor() - 1e-6,
@@ -215,8 +225,30 @@ mod tests {
     #[test]
     fn an_unset_scale_factor_falls_back() {
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert_eq!(render_scale(false, bad), 1.0, "scale factor {bad}");
-            assert_eq!(render_scale(true, bad), SSAA_SCALE, "scale factor {bad}");
+            assert_eq!(render_scale(false, 1.0, bad), 1.0, "scale factor {bad}");
+            assert_eq!(
+                render_scale(true, 1.0, bad),
+                SSAA_SCALE,
+                "scale factor {bad}"
+            );
         }
+    }
+
+    #[test]
+    fn the_render_scale_option_multiplies() {
+        for percent in crate::gui::RENDER_SCALE_PERCENTS {
+            let user = percent as f32 / 100.0;
+            assert!((render_scale(false, user, 1.0) - user).abs() < 1e-6);
+            assert!((render_scale(true, user, 1.0) - SSAA_SCALE * user).abs() < 1e-6);
+            for factor in [1.25, 2.0, 2.625, 3.5] {
+                let scale = render_scale(false, user, factor);
+                assert!(scale <= user + 1e-6, "{percent}% at {factor}: {scale}");
+                assert!(
+                    scale >= user.min(test_floor()) - 1e-6,
+                    "{percent}% at {factor}: {scale}"
+                );
+            }
+        }
+        assert_eq!(render_scale(false, 1.0, 1.0), 1.0);
     }
 }

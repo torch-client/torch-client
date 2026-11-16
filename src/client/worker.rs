@@ -1029,6 +1029,11 @@ pub(crate) fn install_biome_table(table: Vec<u8>) {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn installed_biome_count() -> usize {
+    BIOME_TABLE.read().as_ref().map_or(0, |t| t.len())
+}
+
 pub(crate) fn biome_table(registries: &RegistryHolder) -> Arc<Vec<u8>> {
     if let Some(table) = BIOME_TABLE.read().as_ref() {
         return table.clone();

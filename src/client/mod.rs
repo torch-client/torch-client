@@ -5,6 +5,8 @@ pub(crate) mod assets;
 pub(crate) mod auth;
 #[cfg(feature = "online_mode")]
 pub(crate) mod ban;
+#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+pub(crate) mod bedrock_art;
 pub(crate) mod bossbar;
 pub(crate) mod bot;
 pub(crate) mod chat_recv;
@@ -18,9 +20,11 @@ pub(crate) mod envprobe;
 pub(crate) mod hotbar_pop;
 #[cfg(feature = "asset_download")]
 pub(crate) mod language;
+pub(crate) mod level_load;
 #[cfg(feature = "render_lod")]
 pub(crate) mod lod;
 pub(crate) mod mesh_worker;
+pub(crate) mod outbox;
 pub(crate) mod packets;
 pub(crate) mod recipes;
 #[cfg(self_update)]

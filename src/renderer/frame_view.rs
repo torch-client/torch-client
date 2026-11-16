@@ -51,6 +51,7 @@ pub struct FrameView {
     pub camera_pitch: f32,
     pub camera_world: DVec3,
     pub camera_render: Vec3,
+    pub player_section_ready: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub camera_rotation: Quat,
     pub hurt_tilt: Quat,
     pub in_world: bool,
@@ -100,6 +101,8 @@ impl FrameView {
             .camera_distance
             .unwrap_or(crate::client::tracking::DEFAULT_CAMERA_DISTANCE as f32);
         self.local_body = session.local_body;
+        self.player_section_ready
+            .clone_from(&session.player_section_ready);
         {
             use crate::play::mob_effects::{effect_blend_factor, find, has, night_vision_scale};
             let effects = &session.active_effects;

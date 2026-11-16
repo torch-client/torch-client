@@ -54,6 +54,13 @@ const SKIP_SAME: &[&str] = &[
 
 pub const LEAVES_CULL_GROUP: u32 = 1;
 
+const fn skip_same_group(kind: azalea_registry::builtin::BlockKind) -> u32 {
+    kind as u32 + 2
+}
+
+pub const POWDER_SNOW_CULL_GROUP: u32 =
+    skip_same_group(azalea_registry::builtin::BlockKind::PowderSnow);
+
 fn cull_group(name: &str, block: &dyn BlockTrait) -> u32 {
     if name.ends_with("_leaves") {
         return LEAVES_CULL_GROUP;
@@ -62,7 +69,7 @@ fn cull_group(name: &str, block: &dyn BlockTrait) -> u32 {
         || name.ends_with("_stained_glass")
         || name.ends_with("copper_grate")
     {
-        return block.as_block_kind() as u32 + 2;
+        return skip_same_group(block.as_block_kind());
     }
     0
 }

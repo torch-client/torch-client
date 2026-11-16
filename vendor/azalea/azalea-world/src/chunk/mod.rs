@@ -13,12 +13,20 @@ use azalea_block::block_state::BlockState;
 use azalea_buf::{AzBuf, BufReadError};
 use azalea_core::{
     heightmap_kind::HeightmapKind,
-    position::{ChunkBiomePos, ChunkBlockPos, ChunkSectionBiomePos, ChunkSectionBlockPos},
+    position::{
+        ChunkBiomePos, ChunkBlockPos, ChunkPos, ChunkSectionBiomePos, ChunkSectionBlockPos,
+    },
 };
 use azalea_registry::data::Biome;
 use tracing::warn;
 
-use crate::{heightmap::Heightmap, palette::PalettedContainer};
+use crate::{
+    heightmap::Heightmap,
+    palette::{
+        GlobalBits, PaletteKind, PalettedContainer, PalletedContainerKind,
+        block_state_registry_bits, registry_bits,
+    },
+};
 
 const SECTION_HEIGHT: u32 = 16;
 
@@ -70,20 +78,59 @@ impl Chunk {
             let section = Section::azalea_read(buf)?;
             sections.push(section);
         }
-        let sections = sections.into_boxed_slice();
-
-        let mut heightmaps = HashMap::new();
-        for (kind, data) in heightmaps_data {
-            let data = data.clone();
-            let heightmap = Heightmap::new(*kind, dimension_height, min_y, data);
-            heightmaps.insert(*kind, heightmap);
-        }
-
         Ok(Chunk {
-            sections,
-            heightmaps,
+            sections: sections.into_boxed_slice(),
+            heightmaps: read_heightmaps(heightmaps_data, dimension_height, min_y),
             version: next_version(),
         })
+    }
+
+    pub fn read_lenient(
+        data: &[u8],
+        dimension_height: u32,
+        min_y: i32,
+        heightmaps_data: &[(HeightmapKind, Box<[u64]>)],
+        biome_registry_len: usize,
+    ) -> (Self, Option<ChunkDecodeFailure>) {
+        let section_count = (dimension_height / SECTION_HEIGHT) as usize;
+        let vanilla = SectionWidths {
+            blocks: GlobalBits::Registry(block_state_registry_bits()),
+            biomes: if biome_registry_len == 0 {
+                GlobalBits::AsSent
+            } else {
+                GlobalBits::Registry(registry_bits(biome_registry_len))
+            },
+        };
+        let first = decode_sections(data, section_count, vanilla);
+        let clean = |pass: &DecodePass| pass.failure.is_none() && pass.consumed == data.len();
+        let mut chosen = first;
+        if !clean(&chosen) && chosen.ambiguous {
+            let as_sent = SectionWidths {
+                blocks: GlobalBits::AsSent,
+                biomes: GlobalBits::AsSent,
+            };
+            let second = decode_sections(data, section_count, as_sent);
+            if clean(&second) || second.decoded > chosen.decoded {
+                chosen = second;
+                if let Some(failure) = chosen.failure.as_mut() {
+                    failure.read_as_sent = true;
+                }
+            }
+        }
+        let DecodePass {
+            mut sections,
+            failure,
+            ..
+        } = chosen;
+        sections.resize_with(section_count, Section::default);
+        (
+            Chunk {
+                sections: sections.into_boxed_slice(),
+                heightmaps: read_heightmaps(heightmaps_data, dimension_height, min_y),
+                version: next_version(),
+            },
+            failure,
+        )
     }
 
     pub fn version(&self) -> u64 {
@@ -147,6 +194,166 @@ impl Chunk {
         };
         let chunk_section_pos = ChunkSectionBiomePos::from(pos);
         Some(section.get_biome(chunk_section_pos))
+    }
+}
+
+fn read_heightmaps(
+    heightmaps_data: &[(HeightmapKind, Box<[u64]>)],
+    dimension_height: u32,
+    min_y: i32,
+) -> HashMap<HeightmapKind, Heightmap> {
+    let mut heightmaps = HashMap::new();
+    for (kind, data) in heightmaps_data {
+        let heightmap = Heightmap::new(*kind, dimension_height, min_y, data.clone());
+        heightmaps.insert(*kind, heightmap);
+    }
+    heightmaps
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SectionWidths {
+    blocks: GlobalBits,
+    biomes: GlobalBits,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChunkDecodeFailure {
+    pub section: usize,
+    pub sections: usize,
+    pub part: &'static str,
+    pub sent_bits: Option<u8>,
+    pub palette: Option<PaletteKind>,
+    pub read_bits: Option<u8>,
+    pub read_as_sent: bool,
+    pub error: String,
+}
+
+struct DecodePass {
+    sections: Vec<Section>,
+    decoded: usize,
+    failure: Option<ChunkDecodeFailure>,
+    consumed: usize,
+    ambiguous: bool,
+}
+
+fn decode_sections(data: &[u8], section_count: usize, widths: SectionWidths) -> DecodePass {
+    let mut buf = Cursor::new(data);
+    let mut pass = DecodePass {
+        sections: Vec::with_capacity(section_count),
+        decoded: 0,
+        failure: None,
+        consumed: 0,
+        ambiguous: false,
+    };
+    fn global_mismatch<S: PalletedContainerKind>(c: &PalettedContainer<S>, sent: u8) -> bool {
+        matches!(c.palette, crate::palette::Palette::Global) && c.bits_per_entry != sent
+    }
+    fn width_for(kind: &Option<PaletteKind>, sent: Option<u8>, global: GlobalBits, stored: fn(u8) -> u8) -> Option<u8> {
+        let sent = sent?;
+        Some(match (kind, global) {
+            (Some(PaletteKind::Global), GlobalBits::Registry(bits)) => bits,
+            (Some(PaletteKind::Global), GlobalBits::AsSent) => sent,
+            _ => stored(sent),
+        })
+    }
+    for index in 0..section_count {
+        let fail = |part: &'static str,
+                    sent_bits: Option<u8>,
+                    palette: Option<PaletteKind>,
+                    read_bits: Option<u8>,
+                    error: String| ChunkDecodeFailure {
+            section: index,
+            sections: section_count,
+            part,
+            sent_bits,
+            palette,
+            read_bits,
+            read_as_sent: false,
+            error,
+        };
+        let counts = u16::azalea_read(&mut buf).and_then(|b| Ok((b, u16::azalea_read(&mut buf)?)));
+        let (block_count, fluid_count) = match counts {
+            Ok(counts) => counts,
+            Err(e) => {
+                pass.failure = Some(fail("header", None, None, None, e.to_string()));
+                break;
+            }
+        };
+        let states = match PalettedContainer::<BlockState>::read_with(&mut buf, widths.blocks) {
+            Ok((states, sent)) => {
+                pass.ambiguous |= global_mismatch(&states, sent);
+                states
+            }
+            Err(e) => {
+                let read_bits =
+                    width_for(&e.kind, e.sent_bits, widths.blocks, BlockState::storage_bits);
+                pass.ambiguous |= e.kind == Some(PaletteKind::Global) && read_bits != e.sent_bits;
+                let error = e.error.to_string();
+                pass.failure = Some(fail("block states", e.sent_bits, e.kind, read_bits, error));
+                break;
+            }
+        };
+        match PalettedContainer::<Biome>::read_with(&mut buf, widths.biomes) {
+            Ok((biomes, sent)) => {
+                pass.ambiguous |= global_mismatch(&biomes, sent);
+                pass.sections.push(Section {
+                    block_count,
+                    fluid_count,
+                    states,
+                    biomes,
+                });
+                pass.decoded += 1;
+            }
+            Err(e) => {
+                let read_bits =
+                    width_for(&e.kind, e.sent_bits, widths.biomes, Biome::storage_bits);
+                pass.ambiguous |= e.kind == Some(PaletteKind::Global) && read_bits != e.sent_bits;
+                let error = e.error.to_string();
+                pass.failure = Some(fail("biomes", e.sent_bits, e.kind, read_bits, error));
+                pass.sections.push(Section {
+                    block_count,
+                    fluid_count,
+                    states,
+                    biomes: PalettedContainer::new(),
+                });
+                break;
+            }
+        }
+    }
+    pass.consumed = buf.position() as usize;
+    pass
+}
+
+pub fn biome_registry_len(registries: &azalea_core::registry_holder::RegistryHolder) -> usize {
+    use azalea_registry::DataRegistry;
+    let id = azalea_registry::identifier::Identifier::from(Biome::NAME);
+    registries.extra.get(&id).map_or(0, |registry| registry.map.len())
+}
+
+pub type DecodeFailureHook = fn(ChunkPos, &ChunkDecodeFailure);
+
+static DECODE_FAILURE_HOOK: std::sync::OnceLock<DecodeFailureHook> = std::sync::OnceLock::new();
+
+pub fn set_decode_failure_hook(hook: DecodeFailureHook) {
+    let _ = DECODE_FAILURE_HOOK.set(hook);
+}
+
+pub fn report_decode_failure(pos: ChunkPos, failure: &ChunkDecodeFailure) {
+    match DECODE_FAILURE_HOOK.get() {
+        Some(hook) => hook(pos, failure),
+        None => warn!(
+            "column {},{}: section {} of {} would not decode ({}, {:?} bits sent, read at {:?}, \
+             {:?} palette): {}; the rest of the column is air",
+            pos.x,
+            pos.z,
+            failure.section,
+            failure.sections,
+            failure.part,
+            failure.sent_bits,
+            failure.read_bits,
+            failure.palette,
+            failure.error
+        ),
     }
 }
 

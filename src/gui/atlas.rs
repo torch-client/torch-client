@@ -30,6 +30,11 @@ const PLAYER_FACE_COLUMNS: usize = 10;
 const PLAYER_FACE_W: u32 = SKIN_HEAD_SIZE * 2;
 const PLAYER_FACE_H: u32 = SKIN_HEAD_SIZE;
 
+#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+pub const TOUCH_ART_W: u32 = 384;
+#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+pub const TOUCH_ART_H: u32 = 168;
+
 pub(crate) const SKIN_HEAD_U: u32 = 8;
 pub(crate) const SKIN_HEAD_V: u32 = 8;
 pub(crate) const SKIN_HAT_U: u32 = 40;
@@ -145,6 +150,8 @@ pub struct GuiAtlas {
     server_icons: ReservedGrid,
     banner_icons: ReservedGrid,
     player_faces: ReservedGrid,
+    #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+    touch_art: Option<Region>,
     pub white: Region,
     pub font: Font,
 }
@@ -203,6 +210,11 @@ impl GuiAtlas {
         Some((cell(x), cell(x + SKIN_HEAD_SIZE)))
     }
 
+    #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+    pub fn touch_art(&self) -> Option<Region> {
+        self.touch_art
+    }
+
     pub fn glyph_region(&self, rect: [u32; 4]) -> Region {
         Region {
             x: self.font_origin.0 + rect[0],
@@ -239,6 +251,8 @@ impl GuiAtlas {
             server_icons: SERVER_ICON_GRID,
             banner_icons: BANNER_ICON_GRID,
             player_faces: PLAYER_FACE_GRID,
+            #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+            touch_art: None,
             white: Region {
                 x: 0,
                 y: h,
@@ -1003,6 +1017,14 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
         });
     }
 
+    #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+    entries.push(Entry {
+        kind: Kind::TouchArt,
+        key: String::new(),
+        image: RgbaImage::new(TOUCH_ART_W, TOUCH_ART_H),
+        scaling: Scaling::Stretch,
+    });
+
     let icons: ItemIcons = bake_item_icons(assets);
     let icon_map = icons.map;
     let item_trees = icons.trees;
@@ -1049,6 +1071,8 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
     let mut server_icons = SERVER_ICON_GRID;
     let mut banner_icons = BANNER_ICON_GRID;
     let mut player_faces = PLAYER_FACE_GRID;
+    #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+    let mut touch_art = None;
     let mut white = Region {
         x: 0,
         y: 0,
@@ -1078,6 +1102,8 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
             Kind::ServerIcons => server_icons = SERVER_ICON_GRID.at((r.x, r.y)),
             Kind::BannerIcons => banner_icons = BANNER_ICON_GRID.at((r.x, r.y)),
             Kind::PlayerFaces => player_faces = PLAYER_FACE_GRID.at((r.x, r.y)),
+            #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+            Kind::TouchArt => touch_art = Some(r),
         }
     }
 
@@ -1128,6 +1154,8 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
         server_icons,
         banner_icons,
         player_faces,
+        #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+        touch_art,
         white,
         font,
     }
@@ -1142,6 +1170,8 @@ enum Kind {
     ServerIcons,
     BannerIcons,
     PlayerFaces,
+    #[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+    TouchArt,
 }
 
 struct Entry {

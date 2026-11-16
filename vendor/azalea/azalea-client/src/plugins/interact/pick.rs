@@ -207,6 +207,42 @@ pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_, '_>) -> HitResult {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn pick_from(
+    ecs: &mut bevy_ecs::world::World,
+    source_entity: Entity,
+    eye_position: Vec3,
+    look_direction: LookDirection,
+    aabb: Aabb,
+    entity_pick_range: f64,
+    block_pick_range: f64,
+    held_item: ItemKind,
+) -> Option<HitResult> {
+    let mut state = bevy_ecs::system::SystemState::<(
+        Query<&WorldName>,
+        Res<Worlds>,
+        AabbQuery,
+        MaybePickableEntityQuery,
+        PickBoxQuery,
+    )>::new(ecs);
+    let (names, worlds, aabb_query, pickable_query, pick_box_query) = state.get(ecs).ok()?;
+    let world_lock = worlds.get(names.get(source_entity).ok()?)?;
+    let world = world_lock.read();
+    Some(pick(PickOpts {
+        source_entity,
+        look_direction,
+        eye_position,
+        aabb: &aabb,
+        world: &world,
+        entity_pick_range,
+        block_pick_range,
+        aabb_query: &aabb_query,
+        pickable_query: &pickable_query,
+        pick_box_query: &pick_box_query,
+        held_item,
+    }))
+}
+
 fn filter_hit_result(hit_result: HitResult, eye_position: Vec3, range: f64) -> HitResult {
     let location = hit_result.location();
     if !location.closer_than(eye_position, range) {

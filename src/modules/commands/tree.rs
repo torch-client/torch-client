@@ -147,6 +147,39 @@ fn builtin_children(b: &mut B, shape: Shape, table: &Table) -> (bool, Vec<usize>
             vec![b.arg("player", BrigadierParser::GameProfile, true, vec![])],
         ),
         Shape::Choice(words) => (true, b.lits(words.iter().copied(), true, &[])),
+        Shape::Friend => {
+            let player = b.arg("player", BrigadierParser::GameProfile, true, vec![]);
+            let mut out = b.lits(["add", "remove"], false, &[player]);
+            out.extend(b.lits(["list"], true, &[]));
+            (true, out)
+        }
+        Shape::Mine => {
+            use crate::modules::seed_xray::table::Kind;
+            let mut names = vec!["log".to_string(), "wood".to_string()];
+            names.extend(
+                Kind::ALL
+                    .into_iter()
+                    .map(crate::modules::ore_miner::kind_name),
+            );
+            names.extend(
+                crate::modules::esp::blocks::ids()
+                    .iter()
+                    .map(|id| id.to_string()),
+            );
+            names.sort_unstable();
+            names.dedup();
+            names.retain(|n| n != "stop");
+            let count = b.arg(
+                "count",
+                BrigadierParser::Integer(BrigadierNumber::new(Some(1), None)),
+                true,
+                vec![],
+            );
+            let mut out = b.lits(names.iter().map(String::as_str), true, &[count]);
+            out.push(b.lit("stop", true, vec![]));
+            out.push(b.arg("name", greedy(), true, vec![]));
+            (true, out)
+        }
         Shape::Category => {
             let names: Vec<String> = Category::ALL.iter().map(|c| norm(c.name())).collect();
             (true, b.lits(names.iter().map(String::as_str), true, &[]))

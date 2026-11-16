@@ -18,6 +18,10 @@ pub fn set_radius_floor(radius: u32) {
     RADIUS_FLOOR.store(radius, Ordering::Relaxed);
 }
 
+pub fn server_radius() -> u32 {
+    SERVER_RADIUS.load(Ordering::Relaxed)
+}
+
 pub fn effective_radius() -> u32 {
     SERVER_RADIUS
         .load(Ordering::Relaxed)

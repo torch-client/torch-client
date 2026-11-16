@@ -143,7 +143,8 @@ pub fn movement_right(vw: f32, vh: f32) -> f32 {
     let l = Layout::new(vw, vh, 0.0, Movement::Joystick);
     let grid = l.pad.x + l.cell * 3.0;
     let round = l.pad.x + l.cell * (1.5 + ROUND_CELL_OFFSET + 0.5);
-    grid.max(round)
+    let m = bedrock::Layout::new(vw, vh, bedrock::Scheme::Dpad).movement();
+    grid.max(round).max(m.center.x + m.side / 2.0)
 }
 
 pub struct Layout {
@@ -174,6 +175,7 @@ const STICK_TRAVEL_PAD: f32 = 1.0;
 const STICK_DEADZONE: f32 = 0.3;
 const ROUND_CELL_OFFSET: f32 = 1.25;
 const DPAD_DOUBLE_TAP: f32 = 0.3;
+const SNEAK_DOUBLE_TAP: f32 = 0.3;
 
 impl Layout {
     pub fn new(vw: f32, vh: f32, safe_inset: f32, movement: Movement) -> Self {
@@ -191,8 +193,11 @@ impl Layout {
             h: use_size,
         };
 
+        let bedrock = movement
+            .bedrock()
+            .map(|scheme| bedrock::Layout::new(vw, vh, scheme));
         let stick = match movement {
-            Movement::Buttons => None,
+            Movement::Buttons | Movement::BedrockDpad => None,
             Movement::Joystick => Some(Stick {
                 center,
                 radius: cell * STICK_RADIUS,
@@ -203,7 +208,14 @@ impl Layout {
                 radius: cell * 0.5,
                 travel: cell * STICK_TRAVEL_PAD,
             }),
-            Movement::Bedrock => None,
+            Movement::BedrockJoystick => bedrock.map(|b| {
+                let m = b.movement();
+                Stick {
+                    center: m.center,
+                    radius: m.side / 2.0,
+                    travel: m.side / 2.0,
+                }
+            }),
         };
 
         let has_stick = matches!(movement, Movement::Joystick | Movement::PadStick);
@@ -214,7 +226,6 @@ impl Layout {
             h: cell,
         });
 
-        let bedrock = (movement == Movement::Bedrock).then(|| bedrock::Layout::new(vw, vh));
         let close_button = match bedrock {
             Some(b) => {
                 let (c, r) = b.close();
@@ -299,8 +310,11 @@ impl Layout {
             if let Some(slot) = self.hotbar_at(screen, xf) {
                 return Control::Hotbar(slot);
             }
-            if b.dpad_cell(xf.to_local(ElementId::Pad, screen)).is_some() {
-                return Control::DPad;
+            let local = xf.to_local(ElementId::Pad, screen);
+            match b.scheme {
+                bedrock::Scheme::Dpad if b.dpad_hit(local).is_some() => return Control::DPad,
+                bedrock::Scheme::Joystick if b.movement().contains(local) => return Control::Stick,
+                _ => {}
             }
             return self.area_at(screen, areas);
         }
@@ -394,6 +408,7 @@ pub struct PadState {
     last_forward: Option<f32>,
     last_jump: Option<f32>,
     last_dpad_up: Option<f32>,
+    last_sneak_tap: Option<f32>,
 }
 
 impl PadState {
@@ -431,6 +446,18 @@ impl PadState {
 
     pub fn dpad_up_lifted(&mut self, now: f32) {
         self.last_dpad_up = Some(now);
+    }
+
+    pub fn dpad_sneak_tap(&mut self, now: f32) {
+        if self
+            .last_sneak_tap
+            .take()
+            .is_some_and(|t| now - t < SNEAK_DOUBLE_TAP)
+        {
+            self.sneak = !self.sneak;
+        } else {
+            self.last_sneak_tap = Some(now);
+        }
     }
 
     pub fn latched(&self, cell: Cell) -> bool {
@@ -678,5 +705,93 @@ mod tests {
         let l = layout();
         let c = l.close_button;
         assert_eq!(l.hit(Vec2::new(c.x + 1.0, c.y + 1.0)), Control::Chat);
+    }
+
+    const BEDROCK: [Movement; 2] = [Movement::BedrockDpad, Movement::BedrockJoystick];
+    const BEDROCK_SIZES: [(f32, f32); 2] = [(427.0, 240.0), (533.0, 240.0)];
+
+    #[test]
+    fn every_bedrock_key_hits_its_own_control() {
+        for movement in BEDROCK {
+            for (vw, vh) in BEDROCK_SIZES {
+                let l = Layout::new(vw, vh, 0.0, movement);
+                let b = l.bedrock.unwrap();
+                for key in b.keys() {
+                    let c = b.button(key).unwrap().center;
+                    assert_eq!(
+                        l.hit(c),
+                        Control::Key(key),
+                        "{key:?} in {movement:?} at {vw}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bedrock_movement_claims_its_square() {
+        for (vw, vh) in BEDROCK_SIZES {
+            let l = Layout::new(vw, vh, 0.0, Movement::BedrockDpad);
+            let b = l.bedrock.unwrap();
+            let m = b.movement();
+            assert!(l.stick.is_none());
+            assert_eq!(l.hit(m.center), Control::Key(Key::Sneak));
+            for (_, c, _) in b.dpad_arrows() {
+                assert_eq!(l.hit(c), Control::DPad);
+            }
+            assert_eq!(l.hit(m.center + Vec2::splat(m.side * 0.45)), Control::DPad);
+            assert_ne!(
+                l.hit(m.center + Vec2::new(m.side * 0.55, 0.0)),
+                Control::DPad
+            );
+
+            let l = Layout::new(vw, vh, 0.0, Movement::BedrockJoystick);
+            let m = l.bedrock.unwrap().movement();
+            let stick = l.stick.unwrap();
+            assert_eq!(stick.center, m.center);
+            assert_eq!(stick.radius, m.side / 2.0);
+            assert_eq!(l.hit(m.center), Control::Stick);
+            assert_eq!(l.hit(m.center + Vec2::splat(m.side * 0.45)), Control::Stick);
+            assert_ne!(
+                l.hit(m.center + Vec2::new(m.side * 0.55, 0.0)),
+                Control::Stick
+            );
+        }
+    }
+
+    #[test]
+    fn bedrock_hotbar_slots_are_hittable() {
+        for movement in BEDROCK {
+            for (vw, vh) in BEDROCK_SIZES {
+                let l = Layout::new(vw, vh, 0.0, movement);
+                for i in 0..9u8 {
+                    let r = l.hotbar_rect(i as usize);
+                    assert_eq!(
+                        l.hit(r.center()),
+                        Control::Hotbar(i),
+                        "slot {i} in {movement:?} at {vw}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dpad_sneak_toggles_on_a_double_tap() {
+        let mut pad = PadState::default();
+        pad.dpad_sneak_tap(0.0);
+        assert!(!pad.sneak);
+        pad.dpad_sneak_tap(0.2);
+        assert!(pad.sneak);
+        pad.dpad_sneak_tap(0.3);
+        assert!(pad.sneak);
+        pad.dpad_sneak_tap(0.4);
+        assert!(!pad.sneak);
+
+        let mut slow = PadState::default();
+        for i in 0..5 {
+            slow.dpad_sneak_tap(i as f32);
+            assert!(!slow.sneak, "tap {i} should not toggle");
+        }
     }
 }

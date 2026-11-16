@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering::Relaxed};
 use azalea::Client;
 
 use super::area::{self, Area};
+use super::shared;
 use crate::gui::Snapshot;
 use crate::gui::painter::Painter;
 use crate::modules::hud_panels::TextPanel;
@@ -59,7 +60,7 @@ pub fn count(bot: &Client, area: &Area) {
                     return;
                 };
                 samples += 1;
-                solid += i64::from(area::solid(state));
+                solid += i64::from(shared::solid(state));
             }
         }
     }

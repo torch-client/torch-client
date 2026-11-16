@@ -9,7 +9,7 @@ use azalea_core::{
     position::{ChunkPos, Vec3},
 };
 use azalea_entity::{
-    Dead, EntityBundle, EntityKindComponent, HasClientLoaded, LoadedBy, LocalEntity, LookDirection,
+    Dead, EntityBundle, EntityKindComponent, LoadedBy, LocalEntity, LookDirection,
     Physics, PlayerAbilities, Position,
     effect_events::{AddEffectEvent, RemoveEffectsEvent},
     indexing::{EntityIdIndex, EntityUuidIndex},
@@ -201,6 +201,31 @@ pub fn process_packet(ecs: &mut World, player: Entity, packet: &ClientboundGameP
     );
 }
 
+fn clear_queued_block_updates(ecs: &mut World, player: Entity) {
+    as_system::<Query<&mut QueuedServerBlockUpdates>>(ecs, |mut query| {
+        if let Ok(mut queued) = query.get_mut(player) {
+            queued.list.clear();
+        }
+    });
+}
+
+fn level_height(
+    common: &azalea_protocol::packets::common::CommonPlayerSpawnInfo,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+) -> (u32, i32) {
+    match common.dimension_type(registries) {
+        Some((_, data)) => (data.height, data.min_y),
+        None => {
+            warn!(
+                "the level {} names a dimension type this client cannot resolve; resetting it \
+                 at the overworld's 384 blocks from y = -64",
+                common.dimension
+            );
+            (384, -64)
+        }
+    }
+}
+
 pub struct GamePacketHandler<'a> {
     pub ecs: &'a mut World,
     pub player: Entity,
@@ -208,6 +233,7 @@ pub struct GamePacketHandler<'a> {
 impl GamePacketHandler<'_> {
     pub fn login(&mut self, p: &ClientboundLogin) {
         debug!("Got login packet");
+        clear_queued_block_updates(self.ecs, self.player);
 
         as_system::<(
             Commands,
@@ -257,16 +283,12 @@ impl GamePacketHandler<'_> {
                 {
                     let client_registries = &world_holder.shared.read().registries;
 
-                    let Some((_dimension_type, dimension_data)) =
-                        p.common.dimension_type(client_registries)
-                    else {
-                        return;
-                    };
+                    let (height, min_y) = level_height(&p.common, client_registries);
 
                     weak_world = worlds.get_or_insert(
                         new_world_name.clone(),
-                        dimension_data.height,
-                        dimension_data.min_y,
+                        height,
+                        min_y,
                         client_registries,
                     );
                     world_loaded_events.write(WorldLoadedEvent {
@@ -303,6 +325,11 @@ impl GamePacketHandler<'_> {
                     entity_bundle,
                     TicksConnected(0),
                 ));
+                crate::loading::start_waiting_for_new_level(
+                    &mut commands,
+                    self.player,
+                    crate::loading::LevelLoadingReason::Other,
+                );
 
                 azalea_entity::indexing::add_entity_to_indexes(
                     entity_id,
@@ -346,22 +373,41 @@ impl GamePacketHandler<'_> {
     pub fn chunk_batch_start(&mut self, _p: &ClientboundChunkBatchStart) {
         debug!("Got chunk batch start");
 
-        as_system::<MessageWriter<_>>(self.ecs, |mut events| {
-            events.write(chunks::ChunkBatchStartEvent {
-                entity: self.player,
-            });
-        });
+        as_system::<(Query<&mut chunks::ChunkBatchInfo>, MessageWriter<_>)>(
+            self.ecs,
+            |(mut query, mut events)| {
+                if let Ok(mut info) = query.get_mut(self.player) {
+                    chunks::start_chunk_batch(&mut info);
+                }
+                events.write(chunks::ChunkBatchStartEvent {
+                    entity: self.player,
+                });
+            },
+        );
     }
 
     pub fn chunk_batch_finished(&mut self, p: &ClientboundChunkBatchFinished) {
         debug!("Got chunk batch finished {p:?}");
 
-        as_system::<MessageWriter<_>>(self.ecs, |mut events| {
-            events.write(chunks::ChunkBatchFinishedEvent {
-                entity: self.player,
-                batch_size: p.batch_size,
-            });
-        });
+        as_system::<(Commands, Query<&mut chunks::ChunkBatchInfo>, MessageWriter<_>)>(
+            self.ecs,
+            |(mut commands, mut query, mut events)| {
+                if let Ok(mut info) = query.get_mut(self.player) {
+                    let desired_chunks_per_tick =
+                        chunks::finish_chunk_batch(&mut info, p.batch_size);
+                    commands.trigger(SendGamePacketEvent::new(
+                        self.player,
+                        azalea_protocol::packets::game::s_chunk_batch_received::ServerboundChunkBatchReceived {
+                            desired_chunks_per_tick,
+                        },
+                    ));
+                }
+                events.write(chunks::ChunkBatchFinishedEvent {
+                    entity: self.player,
+                    batch_size: p.batch_size,
+                });
+            },
+        );
     }
 
     pub fn custom_payload(&mut self, p: &ClientboundCustomPayload) {
@@ -553,10 +599,20 @@ impl GamePacketHandler<'_> {
     pub fn level_chunk_with_light(&mut self, p: &ClientboundLevelChunkWithLight) {
         debug!("Got chunk with light packet {} {}", p.x, p.z);
 
-        as_system::<MessageWriter<_>>(self.ecs, |mut events| {
+        as_system::<(
+            Query<(&WorldHolder, Option<&mut QueuedServerBlockUpdates>)>,
+            MessageWriter<_>,
+        )>(self.ecs, |(mut query, mut events)| {
+            if let Ok((world_holder, queued)) = query.get_mut(self.player) {
+                chunks::store_chunk(world_holder, p);
+                if let Some(mut queued) = queued {
+                    let pos = ChunkPos::new(p.x, p.z);
+                    queued.list.retain(|(block, _)| ChunkPos::from(block) != pos);
+                }
+            }
             events.write(chunks::ReceiveChunkEvent {
                 entity: self.player,
-                packet: p.clone(),
+                pos: ChunkPos::new(p.x, p.z),
             });
         });
     }
@@ -1070,6 +1126,14 @@ impl GamePacketHandler<'_> {
                     },
                 );
             }
+            EventType::WaitForLevelChunks => {
+                if let Some(mut tracker) = self
+                    .ecs
+                    .get_mut::<crate::loading::LevelLoadTracker>(self.player)
+                {
+                    tracker.loading_packets_received();
+                }
+            }
             _ => {}
         }
     }
@@ -1387,6 +1451,7 @@ impl GamePacketHandler<'_> {
 
     pub fn respawn(&mut self, p: &ClientboundRespawn) {
         debug!("Got respawn packet {p:?}");
+        clear_queued_block_updates(self.ecs, self.player);
 
         as_system::<(
             Commands,
@@ -1396,6 +1461,7 @@ impl GamePacketHandler<'_> {
                     &GameProfileComponent,
                     &ClientInformation,
                     Option<&mut WorldName>,
+                    Has<Dead>,
                 ),
                 With<LocalEntity>,
             >,
@@ -1405,7 +1471,7 @@ impl GamePacketHandler<'_> {
         )>(
             self.ecs,
             |(mut commands, mut query, mut events, mut worlds, mut loaded_by_query)| {
-                let Ok((mut world_holder, game_profile, _client_information, world_name)) =
+                let Ok((mut world_holder, game_profile, _client_information, world_name, player_dead)) =
                     query.get_mut(self.player)
                 else {
                     warn!("Got respawn packet but player doesn't have the required components");
@@ -1420,6 +1486,12 @@ impl GamePacketHandler<'_> {
                         .insert(azalea_world::WorldBorder::default());
                 }
 
+                let loading_reason = crate::loading::determine_level_loading_reason(
+                    player_dead,
+                    &new_world_name.0,
+                    world_name.as_deref().map_or(&new_world_name.0, |old| &old.0),
+                );
+
                 if let Some(mut world_name) = world_name {
                     *world_name = new_world_name.clone();
                 } else {
@@ -1429,16 +1501,12 @@ impl GamePacketHandler<'_> {
                 let weak_world;
                 {
                     let client_registries = &world_holder.shared.read().registries;
-                    let Some((_dimension_type, dimension_data)) =
-                        p.common.dimension_type(client_registries)
-                    else {
-                        return;
-                    };
+                    let (height, min_y) = level_height(&p.common, client_registries);
 
                     weak_world = worlds.get_or_insert(
                         new_world_name.clone(),
-                        dimension_data.height,
-                        dimension_data.min_y,
+                        height,
+                        min_y,
                         client_registries,
                     );
                     events.write(WorldLoadedEvent {
@@ -1468,9 +1536,12 @@ impl GamePacketHandler<'_> {
                     entity_bundle,
                 ));
 
-                commands
-                    .entity(self.player)
-                    .remove::<(Dead, HasClientLoaded)>();
+                commands.entity(self.player).remove::<Dead>();
+                crate::loading::start_waiting_for_new_level(
+                    &mut commands,
+                    self.player,
+                    loading_reason,
+                );
             },
         )
     }

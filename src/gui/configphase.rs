@@ -160,6 +160,6 @@ pub fn draw_reconfig(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     button.active = ctx.input.time - since >= RECONFIG_DISCONNECT_SECS;
     if button.draw(p, ctx) {
         state.disconnect = true;
-        state.nav = Some(Screen::Title);
+        state.nav = Some(Screen::Multiplayer);
     }
 }

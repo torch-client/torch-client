@@ -23,16 +23,54 @@ pub fn load(s: &Store) {
         s.set_profile(Mode::ALL[i]);
     }
 
+    let legacy = root
+        .get("version")
+        .and_then(Json::as_u64)
+        .is_none_or(|v| v < VERSION);
     if let Some(mods) = root.get("modules").and_then(Json::as_object) {
         for m in &MODULES {
             if let Some(saved) = mods.get(m.name).and_then(Json::as_object) {
-                load_module(s, m.id, saved, by_name(m));
+                let skip = if legacy { moved(m.name) } else { &[] };
+                load_module(s, m.id, saved, by_name(m), skip);
             }
         }
     }
 
     for l in list::ALL {
         load_list(l, &root);
+    }
+}
+
+const VERSION: u64 = 2;
+
+const MOVED: &[(&str, &[(&str, Value)])] = &[(
+    "AimAssist",
+    &[
+        ("Range", Value::Num(4.5)),
+        ("FOV", Value::Num(45.0)),
+        ("Strength", Value::Num(100.0)),
+        ("Friction", Value::Num(40.0)),
+        ("Reaction", Value::Range(100.0, 220.0)),
+    ],
+)];
+
+fn moved(name: &str) -> &'static [(&'static str, Value)] {
+    MOVED
+        .iter()
+        .find(|(m, _)| *m == name)
+        .map_or(&[], |(_, rows)| *rows)
+}
+
+fn is_old_default(v: &Json, old: Value) -> bool {
+    let near = |a: f64, b: f32| (a as f32 - b).abs() < 1e-4;
+    match old {
+        Value::Num(x) => v.as_f64().is_some_and(|a| near(a, x)),
+        Value::Range(lo, hi) => v.as_array().is_some_and(|a| {
+            matches!(a.as_slice(), [a0, a1]
+                if a0.as_f64().is_some_and(|a| near(a, lo)) && a1.as_f64().is_some_and(|a| near(a, hi)))
+        }),
+        Value::Bool(b) => v.as_bool() == Some(b),
+        Value::Choice(_) | Value::Key(_) => false,
     }
 }
 
@@ -47,6 +85,7 @@ pub(super) fn load_module<'a>(
     id: ModuleIx,
     saved: &Map<String, Json>,
     settings: impl Iterator<Item = (usize, &'a str, Kind)>,
+    moved: &[(&str, Value)],
 ) {
     if let Some(on) = saved.get("on").and_then(Json::as_bool) {
         s.set_enabled(id, on);
@@ -59,6 +98,12 @@ pub(super) fn load_module<'a>(
     };
     for (slot, key, kind) in settings {
         if let Some(v) = vals.get(key) {
+            if moved
+                .iter()
+                .any(|(k, old)| *k == key && is_old_default(v, *old))
+            {
+                continue;
+            }
             read_setting(s, slot, kind, v);
         }
     }
@@ -159,6 +204,7 @@ fn document(s: &Store) -> String {
     }
 
     let mut root = Map::new();
+    root.insert("version".to_string(), json!(VERSION));
     root.insert(
         "profile".to_string(),
         json!(Mode::NAMES[s.profile() as usize]),
@@ -173,14 +219,27 @@ fn document(s: &Store) -> String {
 }
 
 fn write_setting(s: &Store, slot: usize, kind: Kind) -> Option<Json> {
-    Some(match (kind, s.value(slot)) {
-        (Kind::Text { .. }, _) => json!(s.text_at(slot)),
+    let value = s.value(slot);
+    if value.is_some() && value == Value::default_of(kind) {
+        return None;
+    }
+    Some(match (kind, value) {
+        (Kind::Text { default, .. }, _) => {
+            let text = s.text_at(slot);
+            if text == default {
+                return None;
+            }
+            json!(text)
+        }
         (_, Some(Value::Bool(b))) => json!(b),
         (_, Some(Value::Num(x))) => json!(x),
         (_, Some(Value::Range(lo, hi))) => json!([lo, hi]),
         (Kind::Enum { options, .. }, Some(Value::Choice(c))) => json!(options.get(c as usize)?),
         (_, Some(Value::Key(b))) => json!(b.serialized_name()),
         (Kind::List { list }, _) if list.inline => {
+            if (0..list.count()).all(|i| list.enabled(i) == list.default_on(i)) {
+                return None;
+            }
             json!(
                 (0..list.count())
                     .filter(|&i| list.enabled(i))

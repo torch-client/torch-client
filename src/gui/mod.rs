@@ -4,6 +4,8 @@ pub mod accountlist;
 pub mod advancements;
 #[cfg(feature = "asset_download")]
 pub mod assetdownload;
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+pub mod assetexport;
 pub mod atlas;
 pub mod atlas_writes;
 pub mod banner_icons;
@@ -37,6 +39,7 @@ pub mod hud_layout;
 pub mod keybinds;
 #[cfg(feature = "asset_download")]
 pub mod language;
+pub mod level_loading;
 #[cfg(lua_mods)]
 pub mod lua_list;
 pub mod menu;
@@ -134,6 +137,8 @@ pub enum Screen {
     TouchLayout,
     GameSettings,
     ManageStorage,
+    #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+    ExportAssets,
     #[cfg(feature = "audio")]
     AudioSettings,
     #[cfg(resource_packs)]
@@ -170,6 +175,7 @@ pub enum Screen {
     WinGame,
     CodeOfConduct,
     Reconfiguring,
+    LevelLoading,
     GameModeSwitcher,
 
     #[cfg(feature = "click_gui")]
@@ -206,6 +212,7 @@ impl Screen {
                 | Screen::EditProfile
                 | Screen::Credits
                 | Screen::Disconnected
+                | Screen::LevelLoading
         ) {
             return true;
         }
@@ -280,6 +287,10 @@ impl Screen {
         if self == Screen::TouchLayout {
             return true;
         }
+        #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+        if self == Screen::ExportAssets {
+            return true;
+        }
         matches!(
             self,
             Screen::Options
@@ -347,6 +358,7 @@ impl Screen {
                 | Screen::Statistics
                 | Screen::CodeOfConduct
                 | Screen::Reconfiguring
+                | Screen::LevelLoading
                 | Screen::StructureBlock
                 | Screen::JigsawBlock
                 | Screen::TestBlock
@@ -361,15 +373,17 @@ pub enum TouchMovement {
     Joystick,
     #[default]
     PadStick,
-    Bedrock,
+    BedrockDpad,
+    BedrockJoystick,
 }
 
 impl TouchMovement {
-    pub const ALL: [TouchMovement; 4] = [
+    pub const ALL: [TouchMovement; 5] = [
         TouchMovement::Buttons,
         TouchMovement::Joystick,
         TouchMovement::PadStick,
-        TouchMovement::Bedrock,
+        TouchMovement::BedrockDpad,
+        TouchMovement::BedrockJoystick,
     ];
 
     #[cfg(feature = "mobile_ui")]
@@ -378,7 +392,8 @@ impl TouchMovement {
             TouchMovement::Buttons => "Buttons",
             TouchMovement::Joystick => "Joystick",
             TouchMovement::PadStick => "Pad Joystick",
-            TouchMovement::Bedrock => "Bedrock",
+            TouchMovement::BedrockDpad => "Bedrock D-Pad",
+            TouchMovement::BedrockJoystick => "Bedrock Joystick",
         }
     }
 
@@ -387,7 +402,25 @@ impl TouchMovement {
             TouchMovement::Buttons => "buttons",
             TouchMovement::Joystick => "joystick",
             TouchMovement::PadStick => "pad_joystick",
-            TouchMovement::Bedrock => "bedrock",
+            TouchMovement::BedrockDpad => "bedrock_dpad",
+            TouchMovement::BedrockJoystick => "bedrock_joystick",
+        }
+    }
+
+    pub fn from_saved(name: &str) -> Option<TouchMovement> {
+        match name {
+            "bedrock" => Some(TouchMovement::BedrockDpad),
+            _ => TouchMovement::from_serialized_name(name),
+        }
+    }
+
+    #[cfg(feature = "mobile_ui")]
+    pub fn bedrock(self) -> Option<crate::mobile::bedrock::Scheme> {
+        use crate::mobile::bedrock::Scheme;
+        match self {
+            TouchMovement::BedrockDpad => Some(Scheme::Dpad),
+            TouchMovement::BedrockJoystick => Some(Scheme::Joystick),
+            TouchMovement::Buttons | TouchMovement::Joystick | TouchMovement::PadStick => None,
         }
     }
 }
@@ -491,8 +524,10 @@ pub struct GuiOptions {
     pub render_distance: u32,
     pub gamma: u32,
     pub antialiasing: bool,
+    pub render_scale_step: u32,
     pub smooth_lighting: bool,
     pub lighting_enabled: bool,
+    pub cutout_leaves: bool,
     pub max_fps: u32,
     pub vsync: bool,
     pub inactivity_fps_limit: InactivityFpsLimit,
@@ -544,7 +579,13 @@ pub const FPS_COUNTER_DEFAULT: bool = true;
 
 pub const MAX_FPS_MIN: u32 = 10;
 pub const MAX_FPS_UNLIMITED: u32 = 260;
-pub const MAX_FPS_DEFAULT: u32 = if cfg!(feature = "mobile_ui") { 30 } else { 60 };
+pub const MAX_FPS_DEFAULT: u32 = if cfg!(feature = "mobile_ui") {
+    30
+} else if cfg!(target_arch = "wasm32") {
+    60
+} else {
+    MAX_FPS_UNLIMITED
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InactivityFpsLimit {
@@ -570,13 +611,31 @@ impl InactivityFpsLimit {
 
 pub const VSYNC_DEFAULT: bool = !cfg!(target_os = "android");
 
-pub const RENDER_DISTANCE_DEFAULT: u32 = if cfg!(feature = "mobile_ui") { 2 } else { 8 };
+pub const REDUCED_VIDEO_DEFAULTS: bool = cfg!(any(feature = "mobile_ui", target_arch = "wasm32"));
 
-pub const SMOOTH_LIGHTING_DEFAULT: bool = !cfg!(feature = "mobile_ui");
+pub const RENDER_DISTANCE_DEFAULT: u32 = if cfg!(feature = "mobile_ui") {
+    2
+} else if cfg!(target_arch = "wasm32") {
+    4
+} else {
+    8
+};
+
+pub const SMOOTH_LIGHTING_DEFAULT: bool = !REDUCED_VIDEO_DEFAULTS;
 
 pub const LIGHTING_ENABLED_DEFAULT: bool = !cfg!(feature = "mobile_ui");
 
+pub const CUTOUT_LEAVES_DEFAULT: bool = true;
+
 pub(crate) const GAMMA_DEFAULT: u32 = 50;
+
+pub const RENDER_SCALE_PERCENTS: [u32; 4] = [50, 66, 75, 100];
+
+pub(crate) const RENDER_SCALE_STEP_DEFAULT: u32 = RENDER_SCALE_PERCENTS.len() as u32 - 1;
+
+pub fn render_scale_percent(step: u32) -> u32 {
+    RENDER_SCALE_PERCENTS[(step as usize).min(RENDER_SCALE_PERCENTS.len() - 1)]
+}
 
 pub const GAMMA_MAX: u32 = 150;
 
@@ -636,7 +695,7 @@ impl GuiOptions {
                 .unwrap_or(false),
             clouds: value("renderClouds")
                 .and_then(|v| v.as_str().and_then(CloudStatus::from_serialized_name))
-                .unwrap_or(if cfg!(feature = "mobile_ui") {
+                .unwrap_or(if REDUCED_VIDEO_DEFAULTS {
                     CloudStatus::Fast
                 } else {
                     CloudStatus::default()
@@ -646,7 +705,7 @@ impl GuiOptions {
                     v.as_str()
                         .and_then(crate::util::particles::ParticleStatus::from_serialized_name)
                 })
-                .unwrap_or(if cfg!(feature = "mobile_ui") {
+                .unwrap_or(if REDUCED_VIDEO_DEFAULTS {
                     crate::util::particles::ParticleStatus::Decreased
                 } else {
                     crate::util::particles::ParticleStatus::All
@@ -663,12 +722,24 @@ impl GuiOptions {
             antialiasing: value("antialiasing")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            render_scale_step: value("renderScale")
+                .and_then(|v| v.as_u64())
+                .and_then(|percent| {
+                    RENDER_SCALE_PERCENTS
+                        .iter()
+                        .position(|&stop| u64::from(stop) == percent)
+                })
+                .map(|step| step as u32)
+                .unwrap_or(RENDER_SCALE_STEP_DEFAULT),
             smooth_lighting: value("ao")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(SMOOTH_LIGHTING_DEFAULT),
             lighting_enabled: value("lightingEnabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(LIGHTING_ENABLED_DEFAULT),
+            cutout_leaves: value("cutoutLeaves")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(CUTOUT_LEAVES_DEFAULT),
             max_fps: value("maxFps")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32)
@@ -715,7 +786,7 @@ impl GuiOptions {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             touch_movement: value("touchMovement")
-                .and_then(|v| v.as_str().and_then(TouchMovement::from_serialized_name))
+                .and_then(|v| v.as_str().and_then(TouchMovement::from_saved))
                 .unwrap_or_default(),
             touch_sneak: value("touchSneak")
                 .and_then(|v| v.as_str().and_then(TouchSneak::from_serialized_name))
@@ -792,7 +863,21 @@ fn load_options() -> Option<serde_json::Value> {
 const OPTIONS_FORMAT_KEY: &str = "optionsFormat";
 const OPTIONS_FORMAT: u64 = 2;
 
-const FORMAT_1_DEFAULTS: &[(&str, bool)] = &[("toggleSprint", true)];
+fn format_1_default(key: &str) -> Option<serde_json::Value> {
+    let web = cfg!(all(target_arch = "wasm32", not(feature = "mobile_ui")));
+    match key {
+        "toggleSprint" => Some(true.into()),
+        "renderDistance" if web => Some(8u32.into()),
+        "ao" if web => Some(true.into()),
+        "renderClouds" if web => Some(CloudStatus::Fancy.serialized_name().into()),
+        "particles" if web => Some(
+            crate::util::particles::ParticleStatus::All
+                .serialized_name()
+                .into(),
+        ),
+        _ => None,
+    }
+}
 
 static CHOSEN: std::sync::LazyLock<std::sync::Mutex<serde_json::Map<String, serde_json::Value>>> =
     std::sync::LazyLock::new(Default::default);
@@ -810,11 +895,7 @@ fn chosen_from_stored(stored: serde_json::Value) -> serde_json::Map<String, serd
     }
     let defaults = options_json(&GuiOptions::defaults());
     map.retain(|key, value| {
-        let old_default = FORMAT_1_DEFAULTS
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| serde_json::Value::Bool(*v))
-            .or_else(|| defaults.get(key.as_str()).cloned());
+        let old_default = format_1_default(key).or_else(|| defaults.get(key.as_str()).cloned());
         old_default.as_ref() != Some(value)
     });
     map
@@ -911,8 +992,10 @@ fn options_json(options: &GuiOptions) -> serde_json::Value {
         "renderDistance": options.render_distance,
         "gamma": options.gamma,
         "antialiasing": options.antialiasing,
+        "renderScale": render_scale_percent(options.render_scale_step),
         "ao": options.smooth_lighting,
         "lightingEnabled": options.lighting_enabled,
+        "cutoutLeaves": options.cutout_leaves,
         "maxFps": options.max_fps,
         "vsync": options.vsync,
         "inactivityFpsLimit": options.inactivity_fps_limit.name(),
@@ -995,6 +1078,8 @@ pub struct GuiState {
     pub slots: slots::SlotState,
     pub container: container::ContainerUi,
     pub recipe_book: recipe_book::RecipeBookUi,
+    #[cfg(feature = "ui_utils")]
+    pub ui_utils: crate::modules::ui_utils::Overlay,
     pub ghost: recipe_book_ghost::GhostSlots,
     pub book_requests: Vec<crate::client::recipes::BookRequest>,
     pub book_clock: Option<f32>,
@@ -1016,6 +1101,7 @@ pub struct GuiState {
     pub death: death::DeathState,
     pub win: winscreen::WinState,
     pub config_phase: configphase::State,
+    pub level_loading: level_loading::State,
     pub advancements: advancements::AdvancementsUi,
     pub stats: stats::StatsUi,
     pub credits_parent: Screen,
@@ -1032,6 +1118,8 @@ pub struct GuiState {
     pub confirm_clear_assets: bool,
     #[cfg(feature = "asset_download")]
     pub storage_nothing_missing: bool,
+    #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+    pub asset_transfer: assetexport::State,
     #[cfg(feature = "asset_download")]
     pub language: language::State,
     #[cfg(feature = "shader_support")]

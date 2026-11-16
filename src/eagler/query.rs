@@ -41,13 +41,7 @@ pub(crate) async fn status(url: &str) -> eyre::Result<Status> {
         })
         .unwrap_or_default();
 
-    let protocol = match ask(url, "version", false).await {
-        Ok((version, _)) => protocol_for(&version),
-        Err(e) => {
-            log_debug!("net", "eagler: no version query from {url}: {e}");
-            azalea_protocol::packets::PROTOCOL_VERSION
-        }
-    };
+    let protocol = protocol(url).await;
 
     Ok(Status {
         lines,
@@ -61,6 +55,16 @@ pub(crate) async fn status(url: &str) -> eyre::Result<Status> {
         icon,
         protocol,
     })
+}
+
+pub(crate) async fn protocol(url: &str) -> i32 {
+    match ask(url, "version", false).await {
+        Ok((version, _)) => protocol_for(&version),
+        Err(e) => {
+            log_debug!("net", "eagler: no version query from {url}: {e}");
+            azalea_protocol::packets::PROTOCOL_VERSION
+        }
+    }
 }
 
 fn protocol_for(version: &serde_json::Value) -> i32 {

@@ -67,6 +67,11 @@ impl Store {
         T::from_index(value::choice(bits(h.0)))
     }
 
+    #[inline(always)]
+    pub fn key(&self, h: handle::Key) -> Bound {
+        Bound::from_bits(bits(h.0) as u32)
+    }
+
     pub fn text(&self, h: handle::Text) -> String {
         match SETTINGS[h.0 as usize].kind {
             Kind::Text { default, .. } => default.to_string(),

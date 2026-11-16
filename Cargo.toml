@@ -44,9 +44,13 @@ lua_mods = ["click_gui", "dep:mlua", "dep:flate2", "dep:reqwest", "dep:rustls", 
 
 seed_cracker = ["click_gui", "dep:seedcrack"]
 
+ui_utils = ["click_gui"]
+
 hud_editor = []
 
 screen_record = []
+
+render_scale = []
 
 tutorial = []
 
@@ -56,9 +60,13 @@ builtin_shaders = ["bevy/bevy_anti_alias", "bevy/bevy_post_process"]
 
 shader_support = ["dep:flate2", "dep:naga", "dep:wgpu"]
 
+native_shaders = ["shader_support", "naga/wgsl-in", "dep:toml_edit"]
+
 animated_textures = []
 
 resourcepacks = ["dep:flate2", "dep:sha1"]
+
+cem = ["resourcepacks"]
 
 explore_modrinth = ["resourcepacks", "dep:reqwest", "dep:rustls", "dep:sha1", "image/webp"]
 
@@ -78,7 +86,7 @@ multiversion = ["azalea/multiversion"]
 
 audio = ["asset_download", "dep:rodio", "dep:alsa"]
 
-browser_audio = ["audio"]
+small_audio = ["audio"]
 
 eagler = [
     "dep:tokio-tungstenite",
@@ -171,6 +179,7 @@ naga = { version = "29", default-features = false, features = [
     "wgsl-out",
 ], optional = true }
 wgpu = { version = "29", default-features = false, optional = true }
+toml_edit = { version = "0.25.12", default-features = false, features = ["parse"], optional = true }
 
 tokio-tungstenite = { version = "0.30", default-features = false, features = [
     "connect",

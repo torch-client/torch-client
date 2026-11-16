@@ -34,7 +34,36 @@ fn vanilla_fog(color: vec4<f32>, rel: vec3<f32>) -> vec4<f32> {
         vanilla_fog_ramp(spherical, environmental.x, environmental.y),
         vanilla_fog_ramp(cylindrical, fog.be.x, fog.be.y),
     );
-    let mixed = mix(srgb_encode(color.rgb), srgb_encode(fog.base_color.rgb), value * fog.base_color.a);
+    let t = value * fog.base_color.a;
+#ifdef WEBGL2
+    if t <= 0.0 {
+        return color;
+    }
+    if t >= 1.0 {
+        return vec4(fog.base_color.rgb, color.a);
+    }
+    let linear = max(color.rgb, vec3(0.0));
+    let haze = fog.base_color.rgb;
+    let encoded = fog_fit_encode(linear);
+    let encoded_haze = fog_fit_encode(haze);
+    let fitted = fog_fit_decode(mix(encoded, encoded_haze, t))
+        + (1.0 - t) * (linear - fog_fit_decode(encoded))
+        + t * (haze - fog_fit_decode(encoded_haze));
+    return vec4(fitted, color.a);
+#else
+    let mixed = mix(srgb_encode(color.rgb), srgb_encode(fog.base_color.rgb), t);
     return vec4(srgb_decode(mixed), color.a);
+#endif
 }
+
+#ifdef WEBGL2
+fn fog_fit_encode(c: vec3<f32>) -> vec3<f32> {
+    let r = sqrt(c);
+    return r * (1.1507096 + c * 0.011304) - c * 0.163385;
+}
+
+fn fog_fit_decode(y: vec3<f32>) -> vec3<f32> {
+    return y * y * (0.7359407 + y * (0.2287882 + y * 0.0367181));
+}
+#endif
 #endif

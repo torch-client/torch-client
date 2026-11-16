@@ -1,20 +1,21 @@
 use std::sync::Mutex;
 
 use azalea::Client;
-use azalea::block::fluid_state::{FluidKind, FluidState};
-use azalea::block::{BlockState, BlockTrait};
+use azalea::block::BlockTrait;
 use azalea::mining::MineBlockPos;
 use azalea_core::hit_result::BlockHitResult;
 use azalea_core::position::BlockPos;
 
+use self::shared::{STALL_TICKS, exposes_fluid, is_fluid, present, state_at};
 use super::registry::{Id, auto_mine as setting, options};
 use super::{ButtonAction, Edge, MS_PER_TICK, Phase, Store, roll, store};
-use crate::session::{Gamemode, MineIntent, SharedMutex, SharedState};
+use crate::session::{MineIntent, SharedMutex, SharedState};
 
 mod area;
 mod draw;
 pub mod hud;
 mod pick;
+pub(in crate::modules) mod shared;
 
 pub use area::block_changed;
 pub use pick::gate as pick_gate;
@@ -73,8 +74,6 @@ pub fn reset() {
 
 const RELEASE: f64 = 0.15;
 
-const STALL_TICKS: i64 = 60;
-
 const JITTER_YAW: f32 = 1.5;
 const JITTER_PITCH: f32 = 2.0;
 
@@ -124,6 +123,14 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
         Phase::Started => {
             *RUN.lock().unwrap() = None;
             area::stop_run(bot);
+            if s.enabled(Id::OreMiner) {
+                s.set_enabled(Id::OreMiner, false);
+                let mut st = shared.lock().unwrap();
+                super::chat_math::show_local(
+                    &mut st.session,
+                    "AutoMine: switched OreMiner off, the two cannot run together",
+                );
+            }
         }
         Phase::Running => {}
     }
@@ -143,35 +150,16 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
 }
 
 fn gate(shared: &SharedMutex, s: &Store) -> Option<f32> {
-    let in_gui = s.flag(setting::IN_GUI);
-    let st = shared.lock().unwrap();
-    let blocked = !st.in_world
-        || (st.screen_open && !in_gui)
-        || st.session.dead
-        || st.session.gamemode == Gamemode::Spectator;
-    (!blocked).then_some(st.camera_yaw)
+    shared::gate(shared, s.flag(setting::IN_GUI))
 }
 
 fn low_health(bot: &Client, shared: &SharedMutex, s: &Store) -> bool {
     if s.choice(setting::LOW_HEALTH) != LowHealth::Disconnect {
         return false;
     }
-    let limit = s.num(setting::HEALTH);
-    let mut st = shared.lock().unwrap();
-    if !st.session.health_known || st.session.dead || st.session_ended || st.session.health >= limit
-    {
+    if !shared::low_health(shared, true, s.num(setting::HEALTH), "AutoMine") {
         return false;
     }
-    let text = format!(
-        "AutoMine: health {:.0} fell below {:.0}",
-        st.session.health, limit
-    );
-    st.end_session(
-        "Disconnected".to_string(),
-        Some(crate::text::parse_formatted(&text)),
-    );
-    st.disconnect_requested = true;
-    drop(st);
     *RUN.lock().unwrap() = None;
     area::stop_run(bot);
     store().set_enabled(Id::AutoMine, false);
@@ -322,10 +310,6 @@ enum Cell {
     Unbreakable,
 }
 
-fn present(bot: &Client, pos: BlockPos) -> bool {
-    state_at(bot, pos).is_some_and(|st| !st.is_air() && !is_fluid(st))
-}
-
 fn cell(bot: &Client, pos: BlockPos) -> Cell {
     let Some(state) = state_at(bot, pos) else {
         return Cell::Clear;
@@ -339,14 +323,6 @@ fn cell(bot: &Client, pos: BlockPos) -> Cell {
     } else {
         Cell::Diggable
     }
-}
-
-fn state_at(bot: &Client, pos: BlockPos) -> Option<BlockState> {
-    bot.world().ok().and_then(|w| w.read().get_block_state(pos))
-}
-
-fn is_fluid(state: BlockState) -> bool {
-    FluidState::from(state).kind != FluidKind::Empty
 }
 
 fn choose(bot: &Client, run: &Run, now: i64, s: &Store) -> Result<Stage, Halt> {
@@ -377,23 +353,6 @@ fn choose(bot: &Client, run: &Run, now: i64, s: &Store) -> Result<Stage, Halt> {
         });
     }
     Ok(Stage::Walk)
-}
-
-fn exposes_fluid(bot: &Client, pos: BlockPos) -> bool {
-    let Ok(instance) = bot.world() else {
-        return false;
-    };
-    let world = instance.read();
-    [
-        BlockPos::new(pos.x + 1, pos.y, pos.z),
-        BlockPos::new(pos.x - 1, pos.y, pos.z),
-        BlockPos::new(pos.x, pos.y + 1, pos.z),
-        BlockPos::new(pos.x, pos.y - 1, pos.z),
-        BlockPos::new(pos.x, pos.y, pos.z + 1),
-        BlockPos::new(pos.x, pos.y, pos.z - 1),
-    ]
-    .iter()
-    .any(|p| world.get_block_state(*p).is_some_and(is_fluid))
 }
 
 fn jitter(half: f32) -> f32 {

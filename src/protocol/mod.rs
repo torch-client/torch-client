@@ -60,14 +60,26 @@ pub(crate) async fn detect(address: &str) {
         set_session(Some(known));
         return;
     }
-    let protocol = crate::gui::ping::status_once(address, false)
-        .await
-        .ok()
-        .map(|status| status.protocol);
+    let protocol = ask(address).await;
     if let Some(protocol) = protocol {
         remember(address, protocol);
     }
     set_session(protocol);
+}
+
+async fn ask(address: &str) -> Option<i32> {
+    #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+    {
+        use crate::platform::address;
+        let dial = address::normalize(address);
+        if address::is_websocket(&dial) && !address::is_java_tunnel(&dial) {
+            return Some(crate::eagler::query::protocol(&dial).await);
+        }
+    }
+    crate::gui::ping::status_once(address, false)
+        .await
+        .ok()
+        .map(|status| status.protocol)
 }
 
 fn from_env() -> Option<i32> {

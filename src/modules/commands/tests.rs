@@ -155,6 +155,69 @@ fn the_tree_completes_commands_modules_settings_and_options() {
         "{sizing:?}"
     );
     assert_eq!(complete(&t, ".profile b"), ["blatant"]);
+    let dia = complete(&t, ".mine dia");
+    for name in ["diamond", "diamond_ore", "diamond_block"] {
+        assert!(dia.contains(&name.to_string()), "{dia:?}");
+    }
+    let st = complete(&t, ".mine st");
+    assert!(
+        st.contains(&"stop".to_string()) && st.contains(&"stone".to_string()),
+        "{st:?}"
+    );
+    assert_eq!(complete(&t, ".mine woo"), ["wood"]);
+    assert!(complete(&t, ".mine lo").contains(&"log".to_string()));
+}
+
+#[test]
+fn mine_parses_a_name_off_the_list() {
+    let (t, _) = Table::with_scripts(Vec::new());
+    let tree = super::tree::build(&t);
+    let options = Options {
+        lead: '.',
+        ..Options::CHAT
+    };
+    for line in [
+        ".mine",
+        ".mine wood",
+        ".mine oak_log",
+        ".mine minecraft:stone",
+        ".mine redstone 40",
+        ".mine wood 1",
+        ".mine minecraft:stone 5",
+    ] {
+        let info = update_command_info(
+            Some(&tree),
+            line,
+            line.chars().count(),
+            &Source::default(),
+            options,
+            None,
+        );
+        let red = info.usage.iter().any(|(_, error)| *error);
+        assert!(!red, "{line}: {:?}", info.usage);
+    }
+    for line in [".mine redstone 0", ".mine stop 2"] {
+        let info = update_command_info(
+            Some(&tree),
+            line,
+            line.chars().count(),
+            &Source::default(),
+            options,
+            None,
+        );
+        let red = info.usage.iter().any(|(_, error)| *error);
+        assert!(red, "{line}: {:?}", info.usage);
+    }
+}
+
+#[test]
+fn mine_count_is_a_whole_number_from_one() {
+    use super::builtin::mine_count;
+    assert_eq!(mine_count("40"), Some(40));
+    assert_eq!(mine_count("1"), Some(1));
+    for bad in ["0", "-3", "2.5", "many", ""] {
+        assert_eq!(mine_count(bad), None, "{bad}");
+    }
 }
 
 #[test]

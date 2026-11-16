@@ -98,7 +98,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
     if button(3, 0, BUTTON_WIDTH_FULL, tr::disconnect()) {
         state.disconnect = true;
-        state.nav = Some(Screen::Title);
+        state.nav = Some(Screen::Multiplayer);
         #[cfg(all(target_arch = "wasm32", feature = "screen_record"))]
         crate::platform::record::stop();
     }

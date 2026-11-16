@@ -33,6 +33,8 @@ pub fn box_mesh(
         mirror: false,
         tex_scale: [1.0, 1.0],
         faces: geom::Faces::ALL,
+        #[cfg(cem)]
+        cem: None,
     };
     let mut out = QuadMesh::new();
     geom::push_cube(&mut out, &cube, sheet, scale);

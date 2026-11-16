@@ -13,7 +13,9 @@ template std::string std::operator+ <char, std::char_traits<char>, std::allocato
 
 _LIBCPP_BEGIN_NAMESPACE_STD
 
-void __libcpp_verbose_abort(const char* format, ...)
+// libc++ 21 declares this `noexcept` and older ones do not; a redeclaration
+// must match, so the specification is read off the header's declaration
+void __libcpp_verbose_abort(const char* format, ...) noexcept(noexcept(__libcpp_verbose_abort("")))
 {
     va_list args;
     va_start(args, format);

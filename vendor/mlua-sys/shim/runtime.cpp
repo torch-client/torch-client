@@ -28,10 +28,7 @@ void __libcpp_verbose_abort(const char* format, ...) noexcept(noexcept(__libcpp_
 }
 
 #if _LIBCPP_VERSION >= 210000
-// libc++ 21 moved the hash behind std::hash<string> into the compiled
-// library, which this build does not link. FNV-1a: the value only has to be
-// stable within one run.
-size_t __hash_memory(const void* data, size_t size) noexcept(noexcept(__hash_memory(nullptr, 0)))
+size_t __hash_memory(_LIBCPP_NOESCAPE const void* data, size_t size) noexcept(noexcept(__hash_memory(nullptr, 0))) 
 {
     const unsigned char* p = static_cast<const unsigned char*>(data);
     size_t h = sizeof(size_t) == 8 ? size_t(14695981039346656037ull) : size_t(2166136261u);

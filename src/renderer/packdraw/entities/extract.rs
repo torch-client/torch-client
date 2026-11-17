@@ -131,6 +131,9 @@ pub(crate) fn extract_entity_draws(
         if material.params.mode == LightMode::WaterMask as u32 {
             continue;
         }
+        if material.params.discards_all() {
+            continue;
+        }
         let blend = blended(material.alpha_mode);
         let glowing = material.params.mode == LightMode::Emissive as u32;
         let drawn_as = match kind {

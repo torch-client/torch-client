@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "ValueTracking.h"
 
 #include "Luau/Lexer.h"
@@ -31,7 +30,6 @@ struct ValueVisitor : AstVisitor
         }
         else
         {
-            // we need to be able to track assignments in all expressions, including crazy ones like t[function() t = nil end] = 5
             var->visit(this);
         }
     }
@@ -107,5 +105,5 @@ void trackValues(DenseHashMap<AstName, Global>& globals, DenseHashMap<AstLocal*,
     root->visit(&visitor);
 }
 
-} // namespace Compile
-} // namespace Luau
+}
+}

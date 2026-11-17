@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/DenseHash.h"
@@ -42,7 +41,7 @@ struct Config
     {
         std::string value;
         std::string_view configLocation;
-        std::string originalCase; // The alias in its original case.
+        std::string originalCase;
     };
 
     DenseHashMap<std::string, AliasInfo> aliases{""};
@@ -50,7 +49,6 @@ struct Config
     void setAlias(std::string alias, std::string value, const std::string& configLocation);
 
 private:
-    // Prevents making unnecessary copies of the same config location string.
     DenseHashMap<std::string, std::unique_ptr<std::string>> configLocationCache{""};
 };
 
@@ -86,4 +84,4 @@ std::optional<std::string> parseAlias(
 
 std::optional<std::string> parseConfig(const std::string& contents, Config& config, const ConfigOptions& options = ConfigOptions{});
 
-} // namespace Luau
+}

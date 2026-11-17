@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "ludata.h"
 
 #include "lgc.h"
@@ -25,8 +23,6 @@ void luaU_freeudata(lua_State* L, Udata* u, lua_Page* page)
     if (u->tag < LUA_UTAG_LIMIT)
     {
         lua_Destructor dtor = L->global->udatagc[u->tag];
-        // TODO: access to L here is highly unsafe since this is called during internal GC traversal
-        // certain operations such as lua_getthreaddata are okay, but by and large this risks crashes on improper use
         if (dtor)
             dtor(L, u->data);
     }
@@ -37,7 +33,6 @@ void luaU_freeudata(lua_State* L, Udata* u, lua_Page* page)
         if (dtor)
             dtor(L, u->data);
     }
-
 
     luaM_freegco(L, u, sizeudata(u->len), u->memcat, page);
 }

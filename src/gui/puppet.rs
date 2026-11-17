@@ -10,12 +10,13 @@ use crate::gui::atlas::{PUPPET_ARMOR_SLOT, PUPPET_SKIN_SLOT, PUPPET_SLOTS, Regio
 use crate::gui::painter::Painter;
 use crate::renderer::anim::AnimSample;
 use crate::renderer::player_model::{
-    ARMOR_LAYERS, ARMOR_PARTS, AVATAR_SCALE, MODEL_Y_OFFSET, OVERLAY_BITS, player_parts,
+    ARMOR_LAYERS, ARMOR_PARTS, AVATAR_SCALE, BodyDraw, GHOST_ALPHA, MODEL_Y_OFFSET, OVERLAY_BITS,
+    player_parts,
 };
 use crate::renderer::skin::SKIN_SHEET;
 
-const SHEET_PX: u32 = 64;
-const ARMOR_SHEET_H: u32 = 32;
+pub(super) const SHEET_PX: u32 = 64;
+pub(super) const ARMOR_SHEET_H: u32 = 32;
 
 const ARMOR_DRAW_ORDER: [usize; 4] = [2, 3, 1, 0];
 
@@ -24,20 +25,22 @@ pub struct Figure<'a> {
     pub slim: bool,
     pub parts: u8,
     pub armor: [bool; 4],
+    pub body: BodyDraw,
 }
 
 pub fn show_skin(pixels: &Arc<Vec<u8>>) {
-    show(0, pixels);
+    show(PUPPET_SKIN_SLOT, pixels);
 }
 
 fn show_armor(slot: usize, pixels: &Arc<Vec<u8>>) {
-    show(1 + slot, pixels);
+    show(PUPPET_ARMOR_SLOT + slot, pixels);
 }
 
 static SHOWN: Mutex<[Option<Arc<Vec<u8>>>; PUPPET_SLOTS]> =
     Mutex::new([const { None }; PUPPET_SLOTS]);
 
-fn show(index: usize, pixels: &Arc<Vec<u8>>) {
+pub(super) fn show(slot: usize, pixels: &Arc<Vec<u8>>) {
+    let index = slot - PUPPET_SKIN_SLOT;
     let mut shown = SHOWN.lock().unwrap();
     if shown[index]
         .as_ref()
@@ -45,7 +48,7 @@ fn show(index: usize, pixels: &Arc<Vec<u8>>) {
     {
         return;
     }
-    crate::gui::ping::note_slot(PUPPET_SKIN_SLOT + index, pixels.clone());
+    crate::gui::ping::note_slot(slot, pixels.clone());
     shown[index] = Some(pixels.clone());
 }
 
@@ -87,49 +90,97 @@ pub fn follows_mouse(
     let k = AVATAR_SCALE / 16.0;
     let mirror = Quat::from_rotation_z(PI);
     let outer = view * root.rotation;
-    let placed: [(Quat, Vec3); 6] = pose.parts().map(|part| {
-        let t = crate::renderer::player_model::model_transform(&part);
-        (
-            outer * mirror * t.rotation,
-            lift + outer * (drop + mirror * (k * t.translation)),
-        )
-    });
+    let placed = Placed {
+        parts: pose.parts().map(|part| {
+            let t = crate::renderer::player_model::model_transform(&part);
+            (
+                outer * mirror * t.rotation,
+                lift + outer * (drop + mirror * (k * t.translation)),
+            )
+        }),
+        k,
+        centre: Vec2::new(cx, cy),
+        size,
+    };
 
-    let model = &geometry()[figure.slim as usize];
+    let region_of = |sheet: Sheet| match sheet {
+        Sheet::Skin => Some(skin),
+        Sheet::Overlay(bit) => (figure.parts & (1 << bit) != 0).then_some(skin),
+        Sheet::Armor(slot) => armor[slot],
+    };
+    let insides = figure.body != BodyDraw::Shown;
+    paint(
+        p,
+        &geometry()[figure.slim as usize],
+        &placed,
+        region_of,
+        insides,
+        figure.body,
+    );
+}
+
+pub(super) struct Placed {
+    pub parts: [(Quat, Vec3); 6],
+    pub k: f32,
+    pub centre: Vec2,
+    pub size: f32,
+}
+
+pub(super) fn paint(
+    p: &mut Painter,
+    model: &[Part; 6],
+    placed: &Placed,
+    region_of: impl Fn(Sheet) -> Option<Region>,
+    insides: bool,
+    body: BodyDraw,
+) {
+    let (at_of, k, centre, size) = (&placed.parts, placed.k, placed.centre, placed.size);
     let mut order: [usize; 6] = std::array::from_fn(|i| i);
     let depth: [f32; 6] = std::array::from_fn(|i| {
-        let (turn, at) = placed[i];
+        let (turn, at) = at_of[i];
         (at + k * (turn * model[i].centre)).z
     });
     order.sort_by(|a, b| depth[*b].total_cmp(&depth[*a]));
 
     for part in order {
-        let (turn, at) = placed[part];
-        for shell in &model[part].shells {
-            let region = match shell.sheet {
-                Sheet::Skin => skin,
-                Sheet::Overlay(bit) if figure.parts & (1 << bit) != 0 => skin,
-                Sheet::Overlay(_) => continue,
-                Sheet::Armor(slot) => match armor[slot] {
-                    Some(region) => region,
-                    None => continue,
-                },
-            };
-            for face in &shell.faces {
-                if (turn * face.out).z >= 0.0 {
-                    continue;
+        let (turn, at) = at_of[part];
+        let paint_shell =
+            |p: &mut Painter, region: Region, shell: &Shell, front: bool, alpha: f32| {
+                for face in &shell.faces {
+                    let z = (turn * face.out).z;
+                    if (front && z >= 0.0) || (!front && z <= 0.0) {
+                        continue;
+                    }
+                    let corners = face.corners.map(|c| {
+                        let v = at + k * (turn * Vec3::from(c));
+                        [centre.x + v.x * size, centre.y + v.y * size]
+                    });
+                    p.region_quad(
+                        region,
+                        corners,
+                        face.uv,
+                        [face.shade, face.shade, face.shade, alpha],
+                    );
                 }
-                let corners = face.corners.map(|c| {
-                    let v = at + k * (turn * Vec3::from(c));
-                    [cx + v.x * size, cy + v.y * size]
-                });
-                p.region_quad(
-                    region,
-                    corners,
-                    face.uv,
-                    [face.shade, face.shade, face.shade, 1.0],
-                );
+            };
+        let shells = &model[part].shells;
+        if insides {
+            for shell in shells.iter().rev() {
+                if let (Sheet::Armor(_), Some(region)) = (shell.sheet, region_of(shell.sheet)) {
+                    paint_shell(p, region, shell, false, 1.0);
+                }
             }
+        }
+        for shell in shells {
+            let Some(region) = region_of(shell.sheet) else {
+                continue;
+            };
+            let alpha = match (shell.sheet, body) {
+                (Sheet::Armor(_), _) | (_, BodyDraw::Shown) => 1.0,
+                (_, BodyDraw::Ghost) => GHOST_ALPHA,
+                (_, BodyDraw::Hidden) => continue,
+            };
+            paint_shell(p, region, shell, true, alpha);
         }
     }
 }
@@ -151,7 +202,7 @@ fn entity_pose(s: &AnimSample) -> azalea::entity::Pose {
     }
 }
 
-struct Face {
+pub(super) struct Face {
     corners: [[f32; 3]; 4],
     uv: [[f32; 2]; 4],
     out: Vec3,
@@ -159,20 +210,20 @@ struct Face {
 }
 
 #[derive(Clone, Copy)]
-enum Sheet {
+pub(super) enum Sheet {
     Skin,
     Overlay(u8),
     Armor(usize),
 }
 
-struct Shell {
-    sheet: Sheet,
-    faces: Vec<Face>,
+pub(super) struct Shell {
+    pub sheet: Sheet,
+    pub faces: Vec<Face>,
 }
 
-struct Part {
-    centre: Vec3,
-    shells: Vec<Shell>,
+pub(super) struct Part {
+    pub centre: Vec3,
+    pub shells: Vec<Shell>,
 }
 
 fn geometry() -> &'static [[Part; 6]; 2] {
@@ -208,28 +259,37 @@ fn model(slim: bool) -> [Part; 6] {
         }
         parts[part].shells.push(Shell {
             sheet,
-            faces: faces(&cube, SKIN_SHEET),
+            faces: faces(&cube, SKIN_SHEET, &Transform::IDENTITY),
         });
     }
+    push_armor(&mut parts, &ARMOR_LAYERS, |_, _| Transform::IDENTITY);
+    parts
+}
+
+pub(super) fn push_armor(
+    parts: &mut [Part; 6],
+    layers: &[fn() -> geom::LayerDef; 4],
+    place: impl Fn(&geom::MeshDef, usize) -> Transform,
+) {
     for slot in ARMOR_DRAW_ORDER {
-        let layer = ARMOR_LAYERS[slot]();
+        let layer = layers[slot]();
         let sheet = [layer.tex_w as f32, layer.tex_h as f32];
         for (name, part) in ARMOR_PARTS {
             let Some(node) = layer.mesh.find(name) else {
                 continue;
             };
+            let pose = place(&layer.mesh, part);
             for cube in node.cubes() {
                 parts[part].shells.push(Shell {
                     sheet: Sheet::Armor(slot),
-                    faces: faces(cube, sheet),
+                    faces: faces(cube, sheet, &pose),
                 });
             }
         }
     }
-    parts
 }
 
-fn faces(cube: &geom::CubeDef, sheet: [f32; 2]) -> Vec<Face> {
+pub(super) fn faces(cube: &geom::CubeDef, sheet: [f32; 2], pose: &Transform) -> Vec<Face> {
     let mut mesh = QuadMesh::new();
     geom::push_cube(&mut mesh, cube, sheet, 1.0);
     let centre = Vec3::from(cube.origin) + Vec3::from(cube.size) / 2.0;
@@ -245,10 +305,12 @@ fn faces(cube: &geom::CubeDef, sheet: [f32; 2]) -> Vec<Face> {
             } else {
                 0.6
             };
+            let corners =
+                [c[0], c[1], c[2], c[3]].map(|v| pose.transform_point(Vec3::from(v)).to_array());
             Face {
-                corners: [c[0], c[1], c[2], c[3]],
+                corners,
                 uv: [uv[0], uv[1], uv[2], uv[3]],
-                out,
+                out: pose.rotation * out,
                 shade,
             }
         })
@@ -271,6 +333,9 @@ pub struct Worn {
     armor: [Option<(&'static str, Option<Arc<Vec<u8>>>)>; 4],
     trims: [Option<&'static str>; 4],
     assets_seen: u32,
+    body: crate::session::PlayerBody,
+    viewer: crate::session::Gamemode,
+    pub(super) stand: crate::gui::stand::Stand,
 }
 
 impl Worn {
@@ -292,6 +357,7 @@ impl Worn {
             armor: std::array::from_fn(|i| {
                 self.armor[i].as_ref().is_some_and(|(_, px)| px.is_some())
             }),
+            body: crate::renderer::player_model::Body::of(&self.body, self.viewer).draw,
         };
         follows_mouse(p, &figure, rect, size, offset_y, mouse);
     }
@@ -310,6 +376,8 @@ pub fn update(
     let Some(view) = view else { return };
     let worn = &mut state.puppet;
     worn.sample.clone_from(&view.local);
+    worn.body = view.local_body;
+    worn.viewer = view.gamemode;
 
     let generation = crate::renderer::reload::generation();
     if worn.assets_seen != generation {
@@ -368,25 +436,7 @@ pub fn update(
         let trim = view.local.armor.trim[slot];
         if worn.armor[slot].as_ref().map(|(seen, _)| *seen) != item || worn.trims[slot] != trim {
             worn.trims[slot] = trim;
-            worn.armor[slot] = item.map(|item| {
-                use crate::entities::render::humanoid::{armor, trim as trims};
-                let sheet = crate::renderer::player_model::armor_texture(slot, item)
-                    .and_then(|path| crate::entities::decode_entity_texture(&path))
-                    .map(|image| {
-                        let mut sheet = fit(image, SHEET_PX, ARMOR_SHEET_H);
-                        let over = trim.and_then(|trim| {
-                            let path = trims::texture_name(trim, armor::slot_layer_type(slot));
-                            crate::entities::decode_entity_texture(&path)
-                        });
-                        if let Some(over) = over {
-                            trims::cut_over(&mut sheet, &fit(over, SHEET_PX, ARMOR_SHEET_H));
-                        }
-                        let mut cell = RgbaImage::new(SHEET_PX, SHEET_PX);
-                        image::imageops::replace(&mut cell, &sheet, 0, 0);
-                        Arc::new(cell.into_raw())
-                    });
-                (item, sheet)
-            });
+            worn.armor[slot] = item.map(|item| (item, armor_cell(slot, item, trim)));
         }
         if let Some((_, Some(pixels))) = &worn.armor[slot] {
             show_armor(slot, pixels);
@@ -394,7 +444,27 @@ pub fn update(
     }
 }
 
-fn fit(image: RgbaImage, w: u32, h: u32) -> RgbaImage {
+pub(super) fn armor_cell(slot: usize, item: &str, trim: Option<&str>) -> Option<Arc<Vec<u8>>> {
+    use crate::entities::render::humanoid::{armor, trim as trims};
+    let path = crate::renderer::player_model::armor_texture(slot, item)?;
+    let mut sheet = fit(
+        crate::entities::decode_entity_texture(&path)?,
+        SHEET_PX,
+        ARMOR_SHEET_H,
+    );
+    let over = trim.and_then(|trim| {
+        let path = trims::texture_name(trim, armor::slot_layer_type(slot));
+        crate::entities::decode_entity_texture(&path)
+    });
+    if let Some(over) = over {
+        trims::cut_over(&mut sheet, &fit(over, SHEET_PX, ARMOR_SHEET_H));
+    }
+    let mut cell = RgbaImage::new(SHEET_PX, SHEET_PX);
+    image::imageops::replace(&mut cell, &sheet, 0, 0);
+    Some(Arc::new(cell.into_raw()))
+}
+
+pub(super) fn fit(image: RgbaImage, w: u32, h: u32) -> RgbaImage {
     if image.dimensions() == (w, h) {
         image
     } else {

@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-
 #include "Luau/RequireNavigator.h"
 
 #include "AliasCycleTracker.h"
@@ -19,12 +17,8 @@ using Error = std::optional<std::string>;
 
 static std::string extractAlias(std::string_view path)
 {
-    // To ignore the '@' alias prefix when processing the alias
     const size_t aliasStartPos = 1;
 
-    // If a directory separator was found, the length of the alias is the
-    // distance between the start of the alias and the separator. Otherwise,
-    // the whole string after the alias symbol is the alias.
     size_t aliasLen = path.find_first_of('/');
     if (aliasLen != std::string::npos)
         aliasLen -= aliasStartPos;
@@ -103,8 +97,6 @@ Error Navigator::navigateImpl(std::string_view path)
         {
             if (alias == "self")
             {
-                // If the alias is "@self", we reset to the requirer's context and
-                // navigate directly from there.
                 if (Error error = resetToRequirer())
                     return error;
                 if (Error error = navigateThroughPath(path))
@@ -140,8 +132,6 @@ Error Navigator::navigateThroughPath(std::string_view path)
     std::pair<std::string_view, std::string_view> components = splitPath(path);
     if (path.size() >= 1 && path[0] == '@')
     {
-        // If the path is aliased, we ignore the alias: this function assumes
-        // that navigation to an alias is handled by the caller.
         components = splitPath(components.second);
     }
 
@@ -239,13 +229,13 @@ Error Navigator::navigateToAndPopulateConfig(const std::string& desiredAlias, Co
 {
     while (!config.aliases.contains(desiredAlias))
     {
-        config = {}; // Clear existing config data.
+        config = {};
 
         NavigationContext::NavigateResult result = navigationContext.toParent();
         if (result == NavigationContext::NavigateResult::Ambiguous)
             return "could not navigate up the ancestry chain during search for alias \"" + desiredAlias + "\" (ambiguous)";
         if (result == NavigationContext::NavigateResult::NotFound)
-            break; // Not treated as an error: interpreted as reaching the root.
+            break;
 
         NavigationContext::ConfigStatus status = navigationContext.getConfigStatus();
         if (status == NavigationContext::ConfigStatus::Absent)
@@ -260,7 +250,7 @@ Error Navigator::navigateToAndPopulateConfig(const std::string& desiredAlias, Co
         {
             if (navigationContext.getConfigBehavior() == NavigationContext::ConfigBehavior::GetAlias)
             {
-                config.setAlias(desiredAlias, *navigationContext.getAlias(desiredAlias), /* configLocation = */ "unused");
+                config.setAlias(desiredAlias, *navigationContext.getAlias(desiredAlias), "unused");
                 break;
             }
 
@@ -376,4 +366,4 @@ Error Navigator::toAliasFallback(const std::string& aliasUnprefixed)
     return errorMessage;
 }
 
-} // namespace Luau::Require
+}

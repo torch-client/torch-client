@@ -129,7 +129,6 @@ mod imp {
     use seedcrack::{Cracker, Version};
 
     use super::{Cmd, Out, apply};
-    use crate::modules::seed_cracker::SESSION;
 
     const BUDGET: u64 = 1 << 24;
 
@@ -142,7 +141,7 @@ mod imp {
     }
 
     impl Search {
-        pub fn start(version: Version, session: u32) -> Option<Search> {
+        pub fn start(version: Version) -> Option<Search> {
             let (to, commands) = mpsc::channel();
             let (answers, from) = mpsc::channel();
             let cancel = Arc::new(AtomicBool::new(false));
@@ -151,16 +150,7 @@ mod imp {
                 .map_or(1, |n| n.get().saturating_sub(2).max(1));
             std::thread::Builder::new()
                 .name("seed cracker".into())
-                .spawn(move || {
-                    work(
-                        Cracker::new(version),
-                        commands,
-                        answers,
-                        stop,
-                        session,
-                        threads,
-                    )
-                })
+                .spawn(move || work(Cracker::new(version), commands, answers, stop, threads))
                 .ok()?;
             Some(Search { to, from, cancel })
         }
@@ -185,13 +175,12 @@ mod imp {
         commands: Receiver<Cmd>,
         answers: Sender<Out>,
         stop: Arc<AtomicBool>,
-        session: u32,
         threads: usize,
     ) {
         let mut out = Vec::new();
         let mut busy = true;
         loop {
-            if stop.load(Relaxed) || SESSION.load(Relaxed) != session {
+            if stop.load(Relaxed) {
                 return;
             }
             if !busy {
@@ -237,7 +226,7 @@ mod imp {
     }
 
     impl Search {
-        pub fn start(version: Version, _session: u32) -> Option<Search> {
+        pub fn start(version: Version) -> Option<Search> {
             Some(Search {
                 cracker: Cracker::new(version),
                 pool: Pool::new(),

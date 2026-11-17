@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #pragma once
 
 #include "lua.h"
@@ -58,16 +56,9 @@ LUALIB_API const char* luaL_findtable(lua_State* L, int idx, const char* fname, 
 
 LUALIB_API const char* luaL_typename(lua_State* L, int idx);
 
-// wrapper for making calls from yieldable C functions
 LUALIB_API int luaL_callyieldable(lua_State* L, int nargs, int nresults);
 
 LUALIB_API void luaL_traceback(lua_State* L, lua_State* L1, const char* msg, int level);
-
-/*
-** ===============================================================
-** some useful macros
-** ===============================================================
-*/
 
 #define luaL_argcheck(L, cond, arg, extramsg) ((void)((cond) ? (void)0 : luaL_argerror(L, arg, extramsg)))
 #define luaL_argexpected(L, cond, arg, tname) ((void)((cond) ? (void)0 : luaL_typeerror(L, arg, tname)))
@@ -79,25 +70,17 @@ LUALIB_API void luaL_traceback(lua_State* L, lua_State* L1, const char* msg, int
 
 #define luaL_opt(L, f, n, d) (lua_isnoneornil(L, (n)) ? (d) : f(L, (n)))
 
-// generic buffer manipulation
-
 struct luaL_Strbuf
 {
-    char* p;   // current position in buffer
-    char* end; // end of the current buffer
+    char* p;
+    char* end;
     lua_State* L;
     struct TString* storage;
     char buffer[LUA_BUFFERSIZE];
 };
 typedef struct luaL_Strbuf luaL_Strbuf;
 
-// compatibility typedef: this type is called luaL_Buffer in Lua headers
-// renamed to luaL_Strbuf to reduce confusion with internal VM buffer type
 typedef struct luaL_Strbuf luaL_Buffer;
-
-// when internal buffer storage is exhausted, a mutable string value 'storage' will be placed on the stack
-// in general, functions expect the mutable string buffer to be placed on top of the stack (top-1)
-// with the exception of luaL_addvalue that expects the value at the top and string buffer further away (top-2)
 
 #define luaL_addchar(B, c) ((void)((B)->p < (B)->end || luaL_prepbuffsize(B, 1)), (*(B)->p++ = (char)(c)))
 #define luaL_addstring(B, s) luaL_addlstring(B, s, strlen(s))
@@ -111,7 +94,6 @@ LUALIB_API void luaL_addvalueany(luaL_Strbuf* B, int idx);
 LUALIB_API void luaL_pushresult(luaL_Strbuf* B);
 LUALIB_API void luaL_pushresultsize(luaL_Strbuf* B, size_t size);
 
-// builtin libraries
 LUALIB_API int luaopen_base(lua_State* L);
 
 #define LUA_COLIBNAME "coroutine"
@@ -144,9 +126,7 @@ LUALIB_API int luaopen_debug(lua_State* L);
 #define LUA_VECLIBNAME "vector"
 LUALIB_API int luaopen_vector(lua_State* L);
 
-// open all builtin libraries
 LUALIB_API void luaL_openlibs(lua_State* L);
 
-// sandbox libraries and globals
 LUALIB_API void luaL_sandbox(lua_State* L);
 LUALIB_API void luaL_sandboxthread(lua_State* L);

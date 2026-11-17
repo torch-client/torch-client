@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "BuiltinFolding.h"
 
 #include "Luau/Bytecode.h"
@@ -107,7 +106,7 @@ static Constant ctypeof(const Constant& c)
         return cstring("number");
 
     case Constant::Type_Vector:
-        return cvar(); // vector can have a custom typeof name at runtime
+        return cvar();
 
     case Constant::Type_String:
         return cstring("string");
@@ -120,7 +119,6 @@ static Constant ctypeof(const Constant& c)
 
 static uint32_t bit32(double v)
 {
-    // convert through signed 64-bit integer to match runtime behavior and gracefully truncate negative integers
     return uint32_t(int64_t(v));
 }
 
@@ -188,8 +186,6 @@ Constant foldBuiltin(AstNameTable& stringTable, int bfid, const Constant* args, 
             return cnum(fmod(args[0].valueNumber, args[1].valueNumber));
         break;
 
-        // Note: FREXP isn't folded since it returns multiple values
-
     case LBF_MATH_LDEXP:
         if (count == 2 && args[0].type == Constant::Type_Number && args[1].type == Constant::Type_Number)
             return cnum(ldexp(args[0].valueNumber, int(args[1].valueNumber)));
@@ -251,8 +247,6 @@ Constant foldBuiltin(AstNameTable& stringTable, int bfid, const Constant* args, 
             return cnum(r);
         }
         break;
-
-        // Note: MODF isn't folded since it returns multiple values
 
     case LBF_MATH_POW:
         if (count == 2 && args[0].type == Constant::Type_Number && args[1].type == Constant::Type_Number)
@@ -518,17 +512,14 @@ Constant foldBuiltin(AstNameTable& stringTable, int bfid, const Constant* args, 
             int start = int(args[1].valueNumber);
             int end = count >= 3 ? int(args[2].valueNumber) : int(len);
 
-            // Relative string position: negative means back from end
             if (start < 0)
                 start += int(len) + 1;
             if (end < 0)
                 end += int(len) + 1;
 
-            // If end is before the start of the string, substring is empty
             if (end < 1)
                 return cstring("");
 
-            // Start clamped to the start of the string, end is clamped to the end
             start = start < 1 ? 1 : start;
             end = end > int(len) ? int(len) : end;
 
@@ -639,5 +630,5 @@ Constant foldBuiltinMath(AstName index)
     return cvar();
 }
 
-} // namespace Compile
-} // namespace Luau
+}
+}

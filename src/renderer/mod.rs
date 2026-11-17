@@ -29,6 +29,8 @@ mod atlas;
 #[cfg(feature = "animated_textures")]
 pub(crate) mod atlas_anim;
 mod atlas_meta;
+#[cfg(feature = "benchmark_feature")]
+pub(crate) mod benchmark;
 pub mod clouds;
 pub mod dimension;
 mod empty_mesh;

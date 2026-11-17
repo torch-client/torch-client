@@ -270,7 +270,7 @@ unsafe extern "C" {
     fn libc_sysconf(name: i32) -> i64;
 }
 
-fn core_count() -> usize {
+pub(crate) fn core_count() -> usize {
     static CORES: OnceLock<usize> = OnceLock::new();
     *CORES.get_or_init(|| {
         std::thread::available_parallelism()

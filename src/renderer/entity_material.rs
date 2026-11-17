@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, ColorWrites, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
-use bevy::shader::ShaderRef;
+use bevy::shader::{ShaderDefVal, ShaderRef};
 
 use super::dimension::Dimension;
 
@@ -156,12 +156,14 @@ pub struct EntityMaterial {
     pub depth_bias: i32,
     pub sort_bias: f32,
     pub see_through: bool,
+    pub layering: i8,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct EntityMaterialKey {
     depth_bias: i32,
     see_through: bool,
+    layering: i8,
     glint: bool,
     fancy: bool,
     water_mask: bool,
@@ -172,6 +174,7 @@ impl From<&EntityMaterial> for EntityMaterialKey {
         EntityMaterialKey {
             depth_bias: material.depth_bias,
             see_through: material.see_through,
+            layering: material.layering,
             glint: material.params.glint.z > 0.0 && material.glint_texture.is_some(),
             fancy: crate::renderer::terrain::builtin_shaders_enabled(),
             water_mask: material.params.mode == LightMode::WaterMask as u32,
@@ -179,7 +182,21 @@ impl From<&EntityMaterial> for EntityMaterialKey {
     }
 }
 
+fn layering_def(bias: i8) -> ShaderDefVal {
+    let k = 1.0 - bias as f32 / 4096.0;
+    ShaderDefVal::UInt("VIEW_LAYERING_BITS".into(), (1.0 / k).to_bits())
+}
+
 pub const ALPHA_CUTOUT: f32 = 0.1;
+
+pub const HIDDEN_CUTOFF: f32 = 2.0;
+
+impl EntityParams {
+    #[cfg_attr(not(feature = "shader_support"), allow(dead_code))]
+    pub fn discards_all(&self) -> bool {
+        self.light.w > 1.0
+    }
+}
 
 impl EntityMaterial {
     pub fn new(
@@ -198,6 +215,7 @@ impl EntityMaterial {
             depth_bias,
             sort_bias: 0.0,
             see_through: false,
+            layering: 0,
         }
     }
 
@@ -345,6 +363,12 @@ impl Material for EntityMaterial {
                     .shader_defs
                     .push(super::hand::band_floor_def());
             }
+        }
+        if key.bind_group_data.layering != 0 && !key.bind_group_data.see_through {
+            descriptor
+                .vertex
+                .shader_defs
+                .push(layering_def(key.bind_group_data.layering));
         }
         if key.bind_group_data.fancy {
             descriptor.vertex.shader_defs.push("FANCY_SHADERS".into());

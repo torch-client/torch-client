@@ -1,3 +1,4 @@
+#[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -54,6 +55,7 @@ const SAVE_AFTER: u32 = 20;
 
 struct State {
     session: u32,
+    version: Option<Version>,
     search: Option<Search>,
     hash: i64,
     dimension: Dimension,
@@ -68,10 +70,47 @@ struct State {
     foreign: bool,
     seed: Option<i64>,
     unsaved: Option<u32>,
+    rejoined: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+static STATE: std::sync::Mutex<Option<State>> = std::sync::Mutex::new(None);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn with_state<R>(f: impl FnOnce(&mut Option<State>) -> R) -> R {
+    f(&mut STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+#[cfg(target_arch = "wasm32")]
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn with_state<R>(f: impl FnOnce(&mut Option<State>) -> R) -> R {
+    STATE.with_borrow_mut(f)
+}
+
+pub(super) fn flush() {
+    let save = |slot: &mut Option<State>| {
+        if let Some(st) = slot.as_mut()
+            && st.unsaved.is_some()
+        {
+            st.save();
+        }
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(mut slot) = STATE.try_lock() {
+        save(&mut *slot);
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = STATE.try_with(|cell| {
+        if let Ok(mut slot) = cell.try_borrow_mut() {
+            save(&mut *slot);
+        }
+    });
 }
 
 pub(super) fn finder_on(kind: FinderKind) -> bool {
@@ -140,11 +179,10 @@ impl seedcrack::World for View<'_> {
 }
 
 impl State {
-    fn new(shared: &SharedMutex, session: u32) -> State {
-        let protocol = crate::util::session_protocol();
-        let search = match Version::from_protocol(protocol) {
+    fn new(shared: &SharedMutex, session: u32, version: Option<Version>) -> State {
+        let search = match version {
             Some(version) => {
-                let search = Search::start(version, session);
+                let search = Search::start(version);
                 if search.is_none() {
                     tell(
                         shared,
@@ -156,6 +194,7 @@ impl State {
                 search
             }
             None => {
+                let protocol = crate::util::session_protocol();
                 tell(
                     shared,
                     RED,
@@ -167,6 +206,7 @@ impl State {
         };
         State {
             session,
+            version,
             search,
             hash: 0,
             dimension: dimension::current(),
@@ -181,36 +221,71 @@ impl State {
             foreign: false,
             seed: None,
             unsaved: None,
+            rejoined: false,
         }
+    }
+
+    fn rejoin(&mut self, session: u32) {
+        self.session = session;
+        self.scanned.clear();
+        self.centre = None;
+        self.backlog = true;
+        self.biomes.clear();
+        self.hash = 0;
+        self.dimension = dimension::current();
+        self.redraw = true;
+        self.rejoined = true;
     }
 
     fn restore(&mut self, shared: &SharedMutex, hash: i64) {
         self.target = Some(hash);
-        match cache::load() {
-            Some(c) if c.hash == hash => {
-                let n = self.take_in(c.finds);
-                if n > 0 {
-                    say(
-                        shared,
-                        GRAY,
-                        format!(
-                            "Seed Cracker: {n} find{} restored from the cache",
-                            plural(n)
-                        ),
-                    );
-                }
-                if let Some(seed) = c.seed {
-                    self.world_seeds(shared, &[seed]);
-                }
+        if let Some(c) = cache::load(hash) {
+            let n = self.take_in(c.finds);
+            if n > 0 {
+                say(
+                    shared,
+                    GRAY,
+                    format!(
+                        "Seed Cracker: {n} find{} restored from the cache",
+                        plural(n)
+                    ),
+                );
             }
-            Some(_) => say(
-                shared,
-                GRAY,
-                "Seed Cracker: another hashed seed, so the cache starts again",
-            ),
-            None => {}
+            if let Some(seed) = c.seed
+                && self.seed.is_none()
+            {
+                self.world_seeds(shared, &[seed]);
+            }
         }
         self.save();
+    }
+
+    fn switch_world(&mut self, shared: &SharedMutex, hash: i64) {
+        self.save();
+        let server = crate::modules::seed_xray::server_hash();
+        if let Some(search) = self.search.as_mut() {
+            search.send(Cmd::Clear);
+            if hash != server && hash != 0 {
+                search.send(Cmd::Add {
+                    observation: Observation::HashedSeed(hash),
+                    sighting: None,
+                });
+            }
+        }
+        self.found.clear();
+        self.seed = None;
+        self.scanned.clear();
+        self.backlog = true;
+        self.hash = 0;
+        self.foreign = hash != server;
+        self.redraw = true;
+        self.restore(shared, hash);
+    }
+
+    fn send(&mut self, cmd: Cmd) {
+        if let Some(search) = self.search.as_mut() {
+            search.send(cmd);
+        }
     }
 
     fn take_in(&mut self, finds: Vec<(Observation, Drawn)>) -> usize {
@@ -289,36 +364,19 @@ impl State {
                 ),
             );
         } else {
-            let server = crate::modules::seed_xray::server_hash();
-            if let Some(search) = self.search.as_mut() {
-                search.send(Cmd::Clear);
-                if share.hash != server && share.hash != 0 {
-                    search.send(Cmd::Add {
-                        observation: Observation::HashedSeed(share.hash),
-                        sighting: None,
-                    });
-                }
-            }
-            self.found.clear();
-            self.seed = None;
-            self.scanned.clear();
-            self.backlog = true;
-            self.hash = 0;
-            self.target = Some(share.hash);
-            self.foreign = share.hash != server;
-            self.redraw = true;
-            self.take_in(share.finds);
-            self.changed();
+            self.switch_world(shared, share.hash);
+            let n = self.take_in(share.finds);
             let prefix = store().text(prefix_setting::PREFIX);
             if self.foreign {
                 say(
                     shared,
                     YELLOW,
                     format!(
-                        "Seed Cracker: replaced with the friend's {total} find{} for another world (hashed seed {}); \
-                         this world is not scanned until {prefix}cracker clear or the next join",
+                        "Seed Cracker: switched to the friend's world (hashed seed {}), {n} of {total} find{} new; \
+                         this world's finds are kept, and it is not scanned until {prefix}cracker clear or the \
+                         next join",
+                        share.hash,
                         plural(total),
-                        share.hash
                     ),
                 );
             } else {
@@ -326,7 +384,7 @@ impl State {
                     shared,
                     YELLOW,
                     format!(
-                        "Seed Cracker: replaced with the friend's {total} find{}",
+                        "Seed Cracker: back to this server's world, {n} of the friend's {total} find{} new",
                         plural(total)
                     ),
                 );
@@ -353,30 +411,32 @@ impl State {
         }
 
         let hash = crate::modules::seed_xray::server_hash();
+        let rejoined = std::mem::take(&mut self.rejoined);
         if self.target.is_none() {
             self.restore(shared, hash);
+        } else if rejoined && (self.foreign || self.target != Some(hash)) {
+            self.switch_world(shared, hash);
         }
-        let Some(search) = self.search.as_mut() else {
-            return;
-        };
         if !self.foreign && hash != 0 && hash != self.hash {
             self.hash = hash;
-            search.send(Cmd::Add {
+            self.send(Cmd::Add {
                 observation: Observation::HashedSeed(hash),
                 sighting: None,
             });
         }
         match request {
-            Some(Request::Status) => search.send(Cmd::Status),
+            Some(Request::Status) => self.send(Cmd::Status),
             Some(Request::Clear) => {
-                search.send(Cmd::Clear);
+                self.send(Cmd::Clear);
                 self.hash = 0;
                 self.found.clear();
                 self.seed = None;
-                self.foreign = false;
-                self.target = Some(hash);
-                self.changed();
+                self.save();
+                if self.foreign {
+                    self.switch_world(shared, hash);
+                }
                 self.scanned.clear();
+                self.backlog = true;
                 self.redraw = true;
                 tell(
                     shared,
@@ -385,7 +445,7 @@ impl State {
                 );
             }
             Some(Request::Restart) => {
-                search.send(Cmd::Restart);
+                self.send(Cmd::Restart);
                 tell(shared, YELLOW, "Seed Cracker: searching again");
             }
             None => {}
@@ -711,23 +771,28 @@ pub fn tick(bot: &azalea::Client, shared: &SharedMutex) {
             return;
         }
         Phase::Stopped => {
-            STATE.with_borrow_mut(|st| *st = None);
+            with_state(|st| *st = None);
             hud::reset();
             world_draw::clear(OWNER);
             return;
         }
-        Phase::Started => STATE.with_borrow_mut(|st| *st = None),
+        Phase::Started => with_state(|st| *st = None),
         Phase::Running => {}
     }
     let session = SESSION.load(Relaxed);
-    STATE.with_borrow_mut(|slot| {
-        if slot.as_ref().is_none_or(|st| st.session != session) {
+    let version = Version::from_protocol(crate::util::session_protocol());
+    with_state(|slot| {
+        if slot.as_ref().is_none_or(|st| {
+            st.version != version || (st.search.is_none() && st.session != session)
+        }) {
             world_draw::clear(OWNER);
             hud::reset();
-            *slot = Some(State::new(shared, session));
+            *slot = Some(State::new(shared, session, version));
         }
-        if let Some(st) = slot {
-            st.tick(bot, shared);
+        let Some(st) = slot.as_mut() else { return };
+        if st.session != session {
+            st.rejoin(session);
         }
+        st.tick(bot, shared);
     });
 }

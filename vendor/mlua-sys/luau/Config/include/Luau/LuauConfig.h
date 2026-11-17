@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Common.h"
@@ -63,7 +62,6 @@ struct VariantHashDefault
     }
 };
 
-// Forward declaration
 struct ConfigValue;
 
 struct ConfigTable : public DenseHashMap<ConfigTableKey, ConfigValue, VariantHashDefault<ConfigTableKey>>
@@ -85,13 +83,8 @@ struct InterruptCallbacks
     void (*interruptCallback)(lua_State* L, int gc);
 };
 
-// Executes the contents of `source` in a sandboxed Luau VM and extracts the
-// configuration table that it returns. If extraction fails, std::nullopt is
-// returned and `error` is populated with the error message, if provided.
 std::optional<ConfigTable> extractConfig(const std::string& source, const InterruptCallbacks& callbacks, std::string* error = nullptr);
 
-// Extracts a Luau::Config object into `config` from the configuration code in
-// `source`, returning an error message if extraction fails.
 std::optional<std::string> extractLuauConfig(
     const std::string& source,
     Config& config,
@@ -99,4 +92,4 @@ std::optional<std::string> extractLuauConfig(
     InterruptCallbacks callbacks
 );
 
-} // namespace Luau
+}

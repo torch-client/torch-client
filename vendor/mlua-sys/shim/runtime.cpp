@@ -13,8 +13,6 @@ template std::string std::operator+ <char, std::char_traits<char>, std::allocato
 
 _LIBCPP_BEGIN_NAMESPACE_STD
 
-// libc++ 21 declares this `noexcept` and older ones do not; a redeclaration
-// must match, so the specification is read off the header's declaration
 void __libcpp_verbose_abort(const char* format, ...) noexcept(noexcept(__libcpp_verbose_abort("")))
 {
     va_list args;
@@ -28,7 +26,7 @@ void __libcpp_verbose_abort(const char* format, ...) noexcept(noexcept(__libcpp_
 }
 
 #if _LIBCPP_VERSION >= 210000
-size_t __hash_memory(_LIBCPP_NOESCAPE const void* data, size_t size) noexcept(noexcept(__hash_memory(nullptr, 0))) 
+size_t __hash_memory(_LIBCPP_NOESCAPE const void* data, size_t size) noexcept(noexcept(__hash_memory(nullptr, 0)))
 {
     const unsigned char* p = static_cast<const unsigned char*>(data);
     size_t h = sizeof(size_t) == 8 ? size_t(14695981039346656037ull) : size_t(2166136261u);

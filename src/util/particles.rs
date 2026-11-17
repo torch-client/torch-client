@@ -4122,6 +4122,7 @@ fn batch_material(
         depth_bias: 0,
         sort_bias: 0.0,
         see_through: false,
+        layering: 0,
     });
     cache.0.insert(key, handle.clone());
     handle

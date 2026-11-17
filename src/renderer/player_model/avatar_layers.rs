@@ -274,6 +274,7 @@ pub(super) fn update(
     parts: &[Entity; 6],
     sample: &AnimSample,
     slim: bool,
+    invisible: bool,
     lit: Lit,
     items: &mut ItemCtx,
     layers: &mut LayerQuery<'_, '_>,
@@ -329,10 +330,11 @@ pub(super) fn update(
         node.bake(model, base, items, commands);
     }
 
-    if rig.ears_shown != sample.layers.extra_ears
+    let ears = sample.layers.extra_ears && !invisible;
+    if rig.ears_shown != ears
         && let Ok((mut vis, _)) = layers.get_mut(rig.ears)
     {
-        rig.ears_shown = sample.layers.extra_ears;
+        rig.ears_shown = ears;
         *vis = if rig.ears_shown {
             Visibility::Inherited
         } else {

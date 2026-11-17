@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/Ast.h"
 
 #include "Luau/Common.h"
@@ -425,7 +424,7 @@ std::string toString(AstExprUnary::Op op)
         return "#";
     default:
         LUAU_ASSERT(false);
-        return ""; // MSVC requires this even though the switch/case is exhaustive
+        return "";
     }
 }
 
@@ -484,7 +483,7 @@ std::string toString(AstExprBinary::Op op)
         return "or";
     default:
         LUAU_ASSERT(false);
-        return ""; // MSVC requires this even though the switch/case is exhaustive
+        return "";
     }
 }
 
@@ -565,7 +564,6 @@ void AstExprInstantiate::visit(AstVisitor* visitor)
         visitTypeOrPackArray(visitor, typeArguments);
     }
 }
-
 
 void AstExprError::visit(AstVisitor* visitor)
 {
@@ -1410,4 +1408,4 @@ Location getLocation(const AstTypeList& typeList)
     return result;
 }
 
-} // namespace Luau
+}

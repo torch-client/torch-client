@@ -1,14 +1,7 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #pragma once
 
 #include "lobject.h"
 
-/*
- * WARNING: if you change the order of this enumeration,
- * grep "ORDER TM"
- */
-// clang-format off
 typedef enum
 {
     TM_INDEX,
@@ -19,7 +12,7 @@ typedef enum
     TM_ITER,
     TM_LEN,
 
-    TM_EQ, // last tag method with `fast' access
+    TM_EQ,
 
     TM_ADD,
     TM_SUB,
@@ -36,9 +29,8 @@ typedef enum
     TM_TYPE,
     TM_METATABLE,
 
-    TM_N // number of elements in the enum
+    TM_N
 } TMS;
-// clang-format on
 
 #define gfasttm(g, et, e) ((et) == NULL ? NULL : ((et)->tmcache & (1u << (e))) ? NULL : luaT_gettm(et, e, (g)->tmname[e]))
 

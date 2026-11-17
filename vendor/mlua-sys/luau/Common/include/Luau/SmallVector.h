@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Common.h"
@@ -319,4 +318,4 @@ private:
     alignas(T) unsigned char storage[N * sizeof(T)];
 };
 
-} // namespace Luau
+}

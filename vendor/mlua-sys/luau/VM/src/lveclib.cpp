@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "lualib.h"
 
 #include "lcommon.h"
@@ -8,7 +7,6 @@
 
 static int vector_create(lua_State* L)
 {
-    // checking argument count to avoid accepting 'nil' as a valid value
     int count = lua_gettop(L);
 
     double x = luaL_checknumber(L, 1);
@@ -90,7 +88,6 @@ static int vector_angle(lua_State* L)
     const float* b = luaL_checkvector(L, 2);
     const float* axis = luaL_optvector(L, 3, nullptr);
 
-    // cross(a, b)
     float cross[] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
 
     double sinA = sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
@@ -262,13 +259,11 @@ static int vector_index(lua_State* L)
     size_t namelen = 0;
     const char* name = luaL_checklstring(L, 2, &namelen);
 
-    // field access implementation mirrors the fast-path we have in the VM
     if (namelen == 1)
     {
         int ic = (name[0] | ' ') - 'x';
 
 #if LUA_VECTOR_SIZE == 4
-        // 'w' is before 'x' in ascii, so ic is -1 when indexing with 'w'
         if (ic == -1)
             ic = 3;
 #endif
@@ -318,9 +313,8 @@ static const luaL_Reg vectorlib[] = {
 
 static void createmetatable(lua_State* L)
 {
-    lua_createtable(L, 0, 1); // create metatable for vectors
+    lua_createtable(L, 0, 1);
 
-    // push dummy vector
 #if LUA_VECTOR_SIZE == 4
     lua_pushvector(L, 0.0f, 0.0f, 0.0f, 0.0f);
 #else
@@ -328,14 +322,14 @@ static void createmetatable(lua_State* L)
 #endif
 
     lua_pushvalue(L, -2);
-    lua_setmetatable(L, -2); // set vector metatable
-    lua_pop(L, 1);           // pop dummy vector
+    lua_setmetatable(L, -2);
+    lua_pop(L, 1);
 
     lua_pushcfunction(L, vector_index, nullptr);
     lua_setfield(L, -2, "__index");
 
     lua_setreadonly(L, -1, true);
-    lua_pop(L, 1); // pop the metatable
+    lua_pop(L, 1);
 }
 
 int luaopen_vector(lua_State* L)

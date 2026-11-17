@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "TableShape.h"
 
 namespace Luau
@@ -6,16 +5,13 @@ namespace Luau
 namespace Compile
 {
 
-// conservative limit for the loop bound that establishes table array size
 static const int kMaxLoopBound = 16;
 
 static AstExprTable* getTableHint(AstExpr* expr)
 {
-    // unadorned table literal
     if (AstExprTable* table = expr->as<AstExprTable>())
         return table;
 
-    // setmetatable(table literal, ...)
     if (AstExprCall* call = expr->as<AstExprCall>(); call && !call->self && call->args.size == 2)
         if (AstExprGlobal* func = call->func->as<AstExprGlobal>(); func && func->name == "setmetatable")
             if (AstExprTable* table = call->args.data[0]->as<AstExprTable>())
@@ -39,7 +35,7 @@ struct ShapeVisitor : AstVisitor
     DenseHashMap<AstLocal*, AstExprTable*> tables;
     DenseHashSet<std::pair<AstExprTable*, AstName>, Hasher> fields;
 
-    DenseHashMap<AstLocal*, unsigned int> loops; // iterator => upper bound for 1..k
+    DenseHashMap<AstLocal*, unsigned int> loops;
 
     ShapeVisitor(DenseHashMap<AstExprTable*, TableShape>& shapes)
         : shapes(shapes)
@@ -109,7 +105,6 @@ struct ShapeVisitor : AstVisitor
 
     bool visit(AstStatLocal* node) override
     {
-        // track local -> table association so that we can update table size prediction in assignField
         if (node->vars.size == 1 && node->values.size == 1)
             if (AstExprTable* table = getTableHint(node->values.data[0]); table && table->items.size == 0)
                 tables[node->vars.data[0]] = table;
@@ -154,5 +149,5 @@ void predictTableShapes(DenseHashMap<AstExprTable*, TableShape>& shapes, AstNode
     root->visit(&visitor);
 }
 
-} // namespace Compile
-} // namespace Luau
+}
+}

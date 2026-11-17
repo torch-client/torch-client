@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lualib.h"
 
 #include "lcommon.h"
@@ -23,15 +21,12 @@ static tm* localtime_r(const time_t* timep, tm* result)
 
 static time_t os_timegm(struct tm* timep)
 {
-    // Julian day number calculation
     int day = timep->tm_mday;
     int month = timep->tm_mon + 1;
     int year = timep->tm_year + 1900;
 
-    // year adjustment, pretend that it starts in March
     int a = timep->tm_mon % 12 < 2 ? 1 : 0;
 
-    // also adjust for out-of-range month numbers in input
     a -= timep->tm_mon / 12;
 
     int y = year + 4800 - a;
@@ -39,10 +34,9 @@ static time_t os_timegm(struct tm* timep)
 
     int julianday = day + ((153 * m + 2) / 5) + (365 * y) + (y / 4) - (y / 100) + (y / 400) - 32045;
 
-    const int utcstartasjulianday = 2440588;                              // Jan 1st 1970 offset in Julian calendar
-    const int64_t utcstartasjuliansecond = utcstartasjulianday * 86400ll; // same in seconds
+    const int utcstartasjulianday = 2440588;
+    const int64_t utcstartasjuliansecond = utcstartasjulianday * 86400ll;
 
-    // fail the dates before UTC start
     if (julianday < utcstartasjulianday)
         return time_t(-1);
 
@@ -62,14 +56,6 @@ static int os_clock(lua_State* L)
     return 1;
 }
 
-/*
-** {======================================================
-** Time/Date operations
-** { year=%Y, month=%m, day=%d, hour=%H, min=%M, sec=%S,
-**   wday=%w+1, yday=%j, isdst=? }
-** =======================================================
-*/
-
 static void setfield(lua_State* L, const char* key, int value)
 {
     lua_pushinteger(L, value);
@@ -78,8 +64,8 @@ static void setfield(lua_State* L, const char* key, int value)
 
 static void setboolfield(lua_State* L, const char* key, int value)
 {
-    if (value < 0) // undefined?
-        return;    // does not set field
+    if (value < 0)
+        return;
     lua_pushboolean(L, value);
     lua_setfield(L, -2, key);
 }
@@ -117,23 +103,22 @@ static int os_date(lua_State* L)
     struct tm tm;
     struct tm* stm;
     if (*s == '!')
-    { // UTC?
+    {
         stm = gmtime_r(&t, &tm);
-        s++; // skip `!'
+        s++;
     }
     else
     {
-        // on Windows, localtime() fails with dates before epoch start so we disallow that
         stm = t < 0 ? NULL : localtime_r(&t, &tm);
     }
 
-    if (stm == NULL) // invalid date?
+    if (stm == NULL)
     {
         lua_pushnil(L);
     }
     else if (strcmp(s, "*t") == 0)
     {
-        lua_createtable(L, 0, 9); // 9 = number of fields
+        lua_createtable(L, 0, 9);
         setfield(L, "sec", stm->tm_sec);
         setfield(L, "min", stm->tm_min);
         setfield(L, "hour", stm->tm_hour);
@@ -154,7 +139,7 @@ static int os_date(lua_State* L)
         luaL_buffinit(L, &b);
         for (; *s; s++)
         {
-            if (*s != '%' || *(s + 1) == '\0') // no conversion specifier?
+            if (*s != '%' || *(s + 1) == '\0')
             {
                 luaL_addchar(&b, *s);
             }
@@ -165,7 +150,7 @@ static int os_date(lua_State* L)
             else
             {
                 size_t reslen;
-                char buff[200]; // should be big enough for any conversion result
+                char buff[200];
                 cc[1] = *(++s);
                 reslen = strftime(buff, sizeof(buff), cc, stm);
                 luaL_addlstring(&b, buff, reslen);
@@ -179,13 +164,13 @@ static int os_date(lua_State* L)
 static int os_time(lua_State* L)
 {
     time_t t;
-    if (lua_isnoneornil(L, 1)) // called without args?
-        t = time(NULL);        // get current time
+    if (lua_isnoneornil(L, 1))
+        t = time(NULL);
     else
     {
         struct tm ts;
         luaL_checktype(L, 1, LUA_TTABLE);
-        lua_settop(L, 1); // make sure table is at the top
+        lua_settop(L, 1);
         ts.tm_sec = getfield(L, "sec", 0);
         ts.tm_min = getfield(L, "min", 0);
         ts.tm_hour = getfield(L, "hour", 12);
@@ -194,7 +179,6 @@ static int os_time(lua_State* L)
         ts.tm_year = getfield(L, "year", -1) - 1900;
         ts.tm_isdst = getboolfield(L, "isdst");
 
-        // Note: upstream Lua uses mktime() here which assumes input is local time, but we prefer UTC for consistency
         t = os_timegm(&ts);
     }
     if (t == (time_t)(-1))

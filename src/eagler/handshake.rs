@@ -3,6 +3,8 @@ use crate::{log_info, log_warn};
 
 pub(super) const HANDSHAKE_VERSIONS: [u16; 2] = [5, 4];
 
+pub(super) const STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 fn offered_protocol() -> i32 {
     crate::util::session_protocol()
 }
@@ -42,7 +44,7 @@ pub(super) async fn run(
 ) -> eyre::Result<(azalea_auth::game_profile::GameProfile, u16)> {
     send(socket, client_version(username)?).await?;
 
-    let mut version = expect(socket, SERVER_VERSION).await?;
+    let mut version = expect(socket, SERVER_VERSION, "answer the version offer").await?;
     let eagler = version.u16()?;
     let minecraft = version.u16()?;
     let brand = version.str()?;
@@ -68,7 +70,7 @@ pub(super) async fn run(
 
     send(socket, request_login(username, eagler)?).await?;
 
-    let mut allow = expect(socket, SERVER_ALLOW_LOGIN).await?;
+    let mut allow = expect(socket, SERVER_ALLOW_LOGIN, "accept the login request").await?;
     let name = allow.str()?;
     let uuid = uuid::Uuid::from_u64_pair(allow.u64()?, allow.u64()?);
 
@@ -76,7 +78,7 @@ pub(super) async fn run(
         send(socket, profile_data("skin_v2", skin)?).await?;
     }
     send(socket, vec![CLIENT_FINISH_LOGIN]).await?;
-    expect(socket, SERVER_FINISH_LOGIN).await?;
+    expect(socket, SERVER_FINISH_LOGIN, "finish the login").await?;
 
     Ok((
         azalea_auth::game_profile::GameProfile::new(uuid, name),
@@ -130,17 +132,31 @@ async fn send(socket: &mut Socket, packet: Vec<u8>) -> eyre::Result<()> {
     socket.send_binary(packet).await
 }
 
-async fn expect(socket: &mut Socket, opcode: u8) -> eyre::Result<Reader> {
+async fn expect(socket: &mut Socket, opcode: u8, step: &str) -> eyre::Result<Reader> {
+    match crate::platform::time::timeout(STEP_TIMEOUT, reply(socket, opcode, step)).await {
+        Ok(reply) => reply,
+        Err(()) => eyre::bail!(
+            "the server did not {step} within {} seconds. Its proxy took the packet and went \
+             silent, which is what a login plugin or an anti-bot check holding the backend login \
+             looks like from here.",
+            STEP_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+async fn reply(socket: &mut Socket, opcode: u8, step: &str) -> eyre::Result<Reader> {
     loop {
         let Some(message) = socket.recv().await? else {
-            eyre::bail!("the server closed the connection during the handshake");
+            eyre::bail!("the server closed the connection before it would {step}");
         };
         let payload = match message {
             Frame::Binary(payload) => payload,
             Frame::Close(Some(reason)) => {
                 eyre::bail!("the server closed the connection: {reason}")
             }
-            Frame::Close(None) => eyre::bail!("the server closed the connection"),
+            Frame::Close(None) => {
+                eyre::bail!("the server closed the connection before it would {step}")
+            }
             Frame::Text(_) | Frame::Other => continue,
         };
         let mut reader = Reader::new(payload);

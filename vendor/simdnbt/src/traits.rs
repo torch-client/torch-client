@@ -10,6 +10,12 @@ pub trait Deserialize: Sized {
     fn from_compound(compound: borrow::NbtCompound) -> Result<Self, DeserializeError>;
 }
 
+#[inline]
+fn prealloc_len<T>(approx_len: u32) -> usize {
+    const MAX_PREALLOC_BYTES: usize = 1 << 20;
+    (approx_len as usize).min(MAX_PREALLOC_BYTES / std::mem::size_of::<T>().max(1))
+}
+
 pub trait Serialize: Sized {
     fn to_nbt(self) -> owned::BaseNbt {
         owned::BaseNbt::new("", self.to_compound())
@@ -272,7 +278,7 @@ impl<T: Deserialize> FromNbtTag for Vec<Option<T>> {
     fn from_nbt_tag(tag: borrow::NbtTag) -> Option<Self> {
         let list = tag.list()?;
         let list = list.compounds()?;
-        let mut vec = Vec::with_capacity(list.approx_len() as usize);
+        let mut vec = Vec::with_capacity(prealloc_len::<Option<T>>(list.approx_len()));
         for tag in list {
             if tag.is_empty() {
                 vec.push(None);
@@ -301,7 +307,7 @@ impl<T: Deserialize> FromNbtTag for Vec<T> {
     fn from_nbt_tag(tag: borrow::NbtTag) -> Option<Self> {
         let list = tag.list()?;
         let list = list.compounds()?;
-        let mut vec = Vec::with_capacity(list.approx_len() as usize);
+        let mut vec = Vec::with_capacity(prealloc_len::<T>(list.approx_len()));
         for tag in list {
             vec.push(T::from_compound(tag).ok()?);
         }

@@ -622,6 +622,8 @@ fn close_target(gui: &mut GuiState) -> Screen {
         Screen::ResourcePacks => Screen::Options,
         #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
         Screen::ExportAssets => Screen::ManageStorage,
+        #[cfg(feature = "benchmark_feature")]
+        Screen::Benchmark => Screen::GameSettings,
         #[cfg(explore_modrinth)]
         Screen::ExplorePacks => Screen::ResourcePacks,
         #[cfg(feature = "shader_support")]

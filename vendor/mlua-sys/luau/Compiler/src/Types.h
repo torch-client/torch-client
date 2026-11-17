@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Ast.h"
@@ -20,7 +19,6 @@ struct BuiltinAstTypes
     {
     }
 
-    // AstName use here will not match the AstNameTable, but the way we use them here always forces a full string compare
     AstTypeReference booleanType{{}, std::nullopt, AstName{"boolean"}, std::nullopt, {}};
     AstTypeReference numberType{{}, std::nullopt, AstName{"number"}, std::nullopt, {}};
     AstTypeReference stringType{{}, std::nullopt, AstName{"string"}, std::nullopt, {}};
@@ -43,4 +41,4 @@ void buildTypeMap(
     BytecodeBuilder& bytecode
 );
 
-} // namespace Luau
+}

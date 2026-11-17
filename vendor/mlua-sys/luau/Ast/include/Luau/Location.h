@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 namespace Luau
@@ -94,4 +93,4 @@ struct Location
     void shift(const Position& start, const Position& oldEnd, const Position& newEnd);
 };
 
-} // namespace Luau
+}

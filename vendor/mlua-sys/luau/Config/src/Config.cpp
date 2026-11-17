@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/Config.h"
 
 #include "Luau/Lexer.h"
@@ -212,7 +211,6 @@ static void next(Lexer& lexer)
 {
     lexer.next();
 
-    // skip C-style comments as Lexer only understands Lua-style comments atm
     while (lexer.current().type == Luau::Lexeme::FloorDiv)
         lexer.nextline();
 }
@@ -233,7 +231,7 @@ static Error parseJson(const std::string& contents, Action action)
     next(lexer);
 
     std::vector<std::string> keys;
-    bool arrayTop = false; // we don't support nested arrays
+    bool arrayTop = false;
 
     if (lexer.current().type != '{')
         return fail(lexer, "'{'");
@@ -370,4 +368,4 @@ Error parseConfig(const std::string& contents, Config& config, const ConfigOptio
     );
 }
 
-} // namespace Luau
+}

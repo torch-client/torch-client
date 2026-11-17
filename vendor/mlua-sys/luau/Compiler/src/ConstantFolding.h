@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Compiler.h"
@@ -30,7 +29,7 @@ struct Constant
         bool valueBoolean;
         double valueNumber;
         float valueVector[4];
-        const char* valueString = nullptr; // length stored in stringLength
+        const char* valueString = nullptr;
     };
 
     bool isTruthful() const
@@ -57,5 +56,5 @@ void foldConstants(
     AstNameTable& stringTable
 );
 
-} // namespace Compile
-} // namespace Luau
+}
+}

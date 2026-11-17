@@ -144,6 +144,7 @@ pub fn logged_in() {
 #[cfg(feature = "seed_cracker")]
 pub fn disconnected() {
     SESSION.fetch_add(1, Relaxed);
+    run::flush();
 }
 
 #[cfg(not(feature = "seed_cracker"))]

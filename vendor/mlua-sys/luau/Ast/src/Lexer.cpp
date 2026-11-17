@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/Lexer.h"
 
 #include "Luau/Allocator.h"
@@ -189,7 +188,6 @@ bool AstNameTable::Entry::operator==(const Entry& other) const
 
 size_t AstNameTable::EntryHash::operator()(const Entry& e) const
 {
-    // FNV1a
     uint32_t hash = 2166136261;
 
     for (size_t i = 0; i < e.length; ++i)
@@ -226,12 +224,9 @@ std::pair<AstName, Lexeme::Type> AstNameTable::getOrAddWithType(const char* name
     AstNameTable::Entry key = {AstName(name), uint32_t(length), Lexeme::Eof};
     const Entry& entry = data.insert(key);
 
-    // entry already was inserted
     if (entry.type != Lexeme::Eof)
         return std::make_pair(entry.value, entry.type);
 
-    // we just inserted an entry with a non-owned pointer into the map
-    // we need to correct it, *but* we need to be careful about not disturbing the hash value
     char* nameData = static_cast<char*>(allocator.allocate(length + 1));
     memcpy(nameData, name, length);
     nameData[length] = 0;
@@ -268,7 +263,6 @@ AstName AstNameTable::get(const char* name) const
 
 inline bool isAlpha(char ch)
 {
-    // use or trick to convert to lower case and unsigned comparison to do range check
     return unsigned((ch | ' ') - 'a') < 26;
 }
 
@@ -279,7 +273,6 @@ inline bool isDigit(char ch)
 
 inline bool isHexDigit(char ch)
 {
-    // use or trick to convert to lower case and unsigned comparison to do range check
     return unsigned(ch - '0') < 10 || unsigned((ch | ' ') - 'a') < 6;
 }
 
@@ -315,7 +308,6 @@ unsigned int Lexeme::getBlockDepth() const
 {
     LUAU_ASSERT(type == Lexeme::RawString || type == Lexeme::BlockComment);
 
-    // If we have a well-formed string, we are guaranteed to see 2 `]` characters after the end of the string contents
     LUAU_ASSERT(*(data + length) == ']');
     unsigned int depth = 0;
     do
@@ -330,7 +322,6 @@ Lexeme::QuoteStyle Lexeme::getQuoteStyle() const
 {
     LUAU_ASSERT(type == Lexeme::QuotedString);
 
-    // If we have a well-formed string, we are guaranteed to see a closing delimiter after the string
     LUAU_ASSERT(data);
 
     char quote = *(data + length);
@@ -340,7 +331,7 @@ Lexeme::QuoteStyle Lexeme::getQuoteStyle() const
         return Lexeme::QuoteStyle::Double;
 
     LUAU_ASSERT(!"Unknown quote style");
-    return Lexeme::QuoteStyle::Double; // unreachable, but required due to compiler warning
+    return Lexeme::QuoteStyle::Double;
 }
 
 Lexer::Lexer(const char* buffer, size_t bufferSize, AstNameTable& names, Position startPosition)
@@ -373,10 +364,8 @@ const Lexeme& Lexer::next()
 
 const Lexeme& Lexer::next(bool skipComments, bool updatePrevLocation)
 {
-    // in skipComments mode we reject valid comments
     do
     {
-        // consume whitespace before the token
         while (isSpace(peekch()))
             consumeAny();
 
@@ -454,7 +443,6 @@ Position Lexer::position() const
 LUAU_FORCEINLINE
 void Lexer::consume()
 {
-    // consume() assumes current character is known to not be a newline; use consumeAny if this is not guaranteed
     LUAU_ASSERT(!isNewline(buffer[offset]));
 
     offset++;
@@ -492,18 +480,12 @@ Lexeme Lexer::readCommentBody()
         }
     }
 
-    // fall back to single-line comment
     while (peekch() != 0 && peekch() != '\r' && !isNewline(peekch()))
         consume();
 
     return Lexeme(Location(start, position()), Lexeme::Comment, &buffer[startOffset], offset - startOffset);
 }
 
-// Given a sequence [===[ or ]===], returns:
-// 1. number of equal signs (or 0 if none present) between the brackets
-// 2. -1 if this is not a long comment/string separator
-// 3. -N if this is a malformed separator
-// Does *not* consume the closing brace.
 int Lexer::skipLongSeparator()
 {
     char start = peekch();
@@ -524,7 +506,6 @@ int Lexer::skipLongSeparator()
 
 Lexeme Lexer::readLongString(const Position& start, int sep, Lexeme::Type ok, Lexeme::Type broken)
 {
-    // skip (second) [
     LUAU_ASSERT(peekch() == '[');
     consume();
 
@@ -537,7 +518,7 @@ Lexeme Lexer::readLongString(const Position& start, int sep, Lexeme::Type ok, Le
             if (skipLongSeparator() == sep)
             {
                 LUAU_ASSERT(peekch() == ']');
-                consume(); // skip (second) ]
+                consume();
 
                 unsigned int endOffset = offset - sep - 2;
                 LUAU_ASSERT(endOffset >= startOffset);
@@ -637,12 +618,11 @@ Lexeme Lexer::readInterpolatedStringSection(Position start, Lexeme::Type formatT
             return Lexeme(Location(start, position()), Lexeme::BrokenString);
 
         case '\\':
-            // Allow for \u{}, which would otherwise be consumed by looking for {
             if (peekch(1) == 'u' && peekch(2) == '{')
             {
-                consume(); // backslash
-                consume(); // u
-                consume(); // {
+                consume();
+                consume();
+                consume();
                 break;
             }
 
@@ -680,9 +660,6 @@ Lexeme Lexer::readNumber(const Position& start, unsigned int startOffset)
 {
     LUAU_ASSERT(isDigit(peekch()));
 
-    // This function does not do the number parsing - it only skips a number-like pattern.
-    // It uses the same logic as Lua stock lexer; the resulting string is later converted
-    // to a number with proper verification.
     do
     {
         consume();
@@ -998,7 +975,6 @@ Lexeme Lexer::readNext()
         }
         else
         {
-            // consume @ first
             consume();
 
             if (isAlpha(peekch()) || peekch() == '_')
@@ -1096,20 +1072,17 @@ LUAU_NOINLINE Lexeme Lexer::readUtf8Error()
 
 static size_t toUtf8(char* data, unsigned int code)
 {
-    // U+0000..U+007F
     if (code < 0x80)
     {
         data[0] = char(code);
         return 1;
     }
-    // U+0080..U+07FF
     else if (code < 0x800)
     {
         data[0] = char(0xC0 | (code >> 6));
         data[1] = char(0x80 | (code & 0x3F));
         return 2;
     }
-    // U+0800..U+FFFF
     else if (code < 0x10000)
     {
         data[0] = char(0xE0 | (code >> 12));
@@ -1117,7 +1090,6 @@ static size_t toUtf8(char* data, unsigned int code)
         data[2] = char(0x80 | (code & 0x3F));
         return 3;
     }
-    // U+10000..U+10FFFF
     else if (code < 0x110000)
     {
         data[0] = char(0xF0 | (code >> 18));
@@ -1153,7 +1125,7 @@ bool Lexer::fixupQuotedString(std::string& data)
             return false;
 
         char escape = data[i + 1];
-        i += 2; // skip \e
+        i += 2;
 
         switch (escape)
         {
@@ -1172,7 +1144,6 @@ bool Lexer::fixupQuotedString(std::string& data)
 
         case 'x':
         {
-            // hex escape codes are exactly 2 hex digits long
             if (i + 2 > size)
                 return false;
 
@@ -1184,7 +1155,6 @@ bool Lexer::fixupQuotedString(std::string& data)
                 if (!isHexDigit(ch))
                     return false;
 
-                // use or trick to convert to lower case
                 code = 16 * code + (isDigit(ch) ? ch - '0' : (ch | ' ') - 'a' + 10);
             }
 
@@ -1202,7 +1172,6 @@ bool Lexer::fixupQuotedString(std::string& data)
 
         case 'u':
         {
-            // unicode escape codes are at least 3 characters including braces
             if (i + 3 > size)
                 return false;
 
@@ -1228,7 +1197,6 @@ bool Lexer::fixupQuotedString(std::string& data)
                 if (!isHexDigit(ch))
                     return false;
 
-                // use or trick to convert to lower case
                 code = 16 * code + (isDigit(ch) ? ch - '0' : (ch | ' ') - 'a' + 10);
                 i++;
             }
@@ -1284,23 +1252,9 @@ void Lexer::fixupMultilineString(std::string& data)
     if (data.empty())
         return;
 
-    // Lua rules for multiline strings are as follows:
-    // - standalone \r, \r\n, \n\r and \n are all considered newlines
-    // - first newline in the multiline string is skipped
-    // - all other newlines are normalized to \n
-
-    // Since our lexer just treats \n as newlines, we apply a simplified set of rules that is sufficient to get normalized newlines for Windows/Unix:
-    // - \r\n and \n are considered newlines
-    // - first newline is skipped
-    // - newlines are normalized to \n
-
-    // This makes the string parsing behavior consistent with general lexing behavior - a standalone \r isn't considered a new line from the line
-    // tracking perspective
-
     const char* src = data.c_str();
     char* dst = &data[0];
 
-    // skip leading newline
     if (src[0] == '\r' && src[1] == '\n')
     {
         src += 2;
@@ -1310,7 +1264,6 @@ void Lexer::fixupMultilineString(std::string& data)
         src += 1;
     }
 
-    // parse the rest of the string, converting newlines as we go
     while (*src)
     {
         if (src[0] == '\r' && src[1] == '\n')
@@ -1318,7 +1271,7 @@ void Lexer::fixupMultilineString(std::string& data)
             *dst++ = '\n';
             src += 2;
         }
-        else // note, this handles \n by just writing it without changes
+        else
         {
             *dst++ = *src;
             src += 1;
@@ -1328,4 +1281,4 @@ void Lexer::fixupMultilineString(std::string& data)
     data.resize(dst - &data[0]);
 }
 
-} // namespace Luau
+}

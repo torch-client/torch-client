@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "lualib.h"
 
 #include "lcommon.h"
@@ -10,9 +9,6 @@
 
 #include <string.h>
 
-// while C API returns 'size_t' for binary compatibility in case of future extensions,
-// in the current implementation, length and offset are limited to 31 bits
-// because offset is limited to an integer, a single 64bit comparison can be used and will not overflow
 #define isoutofbounds(offset, len, accessize) (uint64_t(unsigned(offset)) + (accessize) > uint64_t(len))
 
 static_assert(MAX_BUFFER_SIZE <= INT_MAX, "current implementation can't handle a larger limit");
@@ -187,7 +183,6 @@ static int buffer_writestring(lua_State* L)
     if (size_t(count) > size)
         luaL_error(L, "string length overflow");
 
-    // string size can't exceed INT_MAX at this point
     if (isoutofbounds(offset, len, unsigned(count)))
         luaL_error(L, "buffer access out of bounds");
 

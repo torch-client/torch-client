@@ -6,7 +6,7 @@ use crate::entities::TexturePath;
 use crate::entities::registry::Registry;
 use crate::entities::state::{Direction, EntityState};
 use crate::entities::{BlockRef, FrameModel, LightMode, RenderSpec, RootPose};
-use crate::renderer::maps::MAP_TEXTURE_PREFIX;
+use crate::renderer::maps::{DECORATION_ATLAS, MAP_TEXTURE_PREFIX};
 
 const OFFSET_TO_WALL: f32 = 0.46875;
 
@@ -15,7 +15,9 @@ const MAP_EDGE: f32 = crate::client::tracking::MAP_EDGE as f32;
 pub fn register(registry: &mut Registry) {
     registry.add_many(
         &[EntityKind::ItemFrame, EntityKind::GlowItemFrame],
-        RenderSpec::block("item_frame", frame_model).with_root(frame_model_root),
+        RenderSpec::block("item_frame", frame_model)
+            .with_root(frame_model_root)
+            .with_layering(-1),
     );
     registry.add_many(
         &[EntityKind::ItemFrame, EntityKind::GlowItemFrame],
@@ -26,9 +28,24 @@ pub fn register(registry: &mut Registry) {
             .with_levels(map_levels)
             .ignoring_invisibility(),
     );
+    registry.add_many(
+        &[EntityKind::ItemFrame, EntityKind::GlowItemFrame],
+        RenderSpec::built(
+            "item_frame_map_markers",
+            markers_key,
+            markers_mesh,
+            markers_texture,
+        )
+        .with_root(frame_map_root)
+        .with_visible(has_markers)
+        .with_light(LightMode::Text)
+        .with_levels(map_levels)
+        .with_layering(1)
+        .ignoring_invisibility(),
+    );
 }
 
-fn map_levels(st: &EntityState, levels: (u8, u8)) -> (u8, u8) {
+pub fn map_levels(st: &EntityState, levels: (u8, u8)) -> (u8, u8) {
     if st.kind == EntityKind::GlowItemFrame {
         (13, 15)
     } else {
@@ -51,8 +68,7 @@ pub fn has_map(st: &EntityState) -> bool {
     st.extras.item.map_id.is_some()
 }
 
-fn facing(st: &EntityState) -> (Vec3, f32, f32) {
-    let dir = st.extras.hanging_direction;
+fn facing(dir: Direction) -> (Vec3, f32, f32) {
     let step = Vec3::from(dir.normal());
     match dir {
         Direction::Up => (step, -90.0, 180.0),
@@ -62,16 +78,20 @@ fn facing(st: &EntityState) -> (Vec3, f32, f32) {
 }
 
 pub fn frame_root(st: &EntityState) -> RootPose {
-    let (step, x_rot, y_rot) = facing(st);
     RootPose {
         scale: 1.0,
-        hook: Transform {
-            translation: step * OFFSET_TO_WALL,
-            rotation: Quat::from_rotation_x(x_rot.to_radians())
-                * Quat::from_rotation_y(y_rot.to_radians()),
-            scale: Vec3::ONE,
-        },
+        hook: wall_hook(st.extras.hanging_direction),
         ..RootPose::default()
+    }
+}
+
+fn wall_hook(dir: Direction) -> Transform {
+    let (step, x_rot, y_rot) = facing(dir);
+    Transform {
+        translation: step * OFFSET_TO_WALL,
+        rotation: Quat::from_rotation_x(x_rot.to_radians())
+            * Quat::from_rotation_y(y_rot.to_radians()),
+        scale: Vec3::ONE,
     }
 }
 
@@ -84,7 +104,11 @@ fn frame_model_root(st: &EntityState) -> RootPose {
 }
 
 pub fn contents_depth(st: &EntityState) -> f32 {
-    if st.is_invisible { 0.5 } else { 0.4375 }
+    depth_for(st.is_invisible)
+}
+
+fn depth_for(invisible: bool) -> f32 {
+    if invisible { 0.5 } else { 0.4375 }
 }
 
 fn map_mesh(_st: &EntityState) -> Mesh {
@@ -114,12 +138,47 @@ fn map_key(st: &EntityState) -> TexturePath {
     map_texture(st).unwrap_or_default()
 }
 
+fn has_markers(st: &EntityState) -> bool {
+    st.extras.map_markers.is_some()
+}
+
+fn markers_key(st: &EntityState) -> TexturePath {
+    st.extras
+        .map_markers
+        .as_ref()
+        .map(|markers| format!("{:016x}", markers.key).into())
+        .unwrap_or_default()
+}
+
+fn markers_mesh(st: &EntityState) -> Mesh {
+    let list = st
+        .extras
+        .map_markers
+        .as_ref()
+        .map_or(&[][..], |m| &m.list[..]);
+    crate::renderer::maps::decoration_mesh(list)
+}
+
+fn markers_texture(st: &EntityState) -> Option<TexturePath> {
+    has_markers(st).then_some(TexturePath::Borrowed(DECORATION_ATLAS))
+}
+
 fn frame_map_root(st: &EntityState) -> RootPose {
-    let quarter_turns = (st.extras.item_rotation.rem_euclid(4) * 2) as f32;
-    let mut pose = frame_root(st);
-    pose.hook = pose
-        .hook
-        .mul_transform(Transform::from_xyz(0.0, 0.0, contents_depth(st)))
+    RootPose {
+        scale: 1.0,
+        hook: map_pixel_pose(
+            st.extras.hanging_direction,
+            st.extras.item_rotation,
+            st.is_invisible,
+        ),
+        ..RootPose::default()
+    }
+}
+
+pub fn map_pixel_pose(dir: Direction, item_rotation: i32, invisible: bool) -> Transform {
+    let quarter_turns = (item_rotation.rem_euclid(4) * 2) as f32;
+    wall_hook(dir)
+        .mul_transform(Transform::from_xyz(0.0, 0.0, depth_for(invisible)))
         .mul_transform(Transform::from_rotation(Quat::from_rotation_z(
             (quarter_turns * 45.0 + 180.0).to_radians(),
         )))
@@ -127,8 +186,7 @@ fn frame_map_root(st: &EntityState) -> RootPose {
             translation: Vec3::new(-64.0, -64.0, -1.0) / MAP_EDGE,
             rotation: Quat::IDENTITY,
             scale: Vec3::splat(1.0 / MAP_EDGE),
-        });
-    pose
+        })
 }
 
 #[cfg(test)]
@@ -153,7 +211,7 @@ mod tests {
             (Direction::North, Vec3::new(0.0, 0.0, -1.0), 0.0),
             (Direction::East, Vec3::new(1.0, 0.0, 0.0), -90.0),
         ] {
-            let (got_step, x_rot, got_y_rot) = facing(&state(dir));
+            let (got_step, x_rot, got_y_rot) = facing(dir);
             assert!((got_step - step).length() < 1e-5, "{dir:?}: {got_step:?}");
             assert_eq!(x_rot, 0.0, "{dir:?}");
             assert_eq!(got_y_rot, y_rot, "{dir:?}");
@@ -162,10 +220,10 @@ mod tests {
 
     #[test]
     fn vertical_directions_pitch_instead() {
-        let (up, up_x_rot, up_y_rot) = facing(&state(Direction::Up));
+        let (up, up_x_rot, up_y_rot) = facing(Direction::Up);
         assert_eq!(up, Vec3::new(0.0, 1.0, 0.0));
         assert_eq!((up_x_rot, up_y_rot), (-90.0, 180.0));
-        let (down, down_x_rot, down_y_rot) = facing(&state(Direction::Down));
+        let (down, down_x_rot, down_y_rot) = facing(Direction::Down);
         assert_eq!(down, Vec3::new(0.0, -1.0, 0.0));
         assert_eq!((down_x_rot, down_y_rot), (90.0, 180.0));
     }

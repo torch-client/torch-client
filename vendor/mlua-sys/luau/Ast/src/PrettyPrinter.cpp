@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/PrettyPrinter.h"
 
 #include "Luau/Parser.h"
@@ -32,7 +31,7 @@ bool isIdentifierChar(char c)
 const std::vector<std::string> keywords = {"and",   "break", "do",  "else", "elseif", "end",    "false", "for",  "function", "if",   "in",
                                            "local", "nil",   "not", "or",   "repeat", "return", "then",  "true", "until",    "while"};
 
-} // namespace
+}
 
 namespace Luau
 {
@@ -59,7 +58,7 @@ struct StringWriter : Writer
 {
     std::string ss;
     Position pos{0, 0};
-    char lastChar = '\0'; // used to determine whether we need to inject an extra space to preserve grammatical correctness.
+    char lastChar = '\0';
 
     const std::string& str() const
     {
@@ -397,7 +396,6 @@ struct Printer
 
             ArgNameInserter(writer, argNames, argNamesColonPositions)();
 
-            // Only variadic tail
             if (list.types.size == 0)
             {
                 visualizeTypePackAnnotation(*list.tailType, false);
@@ -801,7 +799,7 @@ struct Printer
                 }
                 else
                 {
-                    writer.write(escape(std::string_view(string.data, string.size), /* escapeForInterpString = */ true));
+                    writer.write(escape(std::string_view(string.data, string.size), true));
                 }
 
                 if (index < a->expressions.size)
@@ -925,7 +923,6 @@ struct Printer
         {
             writer.keyword("while");
             visualize(*a->condition);
-            // TODO: what if 'hasDo = false'?
             advance(a->doLocation.begin);
             writer.keyword("do");
             visualizeBlock(*a->body);
@@ -988,7 +985,6 @@ struct Printer
                 advance(a->equalsSignLocation->begin);
                 writer.symbol("=");
             }
-
 
             CommaSeparatorInserter valueComma(writer, cstNode ? cstNode->valuesCommaPositions.begin() : nullptr);
             for (const auto& value : a->values)
@@ -1624,7 +1620,6 @@ struct Printer
                     for (size_t i = 0; i < cstNode->items.size; ++i)
                     {
                         CstTypeTable::Item item = cstNode->items.data[i];
-                        // we store indexer as part of items to preserve property ordering
                         if (item.kind == CstTypeTable::Item::Kind::Indexer)
                         {
                             LUAU_ASSERT(a->indexer);
@@ -1767,7 +1762,6 @@ struct Printer
                 if (lta && lta->name == "nil" && !r->is<AstTypeOptional>())
                     std::swap(l, r);
 
-                // it's still possible that we had a (T | U) or (T | nil) and not (nil | T)
                 auto rta = r->as<AstTypeReference>();
                 if (rta && rta->name == "nil")
                 {
@@ -1829,7 +1823,6 @@ struct Printer
         {
             const auto cstNode = lookupCstNode<CstTypeIntersection>(a);
 
-            // If the sizes are equal, we know there is a leading & token
             if (cstNode && cstNode->leadingPosition)
             {
                 advance(*cstNode->leadingPosition);
@@ -1918,7 +1911,7 @@ struct Printer
             {
                 LUAU_ASSERT(typeOrPack.typePack);
                 comma();
-                visualizeTypePackAnnotation(*typeOrPack.typePack, /* forVarArg = */ false);
+                visualizeTypePackAnnotation(*typeOrPack.typePack, false);
             }
         }
 
@@ -1990,7 +1983,6 @@ PrettyPrintResult prettyPrint(std::string_view source, ParseOptions options, boo
 
     if (!parseResult.errors.empty())
     {
-        // PrettyPrintResult keeps track of only a single error
         const ParseError& error = parseResult.errors.front();
 
         return PrettyPrintResult{"", error.getLocation(), error.what()};
@@ -2006,4 +1998,4 @@ PrettyPrintResult prettyPrint(std::string_view source, ParseOptions options, boo
     return PrettyPrintResult{prettyPrint(*parseResult.root, parseResult.cstNodeMap)};
 }
 
-} // namespace Luau
+}

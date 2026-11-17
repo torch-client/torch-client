@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "AliasCycleTracker.h"
 
 #include "Luau/DenseHash.h"
@@ -42,4 +41,4 @@ std::string AliasCycleTracker::getStringifiedCycle(const std::string& repeated) 
     return result;
 }
 
-} // namespace Luau::Require
+}

@@ -297,6 +297,7 @@ pub fn draw_smithing(
     if snap.container_data[0] != 0 {
         error_icon(p, "container/smithing/error", left + 65.0, top + 46.0);
     }
+    state.puppet.stand.draw(p, left, top, snap.slot(3));
     close_window(
         p,
         state,

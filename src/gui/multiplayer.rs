@@ -33,6 +33,7 @@ mod tr {
         name_label = "manageServer.enterName",
         address_label = "manageServer.enterIp",
         delete_question = "selectServer.deleteQuestion",
+        delete_button = "selectServer.deleteButton",
         pinging = "multiplayer.status.pinging",
         cannot_connect = "multiplayer.status.cannot_connect",
         cannot_resolve = "multiplayer.status.cannot_resolve",
@@ -291,29 +292,30 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     state.menu.ensure_loaded();
     menu::background(p, ctx.vw, ctx.vh);
 
+    if state.menu.confirm_delete.is_some() {
+        draw_delete_confirm(p, state, ctx);
+        return;
+    }
+
     p.text_centered(tr::title(), ctx.vw / 2.0, LAYOUT.title_y(), 0xFFFFFF, true);
 
     let (lx, ly, lw, lh) = LAYOUT.content_rect(ctx.vw, ctx.vh);
     menu::list_background(p, lx, ly, lw, lh, state.menu.scroll);
 
-    let confirming = state.menu.confirm_delete.is_some();
-    let dropped = (state.menu.version_open || state.menu.proxy_open) && !confirming;
-    let locked = confirming || dropped;
-    let (tooltip, list_focused) = draw_rows(p, state, ctx, locked);
-    draw_scrollbar(p, &mut state.menu, ctx, lh, locked);
-    draw_footer(p, state, ctx, locked);
-    draw_version_menu(p, state, ctx, confirming);
+    let dropped = state.menu.version_open || state.menu.proxy_open;
+    let (tooltip, list_focused) = draw_rows(p, state, ctx, dropped);
+    draw_scrollbar(p, &mut state.menu, ctx, lh, dropped);
+    draw_footer(p, state, ctx, dropped);
+    draw_version_menu(p, state, ctx, false);
     #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
-    draw_proxy_menu(p, state, ctx, confirming);
+    draw_proxy_menu(p, state, ctx, false);
     if let Some(lines) = tooltip
         && let Some(m) = ctx.mouse()
     {
         crate::gui::tooltip::draw_lines(p, &lines, m.x, m.y, ctx.vw, ctx.vh);
     }
 
-    if confirming {
-        draw_delete_confirm(p, state, ctx);
-    } else if !dropped {
+    if !dropped {
         handle_list_keys(state, ctx, list_focused);
     }
 }
@@ -892,25 +894,67 @@ fn handle_list_keys(state: &mut GuiState, ctx: &ScreenCtx, list_focused: bool) {
     }
 }
 
+const CONFIRM_SPACING: f32 = 8.0;
+const CONFIRM_BUTTONS_PAD_TOP: f32 = 16.0;
+const CONFIRM_BUTTON_GAP: f32 = 4.0;
+const CONFIRM_BUTTON_W: f32 = 150.0;
+const CONFIRM_MESSAGE_INSET: f32 = 50.0;
+const CONFIRM_MESSAGE_MAX_ROWS: usize = 15;
+
 fn draw_delete_confirm(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let Some(index) = state.menu.confirm_delete else {
         return;
     };
 
-    p.fill(0.0, 0.0, ctx.vw, ctx.vh, 0xC0_000000);
+    let mut rows = widgets::wrap(
+        p,
+        &[state.menu.confirm_delete_text.as_str()],
+        ctx.vw - CONFIRM_MESSAGE_INSET + 4.0,
+    );
+    rows.truncate(CONFIRM_MESSAGE_MAX_ROWS);
 
-    let cy = (ctx.vh / 2.0).floor();
-    let mid = ctx.vw / 2.0;
-    p.text_centered(tr::delete_question(), mid, cy - 40.0, 0xFFFFFF, true);
-    p.text_centered(&state.menu.confirm_delete_text, mid, cy - 25.0, GREY, true);
+    let message_h = rows.len() as f32 * LINE_H;
+    let block_h = LINE_H
+        + CONFIRM_SPACING
+        + message_h
+        + CONFIRM_SPACING
+        + CONFIRM_BUTTONS_PAD_TOP
+        + WIDGET_HEIGHT;
+    let top = ((ctx.vh - block_h) / 2.0).floor();
+    let mid = (ctx.vw / 2.0).floor();
 
-    let x = widgets::centered_x(ctx.vw);
-    if Button::new(x, cy, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, tr::delete()).draw(p, ctx) {
+    p.text_centered(tr::delete_question(), mid, top, 0xFFFFFF, true);
+    let mut y = top + LINE_H + CONFIRM_SPACING;
+    for row in &rows {
+        p.text_centered(row, mid, y, 0xFFFFFF, true);
+        y += LINE_H;
+    }
+
+    let buttons_y = y + CONFIRM_SPACING + CONFIRM_BUTTONS_PAD_TOP;
+    let row_w = 2.0 * CONFIRM_BUTTON_W + CONFIRM_BUTTON_GAP;
+    let x = widgets::centered_row_x(ctx.vw, row_w);
+    if Button::new(
+        x,
+        buttons_y,
+        CONFIRM_BUTTON_W,
+        WIDGET_HEIGHT,
+        tr::delete_button(),
+    )
+    .draw(p, ctx)
+    {
         state.menu.delete(index);
         state.menu.save();
         state.menu.confirm_delete = None;
     }
-    if Button::new(x, cy + 24.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, tr::cancel()).draw(p, ctx)
+    let cancel_x = x + CONFIRM_BUTTON_W + CONFIRM_BUTTON_GAP;
+    if Button::new(
+        cancel_x,
+        buttons_y,
+        CONFIRM_BUTTON_W,
+        WIDGET_HEIGHT,
+        tr::cancel(),
+    )
+    .draw(p, ctx)
         || ctx.input.escape
     {
         state.menu.confirm_delete = None;

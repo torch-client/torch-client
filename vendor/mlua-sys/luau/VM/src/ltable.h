@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #pragma once
 
 #include "lobject.h"
@@ -11,7 +9,6 @@
 
 #define gval2slot(t, v) int(cast_to(LuaNode*, static_cast<const TValue*>(v)) - t->node)
 
-// reset cache of absent metamethods, cache is updated in luaT_gettm
 #define invalidateTMcache(t) t->tmcache = 0
 
 LUAI_FUNC const TValue* luaH_getnum(LuaTable* t, int key);

@@ -10,6 +10,7 @@ pub mod model;
 pub mod placed;
 pub mod potions;
 pub mod raster;
+pub(crate) mod tips;
 
 use std::borrow::Cow;
 

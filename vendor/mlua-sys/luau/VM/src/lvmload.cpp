@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lvm.h"
 
 #include "lstate.h"
@@ -89,16 +87,12 @@ void luaV_getimport(lua_State* L, LuaTable* env, TValue* k, StkId res, uint32_t 
     int id1 = int(id >> 10) & 1023;
     int id2 = int(id) & 1023;
 
-    // after the first call to luaV_gettable, res may be invalid, and env may (sometimes) be garbage collected
-    // we take care to not use env again and to restore res before every consecutive use
     ptrdiff_t resp = savestack(L, res);
 
-    // global lookup for id0
     TValue g;
     sethvalue(L, &g, env);
     luaV_gettable(L, &g, &k[id0], res);
 
-    // table lookup for id1
     if (count < 2)
         return;
 
@@ -106,7 +100,6 @@ void luaV_getimport(lua_State* L, LuaTable* env, TValue* k, StkId res, uint32_t 
     if (!propagatenil || !ttisnil(res))
         luaV_gettable(L, res, &k[id1], res);
 
-    // table lookup for id2
     if (count < 3)
         return;
 
@@ -160,29 +153,23 @@ static void resolveImportSafe(lua_State* L, LuaTable* env, TValue* k, uint32_t i
         {
             ResolveImport* self = static_cast<ResolveImport*>(ud);
 
-            // note: we call getimport with nil propagation which means that accesses to table chains like A.B.C will resolve in nil
-            // this is technically not necessary but it reduces the number of exceptions when loading scripts that rely on getfenv/setfenv for global
-            // injection
-            // allocate a stack slot so that we can do table lookups
             luaD_checkstack(L, 1);
             setnilvalue(L->top);
             L->top++;
 
-            luaV_getimport(L, L->gt, self->k, L->top - 1, self->id, /* propagatenil= */ true);
+            luaV_getimport(L, L->gt, self->k, L->top - 1, self->id, true);
         }
     };
 
     ResolveImport ri = {k, id};
     if (L->gt->safeenv)
     {
-        // luaD_pcall will make sure that if any C/Lua calls during import resolution fail, the thread state is restored back
         int oldTop = lua_gettop(L);
         int status = luaD_pcall(L, &ResolveImport::run, &ri, savestack(L, L->top), 0);
-        LUAU_ASSERT(oldTop + 1 == lua_gettop(L)); // if an error occurred, luaD_pcall saves it on stack
+        LUAU_ASSERT(oldTop + 1 == lua_gettop(L));
 
         if (status != 0)
         {
-            // replace error object with nil
             setnilvalue(L->top - 1);
         }
     }
@@ -205,7 +192,6 @@ static void remapUserdataTypes(char* data, size_t size, uint8_t* userdataRemappi
     {
         uint8_t* types = (uint8_t*)data + offset;
 
-        // Skip two bytes of function type introduction
         for (uint32_t i = 2; i < typeSize; i++)
         {
             uint32_t index = uint32_t(types[i] - LBC_TYPE_TAGGED_USERDATA_BASE);
@@ -264,8 +250,6 @@ static int loadsafe(
 
     uint8_t version = read<uint8_t>(data, size, offset);
 
-
-    // 0 means the rest of the bytecode is the error message
     if (version == 0)
     {
         char chunkbuf[LUA_IDSIZE];
@@ -299,12 +283,10 @@ static int loadsafe(
         }
     }
 
-    // env is 0 for current environment and a stack index otherwise
     LuaTable* envt = (env == 0) ? L->gt : hvalue(luaA_toobject(L, env));
 
     TString* source = luaS_new(L, chunkname);
 
-    // string table
     unsigned int stringCount = readVarInt(data, size, offset);
     strings.allocate(L, stringCount);
 
@@ -316,8 +298,6 @@ static int loadsafe(
         offset += length;
     }
 
-    // userdata type remapping table
-    // for unknown userdata types, the entry will remap to common 'userdata' type
     const uint32_t userdataTypeLimit = LBC_TYPE_TAGGED_USERDATA_END - LBC_TYPE_TAGGED_USERDATA_BASE;
     uint8_t userdataRemapping[userdataTypeLimit];
 
@@ -341,7 +321,6 @@ static int loadsafe(
         }
     }
 
-    // proto table
     unsigned int protoCount = readVarInt(data, size, offset);
     protos.allocate(L, protoCount);
 
@@ -372,7 +351,6 @@ static int loadsafe(
                     LUAU_ASSERT(types[0] == LBC_TYPE_FUNCTION);
                     LUAU_ASSERT(types[1] == p->numparams);
 
-                    // transform v1 into v2 format
                     int headersize = typesize > 127 ? 4 : 3;
 
                     p->typeinfo = luaM_newarray(L, headersize + typesize, uint8_t, p->memcat);
@@ -431,9 +409,6 @@ static int loadsafe(
         p->k = luaM_newarray(L, sizek, TValue, p->memcat);
         p->sizek = sizek;
 
-        // Initialize the constants to nil to ensure they have a valid state
-        // in the event that some operation in the following loop fails with
-        // an exception.
         for (int j = 0; j < p->sizek; ++j)
         {
             setnilvalue(&p->k[j]);
@@ -444,7 +419,6 @@ static int loadsafe(
             switch (read<uint8_t>(data, size, offset))
             {
             case LBC_CONSTANT_NIL:
-                // All constants have already been pre-initialized to nil
                 break;
 
             case LBC_CONSTANT_BOOLEAN:
@@ -590,7 +564,6 @@ static int loadsafe(
         protos[i] = p;
     }
 
-    // "main" proto is pushed to Lua stack
     uint32_t mainid = readVarInt(data, size, offset);
     Proto* main = protos[mainid];
 
@@ -605,10 +578,8 @@ static int loadsafe(
 
 int luau_load(lua_State* L, const char* chunkname, const char* data, size_t size, int env)
 {
-    // we will allocate a fair amount of memory so check GC before we do
     luaC_checkGC(L);
 
-    // pause GC for the duration of deserialization - some objects we're creating aren't rooted
     const ScopedSetGCThreshold pauseGC{L->global, SIZE_MAX};
 
     struct LoadContext
@@ -639,12 +610,11 @@ int luau_load(lua_State* L, const char* chunkname, const char* data, size_t size
 
     int status = luaD_rawrunprotected(L, &LoadContext::run, &ctx);
 
-    // load can either succeed or get an OOM error, any other errors should be handled internally
     LUAU_ASSERT(status == LUA_OK || status == LUA_ERRMEM);
 
     if (status == LUA_ERRMEM)
     {
-        lua_pushstring(L, LUA_MEMERRMSG); // out-of-memory error message doesn't require an allocation
+        lua_pushstring(L, LUA_MEMERRMSG);
         return 1;
     }
 

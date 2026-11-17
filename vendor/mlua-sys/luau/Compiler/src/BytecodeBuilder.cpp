@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/BytecodeBuilder.h"
 
 #include "Luau/BytecodeUtils.h"
@@ -161,20 +160,17 @@ size_t BytecodeBuilder::ConstantKeyHash::operator()(const ConstantKey& key) cons
         static_assert(sizeof(key.value) + sizeof(key.extra) == sizeof(i), "Expecting vector to have four 32-bit components");
         memcpy(i, &key.value, sizeof(i));
 
-        // scramble bits to make sure that integer coordinates have entropy in lower bits
         i[0] ^= i[0] >> 17;
         i[1] ^= i[1] >> 17;
         i[2] ^= i[2] >> 17;
         i[3] ^= i[3] >> 17;
 
-        // Optimized Spatial Hashing for Collision Detection of Deformable Objects
         uint32_t h = (i[0] * 73856093) ^ (i[1] * 19349663) ^ (i[2] * 83492791) ^ (i[3] * 39916801);
 
         return size_t(h);
     }
     else
     {
-        // finalizer from MurmurHash64B
         const uint32_t m = 0x5bd1e995;
 
         uint32_t h1 = uint32_t(key.value);
@@ -189,14 +185,12 @@ size_t BytecodeBuilder::ConstantKeyHash::operator()(const ConstantKey& key) cons
         h2 ^= h1 >> 19;
         h2 *= m;
 
-        // ... truncated to 32-bit output (normally hash is equal to (uint64_t(h1) << 32) | h2, but we only really need the lower 32-bit half)
         return size_t(h2);
     }
 }
 
 size_t BytecodeBuilder::TableShapeHash::operator()(const TableShape& v) const
 {
-    // FNV-1a inspired hash (note that we feed integers instead of bytes)
     uint32_t hash = 2166136261;
 
     for (size_t i = 0; i < v.length; ++i)
@@ -217,7 +211,6 @@ BytecodeBuilder::BytecodeBuilder(BytecodeEncoder* encoder)
 {
     LUAU_ASSERT(stringTable.find(StringRef{"", 0}) == nullptr);
 
-    // preallocate some buffers that are very likely to grow anyway; this works around std::vector's inefficient growth policy for small arrays
     insns.reserve(32);
     lines.reserve(32);
     constants.reserve(16);
@@ -258,11 +251,9 @@ void BytecodeBuilder::endFunction(uint8_t maxstacksize, uint8_t numupvalues, uin
     validate();
 #endif
 
-    // this call is indirect to make sure we only gain link time dependency on dumpCurrentFunction when needed
     if (dumpFunctionPtr)
         func.dump = (this->*dumpFunctionPtr)(func.dumpinstoffs);
 
-    // very approximate: 4 bytes per instruction for code, 1 byte for debug line, and 1-2 bytes for aux data like constants plus overhead
     func.data.reserve(32 + insns.size() * 7);
 
     if (encoder)
@@ -321,7 +312,6 @@ unsigned int BytecodeBuilder::addStringTableEntry(StringRef value)
 {
     unsigned int& index = stringTable[value];
 
-    // note: bytecode serialization format uses 1-based table indices, 0 is reserved to mean nil
     if (index == 0)
     {
         index = uint32_t(stringTable.size());
@@ -525,7 +515,6 @@ bool BytecodeBuilder::patchJumpD(size_t jumpLabel, size_t targetLabel)
     }
     else if (abs(offset) < kMaxJumpDistance)
     {
-        // our jump doesn't fit into 16 bits; we will need to repatch the bytecode sequence with jump trampolines, see expandJumps
         hasLongJumps = true;
     }
     else
@@ -667,7 +656,6 @@ void BytecodeBuilder::addDebugRemark(const char* format, ...)
     vformatAppend(debugRemarkBuffer, format, args);
     va_end(args);
 
-    // we null-terminate all remarks to avoid storing remark length
     debugRemarkBuffer += '\0';
 
     debugRemarks.emplace_back(uint32_t(insns.size()), uint32_t(offset));
@@ -684,7 +672,6 @@ void BytecodeBuilder::finalize()
             ty.nameRef = addStringTableEntry(StringRef({ty.name.c_str(), ty.name.length()}));
     }
 
-    // preallocate space for bytecode blob
     size_t capacity = 16;
 
     for (auto& p : stringTable)
@@ -695,7 +682,6 @@ void BytecodeBuilder::finalize()
 
     bytecode.reserve(capacity);
 
-    // assemble final bytecode blob
     uint8_t version = getVersion();
     LUAU_ASSERT(version >= LBC_VERSION_MIN && version <= LBC_VERSION_MAX);
 
@@ -708,7 +694,6 @@ void BytecodeBuilder::finalize()
     writeStringTable(bytecode);
 
     {
-        // Write the mapping between used type name indices and their name
         for (uint32_t i = 0; i < uint32_t(userdataTypes.size()); i++)
         {
             if (userdataTypes[i].used)
@@ -718,7 +703,6 @@ void BytecodeBuilder::finalize()
             }
         }
 
-        // 0 marks the end of the mapping
         writeByte(bytecode, 0);
     }
 
@@ -736,7 +720,6 @@ void BytecodeBuilder::writeFunction(std::string& ss, uint32_t id, uint8_t flags)
     LUAU_ASSERT(id < functions.size());
     const Function& func = functions[id];
 
-    // header
     writeByte(ss, func.maxstacksize);
     writeByte(ss, func.numparams);
     writeByte(ss, func.numupvalues);
@@ -746,7 +729,6 @@ void BytecodeBuilder::writeFunction(std::string& ss, uint32_t id, uint8_t flags)
 
     if (!func.typeinfo.empty() || !typedUpvals.empty() || !typedLocals.empty())
     {
-        // collect type info into a temporary string to know the overall size of type data
         tempTypeInfo.clear();
         writeVarInt(tempTypeInfo, uint32_t(func.typeinfo.size()));
         writeVarInt(tempTypeInfo, uint32_t(typedUpvals.size()));
@@ -774,13 +756,11 @@ void BytecodeBuilder::writeFunction(std::string& ss, uint32_t id, uint8_t flags)
         writeVarInt(ss, 0);
     }
 
-    // instructions
     writeVarInt(ss, uint32_t(insns.size()));
 
     for (uint32_t insn : insns)
         writeInt(ss, insn);
 
-    // constants
     writeVarInt(ss, uint32_t(constants.size()));
 
     for (const Constant& c : constants)
@@ -839,13 +819,11 @@ void BytecodeBuilder::writeFunction(std::string& ss, uint32_t id, uint8_t flags)
         }
     }
 
-    // child protos
     writeVarInt(ss, uint32_t(protos.size()));
 
     for (uint32_t child : protos)
         writeVarInt(ss, child);
 
-    // debug info
     writeVarInt(ss, func.debuglinedefined);
     writeVarInt(ss, func.debugname);
 
@@ -902,11 +880,8 @@ void BytecodeBuilder::writeLineInfo(std::string& ss) const
 {
     LUAU_ASSERT(!lines.empty());
 
-    // this function encodes lines inside each span as a 8-bit delta to span baseline
-    // span is always a power of two; depending on the line info input, it may need to be as low as 1
     int span = 1 << 24;
 
-    // first pass: determine span length
     for (size_t offset = 0; offset < lines.size(); offset += span)
     {
         size_t next = offset;
@@ -925,13 +900,10 @@ void BytecodeBuilder::writeLineInfo(std::string& ss) const
 
         if (next < lines.size() && next - offset < size_t(span))
         {
-            // since not all lines in the range fit in 8b delta, we need to shrink the span
-            // next iteration will need to reprocess some lines again since span changed
             span = 1 << log2(int(next - offset));
         }
     }
 
-    // second pass: compute span base
     int baselineOne = 0;
     std::vector<int> baselineScratch;
     int* baseline = &baselineOne;
@@ -939,7 +911,6 @@ void BytecodeBuilder::writeLineInfo(std::string& ss) const
 
     if (baselineSize > 1)
     {
-        // avoid heap allocation for single-element baseline which is most functions (<256 lines)
         baselineScratch.resize(baselineSize);
         baseline = baselineScratch.data();
     }
@@ -956,7 +927,6 @@ void BytecodeBuilder::writeLineInfo(std::string& ss) const
         baseline[offset / span] = min;
     }
 
-    // third pass: write resulting data
     int logspan = log2(span);
 
     writeByte(ss, uint8_t(logspan));
@@ -1032,16 +1002,11 @@ int BytecodeBuilder::decomposeImportId(uint32_t ids, int32_t& id0, int32_t& id1,
 
 uint32_t BytecodeBuilder::getStringHash(StringRef key)
 {
-    // This hashing algorithm should match luaS_hash defined in VM/lstring.cpp for short inputs; we can't use that code directly to keep compiler and
-    // VM independent in terms of compilation/linking. The resulting string hashes are embedded into bytecode binary and result in a better initial
-    // guess for the field hashes which improves performance during initial code execution. We omit the long string processing here for simplicity, as
-    // it doesn't really matter on long identifiers.
     const char* str = key.data;
     size_t len = key.length;
 
     unsigned int h = unsigned(len);
 
-    // original Lua 5.1 hash for compatibility (exact match when len<32)
     for (size_t i = len; i > 0; --i)
         h ^= (h << 5) + (h >> 2) + (uint8_t)str[i - 1];
 
@@ -1050,8 +1015,6 @@ uint32_t BytecodeBuilder::getStringHash(StringRef key)
 
 void BytecodeBuilder::foldJumps()
 {
-    // if our function has long jumps, some processing below can make jump instructions not-jumps (e.g. JUMP->RETURN)
-    // it's safer to skip this processing
     if (hasLongJumps)
         return;
 
@@ -1061,8 +1024,6 @@ void BytecodeBuilder::foldJumps()
 
         uint32_t jumpInsn = insns[jumpLabel];
 
-        // follow jump target through forward unconditional jumps
-        // we only follow forward jumps to make sure the process terminates
         uint32_t targetLabel = jumpLabel + 1 + LUAU_INSN_D(jumpInsn);
         LUAU_ASSERT(targetLabel < insns.size());
         uint32_t targetInsn = insns[targetLabel];
@@ -1076,7 +1037,6 @@ void BytecodeBuilder::foldJumps()
 
         int offset = int(targetLabel) - int(jumpLabel) - 1;
 
-        // for unconditional jumps to RETURN, we can replace JUMP with RETURN
         if (LUAU_INSN_OP(jumpInsn) == LOP_JUMP && LUAU_INSN_OP(targetInsn) == LOP_RETURN)
         {
             insns[jumpLabel] = targetInsn;
@@ -1096,22 +1056,8 @@ void BytecodeBuilder::expandJumps()
     if (!hasLongJumps)
         return;
 
-    // we have some jump instructions that couldn't be patched which means their offset didn't fit into 16 bits
-    // our strategy for replacing instructions is as follows: instead of
-    //   OP jumpoffset
-    // we will synthesize a jump trampoline before our instruction (note that jump offsets are relative to next instruction):
-    //   JUMP +1
-    //   JUMPX jumpoffset
-    //   OP -2
-    // the idea is that during forward execution, we will jump over JUMPX into OP; if OP decides to jump, it will jump to JUMPX
-    // JUMPX can carry a 24-bit jump offset
-
-    // jump trampolines expand the code size, which can increase existing jump distances.
-    // because of this, we may need to expand jumps that previously fit into 16-bit just fine.
-    // the worst-case expansion is 3x, so to be conservative we will repatch all jumps that have an offset >= 32767/3
     const int kMaxJumpDistanceConservative = 32767 / 3;
 
-    // we will need to process jumps in order
     std::sort(
         jumps.begin(),
         jumps.end(),
@@ -1121,8 +1067,6 @@ void BytecodeBuilder::expandJumps()
         }
     );
 
-    // first, let's add jump thunks for every jump with a distance that's too big
-    // we will create new instruction buffers, with remap table keeping track of the moves: remap[oldpc] = newpc
     std::vector<uint32_t> remap(insns.size());
 
     std::vector<uint32_t> newinsns;
@@ -1146,7 +1090,6 @@ void BytecodeBuilder::expandJumps()
 
             if (abs(offset) > kMaxJumpDistanceConservative)
             {
-                // insert jump trampoline as described above; we keep JUMPX offset uninitialized in this pass
                 newinsns.push_back(LOP_JUMP | (1 << 16));
                 newinsns.push_back(LOP_JUMPX);
 
@@ -1161,7 +1104,6 @@ void BytecodeBuilder::expandJumps()
 
         int oplen = getOpLength(LuauOpcode(op));
 
-        // copy instruction and line info to the new stream
         for (int j = 0; j < oplen; ++j)
         {
             remap[i] = uint32_t(newinsns.size());
@@ -1176,8 +1118,6 @@ void BytecodeBuilder::expandJumps()
     LUAU_ASSERT(currentJump == jumps.size());
     LUAU_ASSERT(pendingTrampolines > 0);
 
-    // now we need to recompute offsets for jump instructions - we could not do this in the first pass because the offsets are between *target*
-    // instructions
     for (Jump& jump : jumps)
     {
         int offset = int(jump.target) - int(jump.source) - 1;
@@ -1185,18 +1125,14 @@ void BytecodeBuilder::expandJumps()
 
         if (abs(offset) > kMaxJumpDistanceConservative)
         {
-            // fix up jump trampoline
             uint32_t& insnt = newinsns[remap[jump.source] - 1];
             uint32_t& insnj = newinsns[remap[jump.source]];
 
             LUAU_ASSERT(LUAU_INSN_OP(insnt) == LOP_JUMPX);
 
-            // patch JUMPX to JUMPX to target location; note that newoffset is the offset of the jump *relative to OP*, so we need to add 1 to make it
-            // relative to JUMPX
             insnt &= 0xff;
             insnt |= uint32_t(newoffset + 1) << 8;
 
-            // patch OP to OP -2
             insnj &= 0xffff;
             insnj |= uint16_t(-2) << 16;
 
@@ -1206,10 +1142,8 @@ void BytecodeBuilder::expandJumps()
         {
             uint32_t& insn = newinsns[remap[jump.source]];
 
-            // make sure jump instruction had the correct offset before we started
             LUAU_ASSERT(LUAU_INSN_D(insn) == offset);
 
-            // patch instruction with the new offset
             LUAU_ASSERT(int16_t(newoffset) == newoffset);
 
             insn &= 0xffff;
@@ -1219,7 +1153,6 @@ void BytecodeBuilder::expandJumps()
 
     LUAU_ASSERT(pendingTrampolines == 0);
 
-    // this was hard, but we're done.
     insns.swap(newinsns);
     lines.swap(newlines);
 
@@ -1227,7 +1160,6 @@ void BytecodeBuilder::expandJumps()
     {
         for (DebugLocal& debugLocal : debugLocals)
         {
-            // endpc is exclusive, to get the right remapping, we need to remap the location before the end
             if (debugLocal.startpc != debugLocal.endpc)
                 debugLocal.endpc = remap[debugLocal.endpc - 1] + 1;
             else
@@ -1239,7 +1171,6 @@ void BytecodeBuilder::expandJumps()
 
         for (TypedLocal& typedLocal : typedLocals)
         {
-            // endpc is exclusive, to get the right remapping, we need to remap the location before the end
             if (typedLocal.startpc != typedLocal.endpc)
                 typedLocal.endpc = remap[typedLocal.endpc - 1] + 1;
             else
@@ -1252,7 +1183,6 @@ void BytecodeBuilder::expandJumps()
 
 std::string BytecodeBuilder::getError(const std::string& message)
 {
-    // 0 acts as a special marker for error bytecode (it's equal to LBC_VERSION_TARGET for valid bytecode blobs)
     std::string result;
     result += char(0);
     result += message;
@@ -1290,7 +1220,6 @@ void BytecodeBuilder::validateInstructions() const
 
     const Function& func = functions[currentFunction];
 
-    // tag instruction offsets so that we can validate jumps
     std::vector<uint8_t> insnvalid(insns.size(), 0);
 
     for (size_t i = 0; i < insns.size();)
@@ -1306,7 +1235,6 @@ void BytecodeBuilder::validateInstructions() const
 
     std::vector<uint8_t> openCaptures;
 
-    // validate individual instructions
     for (size_t i = 0; i < insns.size();)
     {
         uint32_t insn = insns[i];
@@ -1361,7 +1289,7 @@ void BytecodeBuilder::validateInstructions() const
             VREG(LUAU_INSN_A(insn));
             VCONST(LUAU_INSN_D(insn), Import);
             uint32_t id = insns[i + 1];
-            LUAU_ASSERT((id >> 30) != 0); // import chain with length 1-3
+            LUAU_ASSERT((id >> 30) != 0);
             for (unsigned int j = 0; j < (id >> 30); ++j)
                 VCONST((id >> (20 - 10 * j)) & 1023, String);
         }
@@ -1415,15 +1343,15 @@ void BytecodeBuilder::validateInstructions() const
             int nparams = LUAU_INSN_B(insn) - 1;
             int nresults = LUAU_INSN_C(insn) - 1;
             VREG(LUAU_INSN_A(insn));
-            VREGRANGE(LUAU_INSN_A(insn) + 1, nparams); // 1..nparams
-            VREGRANGE(LUAU_INSN_A(insn), nresults);    // 1..nresults
+            VREGRANGE(LUAU_INSN_A(insn) + 1, nparams);
+            VREGRANGE(LUAU_INSN_A(insn), nresults);
         }
         break;
 
         case LOP_RETURN:
         {
             int nresults = LUAU_INSN_B(insn) - 1;
-            VREGRANGE(LUAU_INSN_A(insn), nresults); // 0..nresults-1
+            VREGRANGE(LUAU_INSN_A(insn), nresults);
         }
         break;
 
@@ -1544,19 +1472,16 @@ void BytecodeBuilder::validateInstructions() const
 
         case LOP_FORNPREP:
         case LOP_FORNLOOP:
-            // for loop protocol: A, A+1, A+2 are used for iteration
             VREG(LUAU_INSN_A(insn) + 2);
             VJUMP(LUAU_INSN_D(insn));
             break;
 
         case LOP_FORGPREP:
-            // forg loop protocol: A, A+1, A+2 are used for iteration protocol; A+3, ... are loop variables
             VREG(LUAU_INSN_A(insn) + 2 + 1);
             VJUMP(LUAU_INSN_D(insn));
             break;
 
         case LOP_FORGLOOP:
-            // forg loop protocol: A, A+1, A+2 are used for iteration protocol; A+3, ... are loop variables
             VREG(LUAU_INSN_A(insn) + 2 + uint8_t(insns[i + 1]));
             VJUMP(LUAU_INSN_D(insn));
             LUAU_ASSERT(uint8_t(insns[i + 1]) >= 1);
@@ -1564,14 +1489,14 @@ void BytecodeBuilder::validateInstructions() const
 
         case LOP_FORGPREP_INEXT:
         case LOP_FORGPREP_NEXT:
-            VREG(LUAU_INSN_A(insn) + 4); // forg loop protocol: A, A+1, A+2 are used for iteration protocol; A+3, A+4 are loop variables
+            VREG(LUAU_INSN_A(insn) + 4);
             VJUMP(LUAU_INSN_D(insn));
             break;
 
         case LOP_GETVARARGS:
         {
             int nresults = LUAU_INSN_B(insn) - 1;
-            VREGRANGE(LUAU_INSN_A(insn), nresults); // 0..nresults-1
+            VREGRANGE(LUAU_INSN_A(insn), nresults);
         }
         break;
 
@@ -1679,10 +1604,6 @@ void BytecodeBuilder::validateInstructions() const
         LUAU_ASSERT(i <= insns.size());
     }
 
-    // all CAPTURE REF instructions must have a CLOSEUPVALS instruction after them in the bytecode stream
-    // this doesn't guarantee safety as it doesn't perform basic block based analysis, but if this fails
-    // then the bytecode is definitely unsafe to run since the compiler won't generate backwards branches
-    // except for loop edges
     LUAU_ASSERT(openCaptures.empty());
 
 #undef VREG
@@ -1695,14 +1616,6 @@ void BytecodeBuilder::validateInstructions() const
 
 void BytecodeBuilder::validateVariadic() const
 {
-    // validate MULTRET sequences: instructions that produce a variadic sequence and consume one must come in pairs
-    // we classify instructions into four groups: producers, consumers, neutral and others
-    // any producer (an instruction that produces more than one value) must be followed by 0 or more neutral instructions
-    // and a consumer (that consumes more than one value); these form a variadic sequence.
-    // except for producer, no instruction in the variadic sequence may be a jump target.
-    // from the execution perspective, producer adjusts L->top to point to one past the last result, neutral instructions
-    // leave L->top unmodified, and consumer adjusts L->top back to the stack frame end.
-    // consumers invalidate all values after L->top after they execute (which we currently don't validate)
     bool variadicSeq = false;
 
     std::vector<uint8_t> insntargets(insns.size(), 0);
@@ -1732,43 +1645,35 @@ void BytecodeBuilder::validateVariadic() const
 
         if (variadicSeq)
         {
-            // no instruction inside the sequence, including the consumer, may be a jump target
-            // this guarantees uninterrupted L->top adjustment flow
             LUAU_ASSERT(!insntargets[i]);
         }
 
         if (op == LOP_CALL)
         {
-            // note: calls may end one variadic sequence and start a new one
 
             if (LUAU_INSN_B(insn) == 0)
             {
-                // consumer instruction ends a variadic sequence
                 LUAU_ASSERT(variadicSeq);
                 variadicSeq = false;
             }
             else
             {
-                // CALL is not a neutral instruction so it can't be present in a variadic sequence unless it's a consumer
                 LUAU_ASSERT(!variadicSeq);
             }
 
             if (LUAU_INSN_C(insn) == 0)
             {
-                // producer instruction starts a variadic sequence
                 LUAU_ASSERT(!variadicSeq);
                 variadicSeq = true;
             }
         }
         else if (op == LOP_GETVARARGS && LUAU_INSN_B(insn) == 0)
         {
-            // producer instruction starts a variadic sequence
             LUAU_ASSERT(!variadicSeq);
             variadicSeq = true;
         }
         else if ((op == LOP_RETURN && LUAU_INSN_B(insn) == 0) || (op == LOP_SETLIST && LUAU_INSN_C(insn) == 0))
         {
-            // consumer instruction ends a variadic sequence
             LUAU_ASSERT(variadicSeq);
             variadicSeq = false;
         }
@@ -1779,27 +1684,17 @@ void BytecodeBuilder::validateVariadic() const
 
             if (LUAU_INSN_B(insns[callTarget]) == 0)
             {
-                // consumer instruction ends a variadic sequence; however, we can't terminate it yet because future analysis of CALL will do it
-                // during FASTCALL fallback, the instructions between this and CALL consumer are going to be executed before L->top so they must
-                // be neutral; as such, we will defer termination of variadic sequence until CALL analysis
                 LUAU_ASSERT(variadicSeq);
             }
             else
             {
-                // FASTCALL is not a neutral instruction so it can't be present in a variadic sequence unless it's linked to CALL consumer
                 LUAU_ASSERT(!variadicSeq);
             }
 
-            // note: if FASTCALL is linked to a CALL producer, the instructions between FASTCALL and CALL are technically not part of an executed
-            // variadic sequence since they are never executed if FASTCALL does anything, so it's okay to skip their validation until CALL
-            // (we can't simply start a variadic sequence here because that would trigger assertions during linked CALL validation)
         }
         else if (op == LOP_CLOSEUPVALS || op == LOP_NAMECALL || op == LOP_GETIMPORT || op == LOP_MOVE || op == LOP_GETUPVAL || op == LOP_GETGLOBAL ||
                  op == LOP_GETTABLEKS || op == LOP_COVERAGE)
         {
-            // instructions inside a variadic sequence must be neutral (can't change L->top)
-            // while there are many neutral instructions like this, here we check that the instruction is one of the few
-            // that we'd expect to exist in FASTCALL fallback sequences or between consecutive CALLs for encoding reasons
         }
         else
         {
@@ -1842,7 +1737,6 @@ void BytecodeBuilder::dumpConstant(std::string& result, int k) const
         formatAppend(result, "%.17g", data.valueNumber);
         break;
     case Constant::Type_Vector:
-        // 3-vectors is the most common configuration, so truncate to three components if possible
         if (data.valueVector[3] == 0.0)
             formatAppend(result, "%.9g, %.9g, %.9g", data.valueVector[0], data.valueVector[1], data.valueVector[2]);
         else
@@ -1986,7 +1880,7 @@ void BytecodeBuilder::dumpInstruction(const uint32_t* code, std::string& result,
         formatAppend(result, "GETIMPORT R%d %d [", LUAU_INSN_A(insn), LUAU_INSN_D(insn));
         dumpConstant(result, LUAU_INSN_D(insn));
         result.append("]\n");
-        code++; // AUX
+        code++;
         break;
 
     case LOP_GETTABLE:
@@ -2382,16 +2276,14 @@ std::string BytecodeBuilder::dumpCurrentFunction(std::vector<int>& dumpinstoffs)
             {
                 LUAU_ASSERT(l.startpc < lines.size());
 
-                // it would be nice to emit name as well but it requires reverse lookup through stringtable
                 formatAppend(result, "local %d: reg %d, start pc %d line %d, no live range\n", int(i), l.reg, l.startpc, lines[l.startpc]);
             }
             else
             {
                 LUAU_ASSERT(l.startpc < l.endpc);
                 LUAU_ASSERT(l.startpc < lines.size());
-                LUAU_ASSERT(l.endpc <= lines.size()); // endpc is exclusive in the debug info, but it's more intuitive to print inclusive data
+                LUAU_ASSERT(l.endpc <= lines.size());
 
-                // it would be nice to emit name as well but it requires reverse lookup through stringtable
                 formatAppend(
                     result,
                     "local %d: reg %d, start pc %d line %d, end pc %d line %d\n",
@@ -2410,7 +2302,6 @@ std::string BytecodeBuilder::dumpCurrentFunction(std::vector<int>& dumpinstoffs)
     {
         const std::string& typeinfo = functions.back().typeinfo;
 
-        // Arguments start from third byte in function typeinfo string
         for (uint8_t i = 2; i < typeinfo.size(); ++i)
         {
             uint8_t et = typeinfo[i];
@@ -2447,7 +2338,6 @@ std::string BytecodeBuilder::dumpCurrentFunction(std::vector<int>& dumpinstoffs)
 
     std::vector<int> labels(insns.size(), -1);
 
-    // annotate valid jump targets with 0
     for (size_t i = 0; i < insns.size();)
     {
         int target = getJumpTarget(insns[i], uint32_t(i));
@@ -2464,7 +2354,6 @@ std::string BytecodeBuilder::dumpCurrentFunction(std::vector<int>& dumpinstoffs)
 
     int nextLabel = 0;
 
-    // compute label ids (sequential integers for all jump targets)
     for (size_t i = 0; i < labels.size(); ++i)
         if (labels[i] == 0)
             labels[i] = nextLabel++;
@@ -2480,7 +2369,6 @@ std::string BytecodeBuilder::dumpCurrentFunction(std::vector<int>& dumpinstoffs)
 
         if (op == LOP_PREPVARARGS)
         {
-            // Don't emit function header in bytecode - it's used for call dispatching and doesn't contain "interesting" information
             i++;
             continue;
         }
@@ -2597,7 +2485,6 @@ std::string BytecodeBuilder::dumpSourceRemarks() const
             formatAppend(result, "%.*s-- remark: %s\n", int(indent), line.c_str(), remarks[nextRemark].second.c_str());
             nextRemark++;
 
-            // skip duplicate remarks (due to inlining/unrolling)
             while (nextRemark < remarks.size() && remarks[nextRemark] == remarks[nextRemark - 1])
                 nextRemark++;
         }
@@ -2664,11 +2551,10 @@ void BytecodeBuilder::annotateInstruction(std::string& result, uint32_t fid, uin
 
     LUAU_ASSERT(next < dumpinstoffs.size());
 
-    // Skip locations of multi-dword instructions
     while (next < dumpinstoffs.size() && dumpinstoffs[next] == -1)
         next++;
 
     formatAppend(result, "%.*s", dumpinstoffs[next] - dumpinstoffs[instpos], dump.data() + dumpinstoffs[instpos]);
 }
 
-} // namespace Luau
+}

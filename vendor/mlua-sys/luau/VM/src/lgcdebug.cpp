@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lgc.h"
 
 #include "lfunc.h"
@@ -20,7 +18,6 @@ static void validateobjref(global_State* g, GCObject* f, GCObject* t)
 
     if (keepinvariant(g))
     {
-        // basic incremental invariant: black can't point to white
         LUAU_ASSERT(!(isblack(f) && iswhite(t)));
     }
 }
@@ -96,7 +93,6 @@ static void validatestack(global_State* g, lua_State* l)
         LUAU_ASSERT(ci->top <= l->stack_last);
     }
 
-    // note: stack refs can violate gc invariant so we only check for liveness
     for (StkId o = l->stack; o < l->top; ++o)
         checkliveness(g, o);
 
@@ -108,7 +104,7 @@ static void validatestack(global_State* g, lua_State* l)
         LUAU_ASSERT(uv->tt == LUA_TUPVAL);
         LUAU_ASSERT(upisopen(uv));
         LUAU_ASSERT(uv->u.open.next->u.open.prev == uv && uv->u.open.prev->u.open.next == uv);
-        LUAU_ASSERT(!isblack(obj2gco(uv))); // open upvalues are never black
+        LUAU_ASSERT(!isblack(obj2gco(uv)));
     }
 }
 
@@ -138,7 +134,6 @@ static void validateproto(global_State* g, Proto* f)
 
 static void validateobj(global_State* g, GCObject* o)
 {
-    // dead objects can only occur during sweep
     if (isdead(g, o))
     {
         LUAU_ASSERT(g->gcstate == GCSsweep);
@@ -246,7 +241,7 @@ void luaC_validate(lua_State* L)
         LUAU_ASSERT(uv->tt == LUA_TUPVAL);
         LUAU_ASSERT(upisopen(uv));
         LUAU_ASSERT(uv->u.open.next->u.open.prev == uv && uv->u.open.prev->u.open.next == uv);
-        LUAU_ASSERT(!isblack(obj2gco(uv))); // open upvalues are never black
+        LUAU_ASSERT(!isblack(obj2gco(uv)));
     }
 }
 
@@ -589,7 +584,7 @@ void luaC_dump(lua_State* L, void* file, const char* (*categoryName)(lua_State* 
 
     luaM_visitgco(L, f, dumpgco);
 
-    fprintf(f, "\"0\":{\"type\":\"userdata\",\"cat\":0,\"size\":0}\n"); // to avoid issues with trailing ,
+    fprintf(f, "\"0\":{\"type\":\"userdata\",\"cat\":0,\"size\":0}\n");
     fprintf(f, "},\"roots\":{\n");
     fprintf(f, "\"mainthread\":");
     dumpref(f, obj2gco(g->mainthread));
@@ -611,7 +606,7 @@ void luaC_dump(lua_State* L, void* file, const char* (*categoryName)(lua_State* 
                 fprintf(f, "\"%d\":{\"size\":%d},\n", i, int(bytes));
         }
     }
-    fprintf(f, "\"none\":{}\n"); // to avoid issues with trailing ,
+    fprintf(f, "\"none\":{}\n");
     fprintf(f, "}\n");
     fprintf(f, "}}\n");
 }
@@ -626,7 +621,6 @@ struct EnumContext
 
 static void* enumtopointer(GCObject* gco)
 {
-    // To match lua_topointer, userdata pointer is represented as a pointer to internal data
     return gco->gch.tt == LUA_TUSERDATA ? (void*)gco2u(gco)->data : (void*)gco;
 }
 
@@ -658,7 +652,6 @@ static void enumtable(EnumContext* ctx, LuaTable* h)
 {
     size_t size = sizeof(LuaTable) + (h->node == &luaH_dummynode ? 0 : sizenode(h) * sizeof(LuaNode)) + h->sizearray * sizeof(TValue);
 
-    // Provide a name for a special registry table
     enumnode(ctx, obj2gco(h), size, h == hvalue(registry(ctx->L)) ? "registry" : NULL);
 
     if (h->node != &luaH_dummynode)

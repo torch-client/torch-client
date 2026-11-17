@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/HashUtil.h"
@@ -13,7 +12,6 @@
 namespace Luau
 {
 
-// Internal implementation of DenseHashSet and DenseHashMap
 namespace detail
 {
 
@@ -30,9 +28,7 @@ public:
         , count(0)
         , empty_key(empty_key)
     {
-        // validate that equality operator is at least somewhat functional
         LUAU_ASSERT(eq(empty_key, empty_key));
-        // buckets has to be power-of-two or zero
         LUAU_ASSERT((buckets & (buckets - 1)) == 0);
 
         if (buckets)
@@ -63,7 +59,7 @@ public:
             for (size_t i = 0; i < other.capacity; ++i)
             {
                 new (&data[i]) Item(other.data[i]);
-                capacity = i + 1; // if Item copy throws, capacity will note the number of initialized objects for destroy() to clean up
+                capacity = i + 1;
             }
         }
     }
@@ -140,7 +136,6 @@ public:
 
     Item* insert_unsafe(const Key& key)
     {
-        // It is invalid to insert empty_key into the table since it acts as a "entry does not exist" marker
         LUAU_ASSERT(!eq(key, empty_key));
 
         size_t hashmod = capacity - 1;
@@ -150,7 +145,6 @@ public:
         {
             Item& probe_item = data[bucket];
 
-            // Element does not exist, insert here
             if (eq(ItemInterface::getKey(probe_item), empty_key))
             {
                 ItemInterface::setKey(probe_item, key);
@@ -158,17 +152,14 @@ public:
                 return &probe_item;
             }
 
-            // Element already exists
             if (eq(ItemInterface::getKey(probe_item), key))
             {
                 return &probe_item;
             }
 
-            // Hash collision, quadratic probing
             bucket = (bucket + probe + 1) & hashmod;
         }
 
-        // Hash table is full - this should not happen
         LUAU_ASSERT(false);
         return NULL;
     }
@@ -187,19 +178,15 @@ public:
         {
             const Item& probe_item = data[bucket];
 
-            // Element exists
             if (eq(ItemInterface::getKey(probe_item), key))
                 return &probe_item;
 
-            // Element does not exist
             if (eq(ItemInterface::getKey(probe_item), empty_key))
                 return NULL;
 
-            // Hash collision, quadratic probing
             bucket = (bucket + probe + 1) & hashmod;
         }
 
-        // Hash table is full - this should not happen
         LUAU_ASSERT(false);
         return NULL;
     }
@@ -467,9 +454,8 @@ struct ItemInterfaceMap
     }
 };
 
-} // namespace detail
+}
 
-// This is a faster alternative of unordered_set, but it does not implement the same interface (i.e. it does not support erasing)
 template<typename Key, typename Hash = detail::DenseHashDefault<Key>, typename Eq = std::equal_to<Key>>
 class DenseHashSet
 {
@@ -556,8 +542,6 @@ public:
     }
 };
 
-// This is a faster alternative of unordered_map, but it does not implement the same interface (i.e. it does not support erasing and has
-// contains() instead of find())
 template<typename Key, typename Value, typename Hash = detail::DenseHashDefault<Key>, typename Eq = std::equal_to<Key>>
 class DenseHashMap
 {
@@ -578,14 +562,12 @@ public:
         impl.clear(thresholdToDestroy);
     }
 
-    // Note: this reference is invalidated by any insert operation (i.e. operator[])
     Value& operator[](const Key& key)
     {
         impl.rehash_if_full(key);
         return impl.insert_unsafe(key)->second;
     }
 
-    // Note: this pointer is invalidated by any insert operation (i.e. operator[])
     const Value* find(const Key& key) const
     {
         const std::pair<Key, Value>* result = impl.find(key);
@@ -593,7 +575,6 @@ public:
         return result ? &result->second : NULL;
     }
 
-    // Note: this pointer is invalidated by any insert operation (i.e. operator[])
     Value* find(const Key& key)
     {
         const std::pair<Key, Value>* result = impl.find(key);
@@ -613,7 +594,6 @@ public:
         size_t before = impl.size();
         std::pair<Key, Value>* slot = impl.insert_unsafe(key);
 
-        // Value is fresh if container count has increased
         bool fresh = impl.size() > before;
 
         if (fresh)
@@ -653,4 +633,4 @@ public:
     }
 };
 
-} // namespace Luau
+}

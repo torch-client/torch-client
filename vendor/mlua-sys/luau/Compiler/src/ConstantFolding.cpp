@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "ConstantFolding.h"
 
 #include "BuiltinFolding.h"
@@ -450,7 +449,6 @@ struct ConstantVisitor : AstVisitor
         , libraryMemberConstantCb(libraryMemberConstantCb)
         , stringTable(stringTable)
     {
-        // since we do a single pass over the tree, if the initial state was empty we don't need to clear out old entries
         wasEmpty = constants.empty() && locals.empty();
     }
 
@@ -492,11 +490,9 @@ struct ConstantVisitor : AstVisitor
         }
         else if (node->is<AstExprGlobal>())
         {
-            // nope
         }
         else if (node->is<AstExprVarargs>())
         {
-            // nope
         }
         else if (AstExprCall* expr = node->as<AstExprCall>())
         {
@@ -508,7 +504,6 @@ struct ConstantVisitor : AstVisitor
 
                 if (bfid && *bfid != LBF_NONE)
                 {
-                    // since recursive calls to analyze() may reuse the vector we need to be careful and preserve existing contents
                     size_t offset = builtinArgs.size();
                     bool canFold = true;
 
@@ -542,7 +537,6 @@ struct ConstantVisitor : AstVisitor
             {
                 if (const int* bfid = builtins ? builtins->find(expr) : nullptr)
                 {
-                    // since recursive calls to analyze() may reuse the vector we need to be careful and preserve existing contents
                     size_t offset = builtinArgs.size();
                     bool canFold = true;
 
@@ -597,8 +591,6 @@ struct ConstantVisitor : AstVisitor
                         result.valueNumber = value.valueVector[2];
                     }
 
-                    // Do not handle 'w' component because it isn't known if the runtime will be configured in 3-wide or 4-wide mode
-                    // In 3-wide, access to 'w' will call unspecified metamethod or fail
                 }
                 else if (foldLibraryK)
                 {
@@ -607,7 +599,6 @@ struct ConstantVisitor : AstVisitor
                         if (eg->name == "math")
                             result = foldBuiltinMath(expr->index);
 
-                        // if we have a custom handler and the constant hasn't been resolved
                         if (libraryMemberConstantCb && result.type == Constant::Type_Unknown)
                             libraryMemberConstantCb(eg->name.value, expr->index.value, reinterpret_cast<Luau::CompileConstant*>(&result));
                     }
@@ -624,7 +615,6 @@ struct ConstantVisitor : AstVisitor
                         if (eg->name == "math")
                             result = foldBuiltinMath(expr->index);
 
-                        // if we have a custom handler and the constant hasn't been resolved
                         if (libraryMemberConstantCb && result.type == Constant::Type_Unknown)
                             libraryMemberConstantCb(eg->name.value, expr->index.value, reinterpret_cast<Luau::CompileConstant*>(&result));
                     }
@@ -638,7 +628,6 @@ struct ConstantVisitor : AstVisitor
         }
         else if (AstExprFunction* expr = node->as<AstExprFunction>())
         {
-            // this is necessary to propagate constant information in all child functions
             expr->body->visit(this);
         }
         else if (AstExprTable* expr = node->as<AstExprTable>())
@@ -665,7 +654,6 @@ struct ConstantVisitor : AstVisitor
             Constant la = analyze(expr->left);
             Constant ra = analyze(expr->right);
 
-            // note: ra doesn't need to be constant to fold and/or
             if (la.type != Constant::Type_Unknown)
                 foldBinary(result, expr->op, la, ra, stringTable);
         }
@@ -722,7 +710,6 @@ struct ConstantVisitor : AstVisitor
 
     void recordValue(AstLocal* local, const Constant& value)
     {
-        // note: we rely on trackValues to have been run before us
         Variable* v = variables.find(local);
         LUAU_ASSERT(v);
 
@@ -735,8 +722,6 @@ struct ConstantVisitor : AstVisitor
 
     bool visit(AstExpr* node) override
     {
-        // note: we short-circuit the visitor traversal through any expression trees by returning false
-        // recursive traversal is happening inside analyze() which makes it easier to get the resulting value of the subexpression
         analyze(node);
 
         return false;
@@ -744,7 +729,6 @@ struct ConstantVisitor : AstVisitor
 
     bool visit(AstStatLocal* node) override
     {
-        // all values that align wrt indexing are simple - we just match them 1-1
         for (size_t i = 0; i < node->vars.size && i < node->values.size; ++i)
         {
             Constant arg = analyze(node->values.data[i]);
@@ -754,8 +738,6 @@ struct ConstantVisitor : AstVisitor
 
         if (node->vars.size > node->values.size)
         {
-            // if we have trailing variables, then depending on whether the last value is capable of returning multiple values
-            // (aka call or varargs), we either don't know anything about these vars, or we know they're nil
             AstExpr* last = node->values.size ? node->values.data[node->values.size - 1] : nullptr;
             bool multRet = last && (last->is<AstExprCall>() || last->is<AstExprVarargs>());
 
@@ -770,8 +752,6 @@ struct ConstantVisitor : AstVisitor
         }
         else
         {
-            // we can have more values than variables; in this case we still need to analyze them to make sure we do constant propagation inside
-            // them
             for (size_t i = node->vars.size; i < node->values.size; ++i)
                 analyze(node->values.data[i]);
         }
@@ -795,5 +775,5 @@ void foldConstants(
     root->visit(&visitor);
 }
 
-} // namespace Compile
-} // namespace Luau
+}
+}

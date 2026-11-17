@@ -6,6 +6,7 @@ use crate::common::debug_subscription::DebugSubscriptionUpdate;
 
 #[derive(AzBuf, ClientboundGamePacket, Clone, Debug, PartialEq)]
 pub struct ClientboundDebugEntityValue {
+    #[var]
     pub entity_id: MinecraftEntityId,
     pub update: DebugSubscriptionUpdate,
 }

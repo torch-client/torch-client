@@ -17,6 +17,7 @@ default = [
     "resourcepacks",
     "update_checker",
     "hud_editor",
+    "benchmark_feature",
 ]
 
 update_checker = ["dep:reqwest", "dep:rustls", "dep:sha1"]
@@ -53,6 +54,8 @@ screen_record = []
 render_scale = []
 
 tutorial = []
+
+benchmark_feature = []
 
 render_lod = []
 

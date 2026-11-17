@@ -191,6 +191,12 @@ pub struct MapDecoration {
     pub name: Option<std::sync::Arc<[crate::text::Span]>>,
 }
 
+#[derive(Debug)]
+pub struct FrameMarkers {
+    pub list: Vec<MapDecoration>,
+    pub key: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SlotStack {
     pub item: &'static str,

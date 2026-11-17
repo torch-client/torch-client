@@ -44,7 +44,7 @@ impl NbtCompound {
 
         let mut error = None;
 
-        let mut values = Vec::with_capacity(capacity);
+        let mut values: Vec<(Mutf8String, NbtTag)> = Vec::new();
         loop {
             let Ok(tag_type) = data.read_u8() else {
                 error = Some(NonRootError::unexpected_eof());
@@ -71,6 +71,9 @@ impl NbtCompound {
             tags_buffer[tags_buffer_len] = MaybeUninit::new((tag_name, tag));
             tags_buffer_len += 1;
             if tags_buffer_len == tags_buffer.len() {
+                if values.capacity() == 0 {
+                    values.reserve_exact(capacity.max(tags_buffer.len()));
+                }
                 for i in 0..tags_buffer_len {
                     values.push(unsafe { tags_buffer.get_unchecked(i).assume_init_read() });
                 }
@@ -78,6 +81,9 @@ impl NbtCompound {
             }
         }
 
+        if values.capacity() == 0 {
+            values.reserve_exact(tags_buffer_len);
+        }
         for i in 0..tags_buffer_len {
             values.push(unsafe { tags_buffer.get_unchecked(i).assume_init_read() });
         }

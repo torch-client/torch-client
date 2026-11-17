@@ -352,12 +352,12 @@ pub struct Enchantments {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub enum BlockStateValueMatcher {
-    Exact {
-        value: String,
-    },
     Range {
         min: Option<String>,
         max: Option<String>,
+    },
+    Exact {
+        value: String,
     },
 }
 
@@ -1440,18 +1440,18 @@ impl Serialize for ParrotVariantKind {
 #[derive(AzBuf, Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TropicalFishPattern {
-    Kob,
-    Sunstreak,
-    Snooper,
-    Dasher,
-    Brinely,
-    Spotty,
-    Flopper,
-    Stripey,
-    Glitter,
-    Blockfish,
-    Betty,
-    Clayfish,
+    Kob = 0,
+    Sunstreak = 256,
+    Snooper = 512,
+    Dasher = 768,
+    Brinely = 1024,
+    Spotty = 1280,
+    Flopper = 1,
+    Stripey = 257,
+    Glitter = 513,
+    Blockfish = 769,
+    Betty = 1025,
+    Clayfish = 1281,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -1502,13 +1502,13 @@ pub struct RabbitVariant {
 #[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq)]
 pub enum RabbitVariantKind {
     #[default]
-    Brown,
-    White,
-    Black,
-    WhiteSplotched,
-    Gold,
-    Salt,
-    Evil,
+    Brown = 0,
+    White = 1,
+    Black = 2,
+    WhiteSplotched = 3,
+    Gold = 4,
+    Salt = 5,
+    Evil = 99,
 }
 impl Display for RabbitVariantKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

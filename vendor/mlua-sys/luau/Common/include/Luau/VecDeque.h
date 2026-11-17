@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Common.h"
@@ -13,28 +12,6 @@
 
 namespace Luau
 {
-// `VecDeque` is a general double-ended implementation designed as a drop-in replacement for the
-// standard library `std::deque`. It's backed by a growable ring buffer, rather than using the
-// segmented queue design of `std::deque` which can degrade into a linked list in the worst case.
-// The motivation for `VecDeque` as a replacement is to maintain the asymptotic complexity of
-// `std::deque` while reducing overall allocations and promoting better usage of the cache. Its API
-// is intended to be compatible with `std::deque` and `std::vector` as appropriate, and as such
-// provides corresponding method definitions and supports the use of custom allocators.
-//
-// `VecDeque` offers pushing and popping from both ends with an amortized O(1) complexity. It also
-// supports `std::vector`-style random-access in O(1). The implementation of buffer resizing uses
-// a growth factor of 1.5x to enable better memory reuse after resizing, and reduce overall memory
-// fragmentation when using the queue.
-//
-// Since `VecDeque` is a ring buffer, its elements are not necessarily contiguous in memory. To
-// describe this, we refer to the two portions of the buffer as the `head` and the `tail`. The
-// `head` is the initial portion of the queue that is on the range `[head, capacity)` and the tail
-// is the (optionally) remaining portion on the range `[0, head + size - capacity)` whenever the
-// `head + size` exceeds the capacity of the buffer.
-//
-// `VecDeque` does not currently support iteration since its primary focus is on providing
-// double-ended queue functionality specifically, but it can be reasonably expanded to provide
-// an iterator if we have a use-case for one in the future.
 template<typename T, class Allocator = std::allocator<T>>
 class VecDeque : Allocator
 {
@@ -42,23 +19,21 @@ private:
     static_assert(std::is_nothrow_move_constructible_v<T>);
     static_assert(std::is_nothrow_move_assignable_v<T>);
 
-    T* buffer = nullptr;        // the existing allocation we have backing this queue
-    size_t buffer_capacity = 0; // the size of our allocation
+    T* buffer = nullptr;
+    size_t buffer_capacity = 0;
 
-    size_t head = 0;       // the index of the head of the queue
-    size_t queue_size = 0; // the size of the queue
+    size_t head = 0;
+    size_t queue_size = 0;
 
     void destroyElements() noexcept
     {
         size_t head_size =
-            std::min(queue_size, capacity() - head); // how many elements are in the head portion (i.e. from the head to the end of the buffer)
-        size_t tail_size = queue_size - head_size;   // how many elements are in the tail portion (i.e. any portion that wrapped to the front)
+            std::min(queue_size, capacity() - head);
+        size_t tail_size = queue_size - head_size;
 
-        // we have to destroy every element in the head portion
         for (size_t index = head; index < head + head_size; index++)
             buffer[index].~T();
 
-        // and any in the tail portion, if one exists
         for (size_t index = 0; index < tail_size; index++)
             buffer[index].~T();
     }
@@ -72,39 +47,28 @@ private:
     {
         size_t old_capacity = capacity();
 
-        // we use a growth factor of 1.5x (plus a constant) here in order to enable the
-        // previous memory to be reused after a certain number of calls to grow.
-        // see: https://github.com/facebook/folly/blob/main/folly/docs/FBVector.md#memory-handling
         size_t new_capacity = (old_capacity > 0) ? old_capacity * 3 / 2 + 1 : 4;
 
-        // check that it's a legal allocation
         if (new_capacity > max_size())
             throw std::bad_array_new_length();
 
-        // allocate a new backing buffer
         T* new_buffer = this->allocate(new_capacity);
 
-        // we should not be growing if the capacity is not the current size
         LUAU_ASSERT(old_capacity == queue_size);
 
         size_t head_size =
-            std::min(queue_size, old_capacity - head); // how many elements are in the head portion (i.e. from the head to the end of the buffer)
-        size_t tail_size = queue_size - head_size;     // how many elements are in the tail portion (i.e. any portion that wrapped to the front)
+            std::min(queue_size, old_capacity - head);
+        size_t tail_size = queue_size - head_size;
 
-        // move the head into the new buffer
         if (head_size != 0)
             std::uninitialized_move(buffer + head, buffer + head + head_size, new_buffer);
 
-        // move the tail into the new buffer immediately after
         if (tail_size != 0)
             std::uninitialized_move(buffer, buffer + tail_size, new_buffer + head_size);
 
-        // destroy the old elements
         destroyElements();
-        // deallocate the old buffer
         this->deallocate(buffer, old_capacity);
 
-        // set up the queue to be backed by the new buffer
         buffer = new_buffer;
         buffer_capacity = new_capacity;
         head = 0;
@@ -129,12 +93,11 @@ public:
         , head(other.head)
         , queue_size(other.queue_size)
     {
-        // copy the initialized contents of the other buffer to this one
         size_t head_size = std::min(
             other.queue_size,
             other.buffer_capacity - other.head
-        );                                               // how many elements are in the head portion (i.e. from the head to the end of the buffer)
-        size_t tail_size = other.queue_size - head_size; // how many elements are in the tail portion (i.e. any portion that wrapped to the front)
+        );
+        size_t tail_size = other.queue_size - head_size;
 
         if (head_size != 0)
             std::uninitialized_copy(other.buffer + other.head, other.buffer + other.head + head_size, buffer + head);
@@ -150,12 +113,11 @@ public:
         , head(other.head)
         , queue_size(other.queue_size)
     {
-        // copy the initialized contents of the other buffer to this one
         size_t head_size = std::min(
             other.queue_size,
             other.buffer_capacity - other.head
-        );                                               // how many elements are in the head portion (i.e. from the head to the end of the buffer)
-        size_t tail_size = other.queue_size - head_size; // how many elements are in the tail portion (i.e. any portion that wrapped to the front)
+        );
+        size_t tail_size = other.queue_size - head_size;
 
         if (head_size != 0)
             std::uninitialized_copy(other.buffer + other.head, other.buffer + other.head + head_size, buffer + head);
@@ -193,9 +155,7 @@ public:
 
     ~VecDeque() noexcept
     {
-        // destroy any elements that exist
         destroyElements();
-        // free the allocated buffer
         this->deallocate(buffer, buffer_capacity);
     }
 
@@ -204,12 +164,10 @@ public:
         if (this == &other)
             return *this;
 
-        // destroy all of the existing elements
         destroyElements();
 
         if (buffer_capacity < other.size())
         {
-            // free the current buffer
             this->deallocate(buffer, buffer_capacity);
 
             buffer = this->allocate(other.buffer_capacity);
@@ -219,10 +177,9 @@ public:
         size_t head_size = std::min(
             other.queue_size,
             other.buffer_capacity - other.head
-        );                                               // how many elements are in the head portion (i.e. from the head to the end of the buffer)
-        size_t tail_size = other.queue_size - head_size; // how many elements are in the tail portion (i.e. any portion that wrapped to the front)
+        );
+        size_t tail_size = other.queue_size - head_size;
 
-        // Assignment doesn't try to match the capacity of 'other' and thus makes the buffer contiguous
         head = 0;
         queue_size = other.queue_size;
 
@@ -240,9 +197,7 @@ public:
         if (this == &other)
             return *this;
 
-        // destroy all of the existing elements
         destroyElements();
-        // free the current buffer
         this->deallocate(buffer, buffer_capacity);
 
         buffer = std::exchange(other.buffer, nullptr);
@@ -257,8 +212,6 @@ public:
     {
         return this;
     }
-
-    // element access
 
     T& at(size_t pos)
     {
@@ -320,8 +273,6 @@ public:
         return buffer[back];
     }
 
-    // capacity
-
     bool empty() const noexcept
     {
         return queue_size == 0;
@@ -339,38 +290,30 @@ public:
 
     void reserve(size_t new_capacity)
     {
-        // error if this allocation would be illegal
         if (new_capacity > max_size())
             throw std::length_error("too large");
 
         size_t old_capacity = capacity();
 
-        // do nothing if we're requesting a capacity that would not cause growth
         if (new_capacity <= old_capacity)
             return;
 
         size_t head_size =
-            std::min(queue_size, old_capacity - head); // how many elements are in the head portion (i.e. from the head to the end of the buffer)
-        size_t tail_size = queue_size - head_size;     // how many elements are in the tail portion (i.e. any portion that wrapped to the front)
+            std::min(queue_size, old_capacity - head);
+        size_t tail_size = queue_size - head_size;
 
-        // allocate a new backing buffer
         T* new_buffer = this->allocate(new_capacity);
 
-        // move the head into the new buffer
         if (head_size != 0)
             std::uninitialized_move(buffer + head, buffer + head + head_size, new_buffer);
 
-        // move the tail into the new buffer immediately after
         if (tail_size != 0)
             std::uninitialized_move(buffer, buffer + tail_size, new_buffer + head_size);
 
-        // destroy all the existing elements before freeing the old buffer
         destroyElements();
 
-        // deallocate the old buffer
         this->deallocate(buffer, old_capacity);
 
-        // set up the queue to be backed by the new buffer
         buffer = new_buffer;
         buffer_capacity = new_capacity;
         head = 0;
@@ -390,26 +333,20 @@ public:
             return;
 
         size_t head_size =
-            std::min(queue_size, old_capacity - head); // how many elements are in the head portion (i.e. from the head to the end of the buffer)
-        size_t tail_size = queue_size - head_size;     // how many elements are in the tail portion (i.e. any portion that wrapped to the front)
+            std::min(queue_size, old_capacity - head);
+        size_t tail_size = queue_size - head_size;
 
-        // allocate a new backing buffer
         T* new_buffer = this->allocate(new_capacity);
 
-        // move the head into the new buffer
         if (head_size != 0)
             std::uninitialized_move(buffer + head, buffer + head + head_size, new_buffer);
 
-        // move the tail into the new buffer immediately after, if we have one
         if (tail_size != 0)
             std::uninitialized_move(buffer, buffer + tail_size, new_buffer + head_size);
 
-        // destroy all the existing elements before freeing the old buffer
         destroyElements();
-        // deallocate the old buffer
         this->deallocate(buffer, old_capacity);
 
-        // set up the queue to be backed by the new buffer
         buffer = new_buffer;
         buffer_capacity = new_capacity;
         head = 0;
@@ -417,11 +354,8 @@ public:
 
     [[nodiscard]] bool is_contiguous() const noexcept
     {
-        // this is an overflow-safe alternative to writing `head + size <= capacity`.
         return head <= capacity() - queue_size;
     }
-
-    // modifiers
 
     void clear() noexcept
     {
@@ -473,4 +407,4 @@ public:
     }
 };
 
-} // namespace Luau
+}

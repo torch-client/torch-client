@@ -6,9 +6,12 @@ use azalea_inventory::bundle::{
     Fraction, MAX_SHOWN_GRID_ITEMS, MAX_SHOWN_GRID_ITEMS_X, number_of_items_to_show,
 };
 
-use crate::generated_items::item;
+use azalea_registry::builtin::DataComponentKind;
+
+use crate::generated_items::{Rarity, item};
 use crate::gui::painter::Painter;
 use crate::items::potions;
+use crate::items::tips::{self, TipAt};
 use crate::modules::better_tooltips::{self, FoodRows};
 use crate::play::mob_effects;
 use crate::session::{BundleView, SlotStack};
@@ -30,6 +33,9 @@ const WHITE: u32 = crate::text::WHITE;
 
 static LANG: Reloadable<HashMap<String, String>> = Reloadable::new(load_lang);
 
+#[path = "lang_renames.rs"]
+mod lang_renames;
+
 fn load_lang() -> HashMap<String, String> {
     let mut out = HashMap::new();
     #[cfg_attr(not(feature = "asset_download"), allow(unused_mut))]
@@ -50,6 +56,11 @@ fn load_lang() -> HashMap<String, String> {
             map.into_iter()
                 .filter_map(|(k, v)| Some((k, v.as_str()?.to_owned()))),
         );
+    }
+    for (from, to) in lang_renames::RENAMED {
+        if let Some(text) = out.remove(from) {
+            out.insert(to.to_owned(), text);
+        }
     }
     out
 }
@@ -349,24 +360,65 @@ fn painting_lines(stack: &SlotStack, creative: bool) -> Vec<Vec<Span>> {
     out
 }
 
-fn format_modifier(value: f64) -> String {
+pub(crate) fn format_modifier(value: f64) -> String {
     let text = format!("{:.2}", value);
     let trimmed = text.trim_end_matches('0').trim_end_matches('.');
     trimmed.to_string()
 }
 
 pub(crate) fn styled_hover_name(stack: &SlotStack) -> Vec<Span> {
-    let def = item(stack.item);
-    let rarity = def.map(|d| d.rarity.color()).unwrap_or(WHITE);
+    let data = stack
+        .raw
+        .as_deref()
+        .and_then(azalea_inventory::ItemStack::as_present);
+    let color = rarity(stack, data).color();
     match &stack.extra.custom_name {
-        Some(spans) => inherit(spans, rarity, true),
+        Some(spans) => inherit(spans, color, true),
         None => {
-            let name = book_title(stack)
-                .or_else(|| potion_name(stack))
-                .or_else(|| def.map(|d| d.name.to_string()))
-                .unwrap_or_else(|| stack.item.to_string());
-            plain(name, rarity)
+            if let Some(name) = book_title(stack).or_else(|| potion_name(stack)) {
+                return plain(name, color);
+            }
+            if let Some(name) = data.and_then(|d| {
+                d.component_patch
+                    .get::<azalea_inventory::components::ItemName>()
+            }) {
+                return inherit(
+                    &crate::client::chat_text::to_spans(&name.name),
+                    color,
+                    false,
+                );
+            }
+            let name = item(stack.item).map_or(stack.item, |d| d.name);
+            plain(name.to_string(), color)
         }
+    }
+}
+
+pub(crate) fn rarity(stack: &SlotStack, data: Option<&azalea_inventory::ItemStackData>) -> Rarity {
+    use azalea_inventory::components as comp;
+    let base = data
+        .and_then(crate::items::component::<comp::Rarity>)
+        .map(|r| match *r {
+            comp::Rarity::Common => Rarity::Common,
+            comp::Rarity::Uncommon => Rarity::Uncommon,
+            comp::Rarity::Rare => Rarity::Rare,
+            comp::Rarity::Epic => Rarity::Epic,
+        })
+        .or_else(|| item(stack.item).map(|d| d.rarity))
+        .unwrap_or(Rarity::Common);
+    let enchanted = match data {
+        Some(d) => {
+            crate::items::component::<comp::Enchantments>(d).is_some_and(|e| !e.levels.is_empty())
+        }
+        None => stack.item != "enchanted_book" && !stack.extra.enchantments.is_empty(),
+    };
+    if !enchanted {
+        return base;
+    }
+    match base {
+        Rarity::Common | Rarity::Uncommon => Rarity::Rare,
+        Rarity::Rare => Rarity::Epic,
+        Rarity::Epic => Rarity::Epic,
     }
 }
 
@@ -375,24 +427,78 @@ fn book_title(stack: &SlotStack) -> Option<String> {
     (book.signed && !book.title.trim().is_empty()).then(|| book.title.clone())
 }
 
+fn enchantment_block(
+    levels: &HashMap<azalea_registry::data::Enchantment, i32>,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+    out: &mut Vec<Vec<Span>>,
+) {
+    let mut list: Vec<(String, i32)> = levels
+        .iter()
+        .map(|(e, level)| {
+            (
+                crate::play::inventory_bridge::enchantment_name(Some(registries), e),
+                *level,
+            )
+        })
+        .collect();
+    list.sort();
+    for (id, level) in ordered_enchantments(&list) {
+        out.push(enchantment_line(id, *level));
+    }
+}
+
 fn build_lines(stack: &SlotStack, advanced: bool, creative: bool) -> Vec<Vec<Span>> {
+    use azalea_inventory::components as comp;
+
+    let registries = tips::registries();
+    let (attack_speed_base, peaceful) = tips::player();
+    let ctx = tips::Ctx {
+        registries: registries.as_deref(),
+        advanced,
+        attack_speed_base: Some(attack_speed_base),
+        peaceful,
+    };
+    let built;
+    let data: Option<&azalea_inventory::ItemStackData> = match stack.raw.as_deref() {
+        Some(raw) => raw.as_present(),
+        None => {
+            built = crate::play::inventory_bridge::creative_stack(stack, ctx.registries);
+            built.as_present()
+        }
+    };
+    let shows = |kind: DataComponentKind| data.is_none_or(|d| tips::shows(d, kind));
+    let tips_at = |at: TipAt, out: &mut Vec<Vec<Span>>| {
+        if let Some(d) = data {
+            tips::lines(at, d, &ctx, out);
+        }
+    };
+
+    if !creative && data.is_some_and(tips::hides_tooltip) {
+        return Vec::new();
+    }
+
     let mut out: Vec<Vec<Span>> = Vec::new();
     let tick_rate = tick_rate();
 
     out.push(styled_hover_name(stack));
 
-    if stack.item == "painting" {
+    if stack.item == "painting" && shows(DataComponentKind::PaintingVariant) {
         out.extend(painting_lines(stack, creative));
     }
+    tips_at(TipAt::ItemHover, &mut out);
 
+    tips_at(TipAt::BeforeBook, &mut out);
     if let Some(b) = &stack.extra.book
         && b.signed
+        && shows(DataComponentKind::WrittenBookContent)
     {
         out.extend(book_lines(b));
     }
 
+    tips_at(TipAt::BeforePotion, &mut out);
     if let Some(contents) = &stack.extra.potion
         && potions::is_potion_item(stack.item)
+        && shows(DataComponentKind::PotionContents)
     {
         let scale = contents
             .duration_scale
@@ -400,33 +506,71 @@ fn build_lines(stack: &SlotStack, advanced: bool, creative: bool) -> Vec<Vec<Spa
         out.extend(potion_lines(&contents.all_effects(), scale, tick_rate));
     }
 
-    for (id, level) in ordered_enchantments(&stack.extra.enchantments) {
-        out.push(enchantment_line(id, *level));
+    tips_at(TipAt::BeforeEnchantments, &mut out);
+    let raw = stack
+        .raw
+        .as_deref()
+        .and_then(azalea_inventory::ItemStack::as_present);
+    match (raw, ctx.registries) {
+        (Some(d), Some(registries)) => {
+            if let Some(c) = crate::items::component::<comp::StoredEnchantments>(d)
+                && tips::shows(d, DataComponentKind::StoredEnchantments)
+            {
+                enchantment_block(&c.enchantments, registries, &mut out);
+            }
+            if let Some(c) = crate::items::component::<comp::Enchantments>(d)
+                && tips::shows(d, DataComponentKind::Enchantments)
+            {
+                enchantment_block(&c.levels, registries, &mut out);
+            }
+        }
+        _ => {
+            let kind = if stack.item == "enchanted_book" {
+                DataComponentKind::StoredEnchantments
+            } else {
+                DataComponentKind::Enchantments
+            };
+            if shows(kind) {
+                for (id, level) in ordered_enchantments(&stack.extra.enchantments) {
+                    out.push(enchantment_line(id, *level));
+                }
+            }
+        }
     }
 
-    for line in &stack.extra.lore {
-        out.push(inherit(line, DARK_PURPLE, true));
+    tips_at(TipAt::BeforeLore, &mut out);
+    if shows(DataComponentKind::Lore) {
+        for line in &stack.extra.lore {
+            out.push(inherit(line, DARK_PURPLE, true));
+        }
     }
+    tips_at(TipAt::AfterLore, &mut out);
 
-    if stack.unbreakable {
+    if stack.unbreakable && shows(DataComponentKind::Unbreakable) {
         out.push(plain(translate("item.unbreakable", &[]), BLUE));
     }
 
-    if let Some(amplifier) = stack.extra.ominous_amplifier {
+    if let Some(amplifier) = stack.extra.ominous_amplifier
+        && shows(DataComponentKind::OminousBottleAmplifier)
+    {
         let effect = potions::PotionEffectInstance::new("bad_omen", 120000, amplifier);
         out.extend(potion_lines(&[effect], 1.0, tick_rate));
     }
 
-    if creative && let Some(stew) = &stack.extra.stew_effects {
+    if creative
+        && let Some(stew) = &stack.extra.stew_effects
+        && shows(DataComponentKind::SuspiciousStewEffects)
+    {
         let effects: Vec<_> = stew
             .iter()
             .map(|(id, duration)| potions::PotionEffectInstance::new(id.as_str(), *duration, 0))
             .collect();
         out.extend(potion_lines(&effects, 1.0, tick_rate));
     }
+    tips_at(TipAt::BeforeAdvanced, &mut out);
 
     if advanced {
-        if stack.max_damage > 0 && stack.damage > 0 {
+        if stack.max_damage > 0 && stack.damage > 0 && shows(DataComponentKind::Damage) {
             let remaining = stack.max_damage.saturating_sub(stack.damage);
             let text = translate(
                 "item.durability",
@@ -506,6 +650,7 @@ struct LineCache {
     creative: bool,
     tick_rate: f32,
     lang_epoch: u32,
+    tips_epoch: u32,
     food_values: bool,
     lines: Vec<Vec<Span>>,
     bundle: BundleText,
@@ -792,6 +937,7 @@ fn with_lines(
         return;
     }
     let lang_epoch = LANG.epoch();
+    let tips_epoch = tips::epoch();
     let tick_rate = tick_rate();
     let food_values = better_tooltips::food_values();
     LINES.with_borrow_mut(|cache| {
@@ -800,12 +946,13 @@ fn with_lines(
                 && c.creative == creative
                 && c.tick_rate == tick_rate
                 && c.lang_epoch == lang_epoch
+                && c.tips_epoch == tips_epoch
                 && c.food_values == food_values
                 && c.stack == *stack
         });
         if !hit {
             let mut lines = build_lines(stack, advanced, creative);
-            let food = food_values
+            let food = (food_values && !lines.is_empty())
                 .then(|| FoodRows::of(stack, font))
                 .flatten()
                 .map(|rows| {
@@ -819,6 +966,7 @@ fn with_lines(
                 creative,
                 tick_rate,
                 lang_epoch,
+                tips_epoch,
                 food_values,
                 lines,
                 bundle: BundleText::new(stack, font),
@@ -995,21 +1143,21 @@ mod tests {
     #[test]
     fn damaged_tool_advanced_and_not() {
         let stack = SlotStack {
-            item: "diamond_sword",
+            item: "fishing_rod",
             count: 1,
-            damage: 100,
-            max_damage: 1561,
+            damage: 10,
+            max_damage: 64,
             component_count: 2,
             nbt_bytes: 18,
             ..Default::default()
         };
-        assert_eq!(lines_text(&stack, false), vec!["Diamond Sword".to_string()]);
+        assert_eq!(lines_text(&stack, false), vec!["Fishing Rod".to_string()]);
         assert_eq!(
             lines_text(&stack, true),
             vec![
-                "Diamond Sword".to_string(),
-                "Durability: 1461 / 1561".to_string(),
-                "minecraft:diamond_sword".to_string(),
+                "Fishing Rod".to_string(),
+                "Durability: 54 / 64".to_string(),
+                "minecraft:fishing_rod".to_string(),
                 "2 component(s)".to_string(),
                 "Size: 18 B".to_string(),
             ]
@@ -1019,9 +1167,9 @@ mod tests {
     #[test]
     fn undamaged_tool_hides_durability() {
         let stack = SlotStack {
-            item: "diamond_sword",
+            item: "fishing_rod",
             count: 1,
-            max_damage: 1561,
+            max_damage: 64,
             nbt_bytes: 4,
             ..Default::default()
         };
@@ -1218,7 +1366,7 @@ mod tests {
     #[test]
     fn enchantments_then_lore() {
         let stack = SlotStack {
-            item: "diamond_pickaxe",
+            item: "fishing_rod",
             count: 1,
             extra: StackExtra {
                 lore: vec![
@@ -1235,7 +1383,7 @@ mod tests {
         assert_eq!(
             lines_text(&stack, false),
             vec![
-                "Diamond Pickaxe".to_string(),
+                "Fishing Rod".to_string(),
                 "Silk Touch".to_string(),
                 "Efficiency V".to_string(),
                 "first".to_string(),
@@ -1277,6 +1425,151 @@ mod tests {
             title.style.color,
             item("golden_apple").unwrap().rarity.color()
         );
+    }
+
+    fn stick(raw: Option<azalea_inventory::ItemStack>) -> SlotStack {
+        SlotStack {
+            item: "stick",
+            count: 1,
+            damage: 5,
+            max_damage: 10,
+            component_count: 1,
+            nbt_bytes: 4,
+            unbreakable: true,
+            extra: StackExtra {
+                lore: vec![crate::text::styled("first", Style::default())],
+                ..Default::default()
+            }
+            .into(),
+            raw: raw.map(std::sync::Arc::new),
+            ..Default::default()
+        }
+    }
+
+    fn display(hide_tooltip: bool, hidden: Vec<DataComponentKind>) -> azalea_inventory::ItemStack {
+        use azalea_registry::builtin::ItemKind;
+        azalea_inventory::ItemStack::new(ItemKind::Stick, 1).with_component(
+            azalea_inventory::components::TooltipDisplay {
+                hide_tooltip,
+                hidden_components: hidden,
+            },
+        )
+    }
+
+    #[test]
+    fn shown_blocks_keep_vanilla_order() {
+        let lines: Vec<String> = build_lines(&stick(Some(display(false, Vec::new()))), true, false)
+            .iter()
+            .map(|l| text_of(l))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Stick".to_string(),
+                "first".to_string(),
+                "Unbreakable".to_string(),
+                "Durability: 5 / 10".to_string(),
+                "minecraft:stick".to_string(),
+                "1 component(s)".to_string(),
+                "Size: 4 B".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_components_drop_their_rows() {
+        let hidden = vec![
+            DataComponentKind::Lore,
+            DataComponentKind::Unbreakable,
+            DataComponentKind::Damage,
+        ];
+        let lines: Vec<String> = build_lines(&stick(Some(display(false, hidden))), true, false)
+            .iter()
+            .map(|l| text_of(l))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Stick".to_string(),
+                "minecraft:stick".to_string(),
+                "1 component(s)".to_string(),
+                "Size: 4 B".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_potion_contents_keep_the_name() {
+        use azalea_registry::builtin::ItemKind;
+        let mut stack = potion_stack("potion", Some("night_vision"));
+        stack.raw = Some(std::sync::Arc::new(
+            azalea_inventory::ItemStack::new(ItemKind::Potion, 1).with_component(
+                azalea_inventory::components::TooltipDisplay {
+                    hide_tooltip: false,
+                    hidden_components: vec![DataComponentKind::PotionContents],
+                },
+            ),
+        ));
+        assert_eq!(
+            lines_text(&stack, false),
+            vec!["Potion of Night Vision".to_string()]
+        );
+    }
+
+    #[test]
+    fn hide_tooltip_empties_outside_creative() {
+        let stack = stick(Some(display(true, Vec::new())));
+        assert!(build_lines(&stack, true, false).is_empty());
+        let creative = build_lines(&stack, false, true);
+        assert_eq!(text_of(&creative[0]), "Stick");
+        assert_eq!(text_of(&creative[1]), "first");
+    }
+
+    #[test]
+    fn enchantments_raise_the_rarity() {
+        use azalea_inventory::components as comp;
+        use azalea_registry::builtin::ItemKind;
+
+        let enchanted = azalea_inventory::ItemStack::new(ItemKind::Stick, 1).with_component(
+            comp::Enchantments {
+                levels: [(azalea_registry::data::Enchantment::new_raw(0), 1)].into(),
+            },
+        );
+        let color = |stack: &SlotStack| styled_hover_name(stack)[0].style.color;
+        assert_eq!(color(&stick(None)), Rarity::Common.color());
+        assert_eq!(color(&stick(Some(enchanted.clone()))), Rarity::Rare.color());
+        let rare = enchanted.with_component(comp::Rarity::Rare);
+        assert_eq!(color(&stick(Some(rare))), Rarity::Epic.color());
+
+        let listed = |item: &'static str| SlotStack {
+            item,
+            count: 1,
+            extra: StackExtra {
+                enchantments: vec![("sharpness".into(), 1)],
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        assert_eq!(color(&listed("stick")), Rarity::Rare.color());
+        assert_eq!(
+            color(&listed("enchanted_book")),
+            item("enchanted_book").unwrap().rarity.color()
+        );
+    }
+
+    #[test]
+    fn patched_item_name_names_the_stack() {
+        use azalea_registry::builtin::ItemKind;
+        let raw = azalea_inventory::ItemStack::new(ItemKind::Stick, 1).with_component(
+            azalea_inventory::components::ItemName {
+                name: "Relic".into(),
+            },
+        );
+        let name = styled_hover_name(&stick(Some(raw)));
+        assert_eq!(text_of(&name), "Relic");
+        assert!(!name[0].style.italic);
+        assert_eq!(name[0].style.color, Rarity::Common.color());
     }
 
     #[test]

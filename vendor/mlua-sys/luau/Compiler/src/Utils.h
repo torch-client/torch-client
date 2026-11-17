@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Ast.h"
@@ -25,8 +24,6 @@ inline bool isConstantFalse(const DenseHashMap<AstExpr*, Constant>& constants, A
     return cv && cv->type != Constant::Type_Unknown && !cv->isTruthful();
 }
 
-// true iff all execution paths through node subtree result in return/break/continue
-// note: because this function doesn't visit loop nodes, it (correctly) only detects break/continue that refer to the outer control flow
 inline bool alwaysTerminates(const DenseHashMap<AstExpr*, Constant>& constants, AstStat* node)
 {
     if (AstStatBlock* stat = node->as<AstStatBlock>())
@@ -60,5 +57,5 @@ inline bool alwaysTerminates(const DenseHashMap<AstExpr*, Constant>& constants, 
     return false;
 }
 
-} // namespace Compile
-} // namespace Luau
+}
+}

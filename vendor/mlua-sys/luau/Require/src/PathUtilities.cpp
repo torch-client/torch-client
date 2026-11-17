@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-
 #include "PathUtilities.h"
 
 #include <string_view>
@@ -28,4 +26,4 @@ std::pair<std::string_view, std::string_view> splitPath(std::string_view path)
     return {path.substr(0, pos), path.substr(pos + 1)};
 }
 
-} // namespace Luau::Require
+}

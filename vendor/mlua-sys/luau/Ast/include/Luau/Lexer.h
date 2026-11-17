@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Allocator.h"
@@ -18,7 +17,6 @@ struct Lexeme
     {
         Eof = 0,
 
-        // 1..255 means actual character values
         Char_END = 256,
 
         Equal,
@@ -34,7 +32,6 @@ struct Lexeme
         InterpStringBegin,
         InterpStringMid,
         InterpStringEnd,
-        // An interpolated string with no expressions (like `x`)
         InterpStringSimple,
 
         AddAssign,
@@ -97,19 +94,15 @@ struct Lexeme
     Type type;
     Location location;
 
-    // Field declared here, before the union, to ensure that Lexeme size is 32 bytes.
 private:
-    // length is used to extract a slice from the input buffer.
-    // This field is only valid for certain lexeme types which don't duplicate portions of input
-    // but instead store a pointer to a location in the input buffer and the length of lexeme.
     unsigned int length;
 
 public:
     union
     {
-        const char* data;       // String, Number, Comment
-        const char* name;       // Name
-        unsigned int codepoint; // BrokenUnicode
+        const char* data;
+        const char* name;
+        unsigned int codepoint;
     };
 
     Lexeme(const Location& location, Type type);
@@ -208,17 +201,11 @@ private:
 
     Position position() const;
 
-    // consume() assumes current character is not a newline for performance; when that is not known, consumeAny() should be used instead.
     void consume();
     void consumeAny();
 
     Lexeme readCommentBody();
 
-    // Given a sequence [===[ or ]===], returns:
-    // 1. number of equal signs (or 0 if none present) between the brackets
-    // 2. -1 if this is not a long comment/string separator
-    // 3. -N if this is a malformed separator
-    // Does *not* consume the closing brace.
     int skipLongSeparator();
 
     Lexeme readLongString(const Position& start, int sep, Lexeme::Type ok, Lexeme::Type broken);
@@ -261,4 +248,4 @@ inline bool isSpace(char ch)
     return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\v' || ch == '\f';
 }
 
-} // namespace Luau
+}

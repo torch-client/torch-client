@@ -8,6 +8,8 @@ use crate::util::reload::Reloadable;
 
 pub(crate) const TRIM_PREFIX: &str = "armor_trim/";
 
+const DECAL: char = '+';
+
 pub(crate) fn resolve(
     stack: &azalea_inventory::ItemStack,
     item: &str,
@@ -54,25 +56,34 @@ pub(crate) fn resolve(
             }
         }
     };
-    let pattern = match &trim.pattern {
-        Holder::Direct(pattern) => pattern.asset_id.to_string(),
+    let (pattern, decal) = match &trim.pattern {
+        Holder::Direct(pattern) => (pattern.asset_id.to_string(), pattern.decal),
         Holder::Reference(pattern) => {
             let (name, entry) = entry(registries?, "trim_pattern", pattern.protocol_id())?;
             entry
-                .and_then(|entry| Some(entry.string("asset_id")?.to_str().into_owned()))
+                .and_then(|entry| {
+                    let asset_id = entry.string("asset_id")?.to_str().into_owned();
+                    Some((
+                        asset_id,
+                        entry.byte("decal").is_some_and(|decal| decal != 0),
+                    ))
+                })
                 .or_else(|| {
                     let json = (name.namespace() == "minecraft")
                         .then(|| crate::util::datapack::entry("trim_pattern", name.path()))??;
-                    json.get("asset_id")?.as_str().map(str::to_owned)
+                    let asset_id = json.get("asset_id")?.as_str()?.to_owned();
+                    let decal = json.get("decal").and_then(Value::as_bool).unwrap_or(false);
+                    Some((asset_id, decal))
                 })?
         }
     };
     let pattern = azalea::Identifier::new(pattern);
-    Some(crate::util::intern(format!(
-        "{}:{}_{suffix}",
-        pattern.namespace(),
-        pattern.path()
-    )))
+    let mut key = format!("{}:{}_{suffix}", pattern.namespace(), pattern.path());
+    if decal {
+        key.push(DECAL);
+        key.push_str(asset);
+    }
+    Some(crate::util::intern(key))
 }
 
 fn entry<'a>(
@@ -166,6 +177,41 @@ fn open(id: &str) -> Option<image::RgbaImage> {
 
 pub(crate) fn permuted(rest: &str) -> Option<image::RgbaImage> {
     let (layer_type, trim) = rest.split_once('/')?;
+    let Some((trim, asset)) = trim.rsplit_once(DECAL) else {
+        return sprite(layer_type, trim);
+    };
+    let image = sprite(layer_type, trim)?;
+    match super::armor::stack(&format!("{layer_type}/{asset}")) {
+        Some(base) => Some(mask_decal(image, &base)),
+        None => Some(image),
+    }
+}
+
+fn mask_decal(sprite: image::RgbaImage, base: &image::RgbaImage) -> image::RgbaImage {
+    let cutoff = crate::renderer::entity_material::ALPHA_CUTOUT;
+    let (bw, bh) = base.dimensions();
+    if bw == 0 || bh == 0 {
+        return sprite;
+    }
+    let (w, h) = (sprite.width().max(bw), sprite.height().max(bh));
+    let mut sprite = if (w, h) == sprite.dimensions() {
+        sprite
+    } else {
+        image::imageops::resize(&sprite, w, h, image::imageops::FilterType::Nearest)
+    };
+    let at = |i: u32, size: u32, other: u32| {
+        (((2 * u64::from(i) + 1) * u64::from(other)) / (2 * u64::from(size))) as u32
+    };
+    for (x, y, pixel) in sprite.enumerate_pixels_mut() {
+        let under = base.get_pixel(at(x, w, bw).min(bw - 1), at(y, h, bh).min(bh - 1));
+        if f32::from(under[3]) / 255.0 < cutoff {
+            pixel[3] = 0;
+        }
+    }
+    sprite
+}
+
+fn sprite(layer_type: &str, trim: &str) -> Option<image::RgbaImage> {
     let (namespace, name) = trim.split_once(':')?;
     if namespace != "minecraft" {
         return None;
@@ -249,5 +295,41 @@ mod tests {
         cut_over(&mut base, &trim);
         assert_eq!(base.get_pixel(0, 0).0, [9, 9, 9, 26]);
         assert_eq!(base.get_pixel(1, 0).0, [1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn a_decal_is_cut_to_the_texels_its_base_keeps() {
+        let red = image::Rgba([200, 0, 0, 255]);
+        let kept = image::Rgba([0, 0, 0, 26]);
+        let dropped = image::Rgba([0, 0, 0, 25]);
+
+        let mut base = image::RgbaImage::from_pixel(2, 1, kept);
+        base.put_pixel(1, 0, dropped);
+        let out = mask_decal(image::RgbaImage::from_pixel(2, 1, red), &base);
+        assert_eq!(out.dimensions(), (2, 1));
+        assert_eq!(out.get_pixel(0, 0).0, red.0);
+        assert_eq!(out.get_pixel(1, 0)[3], 0);
+
+        let out = mask_decal(image::RgbaImage::from_pixel(4, 2, red), &base);
+        assert_eq!(out.dimensions(), (4, 2));
+        for y in 0..2 {
+            assert_eq!(out.get_pixel(0, y).0, red.0);
+            assert_eq!(out.get_pixel(1, y).0, red.0);
+            assert_eq!(out.get_pixel(2, y)[3], 0);
+            assert_eq!(out.get_pixel(3, y)[3], 0);
+        }
+
+        let mut base = image::RgbaImage::from_pixel(4, 2, kept);
+        base.put_pixel(0, 0, dropped);
+        let out = mask_decal(image::RgbaImage::from_pixel(2, 1, red), &base);
+        assert_eq!(out.dimensions(), (4, 2));
+        assert_eq!(out.get_pixel(0, 0)[3], 0);
+        for (x, y) in [(1, 0), (0, 1), (1, 1), (3, 1)] {
+            assert_eq!(out.get_pixel(x, y).0, red.0);
+        }
+
+        let base = image::RgbaImage::from_pixel(1, 1, kept);
+        let out = mask_decal(image::RgbaImage::new(1, 1), &base);
+        assert_eq!(out.get_pixel(0, 0)[3], 0);
     }
 }

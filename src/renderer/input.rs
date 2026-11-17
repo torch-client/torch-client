@@ -120,6 +120,7 @@ fn reset_session_gui(
     state.hud_overlays = Default::default();
     state.toasts.clear();
     state.advancements = Default::default();
+    state.level_loading.connecting = false;
     #[cfg(feature = "skins")]
     faces.reset();
 }
@@ -233,7 +234,17 @@ pub(super) fn apply_gui_nav(
         state.disconnect_reason = reason;
     }
     if let Some(address) = state.connect.take() {
-        crate::client::bot::start_bot(address);
+        match crate::client::bot::start_bot(address) {
+            Ok(()) => {
+                state.level_loading.begin_connect();
+                state.nav = Some(Screen::LevelLoading);
+            }
+            Err(reason) => {
+                state.level_loading.connecting = false;
+                state.disconnect_reason = Some(crate::text::parse_formatted(&reason));
+                state.nav = Some(Screen::Disconnected);
+            }
+        }
         let mut s = shared.0.lock().unwrap();
         s.render_distance_sent = None;
         s.skin_prefs_sent = None;
@@ -262,7 +273,11 @@ pub(super) fn apply_gui_nav(
                 state.level_loading.open(load.id, load.reason);
                 state.nav = Some(Screen::LevelLoading);
             }
-            None if state.screen == Screen::LevelLoading && state.nav.is_none() && !warming => {
+            None if state.screen == Screen::LevelLoading
+                && state.nav.is_none()
+                && !warming
+                && !state.level_loading.connecting =>
+            {
                 state.nav = Some(Screen::None);
             }
             Some(_)
@@ -1377,6 +1392,8 @@ pub(super) fn toggle_screen(
                     Screen::TouchLayout => Screen::Controls,
                     #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
                     Screen::ExportAssets => Screen::ManageStorage,
+                    #[cfg(feature = "benchmark_feature")]
+                    Screen::Benchmark => Screen::GameSettings,
                     s if s.is_options() => Screen::Options,
                     _ => Screen::None,
                 })

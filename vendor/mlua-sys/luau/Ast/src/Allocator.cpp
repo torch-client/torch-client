@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-
 #include "Luau/Allocator.h"
 
 namespace Luau
@@ -49,7 +47,6 @@ void* Allocator::allocate(size_t size)
         }
     }
 
-    // allocate new page
     size_t pageSize = size > sizeof(root->data) ? size : sizeof(root->data);
     void* pageData = operator new(offsetof(Page, data) + pageSize);
 
@@ -63,4 +60,4 @@ void* Allocator::allocate(size_t size)
     return page->data;
 }
 
-} // namespace Luau
+}

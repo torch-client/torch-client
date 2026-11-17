@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/StringUtils.h"
 
 #include "Luau/Common.h"
@@ -68,7 +67,7 @@ static std::string joinImpl(const std::vector<String>& segments, std::string_vie
 
     std::string result;
     result.resize(len);
-    char* dest = const_cast<char*>(result.data()); // This const_cast is only necessary until C++17
+    char* dest = const_cast<char*>(result.data());
 
     auto it = segments.begin();
     memcpy(dest, it->data(), it->size());
@@ -118,7 +117,6 @@ std::vector<std::string_view> split(std::string_view s, char delimiter)
 
 size_t editDistance(std::string_view a, std::string_view b)
 {
-    // When there are matching prefix and suffix, they end up computing as zero cost, effectively making it no-op. We drop these characters.
     while (!a.empty() && !b.empty() && a.front() == b.front())
     {
         a.remove_prefix(1);
@@ -131,8 +129,6 @@ size_t editDistance(std::string_view a, std::string_view b)
         b.remove_suffix(1);
     }
 
-    // Since we know the edit distance is the difference of the length of A and B discounting the matching prefixes and suffixes,
-    // it is therefore pointless to run the rest of this function to find that out. We immediately infer this size and return it.
     if (a.empty())
         return b.size();
     if (b.empty())
@@ -169,7 +165,6 @@ size_t editDistance(std::string_view a, std::string_view b)
 
         for (size_t y = 1; y <= b.size(); ++y)
         {
-            // The value of b[N] can be negative with unicode characters
             unsigned char bSeenCharIndex = static_cast<unsigned char>(b[y - 1]);
             size_t x1 = seenCharToRow[bSeenCharIndex];
             size_t y1 = lastMatchedY;
@@ -186,12 +181,9 @@ size_t editDistance(std::string_view a, std::string_view b)
             size_t insertion = distances[getPos(x, y + 1)] + 1;
             size_t deletion = distances[getPos(x + 1, y)] + 1;
 
-            // It's more performant to use std::min(size_t, size_t) rather than the initializer_list overload.
-            // Until proven otherwise, please do not change this.
             distances[getPos(x + 1, y + 1)] = std::min(std::min(insertion, deletion), std::min(substitution, transposition));
         }
 
-        // The value of a[N] can be negative with unicode characters
         unsigned char aSeenCharIndex = static_cast<unsigned char>(a[x - 1]);
         seenCharToRow[aSeenCharIndex] = x;
     }
@@ -201,7 +193,6 @@ size_t editDistance(std::string_view a, std::string_view b)
 
 bool startsWith(std::string_view haystack, std::string_view needle)
 {
-    // ::starts_with is C++20
     return haystack.size() >= needle.size() && haystack.substr(0, needle.size()) == needle;
 }
 
@@ -219,7 +210,6 @@ bool equalsLower(std::string_view lhs, std::string_view rhs)
 
 size_t hashRange(const char* data, size_t size)
 {
-    // FNV-1a
     uint32_t hash = 2166136261;
 
     for (size_t i = 0; i < size; ++i)
@@ -239,7 +229,7 @@ bool isIdentifier(std::string_view s)
 std::string escape(std::string_view s, bool escapeForInterpString)
 {
     std::string r;
-    r.reserve(s.size() + 50); // arbitrary number to guess how many characters we'll be inserting
+    r.reserve(s.size() + 50);
 
     for (uint8_t c : s)
     {
@@ -312,4 +302,4 @@ std::string_view strip(std::string_view s)
     return s;
 }
 
-} // namespace Luau
+}

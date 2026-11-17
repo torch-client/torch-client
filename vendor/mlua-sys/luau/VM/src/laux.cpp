@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lualib.h"
 
 #include "lobject.h"
@@ -13,14 +11,7 @@
 
 LUAU_FASTFLAG(LuauStacklessPcall)
 
-// convert a stack index to positive
 #define abs_index(L, i) ((i) > 0 || (i) <= LUA_REGISTRYINDEX ? (i) : lua_gettop(L) + (i) + 1)
-
-/*
-** {======================================================
-** Error-report functions
-** =======================================================
-*/
 
 static const char* currfuncname(lua_State* L)
 {
@@ -69,7 +60,6 @@ static l_noret tag_error(lua_State* L, int narg, int tag)
     luaL_typeerrorL(L, narg, lua_typename(L, tag));
 }
 
-// Can be called without stack space reservation
 void luaL_where(lua_State* L, int level)
 {
     lua_Debug ar;
@@ -80,10 +70,9 @@ void luaL_where(lua_State* L, int level)
     }
 
     lua_rawcheckstack(L, 1);
-    lua_pushliteral(L, ""); // else, no information available...
+    lua_pushliteral(L, "");
 }
 
-// Can be called without stack space reservation
 l_noret luaL_errorL(lua_State* L, const char* fmt, ...)
 {
     va_list argp;
@@ -94,8 +83,6 @@ l_noret luaL_errorL(lua_State* L, const char* fmt, ...)
     lua_concat(L, 2);
     lua_error(L);
 }
-
-// }======================================================
 
 int luaL_checkoption(lua_State* L, int narg, const char* def, const char* const lst[])
 {
@@ -110,13 +97,13 @@ int luaL_checkoption(lua_State* L, int narg, const char* def, const char* const 
 
 int luaL_newmetatable(lua_State* L, const char* tname)
 {
-    lua_getfield(L, LUA_REGISTRYINDEX, tname); // get registry.name
-    if (!lua_isnil(L, -1))                     // name already in use?
-        return 0;                              // leave previous value on top, but return 0
+    lua_getfield(L, LUA_REGISTRYINDEX, tname);
+    if (!lua_isnil(L, -1))
+        return 0;
     lua_pop(L, 1);
-    lua_newtable(L); // create metatable
+    lua_newtable(L);
     lua_pushvalue(L, -1);
-    lua_setfield(L, LUA_REGISTRYINDEX, tname); // registry.name = metatable
+    lua_setfield(L, LUA_REGISTRYINDEX, tname);
     return 1;
 }
 
@@ -124,18 +111,18 @@ void* luaL_checkudata(lua_State* L, int ud, const char* tname)
 {
     void* p = lua_touserdata(L, ud);
     if (p != NULL)
-    { // value is a userdata?
+    {
         if (lua_getmetatable(L, ud))
-        {                                              // does it have a metatable?
-            lua_getfield(L, LUA_REGISTRYINDEX, tname); // get correct metatable
+        {
+            lua_getfield(L, LUA_REGISTRYINDEX, tname);
             if (lua_rawequal(L, -1, -2))
-            {                  // does it have the correct mt?
-                lua_pop(L, 2); // remove both metatables
+            {
+                lua_pop(L, 2);
                 return p;
             }
         }
     }
-    luaL_typeerrorL(L, ud, tname); // else error
+    luaL_typeerrorL(L, ud, tname);
 }
 
 void* luaL_checkbuffer(lua_State* L, int narg, size_t* len)
@@ -200,10 +187,6 @@ double luaL_optnumber(lua_State* L, int narg, double def)
 
 int luaL_checkboolean(lua_State* L, int narg)
 {
-    // This checks specifically for boolean values, ignoring
-    // all other truthy/falsy values. If the desired result
-    // is true if value is present then lua_toboolean should
-    // directly be used instead.
     if (!lua_isboolean(L, narg))
         tag_error(L, narg, LUA_TBOOLEAN);
     return lua_toboolean(L, narg);
@@ -257,18 +240,18 @@ const float* luaL_optvector(lua_State* L, int narg, const float* def)
 
 int luaL_getmetafield(lua_State* L, int obj, const char* event)
 {
-    if (!lua_getmetatable(L, obj)) // no metatable?
+    if (!lua_getmetatable(L, obj))
         return 0;
     lua_pushstring(L, event);
     lua_rawget(L, -2);
     if (lua_isnil(L, -1))
     {
-        lua_pop(L, 2); // remove metatable and metafield
+        lua_pop(L, 2);
         return 0;
     }
     else
     {
-        lua_remove(L, -2); // remove only metatable
+        lua_remove(L, -2);
         return 1;
     }
 }
@@ -276,7 +259,7 @@ int luaL_getmetafield(lua_State* L, int obj, const char* event)
 int luaL_callmeta(lua_State* L, int obj, const char* event)
 {
     obj = abs_index(L, obj);
-    if (!luaL_getmetafield(L, obj, event)) // no metafield?
+    if (!luaL_getmetafield(L, obj, event))
         return 0;
     lua_pushvalue(L, obj);
     lua_call(L, 1, 1);
@@ -296,19 +279,17 @@ void luaL_register(lua_State* L, const char* libname, const luaL_Reg* l)
     if (libname)
     {
         int size = libsize(l);
-        // check whether lib already exists
         luaL_findtable(L, LUA_REGISTRYINDEX, "_LOADED", 1);
-        lua_getfield(L, -1, libname); // get _LOADED[libname]
+        lua_getfield(L, -1, libname);
         if (!lua_istable(L, -1))
-        {                  // not found?
-            lua_pop(L, 1); // remove previous result
-            // try global variable (and create one if it does not exist)
+        {
+            lua_pop(L, 1);
             if (luaL_findtable(L, LUA_GLOBALSINDEX, libname, size) != NULL)
                 luaL_error(L, "name conflict for module '%s'", libname);
             lua_pushvalue(L, -1);
-            lua_setfield(L, -3, libname); // _LOADED[libname] = new table
+            lua_setfield(L, -3, libname);
         }
-        lua_remove(L, -2); // remove _LOADED table
+        lua_remove(L, -2);
     }
     for (; l->name; l++)
     {
@@ -329,19 +310,19 @@ const char* luaL_findtable(lua_State* L, int idx, const char* fname, int szhint)
         lua_pushlstring(L, fname, e - fname);
         lua_rawget(L, -2);
         if (lua_isnil(L, -1))
-        {                                                    // no such field?
-            lua_pop(L, 1);                                   // remove this nil
-            lua_createtable(L, 0, (*e == '.' ? 1 : szhint)); // new table for field
+        {
+            lua_pop(L, 1);
+            lua_createtable(L, 0, (*e == '.' ? 1 : szhint));
             lua_pushlstring(L, fname, e - fname);
             lua_pushvalue(L, -2);
-            lua_settable(L, -4); // set new table into field
+            lua_settable(L, -4);
         }
         else if (!lua_istable(L, -1))
-        {                  // field has a non-table value?
-            lua_pop(L, 2); // remove table and value
-            return fname;  // return problematic part of the name
+        {
+            lua_pop(L, 2);
+            return fname;
         }
-        lua_remove(L, -2); // remove previous table
+        lua_remove(L, -2);
         fname = e + 1;
     } while (*e == '.');
     return NULL;
@@ -363,14 +344,13 @@ int luaL_callyieldable(lua_State* L, int nargs, int nresults)
 
     if (FFlag::LuauStacklessPcall)
     {
-        // yielding means we need to propagate yield; resume will call continuation function later
         if (isyielded(L))
             return C_CALL_YIELD;
     }
     else
     {
         if (L->status == LUA_YIELD || L->status == LUA_BREAK)
-            return -1; // -1 is a marker for yielding from C
+            return -1;
     }
 
     return cl->c.cont(L, LUA_OK);
@@ -400,7 +380,7 @@ void luaL_traceback(lua_State* L, lua_State* L1, const char* msg, int level)
 
         if (ar.currentline > 0)
         {
-            char line[32]; // manual conversion for performance
+            char line[32];
             char* lineend = line + sizeof(line);
             char* lineptr = lineend;
             for (unsigned int r = ar.currentline; r > 0; r /= 10)
@@ -422,22 +402,13 @@ void luaL_traceback(lua_State* L, lua_State* L1, const char* msg, int level)
     luaL_pushresult(&buf);
 }
 
-
-/*
-** {======================================================
-** Generic Buffer manipulation
-** =======================================================
-*/
-
 static size_t getnextbuffersize(lua_State* L, size_t currentsize, size_t desiredsize)
 {
     size_t newsize = currentsize + currentsize / 2;
 
-    // check for size overflow
     if (SIZE_MAX - desiredsize < currentsize)
         luaL_error(L, "buffer too large");
 
-    // growth factor might not be enough to satisfy the desired size
     if (newsize < desiredsize)
         newsize = desiredsize;
 
@@ -460,7 +431,6 @@ static char* extendstrbuf(luaL_Strbuf* B, size_t additionalsize, int boxloc)
 
     memcpy(newStorage->data, base, B->p - base);
 
-    // place the string storage at the expected position in the stack
     if (base == B->buffer)
     {
         lua_pushnil(L);
@@ -477,7 +447,6 @@ static char* extendstrbuf(luaL_Strbuf* B, size_t additionalsize, int boxloc)
 
 void luaL_buffinit(lua_State* L, luaL_Strbuf* B)
 {
-    // start with an internal buffer
     B->p = B->buffer;
     B->end = B->p + LUA_BUFFERSIZE;
 
@@ -564,8 +533,6 @@ void luaL_addvalueany(luaL_Strbuf* B, int idx)
         size_t len;
         luaL_tolstring(L, idx, &len);
 
-        // note: luaL_addlstring assumes box is stored at top of stack, so we can't call it here
-        // instead we use luaL_addvalue which will take the string from the top of the stack and add that
         luaL_addvalue(B);
     }
     }
@@ -579,7 +546,6 @@ void luaL_pushresult(luaL_Strbuf* B)
     {
         luaC_checkGC(L);
 
-        // if we finished just at the end of the string buffer, we can convert it to a mutable stirng without a copy
         if (B->p == B->end)
         {
             setsvalue(L, L->top - 1, luaS_buffinish(L, storage));
@@ -601,11 +567,9 @@ void luaL_pushresultsize(luaL_Strbuf* B, size_t size)
     luaL_pushresult(B);
 }
 
-// }======================================================
-
 const char* luaL_tolstring(lua_State* L, int idx, size_t* len)
 {
-    if (luaL_callmeta(L, idx, "__tostring")) // is there a metafield?
+    if (luaL_callmeta(L, idx, "__tostring"))
     {
         const char* s = lua_tolstring(L, -1, len);
         if (!s)

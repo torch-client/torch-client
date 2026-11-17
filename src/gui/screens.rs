@@ -482,6 +482,14 @@ pub fn draw(
             crate::gui::assetexport::draw(p, state, &ctx);
             None
         }
+        #[cfg(feature = "benchmark_feature")]
+        Screen::Benchmark => {
+            if state.benchmark.phase != crate::gui::benchmark::Phase::Gpu {
+                backdrop(p, state, &ctx);
+            }
+            crate::gui::benchmark::draw(p, state, &ctx);
+            None
+        }
         #[cfg(feature = "mobile_ui")]
         Screen::TouchLayout => {
             if in_menu {

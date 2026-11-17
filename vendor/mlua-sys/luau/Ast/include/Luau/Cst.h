@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Ast.h"
@@ -81,7 +80,6 @@ public:
     unsigned int blockDepth;
 };
 
-// Shared between the expression and call nodes
 struct CstTypeInstantiation
 {
     Position leftArrow1Position = {0, 0};
@@ -147,10 +145,10 @@ public:
 
     struct Item
     {
-        std::optional<Position> indexerOpenPosition;  // '[', only if Kind == General
-        std::optional<Position> indexerClosePosition; // ']', only if Kind == General
-        std::optional<Position> equalsPosition;       // only if Kind != List
-        std::optional<Separator> separator;           // may be missing for last Item
+        std::optional<Position> indexerOpenPosition;
+        std::optional<Position> indexerClosePosition;
+        std::optional<Position> equalsPosition;
+        std::optional<Separator> separator;
         std::optional<Position> separatorPosition;
     };
 
@@ -159,7 +157,6 @@ public:
     AstArray<Item> items;
 };
 
-// TODO: Shared between unary and binary, should we split?
 class CstExprOp : public CstNode
 {
 public:
@@ -224,7 +221,6 @@ public:
     Position endPosition;
 };
 
-// Clip with FFlag::LuauCstStatBlock
 class CstStatDo_DEPRECATED : public CstNode
 {
 public:
@@ -420,14 +416,14 @@ public:
         };
 
         Kind kind;
-        Position indexerOpenPosition;  // '[', only if Kind != Property
-        Position indexerClosePosition; // ']' only if Kind != Property
+        Position indexerOpenPosition;
+        Position indexerClosePosition;
         Position colonPosition;
-        std::optional<CstExprTable::Separator> separator; // may be missing for last Item
+        std::optional<CstExprTable::Separator> separator;
         std::optional<Position> separatorPosition;
 
-        CstExprConstantString* stringInfo = nullptr; // only if Kind == StringProperty
-        Position stringPosition{0, 0};               // only if Kind == StringProperty
+        CstExprConstantString* stringInfo = nullptr;
+        Position stringPosition{0, 0};
     };
 
     CstTypeTable(AstArray<Item> items, bool isArray);
@@ -531,4 +527,4 @@ public:
     Position ellipsisPosition;
 };
 
-} // namespace Luau
+}

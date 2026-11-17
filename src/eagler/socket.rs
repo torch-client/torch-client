@@ -24,6 +24,9 @@ mod native {
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >;
 
+    const USER_AGENT_VALUE: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                                    (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+
     pub(in crate::eagler) struct Socket(Stream);
     pub(in crate::eagler) struct Tx(SplitSink<Stream, Message>);
     pub(in crate::eagler) struct Rx(SplitStream<Stream>);
@@ -31,7 +34,15 @@ mod native {
     impl Socket {
         pub(in crate::eagler) async fn connect(url: &str) -> eyre::Result<Self> {
             crate::install_crypto_provider();
-            match tokio_tungstenite::connect_async(url).await {
+            use tokio_tungstenite::tungstenite::{
+                client::IntoClientRequest,
+                http::{HeaderValue, header::USER_AGENT},
+            };
+            let mut request = url.into_client_request()?;
+            request
+                .headers_mut()
+                .insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
+            match tokio_tungstenite::connect_async(request).await {
                 Ok((socket, _response)) => Ok(Self(socket)),
                 Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
                     eyre::bail!(

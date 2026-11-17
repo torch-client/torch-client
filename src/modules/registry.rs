@@ -887,7 +887,7 @@ modules! {
             "Paste a friend's copied finds here, then press Import",
             Text { max_len: 65536, default: "", expand: true, hint: "Paste a share" };
         IMPORT: "Import",
-            "Same hashed seed as yours: adds their finds. Another: replaces yours with theirs",
+            "Same hashed seed as yours: adds their finds. Another: switches to their world, yours stays cached",
             Button { text: "Import", key: "import" };
     }
 

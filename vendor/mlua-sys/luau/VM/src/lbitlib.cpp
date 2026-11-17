@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lualib.h"
 
 #include "lcommon.h"
@@ -8,10 +6,8 @@
 #define ALLONES ~0u
 #define NBITS int(8 * sizeof(unsigned))
 
-// macro to trim extra bits
 #define trim(x) ((x) & ALLONES)
 
-// builds a number with 'n' ones (1 <= n <= NBITS)
 #define mask(n) (~((ALLONES << 1) << ((n)-1)))
 
 typedef unsigned b_uint;
@@ -69,7 +65,7 @@ static int b_not(lua_State* L)
 static int b_shift(lua_State* L, b_uint r, int i)
 {
     if (i < 0)
-    { // shift right?
+    {
         i = -i;
         r = trim(r);
         if (i >= NBITS)
@@ -78,7 +74,7 @@ static int b_shift(lua_State* L, b_uint r, int i)
             r >>= i;
     }
     else
-    { // shift left
+    {
         if (i >= NBITS)
             r = 0;
         else
@@ -106,11 +102,11 @@ static int b_arshift(lua_State* L)
     if (i < 0 || !(r & ((b_uint)1 << (NBITS - 1))))
         return b_shift(L, r, -i);
     else
-    { // arithmetic shift for 'negative' number
+    {
         if (i >= NBITS)
             r = ALLONES;
         else
-            r = trim((r >> i) | ~(~(b_uint)0 >> i)); // add signal bit
+            r = trim((r >> i) | ~(~(b_uint)0 >> i));
         lua_pushunsigned(L, r);
         return 1;
     }
@@ -119,9 +115,9 @@ static int b_arshift(lua_State* L)
 static int b_rot(lua_State* L, int i)
 {
     b_uint r = luaL_checkunsigned(L, 1);
-    i &= (NBITS - 1); // i = i % NBITS
+    i &= (NBITS - 1);
     r = trim(r);
-    if (i != 0) // avoid undefined shift of NBITS when i == 0
+    if (i != 0)
         r = (r << i) | (r >> (NBITS - i));
     lua_pushunsigned(L, trim(r));
     return 1;
@@ -137,12 +133,6 @@ static int b_rrot(lua_State* L)
     return b_rot(L, -luaL_checkinteger(L, 2));
 }
 
-/*
-** get field and width arguments for field-manipulation functions,
-** checking whether they are valid.
-** ('luaL_error' called without 'return' to avoid later warnings about
-** 'width' being used uninitialized.)
-*/
 static int fieldargs(lua_State* L, int farg, int* width)
 {
     int f = luaL_checkinteger(L, farg);
@@ -172,7 +162,7 @@ static int b_replace(lua_State* L)
     b_uint v = luaL_checkunsigned(L, 2);
     int f = fieldargs(L, 3, &w);
     int m = mask(w);
-    v &= m; // erase bits outside given width
+    v &= m;
     r = (r & ~(m << f)) | (v << f);
     lua_pushunsigned(L, r);
     return 1;

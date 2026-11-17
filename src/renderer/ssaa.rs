@@ -35,6 +35,7 @@ struct SsaaTarget {
     scale: f32,
     camera_count: usize,
     nearest: bool,
+    blur: bool,
 }
 
 impl Default for SsaaTarget {
@@ -44,6 +45,7 @@ impl Default for SsaaTarget {
             scale: f32::NAN,
             camera_count: 0,
             nearest: false,
+            blur: false,
         }
     }
 }
@@ -51,13 +53,18 @@ impl Default for SsaaTarget {
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct SceneImage(pub Option<Handle<Image>>);
 
+#[derive(Resource, Clone, Copy, Default, ExtractResource)]
+pub struct MenuBlur(pub bool);
+
 pub struct SsaaPlugin;
 
 impl Plugin for SsaaPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SsaaTarget>()
             .init_resource::<SceneImage>()
+            .init_resource::<MenuBlur>()
             .add_plugins(ExtractResourcePlugin::<SceneImage>::default())
+            .add_plugins(ExtractResourcePlugin::<MenuBlur>::default())
             .add_systems(Update, apply_ssaa);
     }
 }
@@ -67,6 +74,7 @@ fn apply_ssaa(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut scene_image: ResMut<SceneImage>,
+    mut menu_blur: ResMut<MenuBlur>,
     mut terrain_params: ResMut<crate::renderer::terrain_pool::TerrainParams>,
     mut target: ResMut<SsaaTarget>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -96,17 +104,23 @@ fn apply_ssaa(
     #[cfg(not(feature = "render_scale"))]
     let user_scale = 1.0;
     let scale = render_scale(antialiasing, user_scale, window.scale_factor());
-    let enabled = scale != 1.0;
+    let blur = state.menu_blur_wanted();
+    if menu_blur.0 != blur {
+        menu_blur.0 = blur;
+    }
+    let enabled = scale != 1.0 || blur;
     let camera_count = scene_cameras.iter().count();
     let nearest = user_scale < 1.0 && scale < 1.0;
     if window_size == target.window_size
         && scale == target.scale
         && camera_count == target.camera_count
         && nearest == target.nearest
+        && blur == target.blur
     {
         return;
     }
     target.nearest = nearest;
+    target.blur = blur;
     target.window_size = window_size;
     target.scale = scale;
     target.camera_count = camera_count;

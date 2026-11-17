@@ -35,6 +35,12 @@ pub use watchdog::{
 #[cfg_attr(not(feature = "profiling"), allow(unused_imports))]
 pub use runtime::{ThreadCpu, thread_cpu};
 
+#[cfg_attr(
+    any(not(feature = "benchmark_feature"), target_arch = "wasm32"),
+    allow(unused_imports)
+)]
+pub(crate) use runtime::core_count;
+
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

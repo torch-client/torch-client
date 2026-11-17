@@ -267,7 +267,15 @@ pub(crate) async fn prepare(address: &str, username: &str) -> eyre::Result<Optio
         }));
     }
     log_info!("net", "eagler: opening a websocket to {}", target.url);
-    let mut socket = socket::Socket::connect(&target.url).await?;
+    let opening = socket::Socket::connect(&target.url);
+    let mut socket = match crate::platform::time::timeout(handshake::STEP_TIMEOUT, opening).await {
+        Ok(socket) => socket?,
+        Err(()) => eyre::bail!(
+            "no websocket handshake from {} within {} seconds",
+            target.url,
+            handshake::STEP_TIMEOUT.as_secs()
+        ),
+    };
     #[cfg(eagler_skins)]
     let skin = crate::gui::skinpick::for_account(username);
     #[cfg(eagler_skins)]

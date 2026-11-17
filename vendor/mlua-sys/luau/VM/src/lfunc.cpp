@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lfunc.h"
 
 #include "lstate.h"
@@ -101,18 +99,16 @@ UpVal* luaF_findupval(lua_State* L, StkId level)
     }
 
     LUAU_ASSERT(L->isactive);
-    LUAU_ASSERT(!isblack(obj2gco(L))); // we don't use luaC_threadbarrier because active threads never turn black
+    LUAU_ASSERT(!isblack(obj2gco(L)));
 
-    UpVal* uv = luaM_newgco(L, UpVal, sizeof(UpVal), L->activememcat); // not found: create a new one
+    UpVal* uv = luaM_newgco(L, UpVal, sizeof(UpVal), L->activememcat);
     luaC_init(L, uv, LUA_TUPVAL);
     uv->markedopen = 0;
-    uv->v = level; // current value lives in the stack
+    uv->v = level;
 
-    // chain the upvalue in the threads open upvalue list at the proper position
     uv->u.open.threadnext = *pp;
     *pp = uv;
 
-    // double link the upvalue in the global open upvalue list
     uv->u.open.prev = &g->uvhead;
     uv->u.open.next = g->uvhead.u.open.next;
     uv->u.open.next->u.open.prev = uv;
@@ -124,7 +120,7 @@ UpVal* luaF_findupval(lua_State* L, StkId level)
 
 void luaF_freeupval(lua_State* L, UpVal* uv, lua_Page* page)
 {
-    luaM_freegco(L, uv, sizeof(UpVal), uv->memcat, page); // free upvalue
+    luaM_freegco(L, uv, sizeof(UpVal), uv->memcat, page);
 }
 
 void luaF_close(lua_State* L, StkId level)
@@ -137,16 +133,14 @@ void luaF_close(lua_State* L, StkId level)
         LUAU_ASSERT(!isblack(o) && upisopen(uv));
         LUAU_ASSERT(!isdead(g, o));
 
-        // unlink value *before* closing it since value storage overlaps
         L->openupval = uv->u.open.threadnext;
 
-        luaF_closeupval(L, uv, /* dead= */ false);
+        luaF_closeupval(L, uv, false);
     }
 }
 
 void luaF_closeupval(lua_State* L, UpVal* uv, bool dead)
 {
-    // unlink value from all lists *before* closing it since value storage overlaps
     LUAU_ASSERT(uv->u.open.next->u.open.prev == uv && uv->u.open.prev->u.open.next == uv);
     uv->u.open.next->u.open.prev = uv->u.open.prev;
     uv->u.open.prev->u.open.next = uv->u.open.next;
@@ -191,14 +185,14 @@ const LocVar* luaF_getlocal(const Proto* f, int local_number, int pc)
     for (int i = 0; i < f->sizelocvars; i++)
     {
         if (pc >= f->locvars[i].startpc && pc < f->locvars[i].endpc)
-        { // is variable active?
+        {
             local_number--;
             if (local_number == 0)
                 return &f->locvars[i];
         }
     }
 
-    return NULL; // not found
+    return NULL;
 }
 
 const LocVar* luaF_findlocal(const Proto* f, int local_reg, int pc)
@@ -207,5 +201,5 @@ const LocVar* luaF_findlocal(const Proto* f, int local_reg, int pc)
         if (local_reg == f->locvars[i].reg && pc >= f->locvars[i].startpc && pc < f->locvars[i].endpc)
             return &f->locvars[i];
 
-    return NULL; // not found
+    return NULL;
 }

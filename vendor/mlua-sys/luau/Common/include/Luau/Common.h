@@ -1,7 +1,5 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
-// Compiler codegen control macros
 #ifdef _MSC_VER
 #define LUAU_NORETURN __declspec(noreturn)
 #define LUAU_NOINLINE __declspec(noinline)
@@ -20,7 +18,6 @@
 #define LUAU_DEBUGBREAK() __builtin_trap()
 #endif
 
-// LUAU_FALLTHROUGH is a C++11-compatible alternative to [[fallthrough]] for use in the VM library
 #if defined(__clang__) && defined(__has_warning)
 #if __has_feature(cxx_attributes) && __has_warning("-Wimplicit-fallthrough")
 #define LUAU_FALLTHROUGH [[clang::fallthrough]]
@@ -48,9 +45,6 @@ inline AssertHandler& assertHandler()
     return handler;
 }
 
-// We want 'inline' to correctly link this function declared in the header
-// But we also want to prevent compiler from inlining this function when optimization and assertions are enabled together
-// Reason for that is that compilation times can increase significantly in such a configuration
 LUAU_NOINLINE inline int assertCallHandler(const char* expression, const char* file, int line, const char* function)
 {
     if (AssertHandler handler = assertHandler())
@@ -59,7 +53,7 @@ LUAU_NOINLINE inline int assertCallHandler(const char* expression, const char* f
     return 1;
 }
 
-} // namespace Luau
+}
 
 #if !defined(NDEBUG) || defined(LUAU_ENABLE_ASSERT)
 #define LUAU_ASSERT(expr) ((void)(!!(expr) || (Luau::assertCallHandler(#expr, __FILE__, __LINE__, __FUNCTION__) && (LUAU_DEBUGBREAK(), 0))))
@@ -99,7 +93,7 @@ struct FValue
 template<typename T>
 FValue<T>* FValue<T>::list = nullptr;
 
-} // namespace Luau
+}
 
 #define LUAU_FASTFLAG(flag) \
     namespace FFlag \

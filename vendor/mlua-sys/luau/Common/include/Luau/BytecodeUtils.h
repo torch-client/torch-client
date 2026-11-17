@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Bytecode.h"
@@ -40,4 +39,4 @@ inline int getOpLength(LuauOpcode op)
     }
 }
 
-} // namespace Luau
+}

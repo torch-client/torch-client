@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Location.h"
@@ -114,18 +113,16 @@ struct AstArray
 struct AstTypeList
 {
     AstArray<AstType*> types;
-    // Null indicates no tail, not an untyped tail.
     AstTypePack* tailType = nullptr;
 };
 
-// Don't have Luau::Variant available, it's a bit of an overhead, but a plain struct is nice to use
 struct AstTypeOrPack
 {
     AstType* type = nullptr;
     AstTypePack* typePack = nullptr;
 };
 
-using AstArgumentName = std::pair<AstName, Location>; // TODO: remove and replace when we get a common struct for this pair instead of AstName
+using AstArgumentName = std::pair<AstName, Location>;
 
 extern int gAstRttiIndex;
 
@@ -349,27 +346,9 @@ public:
 
     enum QuoteStyle
     {
-        // A string created using double quotes or an interpolated string,
-        // as in:
-        //
-        //  "foo", `My name is {protagonist}! / And I'm {antagonist}!`
-        //
         QuotedSimple,
-        // A string created using single quotes, as in:
-        //
-        //  'bar'
-        //
         QuotedSingle,
-        // A string created using `[[ ... ]]` as in:
-        //
-        //   [[ Gee, this sure is a long string.
-        //   it even has a new line in it! ]]
-        //
         QuotedRaw,
-        // A "string" in the context of a table literal, as in:
-        //
-        //  { foo = 42 } -- `foo` here is a "constant string"
-        //
         Unquoted,
     };
 
@@ -434,9 +413,6 @@ public:
     void visit(AstVisitor* visitor) override;
 
     AstExpr* func;
-    // These will only be filled in specifically `t:f<<A, B>>()`.
-    // In `f<<A, B>>()`, this is parsed as `f<<A, B>>` as an expression,
-    // which is then called.
     AstArray<AstTypeOrPack> typeArguments;
     AstArray<AstExpr*> args;
     bool self;
@@ -535,14 +511,14 @@ public:
     {
         enum Kind
         {
-            List,    // foo, in which case key is a nullptr
-            Record,  // foo=bar, in which case key is a AstExprConstantString
-            General, // [foo]=bar
+            List,
+            Record,
+            General,
         };
 
         Kind kind;
 
-        AstExpr* key; // can be nullptr!
+        AstExpr* key;
         AstExpr* value;
     };
 
@@ -653,14 +629,10 @@ public:
 
     void visit(AstVisitor* visitor) override;
 
-    /// An interpolated string such as `foo{bar}baz` is represented as
-    /// an array of strings for "foo" and "bar", and an array of expressions for "baz".
-    /// `strings` will always have one more element than `expressions`.
     AstArray<AstArray<char>> strings;
     AstArray<AstExpr*> expressions;
 };
 
-// f<<T>>
 class AstExprInstantiate : public AstExpr
 {
 public:
@@ -685,16 +657,6 @@ public:
 
     AstArray<AstStat*> body;
 
-    /* Indicates whether or not this block has been terminated in a
-     * syntactically valid way.
-     *
-     * This is usually but not always done with the 'end' keyword.  AstStatIf
-     * and AstStatRepeat are the two main exceptions to this.
-     *
-     * The 'then' clause of an if statement can properly be closed by the
-     * keywords 'else' or 'elseif'.  A 'repeat' loop's body is closed with the
-     * 'until' keyword.
-     */
     bool hasEnd = false;
 };
 
@@ -720,7 +682,6 @@ public:
 
     std::optional<Location> thenLocation;
 
-    // Active for 'elseif' as well
     std::optional<Location> elseLocation;
 };
 
@@ -1557,7 +1518,6 @@ public:
         return visit(static_cast<AstStat*>(node));
     }
 
-    // By default visiting type annotations is disabled; override this in your visitor if you need to!
     virtual bool visit(class AstType* node)
     {
         return false;
@@ -1632,7 +1592,7 @@ bool isLiteralTable(const AstExpr*);
 AstName getIdentifier(AstExpr*);
 Location getLocation(const AstTypeList& typeList);
 
-template<typename T> // AstNode, AstExpr, AstLocal, etc
+template<typename T>
 Location getLocation(AstArray<T*> array)
 {
     if (0 == array.size)
@@ -1643,7 +1603,7 @@ Location getLocation(AstArray<T*> array)
 
 #undef LUAU_RTTI
 
-} // namespace Luau
+}
 
 namespace std
 {
@@ -1653,10 +1613,8 @@ struct hash<Luau::AstName>
 {
     size_t operator()(const Luau::AstName& value) const
     {
-        // note: since operator== uses pointer identity, hashing function uses it as well
-        // the hasher is the same as DenseHashPointer (DenseHash.h)
         return (uintptr_t(value.value) >> 4) ^ (uintptr_t(value.value) >> 9);
     }
 };
 
-} // namespace std
+}

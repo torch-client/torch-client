@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lobject.h"
 
 #include "lstate.h"
@@ -47,7 +45,7 @@ int luaO_rawequalObj(const TValue* t1, const TValue* t2)
         case LUA_TVECTOR:
             return luai_veceq(vvalue(t1), vvalue(t2));
         case LUA_TBOOLEAN:
-            return bvalue(t1) == bvalue(t2); // boolean true must be 1 !!
+            return bvalue(t1) == bvalue(t2);
         case LUA_TLIGHTUSERDATA:
             return pvalue(t1) == pvalue(t2) && lightuserdatatag(t1) == lightuserdatatag(t2);
         default:
@@ -70,7 +68,7 @@ int luaO_rawequalKey(const TKey* t1, const TValue* t2)
         case LUA_TVECTOR:
             return luai_veceq(vvalue(t1), vvalue(t2));
         case LUA_TBOOLEAN:
-            return bvalue(t1) == bvalue(t2); // boolean true must be 1 !!
+            return bvalue(t1) == bvalue(t2);
         case LUA_TLIGHTUSERDATA:
             return pvalue(t1) == pvalue(t2) && lightuserdatatag(t1) == lightuserdatatag(t2);
         default:
@@ -84,15 +82,15 @@ int luaO_str2d(const char* s, double* result)
     char* endptr;
     *result = luai_str2num(s, &endptr);
     if (endptr == s)
-        return 0;                         // conversion failed
-    if (*endptr == 'x' || *endptr == 'X') // maybe an hexadecimal constant?
+        return 0;
+    if (*endptr == 'x' || *endptr == 'X')
         *result = cast_num(strtoul(s, &endptr, 16));
     if (*endptr == '\0')
-        return 1; // most common case
+        return 1;
     while (isspace(cast_to(unsigned char, *endptr)))
         endptr++;
     if (*endptr != '\0')
-        return 0; // invalid trailing characters?
+        return 0;
     return 1;
 }
 
@@ -116,20 +114,12 @@ const char* luaO_pushfstring(lua_State* L, const char* fmt, ...)
     return msg;
 }
 
-// Possible chunkname prefixes:
-//
-// '=' prefix: meant to represent custom chunknames. When truncation is needed,
-// the beginning of the chunkname is kept.
-//
-// '@' prefix: meant to represent filepaths. When truncation is needed, the end
-// of the filepath is kept, as this is more useful for identifying the file.
 const char* luaO_chunkid(char* buf, size_t buflen, const char* source, size_t srclen)
 {
     if (*source == '=')
     {
         if (srclen <= buflen)
             return source + 1;
-        // truncate the part after =
         memcpy(buf, source + 1, buflen - 1);
         buf[buflen - 1] = '\0';
     }
@@ -137,20 +127,19 @@ const char* luaO_chunkid(char* buf, size_t buflen, const char* source, size_t sr
     {
         if (srclen <= buflen)
             return source + 1;
-        // truncate the part after @
         memcpy(buf, "...", 3);
         memcpy(buf + 3, source + srclen - (buflen - 4), buflen - 4);
         buf[buflen - 1] = '\0';
     }
     else
-    {                                         // buf = [string "string"]
-        size_t len = strcspn(source, "\n\r"); // stop at first newline
+    {
+        size_t len = strcspn(source, "\n\r");
         buflen -= sizeof("[string \"...\"]");
         if (len > buflen)
             len = buflen;
         strcpy(buf, "[string \"");
         if (source[len] != '\0')
-        { // must truncate?
+        {
             strncat(buf, source, len);
             strcat(buf, "...");
         }

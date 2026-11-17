@@ -276,20 +276,20 @@ fn bot_heartbeat(
     }
 }
 
-pub(crate) fn start_bot(address: String) {
+pub(crate) fn start_bot(address: String) -> Result<(), String> {
     if let Err(reason) = crate::platform::address::check(&address) {
         log_error!("net", "{reason}");
         if let Some(shared) = SHARED.get() {
-            shared.lock().unwrap().session.status = Some(reason.into());
+            shared.lock().unwrap().session.status = Some(reason.clone().into());
         }
-        return;
+        return Err(reason);
     }
     if BOT_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         log_warn!(
             "net",
             "already connected; ignoring a second connection to {address}"
         );
-        return;
+        return Err("The previous connection is still closing; try again".to_string());
     }
     log_info!("net", "connecting to {address}");
     let generation = BOT_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
@@ -447,6 +447,7 @@ pub(crate) fn start_bot(address: String) {
             shared.lock().unwrap().end_session(status, Some(spans));
         }
     }
+    Ok(())
 }
 
 #[derive(Clone, Component, Default)]

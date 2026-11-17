@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/DenseHash.h"
@@ -22,4 +21,4 @@ private:
     std::vector<std::string> ordered;
 };
 
-} // namespace Luau::Require
+}

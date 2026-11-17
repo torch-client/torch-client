@@ -3,9 +3,14 @@ use std::sync::Arc;
 
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_inventory::ItemStack;
+use azalea_inventory::components::{
+    DirectTrimMaterial, DirectTrimPattern, ProvidesTrimMaterial, Trim,
+};
 use azalea_protocol::common::recipe::{RecipeDisplayData, SlotDisplayData};
 use azalea_registry::builtin::{DataComponentKind, ItemKind, Potion};
+use azalea_registry::data::{TrimMaterial, TrimPattern};
 use azalea_registry::identifier::Identifier;
+use azalea_registry::{DataRegistry, Holder};
 
 use crate::session::SlotStack;
 
@@ -200,12 +205,29 @@ impl<'a> Ctx<'a> {
                     })
                     .collect()
             }
-            SlotDisplayData::Dyed(d) => self.demo(&d.target, &d.dye),
-            SlotDisplayData::SmithingTrim(d) => self.demo(&d.base, &d.material),
+            SlotDisplayData::Dyed(d) => {
+                self.demo(&d.target, &d.dye, |target, _| Some(target.clone()))
+            }
+            SlotDisplayData::SmithingTrim(d) => {
+                self.demo(&d.base, &d.material, |base, material| {
+                    if let Some(registries) = self.registries {
+                        crate::items::dispatch::refresh_trims(registries);
+                    }
+                    match self.trim_material(material)? {
+                        Some(material) => apply_trim(base, material, &d.pattern),
+                        None => Some(base.clone()),
+                    }
+                })
+            }
         }
     }
 
-    fn demo(&self, first: &SlotDisplayData, second: &SlotDisplayData) -> Vec<ItemStack> {
+    fn demo(
+        &self,
+        first: &SlotDisplayData,
+        second: &SlotDisplayData,
+        apply: impl Fn(&ItemStack, &ItemStack) -> Option<ItemStack>,
+    ) -> Vec<ItemStack> {
         const DEMO_LIMIT: usize = 16;
         let first = self.stacks(first);
         let second = self.stacks(second);
@@ -213,9 +235,30 @@ impl<'a> Ctx<'a> {
             return Vec::new();
         }
         (0..first.len() * second.len())
-            .map(|i| first[i % first.len()].clone())
+            .filter_map(|i| apply(&first[i % first.len()], &second[i / first.len()]))
             .take(DEMO_LIMIT)
             .collect()
+    }
+
+    fn trim_material(
+        &self,
+        stack: &ItemStack,
+    ) -> Option<Option<Holder<TrimMaterial, DirectTrimMaterial>>> {
+        stack
+            .as_present()?
+            .get_unless_removed::<ProvidesTrimMaterial>()?;
+        if let Some(provided) = stack.component_patch().get::<ProvidesTrimMaterial>() {
+            return Some(Some(provided.value.clone()));
+        }
+        let key = vanilla_trim_material(stack.kind())?;
+        Some(self.registries.and_then(|registries| {
+            let id = registries
+                .extra
+                .get(&Identifier::new("trim_material"))?
+                .map
+                .get_index_of(&Identifier::new(key))?;
+            Some(Holder::Reference(TrimMaterial::new_raw(id as u32)))
+        }))
     }
 
     fn convert(&self, stacks: Vec<ItemStack>) -> Stacks {
@@ -224,12 +267,52 @@ impl<'a> Ctx<'a> {
             .map(|s| {
                 let mut out = crate::play::inventory_bridge::slot_stack(s, self.registries, false);
                 out.cooldown = 0;
-                out.raw = None;
+                if s.get_component::<azalea_inventory::components::Trim>()
+                    .is_none()
+                {
+                    out.raw = None;
+                }
                 out
             })
             .filter(|s| !s.is_empty())
             .collect()
     }
+}
+
+fn apply_trim(
+    base: &ItemStack,
+    material: Holder<TrimMaterial, DirectTrimMaterial>,
+    pattern: &Holder<TrimPattern, DirectTrimPattern>,
+) -> Option<ItemStack> {
+    let trim = Trim {
+        material,
+        pattern: pattern.clone(),
+    };
+    if base.get_component::<Trim>().as_deref() == Some(&trim) {
+        return None;
+    }
+    let mut out = base.clone();
+    if let ItemStack::Present(data) = &mut out {
+        data.count = 1;
+    }
+    Some(out.with_component(trim))
+}
+
+fn vanilla_trim_material(item: ItemKind) -> Option<&'static str> {
+    Some(match item {
+        ItemKind::Redstone => "redstone",
+        ItemKind::Diamond => "diamond",
+        ItemKind::Emerald => "emerald",
+        ItemKind::LapisLazuli => "lapis",
+        ItemKind::Quartz => "quartz",
+        ItemKind::AmethystShard => "amethyst",
+        ItemKind::IronIngot => "iron",
+        ItemKind::CopperIngot => "copper",
+        ItemKind::GoldIngot => "gold",
+        ItemKind::NetheriteIngot => "netherite",
+        ItemKind::ResinBrick => "resin",
+        _ => return None,
+    })
 }
 
 fn has_component(stack: &ItemStack, kind: DataComponentKind) -> bool {

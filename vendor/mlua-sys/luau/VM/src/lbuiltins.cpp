@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lbuiltins.h"
 
 #include "lstate.h"
@@ -21,18 +19,9 @@
 #include <smmintrin.h>
 
 #ifndef _MSC_VER
-#include <cpuid.h> // on MSVC this comes from intrin.h
+#include <cpuid.h>
 #endif
 #endif
-
-// luauF functions implement FASTCALL instruction that performs a direct execution of some builtin functions from the VM
-// The rule of thumb is that FASTCALL functions can not call user code, yield, fail, or reallocate stack.
-// If types of the arguments mismatch, luauF_* needs to return -1 and the execution will fall back to the usual call path
-// If luauF_* succeeds, it needs to return *all* requested arguments, filling results with nil as appropriate.
-// On input, nparams refers to the actual number of arguments (0+), whereas nresults contains LUA_MULTRET for arbitrary returns or 0+ for a
-// fixed-length return
-// Because of this, and the fact that "extra" returned values will be ignored, implementations below typically check that nresults is <= expected
-// number, which covers the LUA_MULTRET case.
 
 static int luauF_assert(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
 {
@@ -437,12 +426,8 @@ static int luauF_arshift(lua_State* L, StkId res, TValue* arg0, int nresults, St
         luai_num2unsigned(u, a1);
         int s = int(a2);
 
-        // note: we only specialize fast-path that doesn't require further conditionals (negative shifts and shifts greater or equal to bit width can
-        // be handled generically)
         if (unsigned(s) < 32)
         {
-            // note: technically right shift of negative values is UB, but this behavior is getting defined in C++20 and all compilers do the right
-            // (shift) thing.
             uint32_t r = int32_t(u) >> s;
 
             setnvalue(res, double(r));
@@ -650,7 +635,6 @@ static int luauF_lrotate(lua_State* L, StkId res, TValue* arg0, int nresults, St
         luai_num2unsigned(u, a1);
         int s = int(a2);
 
-        // MSVC doesn't recognize the rotate form that is UB-safe
 #ifdef _MSC_VER
         uint32_t r = _rotl(u, s);
 #else
@@ -675,8 +659,6 @@ static int luauF_lshift(lua_State* L, StkId res, TValue* arg0, int nresults, Stk
         luai_num2unsigned(u, a1);
         int s = int(a2);
 
-        // note: we only specialize fast-path that doesn't require further conditionals (negative shifts and shifts greater or equal to bit width can
-        // be handled generically)
         if (unsigned(s) < 32)
         {
             uint32_t r = u << s;
@@ -743,7 +725,6 @@ static int luauF_rrotate(lua_State* L, StkId res, TValue* arg0, int nresults, St
         luai_num2unsigned(u, a1);
         int s = int(a2);
 
-        // MSVC doesn't recognize the rotate form that is UB-safe
 #ifdef _MSC_VER
         uint32_t r = _rotr(u, s);
 #else
@@ -768,8 +749,6 @@ static int luauF_rshift(lua_State* L, StkId res, TValue* arg0, int nresults, Stk
         luai_num2unsigned(u, a1);
         int s = int(a2);
 
-        // note: we only specialize fast-path that doesn't require further conditionals (negative shifts and shifts greater or equal to bit width can
-        // be handled generically)
         if (unsigned(s) < 32)
         {
             uint32_t r = u >> s;
@@ -809,8 +788,6 @@ static int luauF_byte(lua_State* L, StkId res, TValue* arg0, int nresults, StkId
             int c = j - i + 1;
             const char* s = getstr(ts);
 
-            // for vararg returns, we only support a single result
-            // this is because this frees us from concerns about stack space
             if (c == (nresults < 0 ? 1 : nresults))
             {
                 for (int k = 0; k < c; ++k)
@@ -833,7 +810,7 @@ static int luauF_char(lua_State* L, StkId res, TValue* arg0, int nresults, StkId
     if (nparams < int(sizeof(buffer)) && nresults <= 1)
     {
         if (luaC_needsGC(L))
-            return -1; // we can't call luaC_checkGC so fall back to C implementation
+            return -1;
 
         if (nparams >= 1)
         {
@@ -905,7 +882,7 @@ static int luauF_sub(lua_State* L, StkId res, TValue* arg0, int nresults, StkId 
         int j = int(nvalue(args + 1));
 
         if (luaC_needsGC(L))
-            return -1; // we can't call luaC_checkGC so fall back to C implementation
+            return -1;
 
         if (i >= 1 && j >= i && unsigned(j - 1) < unsigned(ts->len))
         {
@@ -1143,13 +1120,11 @@ static int luauF_select(lua_State* L, StkId res, TValue* arg0, int nresults, Stk
         {
             int i = int(nvalue(arg0));
 
-            // i >= 1 && i <= n
             if (unsigned(i - 1) < unsigned(n))
             {
                 setobj2s(L, res, L->base - n + (i - 1));
                 return 1;
             }
-            // note: for now we don't handle negative case (wrap around) and defer to fallback
         }
         else if (ttisstring(arg0) && *svalue(arg0) == '#')
         {
@@ -1184,7 +1159,6 @@ static int luauF_rawlen(lua_State* L, StkId res, TValue* arg0, int nresults, Stk
 
 static int luauF_extractk(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
 {
-    // args is known to contain a number constant with packed in-range f/w
     if (nparams >= 2 && nresults <= 1 && ttisnumber(arg0))
     {
         double a1 = nvalue(arg0);
@@ -1243,12 +1217,11 @@ static int luauF_getmetatable(lua_State* L, StkId res, TValue* arg0, int nresult
 
 static int luauF_setmetatable(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
 {
-    // note: setmetatable(_, nil) is rare so we use fallback for it to optimize the fast path
     if (nparams >= 2 && nresults <= 1 && ttistable(arg0) && ttistable(args))
     {
         LuaTable* t = hvalue(arg0);
         if (t->readonly || t->metatable != NULL)
-            return -1; // note: overwriting non-null metatable is very rare but it requires __metatable check
+            return -1;
 
         LuaTable* mt = hvalue(args);
         t->metatable = mt;
@@ -1308,7 +1281,7 @@ static int luauF_tostring(lua_State* L, StkId res, TValue* arg0, int nresults, S
         case LUA_TNUMBER:
         {
             if (luaC_needsGC(L))
-                return -1; // we can't call luaC_checkGC so fall back to C implementation
+                return -1;
 
             char s[LUAI_MAXNUM2STR];
             char* e = luai_num2str(s, nvalue(arg0));
@@ -1322,7 +1295,6 @@ static int luauF_tostring(lua_State* L, StkId res, TValue* arg0, int nresults, S
         }
         }
 
-        // fall back to generic C implementation
     }
 
     return -1;
@@ -1345,7 +1317,6 @@ static int luauF_byteswap(lua_State* L, StkId res, TValue* arg0, int nresults, S
     return -1;
 }
 
-// because offset is limited to an integer, a single 64bit comparison can be used and will not overflow
 #define checkoutofbounds(offset, len, accessize) (uint64_t(unsigned(offset)) + (accessize - 1) >= uint64_t(len))
 
 template<typename T>
@@ -1406,7 +1377,6 @@ static int luauF_readfp(lua_State* L, StkId res, TValue* arg0, int nresults, Stk
 
         T val;
 #ifdef _MSC_VER
-        // avoid memcpy path on MSVC because it results in integer stack copy + floating-point ops on stack
         val = *(T*)((char*)bufvalue(arg0)->data + unsigned(offset));
 #else
         memcpy(&val, (char*)bufvalue(arg0)->data + unsigned(offset), sizeof(T));
@@ -1432,7 +1402,6 @@ static int luauF_writefp(lua_State* L, StkId res, TValue* arg0, int nresults, St
 
         T val = T(nvalue(args + 1));
 #ifdef _MSC_VER
-        // avoid memcpy path on MSVC because it results in integer stack copy + floating-point ops on stack
         *(T*)((char*)bufvalue(arg0)->data + unsigned(offset)) = val;
 #else
         memcpy((char*)bufvalue(arg0)->data + unsigned(offset), &val, sizeof(T));
@@ -1491,7 +1460,6 @@ static int luauF_vectorcross(lua_State* L, StkId res, TValue* arg0, int nresults
         const float* a = vvalue(arg0);
         const float* b = vvalue(args);
 
-        // same for 3- and 4- wide vectors
         setvvalue(res, a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0], 0.0f);
         return 1;
     }
@@ -1820,8 +1788,6 @@ LUAU_TARGET_SSE41 static int luauF_round_sse41(lua_State* L, StkId res, TValue* 
     if (nparams >= 1 && nresults <= 1 && ttisnumber(arg0))
     {
         double a1 = nvalue(arg0);
-        // roundsd only supports bankers rounding natively, so we need to emulate rounding by using truncation
-        // offset is prevfloat(0.5), which is important so that we round prevfloat(0.5) to 0.
         const double offset = 0.49999999999999994;
         setnvalue(res, roundsd_sse41<_MM_FROUND_TO_ZERO>(a1 + (a1 < 0 ? -offset : offset)));
         return 1;
@@ -1839,8 +1805,6 @@ static bool luau_hassse41()
     __cpuid(1, cpuinfo[0], cpuinfo[1], cpuinfo[2], cpuinfo[3]);
 #endif
 
-    // We require SSE4.1 support for ROUNDSD
-    // https://en.wikipedia.org/wiki/CPUID#EAX=1:_Processor_Info_and_Feature_Bits
     return (cpuinfo[2] & (1 << 19)) != 0;
 }
 #endif
@@ -1980,9 +1944,6 @@ const luau_FastFunction luauF_table[256] = {
     luauF_isinf,
     luauF_isfinite,
 
-// When adding builtins, add them above this line; what follows is 64 "dummy" entries with luauF_missing fallback.
-// This is important so that older versions of the runtime that don't support newer builtins automatically fall back via luauF_missing.
-// Given the builtin addition velocity this should always provide a larger compatibility window than bytecode versions suggest.
 #define MISSING8 luauF_missing, luauF_missing, luauF_missing, luauF_missing, luauF_missing, luauF_missing, luauF_missing, luauF_missing
 
     MISSING8,

@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Common.h"
@@ -52,7 +51,7 @@ struct HotComment
 
 struct Comment
 {
-    Lexeme::Type type; // Comment, BlockComment, or BrokenComment
+    Lexeme::Type type;
     Location location;
 };
 
@@ -87,4 +86,4 @@ struct ParseNodeResult
 
 inline constexpr const char* kParseNameError = "%error-id%";
 
-} // namespace Luau
+}

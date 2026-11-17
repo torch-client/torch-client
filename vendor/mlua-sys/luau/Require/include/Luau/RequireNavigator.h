@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Config.h"
@@ -11,26 +10,11 @@
 
 struct lua_State;
 
-////////////////////////////////////////////////////////////////////////////////
-//
-// This file provides a C++ interface for navigating the context in which
-// require-by-string operates. This is used internally by the require-by-string
-// runtime library to resolve paths based on the rules defined by its consumers.
-//
-// Including this file directly allows for inspection of the require-by-string
-// path resolution algorithm's behavior without enabling the runtime library,
-// which can be useful for static tooling.
-//
-////////////////////////////////////////////////////////////////////////////////
-
 namespace Luau::Require
 {
 
 class AliasCycleTracker;
 
-// The ErrorHandler interface is used to report errors during navigation.
-// The default implementation does nothing but can be overridden to enable
-// custom error handling behavior.
 class ErrorHandler
 {
 public:
@@ -38,13 +22,6 @@ public:
     virtual void reportError(std::string message) {}
 };
 
-// NavigationContext is an pure virtual class that is intended to be implemented
-// and injected into a Navigator.
-//
-// When a Navigator traverses a require path, its NavigationContext's methods
-// are invoked, with the expectation that the NavigationContext will keep track
-// of the current state of the navigation and provide information about the
-// current context as needed.
 class NavigationContext
 {
 public:
@@ -91,18 +68,11 @@ public:
     std::function<void(lua_State*)> luauConfigInit = nullptr;
     void (*luauConfigInterrupt)(lua_State* L, int gc) = nullptr;
 
-    // The result of getConfigBehavior determines whether getAlias or getConfig
-    // is called when getConfigStatus indicates a configuration is present.
     virtual ConfigBehavior getConfigBehavior() const = 0;
     virtual std::optional<std::string> getAlias(const std::string& alias) const = 0;
     virtual std::optional<std::string> getConfig() const = 0;
 };
 
-// The Navigator class is responsible for traversing a given require path in the
-// context of a given NavigationContext.
-//
-// The Navigator is not intended to be overridden. Rather, it expects a custom
-// injected NavigationContext that provides the desired navigation behavior.
 class Navigator
 {
 public:
@@ -134,4 +104,4 @@ private:
     ErrorHandler& errorHandler;
 };
 
-} // namespace Luau::Require
+}

@@ -253,6 +253,7 @@ struct MetaCache {
     variant: Option<(&'static str, u32)>,
     head_target_ids: [i32; 2],
     sleeping_pos: Option<AzBlockPos>,
+    framed_map: Option<i32>,
 }
 
 crate::util::global! {
@@ -276,6 +277,7 @@ struct Pending {
     animal: bool,
     camel_pose: (bool, i64),
     glow_uuid: Option<u128>,
+    framed_map: Option<i32>,
 }
 
 #[derive(Clone, Copy)]
@@ -617,6 +619,23 @@ fn is_bare_object(kind: azalea_registry::builtin::EntityKind) -> bool {
     )
 }
 
+fn is_item_frame(kind: azalea_registry::builtin::EntityKind) -> bool {
+    use azalea_registry::builtin::EntityKind;
+    matches!(kind, EntityKind::ItemFrame | EntityKind::GlowItemFrame)
+}
+
+fn frame_map(
+    framed: i32,
+) -> (
+    Option<i32>,
+    Option<std::sync::Arc<crate::session::FrameMarkers>>,
+) {
+    match crate::client::tracking::framed_map(framed) {
+        Some(markers) => (Some(framed), markers),
+        None => (None, None),
+    }
+}
+
 pub(crate) fn collect_entities(
     bot: &Client,
     seen_players: &HashSet<i32>,
@@ -741,6 +760,21 @@ pub(crate) fn collect_entities(
             && let Some(c) = meta_cache_ref.get(&id).filter(|c| c.kind == kind)
         {
             let mut input = c.input.clone();
+            let mut refiled = false;
+            if let Some(framed) = c.framed_map {
+                let (map, markers) = frame_map(framed);
+                let same_markers = match (&input.shared.map_markers, &markers) {
+                    (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if input.shared.item.map_id != map || !same_markers {
+                    let shared = input.shared_mut();
+                    shared.item.map_id = map;
+                    shared.map_markers = markers;
+                    refiled = true;
+                }
+            }
             input.simulate = true;
             input.pos =
                 hanging_position(kind, [pos.x, pos.y, pos.z], input.shared.hanging_direction);
@@ -770,10 +804,11 @@ pub(crate) fn collect_entities(
                 kind,
                 input,
                 deferred,
-                fresh: false,
+                fresh: refiled,
                 animal,
                 camel_pose,
                 glow_uuid,
+                framed_map: c.framed_map,
             };
         }
         let living = is_living(kind);
@@ -905,10 +940,18 @@ pub(crate) fn collect_entities(
             _ => {}
         }
 
+        let framed_map = if is_item_frame(kind) {
+            shared.item.map_id
+        } else {
+            None
+        };
         if let Some(map) = shared.item.map_id
             && !has_map(map)
         {
             shared.item.map_id = None;
+        }
+        if let Some(framed) = framed_map {
+            shared.map_markers = frame_map(framed).1;
         }
 
         if living {
@@ -1356,6 +1399,7 @@ pub(crate) fn collect_entities(
             animal,
             camel_pose,
             glow_uuid,
+            framed_map,
         }
     });
     drop(ecs);
@@ -1554,6 +1598,7 @@ pub(crate) fn collect_entities(
         input,
         deferred: extra,
         fresh,
+        framed_map,
         ..
     } in &pending
     {
@@ -1567,6 +1612,7 @@ pub(crate) fn collect_entities(
                         variant: extra.variant,
                         head_target_ids: extra.head_target_ids,
                         sleeping_pos: extra.sleeping_pos,
+                        framed_map: *framed_map,
                     },
                 );
             } else {

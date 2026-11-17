@@ -219,6 +219,10 @@ impl Plugin for GuiPlugin {
                 options,
                 chat: crate::gui::chat::ChatState::with_saved_history(),
                 hud_state: crate::gui::hud_layout::HudState::load(),
+                level_loading: crate::gui::level_loading::State {
+                    connecting: self.startup.screen == crate::gui::Screen::LevelLoading,
+                    ..Default::default()
+                },
                 ..Default::default()
             })
             .init_resource::<crate::gui::atlas_writes::AtlasWrites>()

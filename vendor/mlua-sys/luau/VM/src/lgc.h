@@ -1,38 +1,21 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #pragma once
 
 #include "ldo.h"
 #include "lobject.h"
 #include "lstate.h"
 
-/*
-** Default settings for GC tunables (settable via lua_gc)
-*/
-#define LUAI_GCGOAL 200    // 200% (allow heap to double compared to live heap size)
-#define LUAI_GCSTEPMUL 200 // GC runs 'twice the speed' of memory allocation
-#define LUAI_GCSTEPSIZE 1  // GC runs every KB of memory allocation
+#define LUAI_GCGOAL 200
+#define LUAI_GCSTEPMUL 200
+#define LUAI_GCSTEPSIZE 1
 
-/*
-** Possible states of the Garbage Collector
-*/
 #define GCSpause 0
 #define GCSpropagate 1
 #define GCSpropagateagain 2
 #define GCSatomic 3
 #define GCSsweep 4
 
-/*
-** The main invariant of the garbage collector, while marking objects,
-** is that a black object can never point to a white one. This invariant
-** is not being enforced during a sweep phase, and is restored when sweep
-** ends.
-*/
 #define keepinvariant(g) ((g)->gcstate == GCSpropagate || (g)->gcstate == GCSpropagateagain || (g)->gcstate == GCSatomic)
 
-/*
-** some useful bit tricks
-*/
 #define resetbits(x, m) ((x) &= cast_to(uint8_t, ~(m)))
 #define setbits(x, m) ((x) |= (m))
 #define testbits(x, m) ((x) & (m))
@@ -44,14 +27,6 @@
 #define set2bits(x, b1, b2) setbits(x, (bit2mask(b1, b2)))
 #define reset2bits(x, b1, b2) resetbits(x, (bit2mask(b1, b2)))
 #define test2bits(x, b1, b2) testbits(x, (bit2mask(b1, b2)))
-
-/*
-** Layout for bit use in `marked' field:
-** bit 0 - object is white (type 0)
-** bit 1 - object is white (type 1)
-** bit 2 - object is black
-** bit 3 - object is fixed (should not be collected)
-*/
 
 #define WHITE0BIT 0
 #define WHITE1BIT 1

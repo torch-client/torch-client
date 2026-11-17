@@ -1,14 +1,10 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #pragma once
 
 #include "lobject.h"
 #include "lstate.h"
 
-// string size limit
 #define MAXSSIZE (1 << 30)
 
-// string atoms are not defined by default; the storage is 16-bit integer
 #define ATOM_UNDEF -32768
 
 #define sizestring(len) (offsetof(TString, data) + len + 1)

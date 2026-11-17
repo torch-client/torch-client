@@ -89,7 +89,9 @@ const SERVER_ICON_GRID: ReservedGrid = ReservedGrid::new(
 
 pub const PUPPET_SKIN_SLOT: usize = ICON_SLOTS;
 pub const PUPPET_ARMOR_SLOT: usize = ICON_SLOTS + 1;
-pub const PUPPET_SLOTS: usize = 5;
+pub const PUPPET_STAND_SLOT: usize = ICON_SLOTS + 5;
+pub const PUPPET_STAND_ARMOR_SLOT: usize = ICON_SLOTS + 6;
+pub const PUPPET_SLOTS: usize = 7;
 
 const BANNER_ICON_GRID: ReservedGrid = ReservedGrid::new(
     BANNER_ICON_PX,

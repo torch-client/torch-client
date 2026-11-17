@@ -281,6 +281,7 @@ impl SkinPick {
             slim: skin.slim,
             parts: u8::MAX,
             armor: [false; 4],
+            body: crate::renderer::player_model::BodyDraw::Shown,
         };
         let size = h / 34.0 * 16.0 / crate::renderer::player_model::AVATAR_SCALE;
         crate::gui::puppet::follows_mouse(

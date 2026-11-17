@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use azalea_protocol::packets::ConnectionProtocol;
@@ -21,6 +22,14 @@ use super::wire::{Reader, varint_len, write_varint, write_varlong};
 
 const ACTION_INTERACT: i32 = 0;
 const ACTION_ATTACK: i32 = 1;
+const ACTION_INTERACT_AT: i32 = 2;
+
+const INPUT_SHIFT: u8 = 32;
+
+const CLIENT_COMMANDS_774: i32 = 2;
+
+const EVENT_TNT_PRIME_WIRE: u8 = 10;
+const EVENT_TNT_PRIME: u8 = 70;
 
 pub(crate) struct Ids {
     to_native: &'static Remap,
@@ -111,7 +120,10 @@ const V774: HopSpec = HopSpec {
             creative_slot,
         ),
     ],
-    layout_out: &[],
+    layout_out: &[
+        ("spectator_action", "interact", spectate_774),
+        ("client_command", "client_command", client_command_774),
+    ],
 };
 
 const V775: HopSpec = HopSpec {
@@ -180,7 +192,9 @@ struct Watched {
     add_entity: u32,
     remove_entities: u32,
     set_entity_data: u32,
+    entity_event: u32,
     login: u32,
+    player_input: u32,
     registry_data: u32,
 }
 
@@ -312,7 +326,9 @@ impl Hop {
             add_entity: id(Direction::Clientbound, "add_entity"),
             remove_entities: id(Direction::Clientbound, "remove_entities"),
             set_entity_data: id(Direction::Clientbound, "set_entity_data"),
+            entity_event: id(Direction::Clientbound, "entity_event"),
             login: id(Direction::Clientbound, "login"),
+            player_input: id(Direction::Serverbound, "player_input"),
             registry_data: new
                 .id(
                     Phase::Configuration,
@@ -347,7 +363,7 @@ impl Hop {
 
     pub(crate) fn inbound(&self, phase: ConnectionProtocol, raw: Box<[u8]>) -> Box<[u8]> {
         match phase {
-            ConnectionProtocol::Game => self.inbound_game(raw),
+            ConnectionProtocol::Game => self.inbound_game(raw).0,
             ConnectionProtocol::Login => {
                 self.inbound_fixed(Phase::Login, &self.login_rewrite, phase, raw)
             }
@@ -403,13 +419,13 @@ impl Hop {
         out.into_boxed_slice()
     }
 
-    fn inbound_game(&self, raw: Box<[u8]>) -> Box<[u8]> {
+    fn inbound_game(&self, raw: Box<[u8]>) -> (Box<[u8]>, bool) {
         let mut r = Reader::new(&raw);
         let Some(wire_id) = r.varint().and_then(|id| u32::try_from(id).ok()) else {
-            return raw;
+            return (raw, false);
         };
         let Some(&native_id) = self.inbound_game.get(wire_id as usize) else {
-            return raw;
+            return (raw, false);
         };
         let body = r.rest();
 
@@ -418,14 +434,15 @@ impl Hop {
             .get(native_id as usize)
             .copied()
             .unwrap_or_default();
-        let rewritten = match self.stages(
+        let (rewritten, failed) = match self.stages(
             Direction::Clientbound,
             native_id,
             [stages.layout, stages.ids],
             body,
         ) {
-            Rewritten::Body(body) => Some(body),
-            Rewritten::Untouched | Rewritten::Failed => None,
+            Rewritten::Body(body) => (Some(body), false),
+            Rewritten::Untouched => (None, false),
+            Rewritten::Failed => (None, true),
         };
 
         if self.trace {
@@ -437,11 +454,12 @@ impl Hop {
                 rewritten.is_some(),
             );
         }
-        match rewritten {
+        let out = match rewritten {
             Some(body) => frame(native_id, &body),
             None if native_id != wire_id => frame(native_id, body),
             None => raw,
-        }
+        };
+        (out, failed)
     }
 
     fn stages(
@@ -559,7 +577,12 @@ impl Hop {
         );
     }
 
-    fn field_indices(&self, moved: &mut HashMap<i32, &'static [Run]>, raw: Box<[u8]>) -> Box<[u8]> {
+    fn by_entity_type(
+        &self,
+        kinds: &mut Arc<HashMap<i32, i32>>,
+        raw: Box<[u8]>,
+        failed: bool,
+    ) -> Box<[u8]> {
         let mut r = Reader::new(&raw);
         let Some(id) = r.varint().and_then(|id| u32::try_from(id).ok()) else {
             return raw;
@@ -567,34 +590,51 @@ impl Hop {
         let watched = &self.watched;
         if id == watched.add_entity {
             if let Some((entity, kind)) = spawned(&mut r) {
-                let fields: &'static Fields = self.fields;
-                match fields.runs(kind) {
-                    Some(runs) => {
-                        moved.insert(entity, runs);
-                    }
-                    None => {
-                        moved.remove(&entity);
-                    }
+                let kinds = Arc::make_mut(kinds);
+                if failed {
+                    kinds.remove(&entity);
+                } else {
+                    kinds.insert(entity, kind);
                 }
             }
         } else if id == watched.remove_entities {
             if let Some(n) = r.count() {
+                let kinds = Arc::make_mut(kinds);
                 for _ in 0..n {
                     let Some(entity) = r.varint() else {
                         break;
                     };
-                    moved.remove(&entity);
+                    kinds.remove(&entity);
                 }
             }
         } else if id == watched.login {
-            moved.clear();
-        } else if id == watched.set_entity_data {
+            Arc::make_mut(kinds).clear();
+        } else if id == watched.set_entity_data && !failed {
             let head = r.pos();
-            let runs = r.varint().and_then(|entity| moved.get(&entity).copied());
+            let fields: &'static Fields = self.fields;
+            let runs = r
+                .varint()
+                .and_then(|entity| kinds.get(&entity).copied())
+                .and_then(|kind| fields.runs(kind));
             if let Some(runs) = runs {
                 if let Some(body) = shifted_metadata(&raw[head..], runs) {
                     return frame(id, &body);
                 }
+            }
+        } else if id == watched.entity_event {
+            let event_at = r.pos() + 4;
+            let entity = r
+                .take(4)
+                .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                .map(i32::from_be_bytes);
+            let tnt_minecart = EntityKind::TntMinecart.to_u32() as i32;
+            if r.u8() == Some(EVENT_TNT_PRIME_WIRE)
+                && r.remaining() == 0
+                && entity.and_then(|entity| kinds.get(&entity).copied()) == Some(tnt_minecart)
+            {
+                let mut raw = raw;
+                raw[event_at] = EVENT_TNT_PRIME;
+                return raw;
             }
         }
         raw
@@ -650,8 +690,20 @@ fn passed_through(way: &str, phase: ConnectionProtocol, raw: &[u8]) {
 
 pub(crate) struct Translator {
     hop: &'static Hop,
-    moved: HashMap<i32, &'static [Run]>,
+    seen: Seen,
     order: Option<Arc<EntryOrder>>,
+}
+
+#[derive(Clone, Default)]
+struct Seen {
+    kinds: Arc<HashMap<i32, i32>>,
+    sneaking: bool,
+}
+
+impl Seen {
+    fn kind(&self, entity: i32) -> Option<i32> {
+        self.kinds.get(&entity).copied()
+    }
 }
 
 impl Translator {
@@ -663,9 +715,19 @@ impl Translator {
         };
         Some(Self {
             hop,
-            moved: HashMap::new(),
+            seen: Seen::default(),
             order: None,
         })
+    }
+
+    fn record_input(&mut self, raw: &[u8]) {
+        let mut r = Reader::new(raw);
+        if r.varint() != Some(self.hop.watched.player_input as i32) {
+            return;
+        }
+        if let Some(flags) = r.u8() {
+            self.seen.sneaking = flags & INPUT_SHIFT != 0;
+        }
     }
 
     fn record_registry(&mut self, raw: &[u8]) {
@@ -720,6 +782,13 @@ impl LazyRegistry {
             .into_iter()
             .find(|candidate| *registry == Identifier::new(candidate.name()))
     }
+
+    fn inline_holder(self) -> bool {
+        matches!(
+            self,
+            Self::Instrument | Self::JukeboxSong | Self::TrimMaterial
+        )
+    }
 }
 
 #[derive(Clone, Default)]
@@ -762,21 +831,53 @@ impl Drop for OrderScope {
     }
 }
 
+thread_local! {
+    static SEEN: std::cell::RefCell<Option<Seen>> = const { std::cell::RefCell::new(None) };
+}
+
+struct SeenScope;
+
+impl SeenScope {
+    fn enter(seen: &Seen) -> Self {
+        SEEN.with(|slot| *slot.borrow_mut() = Some(seen.clone()));
+        Self
+    }
+}
+
+impl Drop for SeenScope {
+    fn drop(&mut self) {
+        SEEN.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+fn seen<T>(ask: impl FnOnce(&Seen) -> T) -> T {
+    SEEN.with(|slot| match &*slot.borrow() {
+        Some(seen) => ask(seen),
+        None => ask(&Seen::default()),
+    })
+}
+
 impl azalea::connection::PacketTranslator for Translator {
     fn inbound(&mut self, phase: ConnectionProtocol, raw: Box<[u8]>) -> Box<[u8]> {
         if phase == ConnectionProtocol::Configuration && self.hop.ids.v774() {
             self.record_registry(&raw);
         }
-        let _order = OrderScope::enter(&self.order);
-        let frame = self.hop.inbound(phase, raw);
-        if phase == ConnectionProtocol::Game {
-            self.hop.field_indices(&mut self.moved, frame)
-        } else {
-            frame
+        if phase != ConnectionProtocol::Game {
+            let _order = OrderScope::enter(&self.order);
+            return self.hop.inbound(phase, raw);
         }
+        let (frame, failed) = {
+            let _order = OrderScope::enter(&self.order);
+            self.hop.inbound_game(raw)
+        };
+        self.hop.by_entity_type(&mut self.seen.kinds, frame, failed)
     }
 
     fn outbound(&mut self, phase: ConnectionProtocol, raw: Box<[u8]>) -> Box<[u8]> {
+        if phase == ConnectionProtocol::Game {
+            self.record_input(&raw);
+        }
+        let _seen = SeenScope::enter(&self.seen);
         self.hop.outbound(phase, raw)
     }
 }
@@ -989,25 +1090,45 @@ fn interact(body: &[u8], attacking: bool) -> Option<Box<[u8]>> {
     let mut r = Reader::new(body);
     let entity_id = r.varint()?;
 
-    let (hand, secondary) = if attacking {
-        (None, false)
+    let mut out = Vec::with_capacity(20);
+    write_varint(&mut out, entity_id);
+    let secondary = if attacking {
+        write_varint(&mut out, ACTION_ATTACK);
+        seen(|seen| seen.sneaking)
     } else {
         let hand = r.varint()?;
-        skip_lp_vec3(&mut r)?;
-        (Some(hand), r.u8()? != 0)
-    };
-
-    let mut out = Vec::with_capacity(8);
-    write_varint(&mut out, entity_id);
-    match hand {
-        Some(hand) => {
+        let location = lp_vec3(&mut r)?;
+        if seen(|seen| seen.kind(entity_id)).is_some_and(interacts_at) && !name_tag_in(hand) {
+            let at = location.to_vec3();
+            write_varint(&mut out, ACTION_INTERACT_AT);
+            for axis in [at.x, at.y, at.z] {
+                out.extend_from_slice(&(axis as f32).to_be_bytes());
+            }
+        } else {
             write_varint(&mut out, ACTION_INTERACT);
-            write_varint(&mut out, hand);
         }
-        None => write_varint(&mut out, ACTION_ATTACK),
-    }
+        write_varint(&mut out, hand);
+        r.u8()? != 0
+    };
     out.push(u8::from(secondary));
     Some(out.into_boxed_slice())
+}
+
+fn interacts_at(native_kind: i32) -> bool {
+    native_kind == EntityKind::ArmorStand.to_u32() as i32
+}
+
+static NAME_TAG_IN_HAND: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+
+pub(crate) fn note_held_name_tag(off_hand: bool, is_name_tag: bool) {
+    NAME_TAG_IN_HAND[usize::from(off_hand)].store(is_name_tag, Ordering::Relaxed);
+}
+
+fn name_tag_in(hand: i32) -> bool {
+    usize::try_from(hand)
+        .ok()
+        .and_then(|i| NAME_TAG_IN_HAND.get(i))
+        .is_some_and(|slot| slot.load(Ordering::Relaxed))
 }
 
 fn attack(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
@@ -1118,16 +1239,44 @@ fn set_player_team(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
 }
 
 fn spectator_action(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let mut out = Vec::with_capacity(5);
+    if let Some(target) = spectate_target(body)? {
+        write_varint(&mut out, target);
+    }
+    Some(out.into_boxed_slice())
+}
+
+fn spectate_774(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    match spectate_target(body)? {
+        Some(target) => {
+            let mut attack = Vec::with_capacity(5);
+            write_varint(&mut attack, target);
+            interact(&attack, true)
+        }
+        None => Some(Box::default()),
+    }
+}
+
+fn spectate_target(body: &[u8]) -> Option<Option<i32>> {
     let mut r = Reader::new(body);
     let target = r.varint()?;
     if r.remaining() != 0 {
         return None;
     }
-    let mut out = Vec::with_capacity(5);
-    if target != 0 {
-        write_varint(&mut out, target.checked_sub(1)?);
+    if target == 0 {
+        return Some(None);
     }
-    Some(out.into_boxed_slice())
+    Some(Some(target.checked_sub(1)?))
+}
+
+fn client_command_774(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
+    let action = Reader::new(body).varint()?;
+    let out: Box<[u8]> = if (0..CLIENT_COMMANDS_774).contains(&action) {
+        Box::from(body)
+    } else {
+        Box::default()
+    };
+    Some(out)
 }
 
 fn state(ids: &Ids, id: i32) -> Option<i32> {
@@ -1138,15 +1287,11 @@ fn block(ids: &Ids, id: i32) -> Option<i32> {
     ids.to_native.map(IdSpace::Block, id)
 }
 
-fn skip_lp_vec3(r: &mut Reader) -> Option<()> {
-    let flags = r.u8()?;
-    if flags != 0 {
-        r.take(5)?;
-        if flags & 4 != 0 {
-            r.varint()?;
-        }
-    }
-    Some(())
+fn lp_vec3(r: &mut Reader) -> Option<azalea_core::delta::LpVec3> {
+    let mut cursor = std::io::Cursor::new(r.rest());
+    let value = azalea_core::delta::LpVec3::azalea_read(&mut cursor).ok()?;
+    r.take(usize::try_from(cursor.position()).ok()?)?;
+    Some(value)
 }
 
 fn copy_payload(
@@ -1642,7 +1787,15 @@ fn lazy_reference(
                 ));
                 return None;
             };
-            write_varint(out, i32::try_from(id).ok()?.checked_add(1)?);
+            let id = i32::try_from(id).ok()?;
+            write_varint(
+                out,
+                if registry.inline_holder() {
+                    id.checked_add(1)?
+                } else {
+                    id
+                },
+            );
             Some(true)
         }
         Way::Out => {
@@ -2268,7 +2421,10 @@ fn creative_slot(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
                 nested_payload.clear();
                 let mut pr = Reader::new(payload);
                 match nested(ids, Way::Out, native_kind, &mut pr, &mut nested_payload) {
-                    Some(false) => payload,
+                    Some(false) => {
+                        nested_payload.extend_from_slice(pr.rest());
+                        &nested_payload[..]
+                    }
                     Some(true) if pr.remaining() == 0 => &nested_payload[..],
                     _ => {
                         dropped = true;
@@ -2429,7 +2585,7 @@ fn add_entity(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     }
     let before_data = r.pos();
     r.take(3 * 8)?;
-    skip_lp_vec3(&mut r)?;
+    lp_vec3(&mut r)?;
     r.take(3)?;
     out.extend_from_slice(&body[before_data..r.pos()]);
     let data = state(ids, r.varint()?)?;
@@ -2996,8 +3152,42 @@ mod tests {
         let mut r = Reader::new(&out);
         assert_eq!(r.varint(), Some(42));
         assert_eq!(r.varint(), Some(ACTION_ATTACK));
-        assert_eq!(r.u8(), Some(0), "775 carries no sneaking flag to forward");
+        assert_eq!(r.u8(), Some(0), "no player_input has said shift");
         assert_eq!(r.remaining(), 0);
+    }
+
+    fn sent_774(t: &mut Translator, name: &str, body: &[u8]) -> Vec<u8> {
+        use azalea::connection::PacketTranslator as _;
+        let out = t.outbound(
+            ConnectionProtocol::Game,
+            framed(native_serverbound(name), body),
+        );
+        let mut r = Reader::new(&out);
+        let id = r.varint().expect("a frame") as u32;
+        assert_eq!(
+            PacketTable::v1_21_11().name_of(Phase::Game, Direction::Serverbound, id),
+            Some("interact")
+        );
+        r.rest().to_vec()
+    }
+
+    #[test]
+    fn a_774_attack_carries_the_sneak_state() {
+        use azalea::connection::PacketTranslator as _;
+        let mut t = Translator::for_protocol(774).unwrap();
+        let input = native_serverbound("player_input");
+        let mut entity = Vec::new();
+        write_varint(&mut entity, 42);
+
+        let _ = t.outbound(ConnectionProtocol::Game, framed(input, &[1 | INPUT_SHIFT]));
+        let mut want = entity.clone();
+        write_varint(&mut want, ACTION_ATTACK);
+        want.push(1);
+        assert_eq!(sent_774(&mut t, "attack", &entity), want);
+
+        let _ = t.outbound(ConnectionProtocol::Game, framed(input, &[1]));
+        *want.last_mut().unwrap() = 0;
+        assert_eq!(sent_774(&mut t, "attack", &entity), want);
     }
 
     #[test]
@@ -3021,6 +3211,126 @@ mod tests {
             assert_eq!(r.u8(), Some(1), "sneaking survived");
             assert_eq!(r.remaining(), 0);
         }
+    }
+
+    #[test]
+    fn a_774_armour_stand_is_interacted_at() {
+        use azalea_core::delta::LpVec3;
+        use azalea_core::position::Vec3;
+
+        let _hint = NAME_TAG_HINT.lock().unwrap_or_else(|e| e.into_inner());
+        note_held_name_tag(false, false);
+        note_held_name_tag(true, false);
+        let mut t = with_a_stand();
+
+        let location = LpVec3::from_vec3(Vec3 {
+            x: 0.25,
+            y: 1.5,
+            z: -0.125,
+        });
+        let interact_on = |entity: i32| {
+            let mut body = Vec::new();
+            write_varint(&mut body, entity);
+            write_varint(&mut body, 1);
+            body.extend(encoded(&location));
+            body.push(1);
+            body
+        };
+
+        let out = sent_774(&mut t, "interact", &interact_on(11));
+        let mut r = Reader::new(&out);
+        assert_eq!(r.varint(), Some(11));
+        assert_eq!(r.varint(), Some(ACTION_INTERACT_AT));
+        let at = location.to_vec3();
+        for (decoded, sent) in [(at.x, 0.25), (at.y, 1.5), (at.z, -0.125)] {
+            let got = f32::from_be_bytes(r.take(4).unwrap().try_into().unwrap());
+            assert_eq!(got, decoded as f32);
+            assert!(
+                (f64::from(got) - sent).abs() < 1e-3,
+                "{got} is not near {sent}"
+            );
+        }
+        assert_eq!(r.varint(), Some(1), "the hand follows the location");
+        assert_eq!(
+            r.u8(),
+            Some(1),
+            "the interact's own flag, not the tracked one"
+        );
+        assert_eq!(r.remaining(), 0);
+
+        let mut want = Vec::new();
+        for v in [12, ACTION_INTERACT, 1] {
+            write_varint(&mut want, v);
+        }
+        want.push(1);
+        assert_eq!(sent_774(&mut t, "interact", &interact_on(12)), want);
+    }
+
+    static NAME_TAG_HINT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_a_stand() -> Translator {
+        use azalea::connection::PacketTranslator as _;
+
+        let mut t = Translator::for_protocol(774).unwrap();
+        let add_entity = PacketTable::v1_21_11()
+            .id(Phase::Game, Direction::Clientbound, "add_entity")
+            .unwrap();
+        let stand_774 = ids()
+            .from_native
+            .map(IdSpace::EntityType, EntityKind::ArmorStand.to_u32() as i32)
+            .expect("774 has armor_stand");
+        let _ = t.inbound(
+            ConnectionProtocol::Game,
+            framed(add_entity, &add_entity_bytes(stand_774, 0)),
+        );
+        t
+    }
+
+    #[test]
+    fn a_774_armour_stand_is_named_through_interact() {
+        use azalea_core::delta::LpVec3;
+        use azalea_core::position::Vec3;
+
+        let _hint = NAME_TAG_HINT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut t = with_a_stand();
+        let location = LpVec3::from_vec3(Vec3 {
+            x: 0.25,
+            y: 1.5,
+            z: -0.125,
+        });
+        let mut main_hand = Vec::new();
+        write_varint(&mut main_hand, 11);
+        write_varint(&mut main_hand, 0);
+        main_hand.extend(encoded(&location));
+        main_hand.push(0);
+        let action = |out: &[u8]| {
+            let mut r = Reader::new(out);
+            assert_eq!(r.varint(), Some(11));
+            r.varint()
+        };
+
+        note_held_name_tag(false, true);
+        note_held_name_tag(true, false);
+        let mut want = Vec::new();
+        for v in [11, ACTION_INTERACT, 0] {
+            write_varint(&mut want, v);
+        }
+        want.push(0);
+        assert_eq!(sent_774(&mut t, "interact", &main_hand), want);
+
+        note_held_name_tag(false, false);
+        assert_eq!(
+            action(sent_774(&mut t, "interact", &main_hand).as_slice()),
+            Some(ACTION_INTERACT_AT)
+        );
+
+        note_held_name_tag(true, true);
+        assert_eq!(
+            action(sent_774(&mut t, "interact", &main_hand).as_slice()),
+            Some(ACTION_INTERACT_AT)
+        );
+
+        note_held_name_tag(true, false);
     }
 
     const BELOW_FIRST_RUN: i32 = 100;
@@ -3815,7 +4125,7 @@ mod tests {
         );
 
         let mut cold = Vec::new();
-        write_varint(&mut cold, 2);
+        write_varint(&mut cold, 1);
         let out = translated(
             |r, out| payload(ids(), Way::In, DataComponentKind::ChickenVariant, r, out),
             &key_form("minecraft:cold"),
@@ -4678,6 +4988,27 @@ mod tests {
     }
 
     #[test]
+    fn a_creative_damage_type_goes_out_behind_its_prefix() {
+        let native = DataComponentKind::DamageType.to_u32() as i32;
+        let wire = ids()
+            .from_native
+            .map(IdSpace::DataComponentType, native)
+            .expect("774 has damage_type");
+        let mut body = 9u16.to_be_bytes().to_vec();
+        for v in [1, 5, 1, 0, native, 1, 7] {
+            write_varint(&mut body, v);
+        }
+
+        let out = creative_slot(ids(), &body).expect("a whole stack");
+        let mut expected = 9u16.to_be_bytes().to_vec();
+        for v in [1, 5, 1, 0, wire, 2] {
+            write_varint(&mut expected, v);
+        }
+        expected.extend_from_slice(&[1, 7]);
+        assert_eq!(out.as_ref(), &expected[..]);
+    }
+
+    #[test]
     fn a_creative_slot_of_a_26_2_only_item_is_cleared() {
         let mut body = 9u16.to_be_bytes().to_vec();
         write_varint(&mut body, 1);
@@ -4919,10 +5250,50 @@ mod tests {
                 .outbound(ConnectionProtocol::Game, framed(id, &[0]))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_774_spectate_is_an_attack_on_the_target() {
+        use azalea::connection::PacketTranslator as _;
+        let mut t = Translator::for_protocol(774).unwrap();
+        let _ = t.outbound(
+            ConnectionProtocol::Game,
+            framed(native_serverbound("player_input"), &[INPUT_SHIFT]),
+        );
+        let mut want = Vec::new();
+        write_varint(&mut want, 42);
+        write_varint(&mut want, ACTION_ATTACK);
+        want.push(1);
+        assert_eq!(sent_774(&mut t, "spectator_action", &[43]), want);
+        assert!(
+            t.outbound(
+                ConnectionProtocol::Game,
+                framed(native_serverbound("spectator_action"), &[0])
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_gamerule_request_is_not_sent_to_774() {
+        let id = native_serverbound("client_command");
+        let wire = PacketTable::v1_21_11()
+            .id(Phase::Game, Direction::Serverbound, "client_command")
+            .expect("1.21.11 has client_command");
+        for action in [0, 1] {
+            assert_eq!(
+                &*hop().outbound(ConnectionProtocol::Game, framed(id, &[action])),
+                &*framed(wire, &[action])
+            );
+        }
         assert!(
             hop()
-                .outbound(ConnectionProtocol::Game, framed(id, &[43]))
+                .outbound(ConnectionProtocol::Game, framed(id, &[2]))
                 .is_empty()
+        );
+        assert_eq!(
+            &*hop775().outbound(ConnectionProtocol::Game, framed(id, &[2])),
+            &*framed(id, &[2])
         );
     }
 
@@ -5268,6 +5639,110 @@ mod tests {
             ),
             &*framed(set_entity_data, &byte_field(17, 1))
         );
+    }
+
+    #[test]
+    fn a_failed_metadata_frame_is_not_shifted() {
+        use azalea::connection::PacketTranslator as _;
+        let wire = PacketTable::v1_21_11();
+        let wire_id = |name| wire.id(Phase::Game, Direction::Clientbound, name).unwrap();
+        let sheep_774 = ids()
+            .from_native
+            .map(IdSpace::EntityType, EntityKind::Sheep.to_u32() as i32)
+            .unwrap();
+        assert_eq!(ids().to_native.map(IdSpace::EntityDataSerializer, 39), None);
+        let mut t = Translator::for_protocol(774).unwrap();
+        let _ = t.inbound(
+            ConnectionProtocol::Game,
+            framed(wire_id("add_entity"), &add_entity_bytes(sheep_774, 0)),
+        );
+
+        let mut body = Vec::new();
+        write_varint(&mut body, 11);
+        body.push(17);
+        write_varint(&mut body, 39);
+        body.extend_from_slice(&[0u8; 12]);
+        body.push(0xFF);
+        assert!(
+            shifted_metadata(
+                &body,
+                &[Run {
+                    from: 17,
+                    offset: 1
+                }]
+            )
+            .is_some(),
+            "it would shift"
+        );
+        assert_eq!(
+            &*t.inbound(
+                ConnectionProtocol::Game,
+                framed(wire_id("set_entity_data"), &body)
+            ),
+            &*framed(native_id(Direction::Clientbound, "set_entity_data"), &body)
+        );
+    }
+
+    #[test]
+    fn a_tnt_minecarts_priming_event_is_renumbered() {
+        use azalea::connection::PacketTranslator as _;
+        let event = |entity: i32, id: u8| {
+            let mut body = entity.to_be_bytes().to_vec();
+            body.push(id);
+            body
+        };
+        let native = native_id(Direction::Clientbound, "entity_event");
+        for (h, protocol) in [(hop(), 774), (hop775(), 775)] {
+            let wire = PacketTable::for_protocol(protocol).unwrap();
+            let wire_id = |name| wire.id(Phase::Game, Direction::Clientbound, name).unwrap();
+            let to_wire = |kind: EntityKind| {
+                h.ids
+                    .from_native
+                    .map(IdSpace::EntityType, kind.to_u32() as i32)
+                    .unwrap()
+            };
+            let mut t = Translator::for_protocol(protocol).unwrap();
+            let mut cart = add_entity_bytes(to_wire(EntityKind::TntMinecart), 0);
+            cart[0] = 12;
+            let _ = t.inbound(
+                ConnectionProtocol::Game,
+                framed(wire_id("add_entity"), &cart),
+            );
+            let _ = t.inbound(
+                ConnectionProtocol::Game,
+                framed(
+                    wire_id("add_entity"),
+                    &add_entity_bytes(to_wire(EntityKind::Sheep), 0),
+                ),
+            );
+
+            let sent = |t: &mut Translator, entity, id| {
+                t.inbound(
+                    ConnectionProtocol::Game,
+                    framed(wire_id("entity_event"), &event(entity, id)),
+                )
+            };
+            assert_eq!(
+                &*sent(&mut t, 12, 10),
+                &*framed(native, &event(12, 70)),
+                "{protocol}: the cart"
+            );
+            assert_eq!(
+                &*sent(&mut t, 11, 10),
+                &*framed(native, &event(11, 10)),
+                "{protocol}: the sheep"
+            );
+            assert_eq!(
+                &*sent(&mut t, 13, 10),
+                &*framed(native, &event(13, 10)),
+                "{protocol}: nobody"
+            );
+            assert_eq!(
+                &*sent(&mut t, 12, 3),
+                &*framed(native, &event(12, 3)),
+                "{protocol}: another event"
+            );
+        }
     }
 
     #[test]

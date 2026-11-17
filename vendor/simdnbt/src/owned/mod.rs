@@ -862,4 +862,48 @@ mod tests {
             NbtCompound::from_values(vec![(Mutf8String::from(""), compound.to_nbt_tag())])
         )
     }
+
+    #[test]
+    fn empty_nested_compounds_do_not_allocate() {
+        const N: usize = 20_000;
+        let mut data = vec![COMPOUND_ID, 0, 0];
+        for _ in 0..N {
+            data.extend_from_slice(&[COMPOUND_ID, 0, 0, END_ID]);
+        }
+        data.push(END_ID);
+        let nbt = super::read(&mut Cursor::new(&data[..])).unwrap().unwrap();
+        assert_eq!(nbt.len(), N);
+        for (_, tag) in nbt.iter() {
+            assert_eq!(tag.compound().unwrap().values.capacity(), 0);
+        }
+
+        let data = [
+            COMPOUND_ID, 0, 0, BYTE_ID, 0, 1, b'a', 1, BYTE_ID, 0, 1, b'b', 2, END_ID,
+        ];
+        let nbt = super::read(&mut Cursor::new(&data[..])).unwrap().unwrap();
+        assert_eq!(nbt.values.capacity(), 2);
+        assert_eq!(nbt.byte("b"), Some(2));
+    }
+
+    #[test]
+    fn write_string_longer_than_u16() {
+        let mut long = "a".repeat(65_533);
+        long.push('\u{20ac}');
+        long.push_str("bbbb");
+        let nbt = BaseNbt::new(
+            "",
+            NbtCompound::from_values(vec![
+                ("s".into(), NbtTag::String(long.into())),
+                ("after".into(), NbtTag::Int(7)),
+            ]),
+        );
+        let mut out = Vec::new();
+        nbt.write(&mut out);
+
+        let mut cursor = Cursor::new(&out[..]);
+        let read = super::read(&mut cursor).unwrap().unwrap();
+        assert_eq!(cursor.position() as usize, out.len());
+        assert_eq!(read.string("s").unwrap().len(), 65_533);
+        assert_eq!(read.int("after"), Some(7));
+    }
 }

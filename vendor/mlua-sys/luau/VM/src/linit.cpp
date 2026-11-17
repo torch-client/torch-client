@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lualib.h"
 
 #include <stdlib.h>
@@ -32,7 +30,6 @@ void luaL_openlibs(lua_State* L)
 
 void luaL_sandbox(lua_State* L)
 {
-    // set all libraries to read-only
     lua_pushnil(L);
     while (lua_next(L, LUA_GLOBALSINDEX) != 0)
     {
@@ -42,7 +39,6 @@ void luaL_sandbox(lua_State* L)
         lua_pop(L, 1);
     }
 
-    // set all builtin metatables to read-only
     lua_pushliteral(L, "");
     if (lua_getmetatable(L, -1))
     {
@@ -54,14 +50,12 @@ void luaL_sandbox(lua_State* L)
         lua_pop(L, 1);
     }
 
-    // set globals to readonly and activate safeenv since the env is immutable
     lua_setreadonly(L, LUA_GLOBALSINDEX, true);
     lua_setsafeenv(L, LUA_GLOBALSINDEX, true);
 }
 
 void luaL_sandboxthread(lua_State* L)
 {
-    // create new global table that proxies reads to original table
     lua_newtable(L);
 
     lua_newtable(L);
@@ -71,7 +65,6 @@ void luaL_sandboxthread(lua_State* L)
 
     lua_setmetatable(L, -2);
 
-    // we can set safeenv now although it's important to set it to false if code is loaded twice into the thread
     lua_replace(L, LUA_GLOBALSINDEX);
     lua_setsafeenv(L, LUA_GLOBALSINDEX, true);
 }

@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lualib.h"
 
 #include "lvm.h"
@@ -30,10 +28,8 @@ static int db_info(lua_State* L)
     lua_State* L1 = getthread(L, &arg);
     int l1top = 0;
 
-    // if L1 != L, L1 can be in any state, and therefore there are no guarantees about its stack space
     if (L != L1)
     {
-        // for 'f' option, we reserve one slot and we also record the stack top
         lua_rawcheckstack(L1, 1);
 
         l1top = lua_gettop(L1);
@@ -47,7 +43,6 @@ static int db_info(lua_State* L)
     }
     else if (arg == 0 && lua_isfunction(L, 1))
     {
-        // convert absolute index to relative index
         level = -lua_gettop(L);
     }
     else
@@ -68,7 +63,6 @@ static int db_info(lua_State* L)
         {
             if (occurs[*it - 'a'])
             {
-                // restore stack state of another thread as 'f' option might not have been visited yet
                 if (L != L1)
                     lua_settop(L1, l1top);
 
@@ -96,9 +90,9 @@ static int db_info(lua_State* L)
 
         case 'f':
             if (L1 == L)
-                lua_pushvalue(L, -1 - results); // function is right before results
+                lua_pushvalue(L, -1 - results);
             else
-                lua_xmove(L1, L, 1); // function is at top of L1
+                lua_xmove(L1, L, 1);
             results++;
             break;
 
@@ -109,7 +103,6 @@ static int db_info(lua_State* L)
             break;
 
         default:
-            // restore stack state of another thread as 'f' option might not have been visited yet
             if (L != L1)
                 lua_settop(L1, l1top);
 
@@ -154,7 +147,7 @@ static int db_traceback(lua_State* L)
 
             if (ar.currentline > 0)
             {
-                char line[32]; // manual conversion for performance
+                char line[32];
                 char* lineend = line + sizeof(line);
                 char* lineptr = lineend;
                 for (unsigned int r = ar.currentline; r > 0; r /= 10)

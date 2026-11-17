@@ -19,3 +19,38 @@ fn blit_vertex(@builtin(vertex_index) index: u32) -> BlitOutput {
 fn blit_fragment(in: BlitOutput) -> @location(0) vec4<f32> {
     return vec4(textureSampleLevel(scene_texture, scene_sampler, in.uv, 0.0).rgb, 1.0);
 }
+
+const KAWASE_OFFSET: f32 = 1.0;
+
+fn kawase_texel() -> vec2<f32> {
+    return KAWASE_OFFSET / vec2<f32>(textureDimensions(scene_texture, 0));
+}
+
+fn tap(uv: vec2<f32>) -> vec3<f32> {
+    return textureSampleLevel(scene_texture, scene_sampler, uv, 0.0).rgb;
+}
+
+@fragment
+fn blur_down_fragment(in: BlitOutput) -> @location(0) vec4<f32> {
+    let d = kawase_texel();
+    var sum = tap(in.uv) * 4.0;
+    sum += tap(in.uv - d);
+    sum += tap(in.uv + d);
+    sum += tap(in.uv + vec2(d.x, -d.y));
+    sum += tap(in.uv - vec2(d.x, -d.y));
+    return vec4(sum / 8.0, 1.0);
+}
+
+@fragment
+fn blur_up_fragment(in: BlitOutput) -> @location(0) vec4<f32> {
+    let d = kawase_texel();
+    var sum = tap(in.uv + vec2(-2.0 * d.x, 0.0));
+    sum += tap(in.uv + vec2(2.0 * d.x, 0.0));
+    sum += tap(in.uv + vec2(0.0, -2.0 * d.y));
+    sum += tap(in.uv + vec2(0.0, 2.0 * d.y));
+    sum += tap(in.uv + vec2(-d.x, d.y)) * 2.0;
+    sum += tap(in.uv + vec2(d.x, d.y)) * 2.0;
+    sum += tap(in.uv + vec2(d.x, -d.y)) * 2.0;
+    sum += tap(in.uv + vec2(-d.x, -d.y)) * 2.0;
+    return vec4(sum / 12.0, 1.0);
+}

@@ -2003,7 +2003,7 @@ fn web_frame_gate(
     mut next_frame: Local<Option<Instant>>,
 ) {
     let target = gui.options.max_fps;
-    if target >= crate::gui::MAX_FPS_UNLIMITED {
+    if target >= crate::gui::MAX_FPS_UNLIMITED || gui.benchmark_running() {
         *next_frame = None;
         gate.render = true;
         return;
@@ -2479,7 +2479,7 @@ fn sync_vsync(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut last: Local<Option<bool>>,
 ) {
-    let wanted = state.options.vsync;
+    let wanted = state.options.vsync && !state.benchmark_running();
     if *last == Some(wanted) {
         return;
     }
@@ -2815,6 +2815,10 @@ pub fn run(
     .add_plugins(crate::renderer::clouds::CloudPlugin)
     .add_plugins(crate::renderer::weather::WeatherPlugin)
     .add_plugins(crate::renderer::world_border::WorldBorderPlugin)
+    .add_plugins((
+        #[cfg(feature = "benchmark_feature")]
+        crate::renderer::benchmark::BenchmarkPlugin,
+    ))
     .add_plugins((
         #[cfg(target_arch = "wasm32")]
         crate::renderer::warmup::WarmupPlugin,

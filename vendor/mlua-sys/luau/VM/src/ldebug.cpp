@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "ldebug.h"
 
 #include "lapi.h"
@@ -35,7 +33,6 @@ int lua_getargument(lua_State* L, int level, int n)
         return 0;
 
     CallInfo* ci = L->ci - level;
-    // changing tables in native functions externally may invalidate safety contracts wrt table state (metatable/size/readonly)
     if (ci->flags & LUA_CALLINFO_NATIVE)
         return 0;
 
@@ -67,7 +64,6 @@ const char* lua_getlocal(lua_State* L, int level, int n)
         return NULL;
 
     CallInfo* ci = L->ci - level;
-    // changing tables in native functions externally may invalidate safety contracts wrt table state (metatable/size/readonly)
     if (ci->flags & LUA_CALLINFO_NATIVE)
         return NULL;
 
@@ -88,7 +84,6 @@ const char* lua_setlocal(lua_State* L, int level, int n)
         return NULL;
 
     CallInfo* ci = L->ci - level;
-    // changing registers in native functions externally may invalidate safety contracts wrt register type tags
     if (ci->flags & LUA_CALLINFO_NATIVE)
         return NULL;
 
@@ -96,7 +91,7 @@ const char* lua_setlocal(lua_State* L, int level, int n)
     const LocVar* var = fp ? luaF_getlocal(fp, n, currentpc(L, ci)) : NULL;
     if (var)
         setobj2s(L, ci->base + var->reg, L->top - 1);
-    L->top--; // pop value
+    L->top--;
     const char* name = var ? getstr(var->varname) : NULL;
     return name;
 }
@@ -186,13 +181,11 @@ int lua_getinfo(lua_State* L, int level, const char* what, lua_Debug* ar)
     CallInfo* ci = NULL;
     if (level < 0)
     {
-        // element has to be within stack
         if (-level > L->top - L->base)
             return 0;
 
         StkId func = L->top + level;
 
-        // and it has to be a function
         if (!ttisfunction(func))
             return 0;
 
@@ -206,7 +199,6 @@ int lua_getinfo(lua_State* L, int level, const char* what, lua_Debug* ar)
     }
     if (f)
     {
-        // auxgetinfo fills ar and optionally requests to put closure on stack
         if (Closure* fcl = auxgetinfo(L, what, ar, f, ci))
         {
             luaC_threadbarrier(L);
@@ -264,7 +256,7 @@ l_noret luaG_aritherror(lua_State* L, const TValue* p1, const TValue* p2, TMS op
 {
     const char* t1 = luaT_objtypename(L, p1);
     const char* t2 = luaT_objtypename(L, p2);
-    const char* opname = luaT_eventname[op] + 2; // skip __ from metamethod name
+    const char* opname = luaT_eventname[op] + 2;
 
     if (t1 == t2)
         luaG_runerror(L, "attempt to perform arithmetic (%s) on %s", opname, t1);
@@ -287,7 +279,7 @@ l_noret luaG_indexerror(lua_State* L, const TValue* p1, const TValue* p2)
     const char* t2 = luaT_objtypename(L, p2);
     const TString* key = ttisstring(p2) ? tsvalue(p2) : 0;
 
-    if (key && key->len <= 64) // limit length to make sure we don't generate very long error messages for very long keys
+    if (key && key->len <= 64)
         luaG_runerror(L, "attempt to index %s with '%s'", t1, getstr(key));
     else
         luaG_runerror(L, "attempt to index %s with %s", t1, t2);
@@ -311,7 +303,7 @@ static void pusherror(lua_State* L, const char* msg)
     if (isLua(ci))
     {
         TString* source = getluaproto(ci)->source;
-        char chunkbuf[LUA_IDSIZE]; // add file:line information
+        char chunkbuf[LUA_IDSIZE];
         const char* chunkid = luaO_chunkid(chunkbuf, sizeof(chunkbuf), getstr(source), source->len);
         int line = currentline(L, ci);
         luaO_pushfstring(L, "%s:%d: %s", chunkid, line, msg);
@@ -347,19 +339,16 @@ void luaG_breakpoint(lua_State* L, Proto* p, int line, bool enable)
 {
     void (*ondisable)(lua_State*, Proto*) = L->global->ecb.disable;
 
-    // since native code doesn't support breakpoints, we would need to update all call frames with LUAU_CALLINFO_NATIVE that refer to p
     if (p->lineinfo && (ondisable || !p->execdata))
     {
         for (int i = 0; i < p->sizecode; ++i)
         {
-            // note: we keep prologue as is, instead opting to break at the first meaningful instruction
             if (LUAU_INSN_OP(p->code[i]) == LOP_PREPVARARGS)
                 continue;
 
             if (luaG_getline(p, i) != line)
                 continue;
 
-            // lazy copy of the original opcode array; done when the first breakpoint is set
             if (!p->debuginsn)
             {
                 p->debuginsn = luaM_newarray(L, p->sizecode, uint8_t, p->memcat);
@@ -369,19 +358,13 @@ void luaG_breakpoint(lua_State* L, Proto* p, int line, bool enable)
 
             uint8_t op = enable ? LOP_BREAK : LUAU_INSN_OP(p->debuginsn[i]);
 
-            // patch just the opcode byte, leave arguments alone
             p->code[i] &= ~0xff;
             p->code[i] |= op;
             LUAU_ASSERT(LUAU_INSN_OP(p->code[i]) == op);
 
-            // currently we don't restore native code when breakpoint is disabled.
-            // this will be addressed in the future.
             if (enable && p->execdata && ondisable)
                 ondisable(L, p);
 
-            // note: this is important!
-            // we only patch the *first* instruction in each proto that's attributed to a given line
-            // this can be changed, but if requires making patching a bit more nuanced so that we don't patch AUX words
             break;
         }
     }
@@ -460,7 +443,6 @@ static int getmaxline(Proto* p)
     return result;
 }
 
-// Find the line number with instructions. If the provided line doesn't have any instruction, it should return the next valid line number.
 static int getnextline(Proto* p, int line)
 {
     int closest = -1;
@@ -469,7 +451,6 @@ static int getnextline(Proto* p, int line)
     {
         for (int i = 0; i < p->sizecode; ++i)
         {
-            // note: we keep prologue as is, instead opting to break at the first meaningful instruction
             if (LUAU_INSN_OP(p->code[i]) == LOP_PREPVARARGS)
                 continue;
 
@@ -504,7 +485,6 @@ int lua_breakpoint(lua_State* L, int funcindex, int line, int enabled)
 
     Proto* p = clvalue(func)->l.p;
 
-    // set the breakpoint to the next closest line with valid instructions
     int target = getnextline(p, line);
 
     if (target != -1)

@@ -96,6 +96,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 #ifdef SEE_THROUGH
     out.clip_position.z = out.clip_position.w * bitcast<f32>(#{HAND_BAND_FLOOR_BITS}u);
 #endif
+#ifdef VIEW_LAYERING_BITS
+    out.clip_position.z = out.clip_position.z * bitcast<f32>(#{VIEW_LAYERING_BITS}u);
+#endif
     out.uv = vertex.uv;
 
     let normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);

@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-
 #include "RequireImpl.h"
 
 #include "Navigation.h"
@@ -13,10 +11,8 @@
 namespace Luau::Require
 {
 
-// Stores explicitly registered modules.
 static const char* registeredCacheTableKey = "_REGISTEREDMODULES";
 
-// Stores the results of require calls.
 static const char* requiredCacheTableKey = "_MODULES";
 
 struct ResolvedRequire
@@ -65,7 +61,6 @@ static ResolvedRequire resolveRequire(luarequire_Configuration* lrc, lua_State* 
 
     Navigator navigator(navigationContext, errorHandler);
 
-    // Updates navigationContext while navigating through the given path.
     Navigator::Status status = navigator.navigate(std::move(path));
     if (status == Navigator::Status::ErrorReported)
         return ResolvedRequire::fromErrorHandler(errorHandler);
@@ -79,7 +74,6 @@ static ResolvedRequire resolveRequire(luarequire_Configuration* lrc, lua_State* 
 
     if (isCached(L, *cacheKey))
     {
-        // Put cached result on top of stack before returning.
         lua_getfield(L, LUA_REGISTRYINDEX, requiredCacheTableKey);
         lua_getfield(L, -1, cacheKey->c_str());
         lua_remove(L, -2);
@@ -129,7 +123,6 @@ static const int kRequireStackValues = 4;
 
 int lua_requirecont(lua_State* L, int status)
 {
-    // Number of stack arguments present before this continuation is called.
     LUAU_ASSERT(lua_gettop(L) >= kRequireStackValues);
     const int numResults = lua_gettop(L) - kRequireStackValues;
     const char* cacheKey = luaL_checkstring(L, 2);
@@ -137,23 +130,16 @@ int lua_requirecont(lua_State* L, int status)
     if (numResults > 1)
         luaL_error(L, "module must return a single value");
 
-    // Cache the result
     if (numResults == 1)
     {
-        // Initial stack state
-        // (-1) result
 
         lua_getfield(L, LUA_REGISTRYINDEX, requiredCacheTableKey);
-        // (-2) result, (-1) cache table
 
         lua_pushvalue(L, -2);
-        // (-3) result, (-2) cache table, (-1) result
 
         lua_setfield(L, -2, cacheKey);
-        // (-2) result, (-1) cache table
 
         lua_pop(L, 1);
-        // (-1) result
     }
 
     return numResults;
@@ -161,7 +147,6 @@ int lua_requirecont(lua_State* L, int status)
 
 int lua_requireinternal(lua_State* L, const char* requirerChunkname)
 {
-    // Discard extra arguments, we only use path
     lua_settop(L, 1);
 
     luarequire_Configuration* lrc = static_cast<luarequire_Configuration*>(lua_touserdata(L, lua_upvalueindex(1)));
@@ -170,13 +155,11 @@ int lua_requireinternal(lua_State* L, const char* requirerChunkname)
 
     void* ctx = lua_tolightuserdata(L, lua_upvalueindex(2));
 
-    // (1) path
     const char* path = luaL_checkstring(L, 1);
 
     if (checkRegisteredModules(L, path) == 1)
         return 1;
 
-    // ResolvedRequire will be destroyed and any string will be pinned to Luau stack, so that luaL_error doesn't need destructors
     bool resolveError = false;
 
     {
@@ -192,7 +175,6 @@ int lua_requireinternal(lua_State* L, const char* requirerChunkname)
         }
         else
         {
-            // (1) path, ..., cacheKey, chunkname, loadname
             lua_pushstring(L, resolvedRequire.cacheKey.c_str());
             lua_pushstring(L, resolvedRequire.chunkname.c_str());
             lua_pushstring(L, resolvedRequire.loadname.c_str());
@@ -200,7 +182,7 @@ int lua_requireinternal(lua_State* L, const char* requirerChunkname)
     }
 
     if (resolveError)
-        lua_error(L); // Error already on top of the stack
+        lua_error(L);
 
     int stackValues = lua_gettop(L);
     LUAU_ASSERT(stackValues == kRequireStackValues);
@@ -251,7 +233,6 @@ int registerModuleImpl(lua_State* L)
     if (pathView.empty() || pathView[0] != '@')
         luaL_argerrorL(L, 1, "path must begin with '@'");
 
-    // Make path lowercase to ensure case-insensitive matching.
     std::string pathLower = std::string(path, len);
     for (char& c : pathLower)
     {
@@ -262,13 +243,10 @@ int registerModuleImpl(lua_State* L)
     lua_replace(L, 1);
 
     luaL_findtable(L, LUA_REGISTRYINDEX, registeredCacheTableKey, 1);
-    // (1) path, (2) result, (3) cache table
 
     lua_insert(L, 1);
-    // (1) cache table, (2) path, (3) result
 
     lua_settable(L, 1);
-    // (1) cache table
 
     lua_pop(L, 1);
 
@@ -292,4 +270,4 @@ int clearCache(lua_State* L)
     return 0;
 }
 
-} // namespace Luau::Require
+}

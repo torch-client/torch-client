@@ -48,6 +48,43 @@ impl Attributes {
 }
 
 impl Attributes {
+    pub fn assign_base_values(&mut self, other: &Attributes) {
+        let Attributes {
+            movement_speed,
+            sneaking_speed,
+            attack_speed,
+            water_movement_efficiency,
+            movement_efficiency,
+            gravity,
+            mining_efficiency,
+            block_break_speed,
+            submerged_mining_speed,
+            block_interaction_range,
+            entity_interaction_range,
+            step_height,
+            scale,
+            air_drag_modifier,
+            friction_modifier,
+            bounciness,
+        } = other;
+        self.movement_speed.base = movement_speed.base;
+        self.sneaking_speed.base = sneaking_speed.base;
+        self.attack_speed.base = attack_speed.base;
+        self.water_movement_efficiency.base = water_movement_efficiency.base;
+        self.movement_efficiency.base = movement_efficiency.base;
+        self.gravity.base = gravity.base;
+        self.mining_efficiency.base = mining_efficiency.base;
+        self.block_break_speed.base = block_break_speed.base;
+        self.submerged_mining_speed.base = submerged_mining_speed.base;
+        self.block_interaction_range.base = block_interaction_range.base;
+        self.entity_interaction_range.base = entity_interaction_range.base;
+        self.step_height.base = step_height.base;
+        self.scale.base = scale.base;
+        self.air_drag_modifier.base = air_drag_modifier.base;
+        self.friction_modifier.base = friction_modifier.base;
+        self.bounciness.base = bounciness.base;
+    }
+
     pub fn get_mut(&mut self, attribute: Attribute) -> Option<&mut AttributeInstance> {
         let value = match attribute {
             Attribute::MovementSpeed => &mut self.movement_speed,

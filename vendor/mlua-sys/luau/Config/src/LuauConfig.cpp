@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/LuauConfig.h"
 
 #include "Luau/Compiler.h"
@@ -44,15 +43,14 @@ struct ThreadPopper
 
 static std::optional<ConfigTable> serializeTable(lua_State* L, std::string* error)
 {
-    ThreadPopper popper(L); // Remove table from stack after processing
+    ThreadPopper popper(L);
     ConfigTable table;
 
     lua_pushnil(L);
     while (lua_next(L, -2) != 0)
     {
-        ThreadPopper popper(L); // Remove value from stack after processing
+        ThreadPopper popper(L);
 
-        // Process key
         ConfigTableKey key;
         switch (lua_type(L, -2))
         {
@@ -66,7 +64,6 @@ static std::optional<ConfigTable> serializeTable(lua_State* L, std::string* erro
             RETURN_WITH_ERROR("configuration table keys must be strings or numbers");
         }
 
-        // Process value
         switch (lua_type(L, -1))
         {
         case LUA_TNUMBER:
@@ -80,11 +77,11 @@ static std::optional<ConfigTable> serializeTable(lua_State* L, std::string* erro
             break;
         case LUA_TTABLE:
         {
-            lua_pushvalue(L, -1); // Copy table for recursive call
+            lua_pushvalue(L, -1);
             if (std::optional<ConfigTable> nested = serializeTable(L, error))
                 table[key] = std::move(*nested);
             else
-                return std::nullopt; // Error already set in recursive call
+                return std::nullopt;
             break;
         }
         default:
@@ -107,7 +104,6 @@ static std::optional<std::string> load(lua_State* L, const std::string& source)
 
 std::optional<ConfigTable> extractConfig(const std::string& source, const InterruptCallbacks& callbacks, std::string* error)
 {
-    // Initialize Luau VM
     std::unique_ptr<lua_State, void (*)(lua_State*)> state{luaL_newstate(), lua_close};
     lua_State* L = state.get();
     luaL_openlibs(L);
@@ -116,7 +112,6 @@ std::optional<ConfigTable> extractConfig(const std::string& source, const Interr
     if (std::optional<std::string> loadError = load(L, source))
         RETURN_WITH_ERROR(*loadError);
 
-    // Execute configuration
     if (callbacks.initCallback)
         callbacks.initCallback(L);
     lua_callbacks(L)->interrupt = callbacks.interruptCallback;
@@ -124,14 +119,13 @@ std::optional<ConfigTable> extractConfig(const std::string& source, const Interr
     {
     case LUA_OK:
         break;
-    case LUA_BREAK: // debugging not supported, at least for now
+    case LUA_BREAK:
     case LUA_YIELD:
         RETURN_WITH_ERROR("configuration execution cannot yield");
     default:
         RETURN_WITH_ERROR(lua_tostring(L, -1));
     }
 
-    // Extract returned table
     if (lua_gettop(L) != 1)
         RETURN_WITH_ERROR("configuration must return exactly one value");
 
@@ -169,7 +163,6 @@ static std::optional<std::string> createLuauConfigFromLuauTable(
             if (!lint)
                 return "configuration value for key \"lint\" must be a table";
 
-            // Handle wildcard first to ensure overrides work as expected.
             if (const ConfigValue* value = lint->find("*"))
             {
                 const bool* enabled = value->get_if<bool>();
@@ -188,7 +181,7 @@ static std::optional<std::string> createLuauConfigFromLuauTable(
                     return "configuration keys in \"lint\" table must be strings";
 
                 if (*warningName == "*")
-                    continue; // Handled above
+                    continue;
 
                 const bool* enabled = v.get_if<bool>();
                 if (!enabled)
@@ -295,4 +288,4 @@ std::optional<std::string> extractLuauConfig(
     return createLuauConfigFromLuauTable(config, *luauTable, aliasOptions);
 }
 
-} // namespace Luau
+}

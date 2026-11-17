@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "ltm.h"
 
 #include "lstate.h"
@@ -10,9 +8,7 @@
 
 #include <string.h>
 
-// clang-format off
 const char* const luaT_typenames[] = {
-    // ORDER TYPE
     "nil",
     "boolean",
 
@@ -30,7 +26,6 @@ const char* const luaT_typenames[] = {
 };
 
 const char* const luaT_eventname[] = {
-    // ORDER TM
     "__index",
     "__newindex",
     "__mode",
@@ -56,7 +51,6 @@ const char* const luaT_eventname[] = {
     "__type",
     "__metatable",
 };
-// clang-format on
 
 static_assert(sizeof(luaT_typenames) / sizeof(luaT_typenames[0]) == LUA_T_COUNT, "luaT_typenames size mismatch");
 static_assert(sizeof(luaT_eventname) / sizeof(luaT_eventname[0]) == TM_N, "luaT_eventname size mismatch");
@@ -68,26 +62,22 @@ void luaT_init(lua_State* L)
     for (i = 0; i < LUA_T_COUNT; i++)
     {
         L->global->ttname[i] = luaS_new(L, luaT_typenames[i]);
-        luaS_fix(L->global->ttname[i]); // never collect these names
+        luaS_fix(L->global->ttname[i]);
     }
     for (i = 0; i < TM_N; i++)
     {
         L->global->tmname[i] = luaS_new(L, luaT_eventname[i]);
-        luaS_fix(L->global->tmname[i]); // never collect these names
+        luaS_fix(L->global->tmname[i]);
     }
 }
 
-/*
-** function to be used with macro "fasttm": optimized for absence of
-** tag methods.
-*/
 const TValue* luaT_gettm(LuaTable* events, TMS event, TString* ename)
 {
     const TValue* tm = luaH_getstr(events, ename);
     LUAU_ASSERT(event <= TM_EQ);
     if (ttisnil(tm))
-    {                                              // no tag method?
-        events->tmcache |= cast_byte(1u << event); // cache this fact
+    {
+        events->tmcache |= cast_byte(1u << event);
         return NULL;
     }
     else
@@ -96,10 +86,6 @@ const TValue* luaT_gettm(LuaTable* events, TMS event, TString* ename)
 
 const TValue* luaT_gettmbyobj(lua_State* L, const TValue* o, TMS event)
 {
-    /*
-      NB: Tag-methods were replaced by meta-methods in Lua 5.0, but the
-      old names are still around (this function, for example).
-    */
     LuaTable* mt;
     switch (ttype(o))
     {
@@ -117,8 +103,6 @@ const TValue* luaT_gettmbyobj(lua_State* L, const TValue* o, TMS event)
 
 const TString* luaT_objtypenamestr(lua_State* L, const TValue* o)
 {
-    // Userdata created by the environment can have a custom type name set in the individual metatable
-    // If there is no custom name, 'userdata' is returned
     if (ttisuserdata(o) && uvalue(o)->tag != UTAG_PROXY && uvalue(o)->metatable)
     {
         const TValue* type = luaH_getstr(uvalue(o)->metatable, L->global->tmname[TM_TYPE]);
@@ -129,7 +113,6 @@ const TString* luaT_objtypenamestr(lua_State* L, const TValue* o)
         return L->global->ttname[ttype(o)];
     }
 
-    // Tagged lightuserdata can be named using lua_setlightuserdataname
     if (ttislightuserdata(o))
     {
         int tag = lightuserdatatag(o);
@@ -141,7 +124,6 @@ const TString* luaT_objtypenamestr(lua_State* L, const TValue* o)
         }
     }
 
-    // For all types except userdata and table, a global metatable can be set with a global name override
     if (LuaTable* mt = L->global->mt[ttype(o)])
     {
         const TValue* type = luaH_getstr(mt, L->global->tmname[TM_TYPE]);

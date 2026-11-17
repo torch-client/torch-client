@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/RequireNavigator.h"
@@ -29,7 +28,6 @@ class RuntimeNavigationContext : public NavigationContext
 public:
     RuntimeNavigationContext(luarequire_Configuration* config, lua_State* L, void* ctx, std::string requirerChunkname);
 
-    // Navigation interface
     NavigateResult resetToRequirer() override;
     NavigateResult jumpToAlias(const std::string& path) override;
 
@@ -44,7 +42,6 @@ public:
     std::optional<std::string> getAlias(const std::string& alias) const override;
     std::optional<std::string> getConfig() const override;
 
-    // Custom capabilities
     bool isModulePresent() const;
     std::optional<std::string> getChunkname() const;
     std::optional<std::string> getLoadname() const;
@@ -68,7 +65,6 @@ private:
     RuntimeLuauConfigTimer timer = RuntimeLuauConfigTimer{};
 };
 
-// Non-throwing error reporter
 class RuntimeErrorHandler : public ErrorHandler
 {
 public:
@@ -82,4 +78,4 @@ private:
     std::string errorMessage;
 };
 
-} // namespace Luau::Require
+}

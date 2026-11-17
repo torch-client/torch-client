@@ -39,27 +39,49 @@ impl From<SerializableGameProfile> for GameProfile {
 pub struct GameProfileProperties {
     pub map: IndexMap<String, ProfilePropertyValue>,
 }
+const MAX_PROPERTIES: u32 = 16;
+const MAX_PROPERTY_NAME: u32 = 64;
+const MAX_PROPERTY_VALUE: u32 = 32767;
+const MAX_PROPERTY_SIGNATURE: u32 = 1024;
+
+fn write_limited_string(buf: &mut impl Write, string: &str, max: u32) -> io::Result<()> {
+    let length = string.encode_utf16().count();
+    if length > max as usize {
+        return Err(io::Error::other(format!(
+            "String too big (was {length} characters, max {max})"
+        )));
+    }
+    (string.len() as u32).azalea_write_var(buf)?;
+    buf.write_all(string.as_bytes())
+}
+
 impl AzBuf for GameProfileProperties {
     fn azalea_read(buf: &mut io::Cursor<&[u8]>) -> Result<Self, BufReadError> {
         let mut properties = IndexMap::new();
         let properties_len = u32::azalea_read_var(buf)?;
-        if properties_len > 16 {
+        if properties_len > MAX_PROPERTIES {
             return Err(BufReadError::VecLengthTooLong {
                 length: properties_len,
-                max_length: 16,
+                max_length: MAX_PROPERTIES,
             });
         }
         for _ in 0..properties_len {
-            let key = String::azalea_read_limited(buf, 16)?;
+            let key = String::azalea_read_limited(buf, MAX_PROPERTY_NAME)?;
             let value = ProfilePropertyValue::azalea_read(buf)?;
             properties.insert(key, value);
         }
         Ok(GameProfileProperties { map: properties })
     }
     fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
-        (self.map.len() as u64).azalea_write_var(buf)?;
+        if self.map.len() > MAX_PROPERTIES as usize {
+            return Err(io::Error::other(format!(
+                "{} elements exceeded max size of: {MAX_PROPERTIES}",
+                self.map.len()
+            )));
+        }
+        (self.map.len() as u32).azalea_write_var(buf)?;
         for (key, value) in &self.map {
-            key.azalea_write(buf)?;
+            write_limited_string(buf, key, MAX_PROPERTY_NAME)?;
             value.azalea_write(buf)?;
         }
         Ok(())
@@ -73,13 +95,19 @@ pub struct ProfilePropertyValue {
 }
 impl AzBuf for ProfilePropertyValue {
     fn azalea_read(buf: &mut io::Cursor<&[u8]>) -> Result<Self, BufReadError> {
-        let value = String::azalea_read_limited(buf, 32767)?;
-        let signature = Option::<String>::azalea_read_limited(buf, 1024)?;
+        let value = String::azalea_read_limited(buf, MAX_PROPERTY_VALUE)?;
+        let signature = Option::<String>::azalea_read_limited(buf, MAX_PROPERTY_SIGNATURE)?;
         Ok(ProfilePropertyValue { value, signature })
     }
     fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
-        self.value.azalea_write(buf)?;
-        self.signature.azalea_write(buf)?;
+        write_limited_string(buf, &self.value, MAX_PROPERTY_VALUE)?;
+        match &self.signature {
+            Some(signature) => {
+                true.azalea_write(buf)?;
+                write_limited_string(buf, signature, MAX_PROPERTY_SIGNATURE)?;
+            }
+            None => false.azalea_write(buf)?,
+        }
         Ok(())
     }
 }

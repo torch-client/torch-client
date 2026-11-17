@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Common.h"
@@ -22,8 +21,6 @@ std::string join(const std::vector<std::string>& segments, std::string_view deli
 
 std::vector<std::string_view> split(std::string_view s, char delimiter);
 
-// Computes the Damerau-Levenshtein distance of A and B.
-// https://en.wikipedia.org/wiki/Damerau-Levenshtein_distance#Distance_with_adjacent_transpositions
 size_t editDistance(std::string_view a, std::string_view b);
 
 bool startsWith(std::string_view lhs, std::string_view rhs);
@@ -36,4 +33,4 @@ bool isIdentifier(std::string_view s);
 
 std::string_view strip(std::string_view s);
 
-} // namespace Luau
+}

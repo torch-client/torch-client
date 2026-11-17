@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/Ast.h"
 #include "Luau/Cst.h"
 #include "Luau/Common.h"
@@ -309,4 +308,4 @@ CstTypePackGeneric::CstTypePackGeneric(Position ellipsisPosition)
 {
 }
 
-} // namespace Luau
+}

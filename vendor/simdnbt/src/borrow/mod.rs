@@ -319,7 +319,6 @@ impl BaseNbt<'_> {
         data.push(COMPOUND_ID);
         write_string(data, self.name);
         self.as_compound().write_fastvec(data);
-        data.push(END_ID);
     }
 }
 
@@ -716,5 +715,52 @@ mod tests {
             .unwrap();
 
         assert_eq!(nbt.as_compound().len(), nbt.as_compound().iter().count());
+    }
+
+    #[test]
+    fn base_nbt_write_round_trip() {
+        let data = [10, 0, 2, b'h', b'i', 1, 0, 1, b'b', 1, 0];
+        let nbt = super::read(&mut Cursor::new(&data[..])).unwrap().unwrap();
+        let mut out = Vec::new();
+        nbt.write(&mut out);
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn list_write_round_trip() {
+        use crate::owned;
+
+        let lists = owned::NbtList::List(vec![
+            owned::NbtList::Byte(vec![5]),
+            owned::NbtList::Empty,
+        ]);
+        let compound = owned::NbtCompound::from_values(vec![
+            (
+                "a".into(),
+                owned::NbtTag::List(owned::NbtList::ByteArray(vec![vec![1, 2], vec![]])),
+            ),
+            (
+                "s".into(),
+                owned::NbtTag::List(owned::NbtList::String(vec!["x".into(), "yz".into()])),
+            ),
+            ("l".into(), owned::NbtTag::List(lists)),
+            (
+                "i".into(),
+                owned::NbtTag::List(owned::NbtList::IntArray(vec![vec![7, -1]])),
+            ),
+            (
+                "g".into(),
+                owned::NbtTag::List(owned::NbtList::LongArray(vec![vec![9]])),
+            ),
+        ]);
+        let mut expected = Vec::new();
+        owned::BaseNbt::new("", compound).write(&mut expected);
+
+        let nbt = super::read(&mut Cursor::new(&expected[..]))
+            .unwrap()
+            .unwrap();
+        let mut out = Vec::new();
+        nbt.write(&mut out);
+        assert_eq!(out, expected);
     }
 }

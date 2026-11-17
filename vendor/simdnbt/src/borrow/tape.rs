@@ -13,6 +13,8 @@ use crate::{
 
 pub type MainTape = FastVec<TapeElement>;
 
+pub(crate) const APPROX_LEN_SATURATED: u32 = 0xff_ffff;
+
 #[derive(Clone, Copy)]
 pub struct TapeElement(u64);
 
@@ -42,7 +44,7 @@ impl TapeElement {
     }
 
     pub fn new_with_approx_len_and_offset(kind: TapeTagKind, approx_len: u32, offset: u32) -> Self {
-        let approx_len = approx_len.min(0xff_ffff);
+        let approx_len = approx_len.min(APPROX_LEN_SATURATED);
         debug_assert!(approx_len < 2u32.pow(24));
         Self(((kind as u64) << 56) | ((approx_len as u64) << 32) | (offset as u64))
     }
@@ -256,5 +258,17 @@ mod tests {
 
         let value: u64 = u56 { a, b, c }.into();
         assert_eq!(value, 0x34_5678_9abc_def0);
+    }
+
+    #[test]
+    fn approx_len_saturates_at_the_named_value() {
+        let len = |n: u32| {
+            TapeElement::new_with_approx_len_and_offset(TapeTagKind::CompoundList, n, 7)
+                .approx_len_and_offset()
+        };
+        assert_eq!(len(APPROX_LEN_SATURATED - 1), (APPROX_LEN_SATURATED - 1, 7));
+        assert_eq!(len(APPROX_LEN_SATURATED), (APPROX_LEN_SATURATED, 7));
+        assert_eq!(len(1 << 24), (APPROX_LEN_SATURATED, 7));
+        assert_eq!(len(u32::MAX), (APPROX_LEN_SATURATED, 7));
     }
 }

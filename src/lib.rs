@@ -641,10 +641,10 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
     } else {
         gui::render::StartupState {
             screen: match address {
-                Some(address) => {
-                    client::bot::start_bot(address);
-                    gui::Screen::None
-                }
+                Some(address) => match client::bot::start_bot(address) {
+                    Ok(()) => gui::Screen::LevelLoading,
+                    Err(_) => gui::Screen::Title,
+                },
                 None => gui::Screen::Title,
             },
             ..Default::default()

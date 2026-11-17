@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #pragma once
 
 #include "lobject.h"
@@ -7,8 +5,6 @@
 #include "luaconf.h"
 #include "ldebug.h"
 
-// returns target stack for 'n' extra elements to reallocate
-// if possible, stack size growth factor is 2x
 #define getgrownstacksize(L, n) ((n) <= L->stacksize ? 2 * L->stacksize : L->stacksize + (n))
 #define stacklimitreached(L, n) ((char*)L->stack_last - (char*)L->top <= (n) * (int)sizeof(TValue))
 
@@ -47,20 +43,14 @@
 
 #define isyielded(L) ((L)->status == LUA_YIELD || (L)->status == LUA_BREAK || (L)->status == SCHEDULED_REENTRY)
 
-// results from luaD_precall
-#define PCRLUA 0   // initiated a call to a Lua function
-#define PCRC 1     // did a call to a C function
-#define PCRYIELD 2 // C function yielded
+#define PCRLUA 0
+#define PCRC 1
+#define PCRYIELD 2
 
-// return value for a yielded C call
 #define C_CALL_YIELD -1
 
-// luaD_call can 'yield' into an immediate reentry
-// reentry will remove extra call frames from C call stack and continue execution
-// this lua_State::status code is internal and should not be used by users
 #define SCHEDULED_REENTRY 0x7f
 
-// type of protected functions, to be ran by `runprotected'
 typedef void (*Pfunc)(lua_State* L, void* ud);
 
 LUAI_FUNC CallInfo* luaD_growCI(lua_State* L);

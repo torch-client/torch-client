@@ -8,7 +8,7 @@ use super::{
     NbtCompound, Tapes,
     compound::{ParsingStack, ParsingStackElement},
     extra_tapes::{ExtraTapeElement, ExtraTapes},
-    tape::{TapeElement, TapeTagKind, UnalignedU32},
+    tape::{APPROX_LEN_SATURATED, TapeElement, TapeTagKind, UnalignedU32},
 };
 use crate::{
     Mutf8Str,
@@ -218,18 +218,21 @@ impl<'a, 'tape> NbtList<'a, 'tape> {
             }
             TapeTagKind::ByteArrayList => {
                 let byte_arrays = self.byte_arrays().unwrap();
+                write_u32(data, byte_arrays.len() as u32);
                 for array in byte_arrays.iter() {
                     write_with_u32_length(data, 1, array);
                 }
             }
             TapeTagKind::StringList => {
                 let strings = self.strings().unwrap();
+                write_u32(data, strings.len() as u32);
                 for string in strings.iter() {
                     write_string(data, string);
                 }
             }
             TapeTagKind::ListList => {
                 let lists = self.lists().unwrap();
+                write_u32(data, lists.len() as u32);
                 for list in lists {
                     list.write_fastvec(data);
                 }
@@ -243,12 +246,14 @@ impl<'a, 'tape> NbtList<'a, 'tape> {
             }
             TapeTagKind::IntArrayList => {
                 let int_arrays = self.int_arrays().unwrap();
+                write_u32(data, int_arrays.len() as u32);
                 for array in int_arrays.iter() {
                     write_with_u32_length(data, 4, array.as_big_endian());
                 }
             }
             TapeTagKind::LongArrayList => {
                 let long_arrays = self.long_arrays().unwrap();
+                write_u32(data, long_arrays.len() as u32);
                 for array in long_arrays.iter() {
                     write_with_u32_length(data, 8, array.as_big_endian());
                 }
@@ -590,7 +595,7 @@ pub struct NbtListListIter<'a, 'tape> {
 impl<'a: 'tape, 'tape> NbtListListIter<'a, 'tape> {
     pub fn len(&self) -> usize {
         let len = self.approx_len();
-        if len < 2u32.pow(24) {
+        if len < APPROX_LEN_SATURATED {
             len as usize
         } else {
             self.clone().count()
@@ -704,7 +709,7 @@ pub struct NbtCompoundListIter<'a, 'tape> {
 impl<'a: 'tape, 'tape> NbtCompoundListIter<'a, 'tape> {
     pub fn len(&self) -> usize {
         let len = self.approx_len();
-        if len < 2u32.pow(24) {
+        if len < APPROX_LEN_SATURATED {
             len as usize
         } else {
             self.clone().count()
@@ -792,6 +797,32 @@ where
     T: Copy + SwappableNumber,
 {
     u32_prefixed_list_to_rawlist(expected_kind, element).map(|rawlist| rawlist.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn len_counts_at_the_saturation_value() {
+        let compound = TapeElement::new_with_approx_len_and_offset(TapeTagKind::Compound, 0, 1);
+        let tape = [compound; 4];
+        let extra = ExtraTapes::default();
+        let iter = NbtCompoundListIter {
+            current_tape_offset: 0,
+            max_tape_offset: tape.len(),
+            approx_length: APPROX_LEN_SATURATED,
+            tape: &tape,
+            extra_tapes: &extra,
+        };
+        assert_eq!(iter.len(), 3);
+
+        let iter = NbtCompoundListIter {
+            approx_length: APPROX_LEN_SATURATED - 1,
+            ..iter
+        };
+        assert_eq!(iter.len(), (APPROX_LEN_SATURATED - 1) as usize);
+    }
 }
 
 #[inline]

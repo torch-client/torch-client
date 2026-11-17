@@ -16,6 +16,7 @@ pub struct State {
     pub shown_id: u64,
     pub reason: LevelLoadingReason,
     pub opened_at: Option<crate::platform::time::Instant>,
+    pub connecting: bool,
 }
 
 pub const SHOWN_AT_MOST: std::time::Duration = std::time::Duration::from_secs(3);
@@ -25,6 +26,13 @@ impl State {
         self.shown_id = id;
         self.reason = reason;
         self.opened_at = Some(crate::platform::time::Instant::now());
+        self.connecting = false;
+    }
+
+    pub fn begin_connect(&mut self) {
+        self.connecting = true;
+        self.reason = LevelLoadingReason::Other;
+        self.opened_at = None;
     }
 
     pub fn overdue(&self) -> bool {
@@ -45,13 +53,12 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) -> Option<Sc
 
     let x_center = (ctx.vw / 2.0).floor();
     let text_top = (ctx.vh / 2.0).floor() - TEXT_ABOVE_CENTRE;
-    p.text_centered(
-        label!("multiplayer.downloadingTerrain"),
-        x_center,
-        text_top,
-        0xFFFFFF,
-        true,
-    );
+    let text = if state.level_loading.connecting {
+        label!("connect.connecting")
+    } else {
+        label!("multiplayer.downloadingTerrain")
+    };
+    p.text_centered(text, x_center, text_top, 0xFFFFFF, true);
 
     let y = ctx.vh - BUTTON_BOTTOM;
     let left = (x_center - BUTTON_W - BUTTON_GAP / 2.0).floor();
@@ -74,7 +81,12 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) -> Option<Sc
 
     if disconnect {
         state.disconnect = true;
+        state.level_loading.connecting = false;
         return Some(Screen::Multiplayer);
     }
-    (hide || ctx.input.escape).then_some(Screen::None)
+    let hidden = hide || ctx.input.escape;
+    if hidden {
+        state.level_loading.connecting = false;
+    }
+    hidden.then_some(Screen::None)
 }

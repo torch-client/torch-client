@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/Location.h"
 
 namespace Luau
@@ -52,4 +51,4 @@ void Location::shift(const Position& start, const Position& oldEnd, const Positi
     end.shift(start, oldEnd, newEnd);
 }
 
-} // namespace Luau
+}

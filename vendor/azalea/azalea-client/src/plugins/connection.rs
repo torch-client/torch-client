@@ -12,8 +12,10 @@ use azalea_crypto::Aes128CfbEnc;
 use azalea_protocol::{
     connect::{RawReadConnection, RawWriteConnection},
     packets::{
-        ConnectionProtocol, Packet, ProtocolPacket, config::ClientboundConfigPacket,
-        game::ClientboundGamePacket, login::ClientboundLoginPacket,
+        ConnectionProtocol, Packet, ProtocolPacket,
+        config::ClientboundConfigPacket,
+        game::{ClientboundBundleDelimiter, ClientboundGamePacket},
+        login::ClientboundLoginPacket,
     },
     read::{ReadPacketError, deserialize_packet},
     write::serialize_packet,
@@ -94,6 +96,8 @@ pub fn read_packets(ecs: &mut World) {
     #[cfg(target_arch = "wasm32")]
     let read_started = bevy_platform::time::Instant::now();
 
+    let bundle_delimiter = bundle_delimiter_byte();
+
     for entity in entities_handling_packets {
         loop {
             let mut conn = conn_query.get_mut(ecs, entity).unwrap();
@@ -115,32 +119,42 @@ pub fn read_packets(ecs: &mut World) {
                         None => raw_packet,
                     };
                     let raw_packet = Arc::<[u8]>::from(raw_packet);
-                    #[cfg(target_arch = "wasm32")]
-                    let packet_started = bevy_platform::time::Instant::now();
-                    if let Err(e) = handle_raw_packet(
-                        ecs,
-                        &raw_packet,
-                        entity,
-                        state,
-                        &mut queued_packet_events,
-                    ) {
-                        let first = azalea_registry::unknown::note_packet(match &*e {
-                            ReadPacketError::Parse { packet_name, .. }
-                            | ReadPacketError::LeftoverData { packet_name, .. } => {
-                                packet_name.as_str()
+                    if matches!(state, ConnectionProtocol::Game) {
+                        if raw_packet.len() == 1 && Some(raw_packet[0]) == bundle_delimiter {
+                            if mem::take(&mut conn.bundle_overflowed) {
+                                continue;
                             }
-                            _ => "unnamed",
-                        });
-                        if first {
-                            let head = &raw_packet[..raw_packet.len().min(16)];
+                            match conn.bundle.take() {
+                                None => conn.bundle = Some(Vec::new()),
+                                Some(frames) => {
+                                    handle_bundle(ecs, entity, &frames, &mut queued_packet_events)
+                                }
+                            }
+                            continue;
+                        }
+                        if let Some(frames) = conn.bundle.as_mut() {
+                            frames.push(raw_packet);
+                            if frames.len() < BUNDLE_SIZE_LIMIT {
+                                continue;
+                            }
                             error!(
-                                "Error reading packet: {e} ({state:?}, {} bytes, starts {head:02x?})",
-                                raw_packet.len()
+                                "a packet bundle reached {BUNDLE_SIZE_LIMIT} packets without its closing delimiter; handling the rest of it unbundled"
+                            );
+                            let frames = conn.bundle.take().unwrap_or_default();
+                            conn.bundle_overflowed = true;
+                            handle_bundle(ecs, entity, &frames, &mut queued_packet_events);
+                            continue;
+                        }
+                    } else if conn.bundle.is_some() || conn.bundle_overflowed {
+                        let dropped = conn.bundle.take().map_or(0, |frames| frames.len());
+                        conn.bundle_overflowed = false;
+                        if dropped > 0 {
+                            error!(
+                                "dropped {dropped} bundled game packets: the connection left the game state ({state:?}) before the bundle closed"
                             );
                         }
                     }
-                    #[cfg(target_arch = "wasm32")]
-                    warn_slow_packet(state, &raw_packet, packet_started.elapsed());
+                    handle_read_frame(ecs, &raw_packet, entity, state, &mut queued_packet_events);
                 }
                 Ok(None) => {
                     #[cfg(target_arch = "wasm32")]
@@ -159,6 +173,8 @@ pub fn read_packets(ecs: &mut World) {
                         info!("Server closed connection");
                         conn.network = None;
                         conn.is_alive = false;
+                        conn.bundle = None;
+                        conn.bundle_overflowed = false;
                     }
 
                     break;
@@ -205,6 +221,54 @@ fn log_for_error(error: &ReadPacketError) {
     }
 }
 
+const BUNDLE_SIZE_LIMIT: usize = 4096;
+
+fn bundle_delimiter_byte() -> Option<u8> {
+    let id = ClientboundGamePacket::BundleDelimiter(ClientboundBundleDelimiter).id();
+    u8::try_from(id).ok().filter(|id| *id < 0x80)
+}
+
+fn handle_bundle(
+    ecs: &mut World,
+    entity: Entity,
+    frames: &[Arc<[u8]>],
+    queued_packet_events: &mut QueuedPacketEvents,
+) {
+    for frame in frames {
+        let Some(state) = ecs.get::<RawConnection>(entity).map(|conn| conn.state) else {
+            return;
+        };
+        handle_read_frame(ecs, frame, entity, state, queued_packet_events);
+    }
+}
+
+fn handle_read_frame(
+    ecs: &mut World,
+    raw_packet: &[u8],
+    entity: Entity,
+    state: ConnectionProtocol,
+    queued_packet_events: &mut QueuedPacketEvents,
+) {
+    #[cfg(target_arch = "wasm32")]
+    let packet_started = bevy_platform::time::Instant::now();
+    if let Err(e) = handle_raw_packet(ecs, raw_packet, entity, state, queued_packet_events) {
+        let first = azalea_registry::unknown::note_packet(match &*e {
+            ReadPacketError::Parse { packet_name, .. }
+            | ReadPacketError::LeftoverData { packet_name, .. } => packet_name.as_str(),
+            _ => "unnamed",
+        });
+        if first {
+            let head = &raw_packet[..raw_packet.len().min(16)];
+            error!(
+                "Error reading packet: {e} ({state:?}, {} bytes, starts {head:02x?})",
+                raw_packet.len()
+            );
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    warn_slow_packet(state, raw_packet, packet_started.elapsed());
+}
+
 #[cfg(target_arch = "wasm32")]
 fn warn_slow_packet(state: ConnectionProtocol, raw_packet: &[u8], took: std::time::Duration) {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -237,6 +301,8 @@ pub struct RawConnection {
     pub(crate) warned_no_network: bool,
     #[cfg(target_arch = "wasm32")]
     pub(crate) read_backlog: bool,
+    pub(crate) bundle: Option<Vec<Arc<[u8]>>>,
+    pub(crate) bundle_overflowed: bool,
     pub state: ConnectionProtocol,
     pub(crate) is_alive: bool,
 
@@ -276,6 +342,8 @@ impl RawConnection {
             warned_no_network: false,
             #[cfg(target_arch = "wasm32")]
             read_backlog: false,
+            bundle: None,
+            bundle_overflowed: false,
             state,
             is_alive: true,
             injected_clientbound_packets: Vec::new(),
@@ -496,4 +564,19 @@ pub enum WritePacketError {
         #[backtrace]
         source: mpsc::error::SendError<Box<[u8]>>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundle_delimiter_frame_is_one_byte() {
+        let packet = ClientboundGamePacket::BundleDelimiter(ClientboundBundleDelimiter);
+        let byte = bundle_delimiter_byte().expect("delimiter id fits one VarInt byte");
+        assert_eq!(ClientboundGamePacket::NAMES[byte as usize], "bundle_delimiter");
+        let mut body = Vec::new();
+        packet.write(&mut body).unwrap();
+        assert!(body.is_empty());
+    }
 }

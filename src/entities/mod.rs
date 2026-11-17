@@ -735,6 +735,7 @@ pub struct RenderSpec {
     pub blend: Blend,
     pub depth_bias: i32,
     pub sort_bias: f32,
+    pub layering: i8,
     pub tint: fn(&EntityState) -> [f32; 4],
     pub respects_invisibility: bool,
     pub outlined_while_invisible: bool,
@@ -872,6 +873,7 @@ impl RenderSpec {
             blend: Blend::Cutout,
             depth_bias: 0,
             sort_bias: 0.0,
+            layering: 0,
             tint: no_tint,
             respects_invisibility: true,
             outlined_while_invisible: false,
@@ -925,6 +927,11 @@ impl RenderSpec {
 
     pub fn with_depth_bias(mut self, depth_bias: i32) -> RenderSpec {
         self.depth_bias = depth_bias;
+        self
+    }
+
+    pub fn with_layering(mut self, layering: i8) -> RenderSpec {
+        self.layering = layering;
         self
     }
 
@@ -1014,6 +1021,7 @@ struct MaterialKey {
     blend: Blend,
     depth_bias: i32,
     sort_bias: u32,
+    layering: i8,
     tint: [u32; 4],
     levels: (u8, u8),
     dirs: [[u32; 3]; 2],
@@ -1036,6 +1044,7 @@ impl MaterialKey {
             blend: spec.blend,
             depth_bias: spec.depth_bias,
             sort_bias: spec.sort_bias.to_bits(),
+            layering: spec.layering,
             tint: lit.tint.map(f32::to_bits),
             levels,
             dirs: lit.dirs.map(|d| d.to_array().map(f32::to_bits)),
@@ -1390,6 +1399,7 @@ fn entity_material(texture: Option<Handle<Image>>, spec: &RenderSpec, lit: Lit) 
         spec.depth_bias,
     );
     material.sort_bias = spec.sort_bias;
+    material.layering = spec.layering;
     material
 }
 
@@ -1397,7 +1407,10 @@ pub(crate) fn light_levels(st: &EntityState) -> (u8, u8) {
     entity_levels(&crate::client::worldsync::light_map().read(), st)
 }
 
-fn entity_levels(light: &crate::lighting::level::LightMap, st: &EntityState) -> (u8, u8) {
+pub(crate) fn entity_levels(
+    light: &crate::lighting::level::LightMap,
+    st: &EntityState,
+) -> (u8, u8) {
     if let Some(levels) = st.frozen_light {
         return levels;
     }
@@ -1701,6 +1714,10 @@ pub struct EntityRigs {
 }
 
 impl EntityRigs {
+    pub fn contains(&self, id: i32) -> bool {
+        self.live.contains_key(&id)
+    }
+
     pub fn len(&self) -> usize {
         self.live.len()
     }
@@ -2367,6 +2384,11 @@ fn sync_entities(
                                         .starts_with(crate::renderer::maps::MAP_TEXTURE_PREFIX) =>
                                 {
                                     map_textures.get(path)
+                                }
+                                Some(path)
+                                    if &**path == crate::renderer::maps::DECORATION_ATLAS =>
+                                {
+                                    map_textures.sheet()
                                 }
                                 Some(path) => entity_images.get(path, &mut images),
                                 None => None,

@@ -897,6 +897,11 @@ fn interact_entity(
         .component::<azalea::physics::client_movement::ClientMovementState>()
         .is_ok_and(|m| m.trying_to_crouch);
     if let (Some(entity_id), Some(at)) = (target, at) {
+        #[cfg(feature = "multiversion")]
+        crate::protocol::hop::note_held_name_tag(
+            hand == InteractionHand::Off,
+            held == Some(ItemKind::NameTag),
+        );
         crate::client::outbox::send(
             bot,
             ServerboundInteract {

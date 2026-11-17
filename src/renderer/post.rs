@@ -92,11 +92,16 @@ fn post_enabled() -> bool {
     super::terrain::builtin_world_shading()
 }
 
+#[cfg(all(feature = "builtin_shaders", feature = "benchmark_feature"))]
+type NotBenchmark = Without<super::benchmark::BenchmarkCamera>;
+#[cfg(all(feature = "builtin_shaders", not(feature = "benchmark_feature")))]
+type NotBenchmark = ();
+
 #[cfg(feature = "builtin_shaders")]
 #[allow(clippy::type_complexity)]
 fn apply_pipeline(
     mut commands: Commands,
-    cameras: Query<(Entity, Has<Hdr>), With<Camera>>,
+    cameras: Query<(Entity, Has<Hdr>), (With<Camera>, NotBenchmark)>,
     mut world: Query<(Entity, Has<Graded>, &mut Tonemapping), With<WorldCamera>>,
 ) {
     let fancy = post_enabled();

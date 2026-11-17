@@ -13,12 +13,6 @@ __attribute__((noreturn)) void _emscripten_throw_longjmp(void);
 double mlua_shim_parse_f64(const char* s, size_t len);
 void mlua_shim_log(const char* s, size_t len);
 
-/* The design is Emscripten's system/lib/compiler-rt/emscripten_setjmp.c
-   (3.1.51, MIT), rewritten here. LLVM 18 and older lower setjmp to
-   saveSetjmp/testSetjmp and a table; LLVM 19 and later to __wasm_setjmp and
-   __wasm_setjmp_test, which keep the label in the jmp_buf itself. Both sets
-   are here so either clang works. */
-
 typedef struct
 {
     uintptr_t id;
@@ -77,8 +71,6 @@ uint32_t testSetjmp(uintptr_t id, SetjmpEntry* table, uint32_t size)
     return 0;
 }
 
-/* LLVM 19+: `env` is the jmp_buf (16 bytes in shim/include/setjmp.h), and
-   `invocation` is an address unique to the calling function's frame */
 typedef struct
 {
     void* invocation;

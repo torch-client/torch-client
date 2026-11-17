@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lvm.h"
 
 #include "lstate.h"
@@ -11,7 +9,6 @@
 
 #include <string.h>
 
-// limit for table tag-method chains (to avoid loops)
 #define MAXTAGLOOP 100
 
 const TValue* luaV_tonumber(const TValue* obj, TValue* n)
@@ -54,17 +51,10 @@ const float* luaV_tovector(const TValue* obj)
 static StkId callTMres(lua_State* L, StkId res, const TValue* f, const TValue* p1, const TValue* p2)
 {
     ptrdiff_t result = savestack(L, res);
-    // using stack room beyond top is technically safe here, but for very complicated reasons:
-    // * The stack guarantees EXTRA_STACK room beyond stack_last (see luaD_reallocstack) will be allocated
-    // * we cannot move luaD_checkstack above because the arguments are *sometimes* pointers to the lua
-    // stack and checkstack may invalidate those pointers
-    // * we cannot use savestack/restorestack because the arguments are sometimes on the C++ stack
-    // * during stack reallocation all of the allocated stack is copied (even beyond stack_last) so these
-    // values will be preserved even if they go past stack_last
     LUAU_ASSERT((L->top + 3) < (L->stack + L->stacksize));
-    setobj2s(L, L->top, f);      // push function
-    setobj2s(L, L->top + 1, p1); // 1st argument
-    setobj2s(L, L->top + 2, p2); // 2nd argument
+    setobj2s(L, L->top, f);
+    setobj2s(L, L->top + 1, p1);
+    setobj2s(L, L->top + 2, p2);
     luaD_checkstack(L, 3);
     L->top += 3;
     luaD_call(L, L->top - 3, 1);
@@ -76,18 +66,11 @@ static StkId callTMres(lua_State* L, StkId res, const TValue* f, const TValue* p
 
 static void callTM(lua_State* L, const TValue* f, const TValue* p1, const TValue* p2, const TValue* p3)
 {
-    // using stack room beyond top is technically safe here, but for very complicated reasons:
-    // * The stack guarantees EXTRA_STACK room beyond stack_last (see luaD_reallocstack) will be allocated
-    // * we cannot move luaD_checkstack above because the arguments are *sometimes* pointers to the lua
-    // stack and checkstack may invalidate those pointers
-    // * we cannot use savestack/restorestack because the arguments are sometimes on the C++ stack
-    // * during stack reallocation all of the allocated stack is copied (even beyond stack_last) so these
-    // values will be preserved even if they go past stack_last
     LUAU_ASSERT((L->top + 4) < (L->stack + L->stacksize));
-    setobj2s(L, L->top, f);      // push function
-    setobj2s(L, L->top + 1, p1); // 1st argument
-    setobj2s(L, L->top + 2, p2); // 2nd argument
-    setobj2s(L, L->top + 3, p3); // 3th argument
+    setobj2s(L, L->top, f);
+    setobj2s(L, L->top + 1, p1);
+    setobj2s(L, L->top + 2, p2);
+    setobj2s(L, L->top + 3, p3);
     luaD_checkstack(L, 4);
     L->top += 4;
     luaD_call(L, L->top - 4, 0);
@@ -100,21 +83,20 @@ void luaV_gettable(lua_State* L, const TValue* t, TValue* key, StkId val)
     {
         const TValue* tm;
         if (ttistable(t))
-        { // `t' is a table?
+        {
             LuaTable* h = hvalue(t);
 
-            const TValue* res = luaH_get(h, key); // do a primitive get
+            const TValue* res = luaH_get(h, key);
 
             if (res != luaO_nilobject)
-                L->cachedslot = gval2slot(h, res); // remember slot to accelerate future lookups
+                L->cachedslot = gval2slot(h, res);
 
-            if (!ttisnil(res) // result is no nil?
+            if (!ttisnil(res)
                 || (tm = fasttm(L, h->metatable, TM_INDEX)) == NULL)
-            { // or no TM?
+            {
                 setobj2s(L, val, res);
                 return;
             }
-            // t isn't a table, so see if it has an INDEX meta-method to look up the key with
         }
         else if (ttisnil(tm = luaT_gettmbyobj(L, t, TM_INDEX)))
             luaG_indexerror(L, t, key);
@@ -123,7 +105,7 @@ void luaV_gettable(lua_State* L, const TValue* t, TValue* key, StkId val)
             callTMres(L, val, tm, t, key);
             return;
         }
-        t = tm; // else repeat with `tm'
+        t = tm;
     }
     luaG_runerror(L, "'__index' chain too long; possible loop");
 }
@@ -136,28 +118,25 @@ void luaV_settable(lua_State* L, const TValue* t, TValue* key, StkId val)
     {
         const TValue* tm;
         if (ttistable(t))
-        { // `t' is a table?
+        {
             LuaTable* h = hvalue(t);
 
             const TValue* oldval = luaH_get(h, key);
 
-            // should we assign the key? (if key is valid or __newindex is not set)
             if (!ttisnil(oldval) || (tm = fasttm(L, h->metatable, TM_NEWINDEX)) == NULL)
             {
                 if (h->readonly)
                     luaG_readonlyerror(L);
 
-                // luaH_set would work but would repeat the lookup so we use luaH_setslot that can reuse oldval if it's safe
                 TValue* newval = luaH_setslot(L, h, oldval, key);
 
-                L->cachedslot = gval2slot(h, newval); // remember slot to accelerate future lookups
+                L->cachedslot = gval2slot(h, newval);
 
                 setobj2t(L, newval, val);
                 luaC_barriert(L, h, val);
                 return;
             }
 
-            // fallthrough to metamethod
         }
         else if (ttisnil(tm = luaT_gettmbyobj(L, t, TM_NEWINDEX)))
             luaG_indexerror(L, t, key);
@@ -167,8 +146,7 @@ void luaV_settable(lua_State* L, const TValue* t, TValue* key, StkId val)
             callTM(L, tm, t, key, val);
             return;
         }
-        // else repeat with `tm'
-        setobj(L, &temp, tm); // avoid pointing inside table (may rehash)
+        setobj(L, &temp, tm);
         t = &temp;
     }
     luaG_runerror(L, "'__newindex' chain too long; possible loop");
@@ -176,9 +154,9 @@ void luaV_settable(lua_State* L, const TValue* t, TValue* key, StkId val)
 
 static int call_binTM(lua_State* L, const TValue* p1, const TValue* p2, StkId res, TMS event)
 {
-    const TValue* tm = luaT_gettmbyobj(L, p1, event); // try first operand
+    const TValue* tm = luaT_gettmbyobj(L, p1, event);
     if (ttisnil(tm))
-        tm = luaT_gettmbyobj(L, p2, event); // try second operand
+        tm = luaT_gettmbyobj(L, p2, event);
     if (ttisnil(tm))
         return 0;
     callTMres(L, res, tm, p1, p2);
@@ -190,13 +168,13 @@ static const TValue* get_compTM(lua_State* L, LuaTable* mt1, LuaTable* mt2, TMS 
     const TValue* tm1 = fasttm(L, mt1, event);
     const TValue* tm2;
     if (tm1 == NULL)
-        return NULL; // no metamethod
+        return NULL;
     if (mt1 == mt2)
-        return tm1; // same metatables => same metamethods
+        return tm1;
     tm2 = fasttm(L, mt2, event);
     if (tm2 == NULL)
-        return NULL;                // no metamethod
-    if (luaO_rawequalObj(tm1, tm2)) // same metamethods?
+        return NULL;
+    if (luaO_rawequalObj(tm1, tm2))
         return tm1;
     return NULL;
 }
@@ -209,10 +187,10 @@ static int call_orderTM(lua_State* L, const TValue* p1, const TValue* p2, TMS ev
     {
         if (error)
             luaG_ordererror(L, p1, p2, event);
-        return -1; // no metamethod?
+        return -1;
     }
     tm2 = luaT_gettmbyobj(L, p2, event);
-    if (!luaO_rawequalObj(tm1, tm2)) // different metamethods?
+    if (!luaO_rawequalObj(tm1, tm2))
     {
         if (error)
             luaG_ordererror(L, p1, p2, event);
@@ -230,7 +208,6 @@ int luaV_strcmp(const TString* ls, const TString* rs)
     const char* l = getstr(ls);
     const char* r = getstr(rs);
 
-    // always safe to read one character because even empty strings are nul terminated
     if (*l != *r)
         return uint8_t(*l) - uint8_t(*r);
 
@@ -254,7 +231,7 @@ int luaV_lessthan(lua_State* L, const TValue* l, const TValue* r)
     else if (ttisstring(l))
         return luaV_strcmp(tsvalue(l), tsvalue(r)) < 0;
     else
-        return call_orderTM(L, l, r, TM_LT, /* error= */ true);
+        return call_orderTM(L, l, r, TM_LT, true);
 }
 
 int luaV_lessequal(lua_State* L, const TValue* l, const TValue* r)
@@ -266,9 +243,9 @@ int luaV_lessequal(lua_State* L, const TValue* l, const TValue* r)
         return luai_numle(nvalue(l), nvalue(r));
     else if (ttisstring(l))
         return luaV_strcmp(tsvalue(l), tsvalue(r)) <= 0;
-    else if ((res = call_orderTM(L, l, r, TM_LE)) != -1) // first try `le'
+    else if ((res = call_orderTM(L, l, r, TM_LE)) != -1)
         return res;
-    else if ((res = call_orderTM(L, r, l, TM_LT)) == -1) // error if not `lt'
+    else if ((res = call_orderTM(L, r, l, TM_LT)) == -1)
         luaG_ordererror(L, l, r, TM_LE);
     return !res;
 }
@@ -286,7 +263,7 @@ int luaV_equalval(lua_State* L, const TValue* t1, const TValue* t2)
     case LUA_TVECTOR:
         return luai_veceq(vvalue(t1), vvalue(t2));
     case LUA_TBOOLEAN:
-        return bvalue(t1) == bvalue(t2); // true must be 1 !!
+        return bvalue(t1) == bvalue(t2);
     case LUA_TLIGHTUSERDATA:
         return pvalue(t1) == pvalue(t2) && lightuserdatatag(t1) == lightuserdatatag(t2);
     case LUA_TUSERDATA:
@@ -294,19 +271,19 @@ int luaV_equalval(lua_State* L, const TValue* t1, const TValue* t2)
         tm = get_compTM(L, uvalue(t1)->metatable, uvalue(t2)->metatable, TM_EQ);
         if (!tm)
             return uvalue(t1) == uvalue(t2);
-        break; // will try TM
+        break;
     }
     case LUA_TTABLE:
     {
         tm = get_compTM(L, hvalue(t1)->metatable, hvalue(t2)->metatable, TM_EQ);
         if (!tm)
             return hvalue(t1) == hvalue(t2);
-        break; // will try TM
+        break;
     }
     default:
         return gcvalue(t1) == gcvalue(t2);
     }
-    callTMres(L, L->top, tm, t1, t2); // call TM
+    callTMres(L, L->top, tm, t1, t2);
     return !l_isfalse(L->top);
 }
 
@@ -315,21 +292,19 @@ void luaV_concat(lua_State* L, int total, int last)
     do
     {
         StkId top = L->base + last + 1;
-        int n = 2; // number of elements handled in this pass (at least 2)
+        int n = 2;
         if (!(ttisstring(top - 2) || ttisnumber(top - 2)) || !tostring(L, top - 1))
         {
             if (!call_binTM(L, top - 2, top - 1, top - 2, TM_CONCAT))
                 luaG_concaterror(L, top - 2, top - 1);
         }
-        else if (tsvalue(top - 1)->len == 0) // second op is empty?
-            (void)tostring(L, top - 2);      // result is first op (as string)
+        else if (tsvalue(top - 1)->len == 0)
+            (void)tostring(L, top - 2);
         else
         {
-            // at least two string values; get as many as possible
             size_t tl = tsvalue(top - 1)->len;
             char* buffer;
             int i;
-            // collect total length
             for (n = 1; n < total && tostring(L, top - n - 1); n++)
             {
                 size_t l = tsvalue(top - n - 1)->len;
@@ -353,7 +328,7 @@ void luaV_concat(lua_State* L, int total, int last)
 
             tl = 0;
             for (i = n; i > 0; i--)
-            { // concat all strings
+            {
                 size_t l = tsvalue(top - i)->len;
                 memcpy(buffer + tl, svalue(top - i), l);
                 tl += l;
@@ -368,9 +343,9 @@ void luaV_concat(lua_State* L, int total, int last)
                 setsvalue(L, top - n, luaS_buffinish(L, ts));
             }
         }
-        total -= n - 1; // got `n' strings to create 1 new
+        total -= n - 1;
         last -= n - 1;
-    } while (total > 1); // repeat until only 1 result left
+    } while (total > 1);
 }
 
 template<TMS op>
@@ -379,11 +354,6 @@ void luaV_doarithimpl(lua_State* L, StkId ra, const TValue* rb, const TValue* rc
     TValue tempb, tempc;
     const TValue *b, *c;
 
-    // vector operations that we support:
-    // v+v  v-v  -v    (add/sub/neg)
-    // v*v  s*v  v*s   (mul)
-    // v/v  s/v  v/s   (div)
-    // v//v s//v v//s  (floor div)
     const float* vb = ttisvector(rb) ? vvalue(rb) : nullptr;
     const float* vc = ttisvector(rc) ? vvalue(rc) : nullptr;
 
@@ -516,7 +486,6 @@ void luaV_doarithimpl(lua_State* L, StkId ra, const TValue* rb, const TValue* rc
     }
 }
 
-// instantiate private template implementation for external callers
 template void luaV_doarithimpl<TM_ADD>(lua_State* L, StkId ra, const TValue* rb, const TValue* rc);
 template void luaV_doarithimpl<TM_SUB>(lua_State* L, StkId ra, const TValue* rb, const TValue* rc);
 template void luaV_doarithimpl<TM_MUL>(lua_State* L, StkId ra, const TValue* rb, const TValue* rc);
@@ -556,7 +525,7 @@ void luaV_dolen(lua_State* L, StkId ra, const TValue* rb)
 
     StkId res = callTMres(L, ra, tm, rb, luaO_nilobject);
     if (!ttisnumber(res))
-        luaG_runerror(L, "'__len' must return a number"); // note, we can't access rb since stack may have been reallocated
+        luaG_runerror(L, "'__len' must return a number");
 }
 
 LUAU_NOINLINE void luaV_prepareFORN(lua_State* L, StkId plimit, StkId pstep, StkId pinit)
@@ -569,8 +538,6 @@ LUAU_NOINLINE void luaV_prepareFORN(lua_State* L, StkId plimit, StkId pstep, Stk
         luaG_forerror(L, pstep, "step");
 }
 
-// calls a C function f with no yielding support; optionally save one resulting value to the res register
-// the function and arguments have to already be pushed to L->top
 LUAU_NOINLINE void luaV_callTM(lua_State* L, int nparams, int res)
 {
     ++L->nCcalls;
@@ -600,13 +567,10 @@ LUAU_NOINLINE void luaV_callTM(lua_State* L, int nparams, int res)
 
     lua_CFunction func = clvalue(fun)->c.f;
     int n = func(L);
-    LUAU_ASSERT(n >= 0); // yields should have been blocked by nCcalls
+    LUAU_ASSERT(n >= 0);
 
-    // ci is our callinfo, cip is our parent
-    // note that we read L->ci again since it may have been reallocated by the call
     CallInfo* cip = L->ci - 1;
 
-    // copy return value into parent stack
     if (res >= 0)
     {
         if (n > 0)
@@ -631,8 +595,8 @@ LUAU_NOINLINE void luaV_tryfuncTM(lua_State* L, StkId func)
     const TValue* tm = luaT_gettmbyobj(L, func, TM_CALL);
     if (!ttisfunction(tm))
         luaG_typeerror(L, func, "call");
-    for (StkId p = L->top; p > func; p--) // open space for metamethod
+    for (StkId p = L->top; p > func; p--)
         setobj2s(L, p, p - 1);
-    L->top++;              // stack space pre-allocated by the caller
-    setobj2s(L, func, tm); // tag method is the new function to be called
+    L->top++;
+    setobj2s(L, func, tm);
 }

@@ -9,12 +9,13 @@ use azalea_core::{
     position::{ChunkPos, Vec3},
 };
 use azalea_entity::{
-    Dead, EntityBundle, EntityKindComponent, LoadedBy, LocalEntity, LookDirection,
+    Dead, EntityBundle, EntityKindComponent, EntityUuid, LoadedBy, LocalEntity, LookDirection,
     Physics, PlayerAbilities, Position,
+    dimensions::RemoteScale,
     effect_events::{AddEffectEvent, RemoveEffectsEvent},
-    indexing::{EntityIdIndex, EntityUuidIndex},
+    indexing::{EntityChunkPos, EntityIdIndex, EntityUuidIndex},
     inventory::Inventory,
-    metadata::{Health, apply_metadata},
+    metadata::{Health, PlayerMetadataBundle, Sprinting, apply_metadata},
 };
 use azalea_protocol::{
     common::movements::MoveFlags,
@@ -30,7 +31,7 @@ pub use events::*;
 use tracing::{debug, error, warn};
 
 use crate::{
-    ClientInformation,
+    ClientInformation, ClientMovementState,
     block_update::{QueuedBlockChangedAcks, QueuedServerBlockUpdates},
     chunks,
     client_chat::{ChatPacket, ChatReceivedEvent},
@@ -206,6 +207,22 @@ fn clear_queued_block_updates(ecs: &mut World, player: Entity) {
         if let Ok(mut queued) = query.get_mut(player) {
             queued.list.clear();
         }
+    });
+}
+
+fn remove_from_chunk_index(world: &mut azalea_world::World, entity: Entity, chunk: Option<ChunkPos>) {
+    if let Some(chunk) = chunk
+        && let Some(entities) = world.entities_by_chunk.get_mut(&chunk)
+        && entities.remove(&entity)
+    {
+        if entities.is_empty() {
+            world.entities_by_chunk.remove(&chunk);
+        }
+        return;
+    }
+    world.entities_by_chunk.retain(|_, entities| {
+        entities.remove(&entity);
+        !entities.is_empty()
     });
 }
 
@@ -623,7 +640,13 @@ impl GamePacketHandler<'_> {
         as_system::<(
             Commands,
             Query<(&mut EntityIdIndex, Option<&WorldName>, Option<&TabList>)>,
-            Query<&mut LoadedBy>,
+            Query<(
+                &mut LoadedBy,
+                Has<LocalEntity>,
+                Option<&EntityKindComponent>,
+                Option<&EntityUuid>,
+                Option<&EntityChunkPos>,
+            )>,
             Query<Entity>,
             Res<Worlds>,
             ResMut<EntityUuidIndex>,
@@ -648,8 +671,11 @@ impl GamePacketHandler<'_> {
                 };
 
                 let world = worlds.get(world_name).unwrap();
-                if let Some(&ecs_entity) = world.read().entity_by_id.get(&entity_id) {
-                    let Ok(mut loaded_by) = loaded_by_query.get_mut(ecs_entity) else {
+                let existing = world.read().entity_by_id.get(&entity_id).copied();
+                if let Some(ecs_entity) = existing {
+                    let Ok((mut loaded_by, is_local, old_kind, old_uuid, old_chunk)) =
+                        loaded_by_query.get_mut(ecs_entity)
+                    else {
 
                         let entity_in_ecs = entity_query.get(ecs_entity).is_ok();
 
@@ -664,12 +690,80 @@ impl GamePacketHandler<'_> {
                         }
                         return;
                     };
+
+                    let replaced = loaded_by.is_empty() && !is_local;
                     loaded_by.insert(self.player);
 
-                    entity_id_index.insert(entity_id, ecs_entity);
+                    if !replaced {
+                        entity_id_index.insert(entity_id, ecs_entity);
 
-                    debug!("added to LoadedBy of entity {ecs_entity:?} with id {entity_id:?}");
-                    return;
+                        debug!("added to LoadedBy of entity {ecs_entity:?} with id {entity_id:?}");
+                        return;
+                    }
+
+                    let old_kind = old_kind.map(|kind| **kind);
+                    let old_uuid = old_uuid.map(|uuid| **uuid);
+                    let old_chunk = old_chunk.map(|chunk| **chunk);
+                    if let Some(old_uuid) = old_uuid
+                        .filter(|uuid| *uuid != p.uuid && entity_uuid_index.get(uuid) == Some(ecs_entity))
+                    {
+                        entity_uuid_index.remove(&old_uuid);
+                    }
+
+                    if old_kind == Some(p.entity_type) {
+                        {
+                            let mut world_mut = world.write();
+                            remove_from_chunk_index(&mut world_mut, ecs_entity, old_chunk);
+                            world_mut
+                                .entities_by_chunk
+                                .entry(ChunkPos::from(&p.position))
+                                .or_default()
+                                .insert(ecs_entity);
+                            azalea_entity::indexing::add_entity_to_indexes(
+                                entity_id,
+                                ecs_entity,
+                                Some(p.uuid),
+                                &mut entity_id_index,
+                                &mut entity_uuid_index,
+                                &mut world_mut,
+                            );
+                        }
+
+                        let mut entity_commands = commands.entity(ecs_entity);
+                        entity_commands
+                            .insert(p.as_entity_bundle(world_name.to_owned()))
+                            .remove::<(Dead, RemoteScale)>();
+                        match tab_list.and_then(|tab_list| tab_list.get(&p.uuid)) {
+                            Some(player_info) => {
+                                entity_commands
+                                    .insert(GameProfileComponent(player_info.profile.clone()));
+                            }
+                            None => {
+                                entity_commands.remove::<GameProfileComponent>();
+                            }
+                        }
+                        p.apply_metadata(&mut entity_commands);
+
+                        debug!(
+                            "re-created entity {ecs_entity:?} with id {entity_id:?} at {pos:?}",
+                            pos = p.position
+                        );
+                        return;
+                    }
+
+                    remove_from_chunk_index(&mut world.write(), ecs_entity, old_chunk);
+                    entity_id_index.remove_by_ecs_entity(ecs_entity);
+                    commands.queue(move |ecs: &mut World| {
+                        let mut indexes = ecs.query::<&mut EntityIdIndex>();
+                        for mut index in indexes.iter_mut(ecs) {
+                            index.remove_by_ecs_entity(ecs_entity);
+                        }
+                    });
+                    commands.entity(ecs_entity).despawn();
+                    debug!(
+                        "despawned entity {ecs_entity:?} with id {entity_id:?}, re-added as {kind:?}",
+                        kind = p.entity_type
+                    );
                 };
 
                 let bundle = p.as_entity_bundle(world_name.to_owned());
@@ -1462,6 +1556,9 @@ impl GamePacketHandler<'_> {
                     &ClientInformation,
                     Option<&mut WorldName>,
                     Has<Dead>,
+                    Option<&Sprinting>,
+                    Option<&mut ClientMovementState>,
+                    Option<&azalea_entity::Attributes>,
                 ),
                 With<LocalEntity>,
             >,
@@ -1471,8 +1568,16 @@ impl GamePacketHandler<'_> {
         )>(
             self.ecs,
             |(mut commands, mut query, mut events, mut worlds, mut loaded_by_query)| {
-                let Ok((mut world_holder, game_profile, _client_information, world_name, player_dead)) =
-                    query.get_mut(self.player)
+                let Ok((
+                    mut world_holder,
+                    game_profile,
+                    _client_information,
+                    world_name,
+                    player_dead,
+                    sprinting,
+                    movement_state,
+                    old_attributes,
+                )) = query.get_mut(self.player)
                 else {
                     warn!("Got respawn packet but player doesn't have the required components");
                     return;
@@ -1524,17 +1629,39 @@ impl GamePacketHandler<'_> {
                     loaded_by.remove(&self.player);
                 }
 
-                let entity_bundle = EntityBundle::new(
+                let mut entity_bundle = EntityBundle::new(
                     game_profile.uuid,
                     Vec3::ZERO,
                     EntityKind::Player,
                     new_world_name,
                 );
+                const KEEP_ATTRIBUTE_MODIFIERS: u8 = 1;
+                if let Some(old) = old_attributes {
+                    if (p.data_to_keep & KEEP_ATTRIBUTE_MODIFIERS) != 0 {
+                        entity_bundle.attributes = old.clone();
+                    } else {
+                        entity_bundle.attributes.assign_base_values(old);
+                    }
+                }
                 commands.entity(self.player).insert((
                     p.common.game_type,
                     PreviousGameMode(p.common.previous_game_type.into()),
                     entity_bundle,
                 ));
+
+                const KEEP_ENTITY_DATA: u8 = 2;
+                let keep_entity_data = (p.data_to_keep & KEEP_ENTITY_DATA) != 0;
+                let was_sprinting = sprinting.is_some_and(|s| **s);
+                if !keep_entity_data {
+                    commands
+                        .entity(self.player)
+                        .insert(PlayerMetadataBundle::default())
+                        .insert(Health(20.0))
+                        .remove::<crate::movement::LastSentInput>();
+                }
+                if let Some(mut movement_state) = movement_state {
+                    movement_state.was_sprinting = keep_entity_data && was_sprinting;
+                }
 
                 commands.entity(self.player).remove::<Dead>();
                 crate::loading::start_waiting_for_new_level(

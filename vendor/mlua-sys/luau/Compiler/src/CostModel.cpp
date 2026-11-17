@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "CostModel.h"
 
 #include "Luau/Bytecode.h"
@@ -22,7 +21,7 @@ namespace Compile
 inline uint64_t parallelAddSat(uint64_t x, uint64_t y)
 {
     uint64_t r = x + y;
-    uint64_t s = r & 0x8080808080808080ull; // saturation mask
+    uint64_t s = r & 0x8080808080808080ull;
 
     return (r ^ s) | (s - (s >> 7));
 }
@@ -31,19 +30,15 @@ static uint64_t parallelMulSat(uint64_t a, int b)
 {
     int bs = (b < 127) ? b : 127;
 
-    // multiply every other value by b, yielding 14-bit products
     uint64_t l = bs * ((a >> 0) & 0x007f007f007f007full);
     uint64_t h = bs * ((a >> 8) & 0x007f007f007f007full);
 
-    // each product is 14-bit, so adding 32768-128 sets high bit iff the sum is 128 or larger without an overflow
     uint64_t ls = l + 0x7f807f807f807f80ull;
     uint64_t hs = h + 0x7f807f807f807f80ull;
 
-    // we now merge saturation bits as well as low 7-bits of each product into one
     uint64_t s = (hs & 0x8000800080008000ull) | ((ls & 0x8000800080008000ull) >> 8);
     uint64_t r = ((h & 0x007f007f007f007full) << 8) | (l & 0x007f007f007f007full);
 
-    // the low bits are now correct for values that didn't saturate, and we simply need to mask them if high bit is 1
     return r | (s - (s >> 7));
 }
 
@@ -51,9 +46,7 @@ struct Cost
 {
     static const uint64_t kLiteral = ~0ull;
 
-    // cost model: 8 bytes, where first byte is the baseline cost, and the next 7 bytes are discounts for when variable #i is constant
     uint64_t model;
-    // constant mask: 8-byte 0xff mask; equal to all ff's for literals, for variables only byte #i (1+) is set to align with model
     uint64_t constant;
 
     Cost(int cost = 0, uint64_t constant = 0)
@@ -88,8 +81,6 @@ struct Cost
         uint64_t newmodel = parallelAddSat(x.model, y.model);
         uint64_t newconstant = x.constant & y.constant;
 
-        // the extra cost for folding is 1; the discount is 1 for the variable that is shared by x&y (or whichever one is used in x/y if the other is
-        // literal)
         uint64_t extra = (newconstant == kLiteral) ? 0 : (1 | (0x0101010101010101ull & newconstant));
 
         Cost result;
@@ -133,7 +124,7 @@ struct CostVisitor : AstVisitor
         {
             const uint64_t* i = vars.find(expr->local);
 
-            return Cost(0, i ? *i : 0); // locals typically don't require extra instructions to compute
+            return Cost(0, i ? *i : 0);
         }
         else if (node->is<AstExprGlobal>())
         {
@@ -145,13 +136,11 @@ struct CostVisitor : AstVisitor
         }
         else if (AstExprCall* expr = node->as<AstExprCall>())
         {
-            // builtin cost modeling is different from regular calls because we use FASTCALL to compile these
-            // thus we use a cheaper baseline, don't account for function, and assume constant/local copy is free
             if (FFlag::LuauCompileInlinedBuiltins)
             {
                 const int* bfid = builtins.find(expr);
                 bool builtin = bfid != nullptr && *bfid != LBF_NONE;
-                bool builtinShort = builtin && expr->args.size <= 2; // FASTCALL1/2
+                bool builtinShort = builtin && expr->args.size <= 2;
 
                 Cost cost = builtin ? 2 : 3;
 
@@ -161,7 +150,6 @@ struct CostVisitor : AstVisitor
                 for (size_t i = 0; i < expr->args.size; ++i)
                 {
                     Cost ac = model(expr->args.data[i]);
-                    // for constants/locals we still need to copy them to the argument list
                     cost += ac.model == 0 && !builtinShort ? Cost(1) : ac;
                 }
 
@@ -170,7 +158,7 @@ struct CostVisitor : AstVisitor
             else
             {
                 bool builtin = builtins.find(expr) != nullptr;
-                bool builtinShort = builtin && expr->args.size <= 2; // FASTCALL1/2
+                bool builtinShort = builtin && expr->args.size <= 2;
 
                 Cost cost = builtin ? 2 : 3;
 
@@ -180,7 +168,6 @@ struct CostVisitor : AstVisitor
                 for (size_t i = 0; i < expr->args.size; ++i)
                 {
                     Cost ac = model(expr->args.data[i]);
-                    // for constants/locals we still need to copy them to the argument list
                     cost += ac.model == 0 && !builtinShort ? Cost(1) : ac;
                 }
 
@@ -197,11 +184,11 @@ struct CostVisitor : AstVisitor
         }
         else if (AstExprFunction* expr = node->as<AstExprFunction>())
         {
-            return 10; // high baseline cost due to allocation
+            return 10;
         }
         else if (AstExprTable* expr = node->as<AstExprTable>())
         {
-            Cost cost = 10; // high baseline cost due to allocation
+            Cost cost = 10;
 
             for (size_t i = 0; i < expr->items.size; ++i)
             {
@@ -234,7 +221,6 @@ struct CostVisitor : AstVisitor
         }
         else if (AstExprInterpString* expr = node->as<AstExprInterpString>())
         {
-            // Baseline cost of string.format
             Cost cost = 3;
 
             for (AstExpr* innerExpression : expr->expressions)
@@ -256,8 +242,6 @@ struct CostVisitor : AstVisitor
 
     void assign(AstExpr* expr)
     {
-        // variable assignments reset variable mask, so that further uses of this variable aren't discounted
-        // this doesn't work perfectly with backwards control flow like loops, but is good enough for a single pass
         if (AstExprLocal* lv = expr->as<AstExprLocal>())
             if (uint64_t* i = vars.find(lv->local))
                 *i = 0;
@@ -275,8 +259,6 @@ struct CostVisitor : AstVisitor
 
     bool visit(AstExpr* node) override
     {
-        // note: we short-circuit the visitor traversal through any expression trees by returning false
-        // recursive traversal is happening inside model() which makes it easier to get the resulting value of the subexpression
         result += model(node);
 
         return false;
@@ -343,8 +325,6 @@ struct CostVisitor : AstVisitor
             }
         }
 
-        // unconditional 'else' may require a jump after the 'if' body
-        // note: this ignores cases when 'then' always terminates and also assumes comparison requires an extra instruction which may be false
         result += 1 + (node->elsebody && !node->elsebody->is<AstStatIf>());
 
         return true;
@@ -356,7 +336,6 @@ struct CostVisitor : AstVisitor
         {
             Cost arg = model(node->values.data[i]);
 
-            // propagate constant mask from expression through variables
             if (arg.constant && i < node->vars.size)
                 vars[node->vars.data[i]] = arg.constant;
 
@@ -378,7 +357,6 @@ struct CostVisitor : AstVisitor
                 ac += model(node->vars.data[i]);
             if (i < node->values.size)
                 ac += model(node->values.data[i]);
-            // local->local or constant->local assignment is not free
             result += ac.model == 0 ? Cost(1) : ac;
         }
 
@@ -389,7 +367,6 @@ struct CostVisitor : AstVisitor
     {
         assign(node->var);
 
-        // if lhs is not a local, setting it requires an extra table operation
         result += node->var->is<AstExprLocal>() ? 1 : 2;
 
         return true;
@@ -475,7 +452,6 @@ int computeCost(uint64_t model, const bool* varsConst, size_t varCount)
 {
     int cost = int(model & 0x7f);
 
-    // don't apply discounts to what is likely a saturated sum
     if (cost == 0x7f)
         return cost;
 
@@ -487,7 +463,6 @@ int computeCost(uint64_t model, const bool* varsConst, size_t varCount)
 
 int getTripCount(double from, double to, double step)
 {
-    // we compute trip count in integers because that way we know that the loop math (repeated addition) is precise
     int fromi = (from >= -32767 && from <= 32767 && double(int(from)) == from) ? int(from) : INT_MIN;
     int toi = (to >= -32767 && to <= 32767 && double(int(to)) == to) ? int(to) : INT_MIN;
     int stepi = (step >= -32767 && step <= 32767 && double(int(step)) == step) ? int(step) : INT_MIN;
@@ -501,5 +476,5 @@ int getTripCount(double from, double to, double step)
     return (toi - fromi) / stepi + 1;
 }
 
-} // namespace Compile
-} // namespace Luau
+}
+}

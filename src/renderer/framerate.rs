@@ -67,6 +67,9 @@ impl Default for FramerateLimitTracker {
 
 impl FramerateLimitTracker {
     pub fn limit(&self, gui: &crate::gui::GuiState, in_world: bool) -> u32 {
+        if gui.benchmark_running() {
+            return crate::gui::MAX_FPS_UNLIMITED;
+        }
         limit_for(
             gui.options.max_fps,
             gui.options.inactivity_fps_limit,

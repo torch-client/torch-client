@@ -6,7 +6,9 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::anim::{AnimSample, ArmPose, Armor, HeldItem};
-use super::entity_material::{ALPHA_CUTOUT, EntityMaterial, LightMode, Lit, diffuse_lights};
+use super::entity_material::{
+    ALPHA_CUTOUT, EntityMaterial, HIDDEN_CUTOFF, LightMode, Lit, diffuse_lights,
+};
 use super::item_assets::{ItemAssets, ItemUse, Owner};
 use crate::entities::geom::{self, PartState};
 use crate::entities::models::humanoid::armor as armor_mesh;
@@ -683,7 +685,7 @@ struct Rig {
     overlay: Handle<EntityMaterial>,
     armor: [ArmorSlotRig; 4],
     lit: Lit,
-    body_hidden: bool,
+    body_draw: BodyDraw,
     glow: u32,
     #[cfg(feature = "skins")]
     cape: CapeRig,
@@ -1057,7 +1059,7 @@ fn spawn_rig(
         overlay,
         armor,
         lit,
-        body_hidden: false,
+        body_draw: BodyDraw::Shown,
         glow: 0,
         #[cfg(feature = "skins")]
         cape,
@@ -1683,41 +1685,65 @@ enum RigVisibility {
 }
 
 #[derive(Clone, Copy)]
-struct Body {
-    hidden: bool,
+pub(crate) struct Body {
+    pub(crate) draw: BodyDraw,
     scale: f32,
     outline: u32,
 }
 
 impl Body {
-    fn of(body: &crate::session::PlayerBody, viewer: crate::session::Gamemode) -> Body {
+    pub(crate) fn of(body: &crate::session::PlayerBody, viewer: crate::session::Gamemode) -> Body {
+        let draw = if !body.invisible {
+            BodyDraw::Shown
+        } else if body.hidden_to(viewer) {
+            BodyDraw::Hidden
+        } else {
+            BodyDraw::Ghost
+        };
         Body {
-            hidden: body.hidden_to(viewer),
+            draw,
             scale: body.scale,
             outline: body.outline,
         }
     }
 }
 
-const BODY_HIDDEN_CUTOFF: f32 = 2.0;
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BodyDraw {
+    Shown,
+    Ghost,
+    Hidden,
+}
 
-fn hide_body(rig: &mut Rig, hidden: bool, materials: &mut Assets<EntityMaterial>) {
-    if rig.body_hidden == hidden {
+pub(crate) const GHOST_ALPHA: f32 = 38.0 / 255.0;
+
+fn draw_body(rig: &mut Rig, draw: BodyDraw, relit: bool, materials: &mut Assets<EntityMaterial>) {
+    if rig.body_draw == draw && !(relit && draw == BodyDraw::Ghost) {
         return;
     }
-    rig.body_hidden = hidden;
-    let cutoff = if hidden {
-        BODY_HIDDEN_CUTOFF
-    } else {
-        ALPHA_CUTOUT
+    rig.body_draw = draw;
+    let (alpha_mode, cutoff, alpha) = match draw {
+        BodyDraw::Shown => (AlphaMode::Mask(ALPHA_CUTOUT), ALPHA_CUTOUT, 1.0),
+        BodyDraw::Ghost => (AlphaMode::Blend, ALPHA_CUTOUT, GHOST_ALPHA),
+        BodyDraw::Hidden => (AlphaMode::Mask(ALPHA_CUTOUT), HIDDEN_CUTOFF, 1.0),
     };
-    #[cfg(feature = "skins")]
-    let cape = Some(&rig.cape.material);
-    #[cfg(not(feature = "skins"))]
-    let cape = None;
-    for handle in [&rig.base, &rig.overlay].into_iter().chain(cape) {
+    let tint_alpha = rig.lit.tint[3] * alpha;
+    for handle in [&rig.base, &rig.overlay] {
         if let Some(mut material) = materials.get_mut(handle) {
+            material.alpha_mode = alpha_mode;
             material.params.light.w = cutoff;
+            material.params.tint.w = tint_alpha;
+        }
+    }
+    #[cfg(feature = "skins")]
+    {
+        let cape_cutoff = if draw == BodyDraw::Shown {
+            ALPHA_CUTOUT
+        } else {
+            HIDDEN_CUTOFF
+        };
+        if let Some(mut material) = materials.get_mut(&rig.cape.material) {
+            material.params.light.w = cape_cutoff;
         }
     }
 }
@@ -1759,7 +1785,6 @@ fn apply_rig(
     if shown == RigVisibility::Hidden {
         return;
     }
-    hide_body(rig, body.hidden, items.entity_materials);
     if let Ok(mut transform) = queries.1.get_mut(rig.flip) {
         transform.translation =
             root.model_offset + Vec3::new(0.0, -AVATAR_SCALE * MODEL_Y_OFFSET, 0.0);
@@ -1862,18 +1887,21 @@ fn apply_rig(
     let slim = rig.worn.slim();
     #[cfg(not(feature = "skins"))]
     let slim = false;
+    let invisible = body.draw != BodyDraw::Shown;
     avatar_layers::update(
         &mut rig.layers,
         &rig.parts,
         sample,
         slim,
+        invisible,
         lit,
         items,
         &mut queries.5,
         commands,
     );
 
-    if lit != rig.lit {
+    let relit = lit != rig.lit;
+    if relit {
         #[cfg(feature = "skins")]
         let cape = Some(&rig.cape.material);
         #[cfg(not(feature = "skins"))]
@@ -1895,6 +1923,7 @@ fn apply_rig(
         }
         rig.lit = lit;
     }
+    draw_body(rig, body.draw, relit, items.entity_materials);
 }
 
 fn update_armor(

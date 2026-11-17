@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Bytecode.h"
@@ -21,13 +20,8 @@ public:
 class BytecodeBuilder
 {
 public:
-    // BytecodeBuilder does *not* copy the data passed via StringRef; instead, it keeps the ref around until finalize()
-    // Please be careful with the lifetime of the data that's being passed because of this.
-    // The safe and correct pattern is to only build StringRefs out of pieces of AST (AstName or AstArray<>) that are backed by AstAllocator.
-    // Note that you must finalize() the builder before the Allocator backing the Ast is destroyed.
     struct StringRef
     {
-        // To construct a StringRef, use sref() from Compiler.cpp.
         const char* data = nullptr;
         size_t length = 0;
 
@@ -123,7 +117,7 @@ public:
 
     const std::string& getBytecode() const
     {
-        LUAU_ASSERT(!bytecode.empty()); // did you forget to call finalize?
+        LUAU_ASSERT(!bytecode.empty());
         return bytecode;
     }
 
@@ -168,18 +162,16 @@ private:
             bool valueBoolean;
             double valueNumber;
             float valueVector[4];
-            unsigned int valueString; // index into string table
-            uint32_t valueImport;     // 10-10-10-2 encoded import id
-            uint32_t valueTable;      // index into tableShapes[]
-            uint32_t valueClosure;    // index of function in global list
+            unsigned int valueString;
+            uint32_t valueImport;
+            uint32_t valueTable;
+            uint32_t valueClosure;
         };
     };
 
     struct ConstantKey
     {
         Constant::Type type;
-        // Note: this stores value* from Constant; when type is Type_Number, this stores the same bits as double does but in uint64_t.
-        // For Type_Vector, x and y are stored in 'value' and z and w are stored in 'extra'.
         uint64_t value;
         uint64_t extra = 0;
 
@@ -326,4 +318,4 @@ private:
     const char* tryGetUserdataTypeName(LuauBytecodeType type) const;
 };
 
-} // namespace Luau
+}

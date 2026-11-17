@@ -726,18 +726,7 @@ fn maps(shared: &SharedMutex, packet: &ClientboundGamePacket) {
         return;
     };
     let id = p.map_id as i32;
-    let colors = match &p.color_patch.0 {
-        Some(patch) => apply_map_patch(
-            id,
-            patch.start_x,
-            patch.start_y,
-            patch.width,
-            patch.height,
-            &patch.map_colors,
-        ),
-        None => apply_map_patch(id, 0, 0, 0, 0, &[]),
-    };
-    let decorations = p.decorations.as_ref().map(|list| {
+    let decorations: Option<Arc<Vec<MapDecoration>>> = p.decorations.as_ref().map(|list| {
         Arc::new(
             list.iter()
                 .map(|d| MapDecoration {
@@ -753,6 +742,19 @@ fn maps(shared: &SharedMutex, packet: &ClientboundGamePacket) {
                 .collect(),
         )
     });
+    let list = decorations.as_deref().map(Vec::as_slice);
+    let colors = match &p.color_patch.0 {
+        Some(patch) => apply_map_patch(
+            id,
+            patch.start_x,
+            patch.start_y,
+            patch.width,
+            patch.height,
+            &patch.map_colors,
+            list,
+        ),
+        None => apply_map_patch(id, 0, 0, 0, 0, &[], list),
+    };
     let mut s = shared.lock().unwrap();
     match s.session.map_updates.iter_mut().find(|u| u.id == id) {
         Some(pending) => {
@@ -1507,6 +1509,7 @@ fn level_lifecycle(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbou
             crate::modules::basefinder::logged_in();
             worldsync::set_dimension(world, &p.common);
             worldsync::reset_level(world, shared);
+            worldsync::drop_maps(shared);
         }
         ClientboundGamePacket::StartConfiguration(_) => crate::client::worker::reset_biome_table(),
         _ => {}

@@ -279,8 +279,13 @@ pub(crate) fn mark_meta_dirty(id: i32) {
 pub(crate) const MAP_EDGE: usize = 128;
 pub(crate) const MAP_BYTES: usize = MAP_EDGE * MAP_EDGE;
 
+struct StoredMap {
+    colors: Box<[u8; MAP_BYTES]>,
+    markers: Option<Arc<crate::session::FrameMarkers>>,
+}
+
 global! {
-fn maps() -> SideMutex<HashMap<i32, Box<[u8; MAP_BYTES]>>>
+fn maps() -> SideMutex<HashMap<i32, StoredMap>>
 }
 
 pub(crate) fn apply_map_patch(
@@ -290,9 +295,13 @@ pub(crate) fn apply_map_patch(
     width: u8,
     height: u8,
     colors: &[u8],
+    decorations: Option<&[crate::session::MapDecoration]>,
 ) -> Arc<Vec<u8>> {
     let mut maps = maps().lock().unwrap();
-    let map = maps.entry(id).or_insert_with(|| Box::new([0u8; MAP_BYTES]));
+    let map = maps.entry(id).or_insert_with(|| StoredMap {
+        colors: Box::new([0u8; MAP_BYTES]),
+        markers: None,
+    });
     for x in 0..width as usize {
         for y in 0..height as usize {
             let Some(color) = colors.get(x + y * width as usize) else {
@@ -300,15 +309,43 @@ pub(crate) fn apply_map_patch(
             };
             let (dx, dy) = (start_x as usize + x, start_y as usize + y);
             if dx < MAP_EDGE && dy < MAP_EDGE {
-                map[dx + dy * MAP_EDGE] = *color;
+                map.colors[dx + dy * MAP_EDGE] = *color;
             }
         }
     }
-    Arc::new(map.to_vec())
+    if let Some(decorations) = decorations {
+        replace_frame_markers(map, decorations);
+    }
+    Arc::new(map.colors.to_vec())
+}
+
+fn replace_frame_markers(map: &mut StoredMap, decorations: &[crate::session::MapDecoration]) {
+    use std::hash::{Hash, Hasher};
+    let list: Vec<crate::session::MapDecoration> = decorations
+        .iter()
+        .filter(|d| crate::renderer::maps::shows_on_item_frame(d.kind))
+        .cloned()
+        .collect();
+    if list.is_empty() {
+        map.markers = None;
+        return;
+    }
+    let mut hasher = std::hash::DefaultHasher::new();
+    for d in &list {
+        (d.kind, d.x, d.y, d.rot).hash(&mut hasher);
+    }
+    map.markers = Some(Arc::new(crate::session::FrameMarkers {
+        list,
+        key: hasher.finish(),
+    }));
 }
 
 pub(crate) fn has_map(id: i32) -> bool {
     maps().lock().unwrap().contains_key(&id)
+}
+
+pub(crate) fn framed_map(id: i32) -> Option<Option<Arc<crate::session::FrameMarkers>>> {
+    Some(maps().lock().unwrap().get(&id)?.markers.clone())
 }
 
 pub(crate) fn reset_maps() {

@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #pragma once
 
 #include <stdarg.h>
@@ -8,39 +6,32 @@
 
 #include "luaconf.h"
 
-
-
-// option for multiple returns in `lua_pcall' and `lua_call'
 #define LUA_MULTRET (-1)
 
-/*
-** pseudo-indices
-*/
 #define LUA_REGISTRYINDEX (-LUAI_MAXCSTACK - 2000)
 #define LUA_ENVIRONINDEX (-LUAI_MAXCSTACK - 2001)
 #define LUA_GLOBALSINDEX (-LUAI_MAXCSTACK - 2002)
 #define lua_upvalueindex(i) (LUA_GLOBALSINDEX - (i))
 #define lua_ispseudo(i) ((i) <= LUA_REGISTRYINDEX)
 
-// thread status; 0 is OK
 enum lua_Status
 {
     LUA_OK = 0,
     LUA_YIELD,
     LUA_ERRRUN,
-    LUA_ERRSYNTAX, // legacy error code, preserved for compatibility
+    LUA_ERRSYNTAX,
     LUA_ERRMEM,
     LUA_ERRERR,
-    LUA_BREAK, // yielded for a debug breakpoint
+    LUA_BREAK,
 };
 
 enum lua_CoStatus
 {
-    LUA_CORUN = 0, // running
-    LUA_COSUS,     // suspended
-    LUA_CONOR,     // 'normal' (it resumed another coroutine)
-    LUA_COFIN,     // finished
-    LUA_COERR,     // finished with error
+    LUA_CORUN = 0,
+    LUA_COSUS,
+    LUA_CONOR,
+    LUA_COFIN,
+    LUA_COERR,
 };
 
 typedef struct lua_State lua_State;
@@ -48,41 +39,24 @@ typedef struct lua_State lua_State;
 typedef int (*lua_CFunction)(lua_State* L);
 typedef int (*lua_Continuation)(lua_State* L, int status);
 
-/*
-** prototype for memory-allocation functions
-*/
-
 typedef void* (*lua_Alloc)(void* ud, void* ptr, size_t osize, size_t nsize);
-
-/*
-** prototype for userdata destructor
-*/
 
 typedef void (*lua_Destructor)(lua_State* L, void* userdata);
 
-// non-return type
 #define l_noret void LUA_NORETURN
 
-/*
-** basic types
-*/
 #define LUA_TNONE (-1)
 
-/*
- * WARNING: if you change the order of this enumeration,
- * grep "ORDER TYPE"
- */
-// clang-format off
 enum lua_Type
 {
-    LUA_TNIL = 0,     // must be 0 due to lua_isnoneornil
-    LUA_TBOOLEAN = 1, // must be 1 due to l_isfalse
+    LUA_TNIL = 0,
+    LUA_TBOOLEAN = 1,
 
     LUA_TLIGHTUSERDATA,
     LUA_TNUMBER,
     LUA_TVECTOR,
 
-    LUA_TSTRING, // all types above this must be value types, all types below this must be GC types - see iscollectable
+    LUA_TSTRING,
 
     LUA_TTABLE,
     LUA_TFUNCTION,
@@ -90,28 +64,19 @@ enum lua_Type
     LUA_TTHREAD,
     LUA_TBUFFER,
 
-    // values below this line are used in GCObject tags but may never show up in TValue type tags
     LUA_TPROTO,
     LUA_TUPVAL,
     LUA_TDEADKEY,
 
-    // the count of TValue type tags
     LUA_T_COUNT = LUA_TPROTO
 };
-// clang-format on
 
-// type of numbers in Luau
 typedef double lua_Number;
 
-// type for integer functions
 typedef int lua_Integer;
 
-// unsigned integer type
 typedef unsigned lua_Unsigned;
 
-/*
-** state manipulation
-*/
 LUA_API lua_State* lua_newstate(lua_Alloc f, void* ud);
 LUA_API void lua_close(lua_State* L);
 LUA_API lua_State* lua_newthread(lua_State* L);
@@ -119,9 +84,6 @@ LUA_API lua_State* lua_mainthread(lua_State* L);
 LUA_API void lua_resetthread(lua_State* L);
 LUA_API int lua_isthreadreset(lua_State* L);
 
-/*
-** basic stack manipulation
-*/
 LUA_API int lua_absindex(lua_State* L, int idx);
 LUA_API int lua_gettop(lua_State* L);
 LUA_API void lua_settop(lua_State* L, int idx);
@@ -130,14 +92,10 @@ LUA_API void lua_remove(lua_State* L, int idx);
 LUA_API void lua_insert(lua_State* L, int idx);
 LUA_API void lua_replace(lua_State* L, int idx);
 LUA_API int lua_checkstack(lua_State* L, int sz);
-LUA_API void lua_rawcheckstack(lua_State* L, int sz); // allows for unlimited stack frames
+LUA_API void lua_rawcheckstack(lua_State* L, int sz);
 
 LUA_API void lua_xmove(lua_State* from, lua_State* to, int n);
 LUA_API void lua_xpush(lua_State* from, lua_State* to, int idx);
-
-/*
-** access functions (stack -> C)
-*/
 
 LUA_API int lua_isnumber(lua_State* L, int idx);
 LUA_API int lua_isstring(lua_State* L, int idx);
@@ -172,9 +130,6 @@ LUA_API lua_State* lua_tothread(lua_State* L, int idx);
 LUA_API void* lua_tobuffer(lua_State* L, int idx, size_t* len);
 LUA_API const void* lua_topointer(lua_State* L, int idx);
 
-/*
-** push functions (C -> stack)
-*/
 LUA_API void lua_pushnil(lua_State* L);
 LUA_API void lua_pushnumber(lua_State* L, double n);
 LUA_API void lua_pushinteger(lua_State* L, int n);
@@ -194,14 +149,11 @@ LUA_API int lua_pushthread(lua_State* L);
 
 LUA_API void lua_pushlightuserdatatagged(lua_State* L, void* p, int tag);
 LUA_API void* lua_newuserdatatagged(lua_State* L, size_t sz, int tag);
-LUA_API void* lua_newuserdatataggedwithmetatable(lua_State* L, size_t sz, int tag); // metatable fetched with lua_getuserdatametatable
+LUA_API void* lua_newuserdatataggedwithmetatable(lua_State* L, size_t sz, int tag);
 LUA_API void* lua_newuserdatadtor(lua_State* L, size_t sz, lua_Destructor dtor);
 
 LUA_API void* lua_newbuffer(lua_State* L, size_t sz);
 
-/*
-** get functions (Lua -> stack)
-*/
 LUA_API int lua_gettable(lua_State* L, int idx);
 LUA_API int lua_getfield(lua_State* L, int idx, const char* k);
 LUA_API int lua_rawgetfield(lua_State* L, int idx, const char* k);
@@ -217,9 +169,6 @@ LUA_API void lua_setsafeenv(lua_State* L, int idx, int enabled);
 LUA_API int lua_getmetatable(lua_State* L, int objindex);
 LUA_API void lua_getfenv(lua_State* L, int idx);
 
-/*
-** set functions (stack -> Lua)
-*/
 LUA_API void lua_settable(lua_State* L, int idx);
 LUA_API void lua_setfield(lua_State* L, int idx, const char* k);
 LUA_API void lua_rawsetfield(lua_State* L, int idx, const char* k);
@@ -229,17 +178,11 @@ LUA_API void lua_rawsetptagged(lua_State* L, int idx, void* p, int tag);
 LUA_API int lua_setmetatable(lua_State* L, int objindex);
 LUA_API int lua_setfenv(lua_State* L, int idx);
 
-/*
-** `load' and `call' functions (load and run Luau bytecode)
-*/
 LUA_API int luau_load(lua_State* L, const char* chunkname, const char* data, size_t size, int env);
 LUA_API void lua_call(lua_State* L, int nargs, int nresults);
 LUA_API int lua_pcall(lua_State* L, int nargs, int nresults, int errfunc);
 LUA_API int lua_cpcall(lua_State* L, lua_CFunction func, void* ud);
 
-/*
-** coroutine functions
-*/
 LUA_API int lua_yield(lua_State* L, int nresults);
 LUA_API int lua_break(lua_State* L);
 LUA_API int lua_resume(lua_State* L, lua_State* from, int narg);
@@ -250,52 +193,20 @@ LUA_API void* lua_getthreaddata(lua_State* L);
 LUA_API void lua_setthreaddata(lua_State* L, void* data);
 LUA_API int lua_costatus(lua_State* L, lua_State* co);
 
-/*
-** garbage-collection function and options
-*/
-
 enum lua_GCOp
 {
-    // stop and resume incremental garbage collection
     LUA_GCSTOP,
     LUA_GCRESTART,
 
-    // run a full GC cycle; not recommended for latency sensitive applications
     LUA_GCCOLLECT,
 
-    // return the heap size in KB and the remainder in bytes
     LUA_GCCOUNT,
     LUA_GCCOUNTB,
 
-    // return 1 if GC is active (not stopped); note that GC may not be actively collecting even if it's running
     LUA_GCISRUNNING,
 
-    /*
-    ** perform an explicit GC step, with the step size specified in KB
-    **
-    ** garbage collection is handled by 'assists' that perform some amount of GC work matching pace of allocation
-    ** explicit GC steps allow to perform some amount of work at custom points to offset the need for GC assists
-    ** note that GC might also be paused for some duration (until bytes allocated meet the threshold)
-    ** if an explicit step is performed during this pause, it will trigger the start of the next collection cycle
-    */
     LUA_GCSTEP,
 
-    /*
-    ** tune GC parameters G (goal), S (step multiplier) and step size (usually best left ignored)
-    **
-    ** garbage collection is incremental and tries to maintain the heap size to balance memory and performance overhead
-    ** this overhead is determined by G (goal) which is the ratio between total heap size and the amount of live data in it
-    ** G is specified in percentages; by default G=200% which means that the heap is allowed to grow to ~2x the size of live data.
-    **
-    ** collector tries to collect S% of allocated bytes by interrupting the application after step size bytes were allocated.
-    ** when S is too small, collector may not be able to catch up and the effective goal that can be reached will be larger.
-    ** S is specified in percentages; by default S=200% which means that collector will run at ~2x the pace of allocations.
-    **
-    ** it is recommended to set S in the interval [100 / (G - 100), 100 + 100 / (G - 100))] with a minimum value of 150%; for example:
-    ** - for G=200%, S should be in the interval [150%, 200%]
-    ** - for G=150%, S should be in the interval [200%, 300%]
-    ** - for G=125%, S should be in the interval [400%, 500%]
-    */
     LUA_GCSETGOAL,
     LUA_GCSETSTEPMUL,
     LUA_GCSETSTEPSIZE,
@@ -303,17 +214,8 @@ enum lua_GCOp
 
 LUA_API int lua_gc(lua_State* L, int what, int data);
 
-/*
-** memory statistics
-** all allocated bytes are attributed to the memory category of the running thread (0..LUA_MEMORY_CATEGORIES-1)
-*/
-
 LUA_API void lua_setmemcat(lua_State* L, int category);
 LUA_API size_t lua_totalbytes(lua_State* L, int category);
-
-/*
-** miscellaneous functions
-*/
 
 LUA_API l_noret lua_error(lua_State* L);
 
@@ -331,8 +233,6 @@ LUA_API void lua_setuserdatatag(lua_State* L, int idx, int tag);
 LUA_API void lua_setuserdatadtor(lua_State* L, int tag, lua_Destructor dtor);
 LUA_API lua_Destructor lua_getuserdatadtor(lua_State* L, int tag);
 
-// alternative access for metatables already registered with luaL_newmetatable
-// used by lua_newuserdatataggedwithmetatable to create tagged userdata with the associated metatable assigned
 LUA_API void lua_setuserdatametatable(lua_State* L, int tag);
 LUA_API void lua_getuserdatametatable(lua_State* L, int tag);
 
@@ -346,9 +246,6 @@ LUA_API void lua_clonetable(lua_State* L, int idx);
 
 LUA_API lua_Alloc lua_getallocf(lua_State* L, void** ud);
 
-/*
-** reference system, can be used to pin objects
-*/
 #define LUA_NOREF -1
 #define LUA_REFNIL 0
 
@@ -357,11 +254,6 @@ LUA_API void lua_unref(lua_State* L, int ref);
 
 #define lua_getref(L, ref) lua_rawgeti(L, LUA_REGISTRYINDEX, (ref))
 
-/*
-** ===============================================================
-** some useful macros
-** ===============================================================
-*/
 #define lua_tonumber(L, i) lua_tonumberx(L, i, NULL)
 #define lua_tointeger(L, i) lua_tointegerx(L, i, NULL)
 #define lua_tounsigned(L, i) lua_tounsignedx(L, i, NULL)
@@ -399,15 +291,8 @@ LUA_API void lua_unref(lua_State* L, int ref);
 
 #define lua_pushfstring(L, fmt, ...) lua_pushfstringL(L, fmt, ##__VA_ARGS__)
 
-/*
-** {======================================================================
-** Debug API
-** =======================================================================
-*/
+typedef struct lua_Debug lua_Debug;
 
-typedef struct lua_Debug lua_Debug; // activation record
-
-// Functions to be called by the debugger in specific events
 typedef void (*lua_Hook)(lua_State* L, lua_Debug* ar);
 
 LUA_API int lua_stackdepth(lua_State* L);
@@ -425,73 +310,41 @@ typedef void (*lua_Coverage)(void* context, const char* function, int linedefine
 
 LUA_API void lua_getcoverage(lua_State* L, int funcindex, void* context, lua_Coverage callback);
 
-// Warning: this function is not thread-safe since it stores the result in a shared global array! Only use for debugging.
 LUA_API const char* lua_debugtrace(lua_State* L);
 
 struct lua_Debug
 {
-    const char* name;      // (n)
-    const char* what;      // (s) `Lua', `C', `main', `tail'
-    const char* source;    // (s)
-    const char* short_src; // (s)
-    int linedefined;       // (s)
-    int currentline;       // (l)
-    unsigned char nupvals; // (u) number of upvalues
-    unsigned char nparams; // (a) number of parameters
-    char isvararg;         // (a)
-    void* userdata;        // only valid in luau_callhook
+    const char* name;
+    const char* what;
+    const char* source;
+    const char* short_src;
+    int linedefined;
+    int currentline;
+    unsigned char nupvals;
+    unsigned char nparams;
+    char isvararg;
+    void* userdata;
 
     char ssbuf[LUA_IDSIZE];
 };
 
-// }======================================================================
-
-/* Callbacks that can be used to reconfigure behavior of the VM dynamically.
- * These are shared between all coroutines.
- *
- * Note: interrupt is safe to set from an arbitrary thread but all other callbacks
- * can only be changed when the VM is not running any code */
 struct lua_Callbacks
 {
-    void* userdata; // arbitrary userdata pointer that is never overwritten by Luau
+    void* userdata;
 
-    void (*interrupt)(lua_State* L, int gc);  // gets called at safepoints (loop back edges, call/ret, gc) if set
-    void (*panic)(lua_State* L, int errcode); // gets called when an unprotected error is raised (if longjmp is used)
+    void (*interrupt)(lua_State* L, int gc);
+    void (*panic)(lua_State* L, int errcode);
 
-    void (*userthread)(lua_State* LP, lua_State* L); // gets called when L is created (LP == parent) or destroyed (LP == NULL)
-    int16_t (*useratom)(const char* s, size_t l);    // gets called when a string is created; returned atom can be retrieved via tostringatom
+    void (*userthread)(lua_State* LP, lua_State* L);
+    int16_t (*useratom)(const char* s, size_t l);
 
-    void (*debugbreak)(lua_State* L, lua_Debug* ar);     // gets called when BREAK instruction is encountered
-    void (*debugstep)(lua_State* L, lua_Debug* ar);      // gets called after each instruction in single step mode
-    void (*debuginterrupt)(lua_State* L, lua_Debug* ar); // gets called when thread execution is interrupted by break in another thread
-    void (*debugprotectederror)(lua_State* L);           // gets called when protected call results in an error
+    void (*debugbreak)(lua_State* L, lua_Debug* ar);
+    void (*debugstep)(lua_State* L, lua_Debug* ar);
+    void (*debuginterrupt)(lua_State* L, lua_Debug* ar);
+    void (*debugprotectederror)(lua_State* L);
 
-    void (*onallocate)(lua_State* L, size_t osize, size_t nsize); // gets called when memory is allocated
+    void (*onallocate)(lua_State* L, size_t osize, size_t nsize);
 };
 typedef struct lua_Callbacks lua_Callbacks;
 
 LUA_API lua_Callbacks* lua_callbacks(lua_State* L);
-
-/******************************************************************************
- * Copyright (c) 2019-2023 Roblox Corporation
- * Copyright (C) 1994-2008 Lua.org, PUC-Rio.  All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sublicense, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- ******************************************************************************/

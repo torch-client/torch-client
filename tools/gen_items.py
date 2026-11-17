@@ -41,6 +41,12 @@ def title_case(item_id: str) -> str:
 def load_names(assets: Path, item_ids: List[str]) -> Tuple[Dict[str, str], List[str]]:
     with open(assets / 'lang' / 'en_us.json') as f:
         lang = json.load(f)
+    deprecated = assets / 'lang' / 'deprecated.json'
+    if deprecated.exists():
+        with open(deprecated) as f:
+            for old, new in json.load(f).get('renamed', {}).items():
+                if old in lang:
+                    lang[new] = lang.pop(old)
     names: Dict[str, str] = {}
     fallbacks: List[str] = []
     for item_id in item_ids:

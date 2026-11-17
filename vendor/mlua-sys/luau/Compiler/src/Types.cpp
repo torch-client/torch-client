@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Types.h"
 
 #include "Luau/BytecodeBuilder.h"
@@ -54,9 +53,8 @@ static LuauBytecodeType getType(
 
         if (AstStatTypeAlias* const* alias = typeAliases.find(ref->name); alias && *alias)
         {
-            // note: we only resolve aliases to the depth of 1 to avoid dealing with recursive aliases
             if (resolveAliases)
-                return getType((*alias)->type, (*alias)->generics, typeAliases, /* resolveAliases= */ false, hostVectorType, userdataTypes, bytecode);
+                return getType((*alias)->type, (*alias)->generics, typeAliases, false, hostVectorType, userdataTypes, bytecode);
             else
                 return LBC_TYPE_ANY;
         }
@@ -76,7 +74,6 @@ static LuauBytecodeType getType(
             return LuauBytecodeType(LBC_TYPE_TAGGED_USERDATA_BASE + *userdataIndex);
         }
 
-        // not primitive or alias or generic => host-provided, we assume userdata for now
         return LBC_TYPE_USERDATA;
     }
     else if (const AstTypeTable* table = ty->as<AstTypeTable>())
@@ -157,7 +154,7 @@ static std::string getFunctionType(
     {
         LuauBytecodeType ty =
             arg->annotation
-                ? getType(arg->annotation, func->generics, typeAliases, /* resolveAliases= */ true, hostVectorType, userdataTypes, bytecode)
+                ? getType(arg->annotation, func->generics, typeAliases, true, hostVectorType, userdataTypes, bytecode)
                 : LBC_TYPE_ANY;
 
         if (ty != LBC_TYPE_ANY)
@@ -166,7 +163,6 @@ static std::string getFunctionType(
         typeInfo.push_back(ty);
     }
 
-    // If all parameters simplify to any, we can just omit type info for this function
     if (!haveNonAnyParam)
         return {};
 
@@ -298,7 +294,7 @@ struct TypeMapVisitor : AstVisitor
 
         resolvedExprs[expr] = ty;
 
-        LuauBytecodeType bty = getType(ty, {}, typeAliases, /* resolveAliases= */ true, hostVectorType, userdataTypes, bytecode);
+        LuauBytecodeType bty = getType(ty, {}, typeAliases, true, hostVectorType, userdataTypes, bytecode);
         exprTypes[expr] = bty;
         return bty;
     }
@@ -309,7 +305,7 @@ struct TypeMapVisitor : AstVisitor
 
         resolvedLocals[local] = ty;
 
-        LuauBytecodeType bty = getType(ty, {}, typeAliases, /* resolveAliases= */ true, hostVectorType, userdataTypes, bytecode);
+        LuauBytecodeType bty = getType(ty, {}, typeAliases, true, hostVectorType, userdataTypes, bytecode);
 
         if (bty != LBC_TYPE_ANY)
             localTypes[local] = bty;
@@ -329,7 +325,6 @@ struct TypeMapVisitor : AstVisitor
         return false;
     }
 
-    // repeat..until scoping rules are such that condition (along with any possible functions declared in it) has aliases from repeat body in scope
     bool visit(AstStatRepeat* node) override
     {
         size_t aliasStackTop = pushTypeAliases(node->body);
@@ -344,13 +339,11 @@ struct TypeMapVisitor : AstVisitor
         return false;
     }
 
-    // for...in statement can contain type annotations on locals (we might even infer some for ipairs/pairs/generalized iteration)
     bool visit(AstStatForIn* node) override
     {
         for (AstExpr* expr : node->values)
             expr->visit(this);
 
-        // This is similar to how Compiler matches builtin iteration, but we also handle generalized iteration case
         if (node->vars.size == 2 && node->values.size == 1)
         {
             if (AstExprCall* call = node->values.data[0]->as<AstExprCall>(); call && call->args.size == 1)
@@ -402,7 +395,7 @@ struct TypeMapVisitor : AstVisitor
         if (!type.empty())
             functionTypes[node] = std::move(type);
 
-        return true; // Let generic visitor step into all expressions
+        return true;
     }
 
     bool visit(AstExprLocal* node) override
@@ -433,8 +426,6 @@ struct TypeMapVisitor : AstVisitor
         {
             AstLocal* var = node->vars.data[i];
 
-            // Propagate from the value that's being assigned
-            // This simple propagation doesn't handle type packs in tail position
             if (var->annotation == nullptr)
             {
                 if (i < node->values.size)
@@ -502,8 +493,6 @@ struct TypeMapVisitor : AstVisitor
             {
                 if (LuauBytecodeType ty = LuauBytecodeType(libraryMemberTypeCb(object->name.value, node->index.value)); ty != LBC_TYPE_ANY)
                 {
-                    // TODO: 'resolvedExprs' is more limited than 'exprTypes' which limits full inference of more complex types that a user
-                    // callback can return
                     switch (ty)
                     {
                     case LBC_TYPE_BOOLEAN:
@@ -568,7 +557,6 @@ struct TypeMapVisitor : AstVisitor
         node->left->visit(this);
         node->right->visit(this);
 
-        // Comparisons result in a boolean
         if (node->op == AstExprBinary::CompareNe || node->op == AstExprBinary::CompareEq || node->op == AstExprBinary::CompareLt ||
             node->op == AstExprBinary::CompareLe || node->op == AstExprBinary::CompareGt || node->op == AstExprBinary::CompareGe)
         {
@@ -658,7 +646,6 @@ struct TypeMapVisitor : AstVisitor
         LuauBytecodeType* trueBcTypePtr = exprTypes.find(node->trueExpr);
         LuauBytecodeType* falseBcTypePtr = exprTypes.find(node->falseExpr);
 
-        // Optimistic check that both expressions are of the same kind, as AstType* cannot be compared
         if (trueTypePtr && trueBcTypePtr && falseBcTypePtr && *trueBcTypePtr == *falseBcTypePtr)
             recordResolvedType(node, *trueTypePtr);
 
@@ -780,15 +767,9 @@ struct TypeMapVisitor : AstVisitor
             }
         }
 
-        return true; // Let generic visitor step into all expressions
+        return true;
     }
 
-    // AstExpr classes that are not covered:
-    // * AstExprConstantNil is not resolved to 'nil' because that doesn't help codegen operations and often used as an initializer before real value
-    // * AstExprGlobal is not supported as we don't have info on globals
-    // * AstExprVarargs cannot be resolved to a testable type
-    // * AstExprTable cannot be reconstructed into a specific AstTypeTable and table annotations don't really help codegen
-    // * AstExprCall is very complex (especially if builtins and registered globals are included), will be extended in the future
 };
 
 void buildTypeMap(
@@ -811,4 +792,4 @@ void buildTypeMap(
     root->visit(&visitor);
 }
 
-} // namespace Luau
+}

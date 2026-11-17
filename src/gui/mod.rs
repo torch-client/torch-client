@@ -11,6 +11,8 @@ pub mod atlas_writes;
 pub mod banner_icons;
 #[cfg(feature = "online_mode")]
 pub mod bannotice;
+#[cfg(feature = "benchmark_feature")]
+pub mod benchmark;
 pub mod book;
 pub mod chat;
 pub mod clickevent;
@@ -80,6 +82,7 @@ pub mod skinpick;
 pub mod sleep;
 pub mod slots;
 pub mod spectator_menu;
+pub mod stand;
 pub mod stats;
 #[cfg(feature = "audio")]
 pub mod subtitles;
@@ -139,6 +142,8 @@ pub enum Screen {
     ManageStorage,
     #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
     ExportAssets,
+    #[cfg(feature = "benchmark_feature")]
+    Benchmark,
     #[cfg(feature = "audio")]
     AudioSettings,
     #[cfg(resource_packs)]
@@ -289,6 +294,10 @@ impl Screen {
         }
         #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
         if self == Screen::ExportAssets {
+            return true;
+        }
+        #[cfg(feature = "benchmark_feature")]
+        if self == Screen::Benchmark {
             return true;
         }
         matches!(
@@ -524,6 +533,7 @@ pub struct GuiOptions {
     pub render_distance: u32,
     pub gamma: u32,
     pub antialiasing: bool,
+    pub menu_blur: bool,
     pub render_scale_step: u32,
     pub smooth_lighting: bool,
     pub lighting_enabled: bool,
@@ -612,6 +622,8 @@ impl InactivityFpsLimit {
 pub const VSYNC_DEFAULT: bool = !cfg!(target_os = "android");
 
 pub const REDUCED_VIDEO_DEFAULTS: bool = cfg!(any(feature = "mobile_ui", target_arch = "wasm32"));
+
+pub const MENU_BLUR_DEFAULT: bool = !REDUCED_VIDEO_DEFAULTS;
 
 pub const RENDER_DISTANCE_DEFAULT: u32 = if cfg!(feature = "mobile_ui") {
     2
@@ -722,6 +734,9 @@ impl GuiOptions {
             antialiasing: value("antialiasing")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            menu_blur: value("menuBlur")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(MENU_BLUR_DEFAULT),
             render_scale_step: value("renderScale")
                 .and_then(|v| v.as_u64())
                 .and_then(|percent| {
@@ -992,6 +1007,7 @@ fn options_json(options: &GuiOptions) -> serde_json::Value {
         "renderDistance": options.render_distance,
         "gamma": options.gamma,
         "antialiasing": options.antialiasing,
+        "menuBlur": options.menu_blur,
         "renderScale": render_scale_percent(options.render_scale_step),
         "ao": options.smooth_lighting,
         "lightingEnabled": options.lighting_enabled,
@@ -1118,6 +1134,8 @@ pub struct GuiState {
     pub confirm_clear_assets: bool,
     #[cfg(feature = "asset_download")]
     pub storage_nothing_missing: bool,
+    #[cfg(feature = "benchmark_feature")]
+    pub benchmark: benchmark::Benchmark,
     #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
     pub asset_transfer: assetexport::State,
     #[cfg(feature = "asset_download")]
@@ -1143,6 +1161,11 @@ pub struct GuiState {
 }
 
 impl GuiState {
+    pub fn menu_blur_wanted(&self) -> bool {
+        let asks = false;
+        self.options.menu_blur && asks
+    }
+
     pub fn claim_buttons(&mut self, buttons: &ButtonInput<MouseButton>) {
         for b in buttons.get_pressed() {
             if !self.screen_buttons.contains(b) {
@@ -1160,6 +1183,17 @@ impl GuiState {
             return self.credits_parent.is_menu();
         }
         self.screen.is_menu()
+    }
+
+    pub fn benchmark_running(&self) -> bool {
+        #[cfg(feature = "benchmark_feature")]
+        {
+            self.screen == Screen::Benchmark && self.benchmark.running()
+        }
+        #[cfg(not(feature = "benchmark_feature"))]
+        {
+            false
+        }
     }
 
     pub fn in_menu(&self) -> bool {

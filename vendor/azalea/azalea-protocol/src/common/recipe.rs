@@ -3,7 +3,7 @@ use std::io::{self, Cursor, Write};
 use azalea_buf::{AzBuf, AzBufVar, BufReadError};
 use azalea_inventory::{DataComponentPatch, ItemStack};
 use azalea_registry::{
-    HolderSet,
+    Holder, HolderSet,
     builtin::{DataComponentKind, ItemKind},
     data::TrimPattern,
     identifier::Identifier,
@@ -127,7 +127,7 @@ pub struct TagSlotDisplay {
 pub struct SmithingTrimDemoSlotDisplay {
     pub base: SlotDisplayData,
     pub material: SlotDisplayData,
-    pub pattern: TrimPattern,
+    pub pattern: Holder<TrimPattern, azalea_inventory::components::DirectTrimPattern>,
 }
 #[derive(AzBuf, Clone, Debug, PartialEq)]
 pub struct WithRemainderSlotDisplay {

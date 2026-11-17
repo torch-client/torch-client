@@ -57,6 +57,28 @@ fn cancel_label() -> &'static str {
     }
 }
 
+const CAN_EXIT: bool = !cfg!(any(target_arch = "wasm32", target_os = "android"));
+
+fn action_and_leave(
+    p: &mut Painter,
+    state: &mut GuiState,
+    ctx: &ScreenCtx,
+    cx: f32,
+    row: f32,
+    action: &str,
+) -> bool {
+    if !CAN_EXIT && !TOP_UP.load(Ordering::Relaxed) {
+        return button(p, ctx, (cx - BUTTON_W * 0.5).floor(), row, action);
+    }
+    let left = (cx - BUTTON_W - BUTTON_GAP * 0.5).floor();
+    let right = (cx + BUTTON_GAP * 0.5).floor();
+    let pressed = button(p, ctx, left, row, action);
+    if button(p, ctx, right, row, leave_label()) {
+        leave(state);
+    }
+    pressed
+}
+
 fn leave(state: &mut GuiState) {
     if TOP_UP.swap(false, Ordering::Relaxed) {
         state.nav = Some(Screen::ManageStorage);
@@ -138,13 +160,8 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                 p.text_centered("Download cancelled", cx, mid - 46.0 + LINE, 0xFFAA55, false);
             }
             let row = prompt_boxes(p, ctx, mid + BOXES_TOP);
-            let left = (cx - BUTTON_W - BUTTON_GAP * 0.5).floor();
-            let right = (cx + BUTTON_GAP * 0.5).floor();
-            if button(p, ctx, left, row, continue_label()) {
+            if action_and_leave(p, state, ctx, cx, row, continue_label()) {
                 begin(dl);
-            }
-            if button(p, ctx, right, row, leave_label()) {
-                leave(state);
             }
         }
 
@@ -217,14 +234,8 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             };
             p.text_centered(error, cx, mid - 14.0, 0xFF5555, false);
             p.text_centered(hint, cx, mid - 14.0 + LINE, 0xA0A0A8, false);
-            let row = mid + 20.0;
-            let left = (cx - BUTTON_W - BUTTON_GAP * 0.5).floor();
-            let right = (cx + BUTTON_GAP * 0.5).floor();
-            if button(p, ctx, left, row, "Try again") {
+            if action_and_leave(p, state, ctx, cx, mid + 20.0, "Try again") {
                 begin(dl);
-            }
-            if button(p, ctx, right, row, leave_label()) {
-                leave(state);
             }
         }
     }

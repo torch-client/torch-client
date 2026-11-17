@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include "Luau/Common.h"
@@ -17,8 +16,8 @@ namespace TimeTrace
 {
 double getClock();
 uint32_t getClockMicroseconds();
-} // namespace TimeTrace
-} // namespace Luau
+}
+}
 
 #if defined(LUAU_ENABLE_TIME_TRACE)
 
@@ -48,7 +47,7 @@ struct Event
 
     union
     {
-        uint32_t microsec; // 1 hour trace limit
+        uint32_t microsec;
         uint32_t dataPos;
     } data;
 };
@@ -207,20 +206,17 @@ struct OptionalTailScope
 
 LUAU_NOINLINE uint16_t createScopeData(const char* name, const char* category);
 
-} // namespace TimeTrace
-} // namespace Luau
+}
+}
 
-// Regular scope
 #define LUAU_TIMETRACE_SCOPE(name, category) \
     static uint16_t lttScopeStatic = Luau::TimeTrace::createScopeData(name, category); \
     Luau::TimeTrace::Scope lttScope(lttScopeStatic)
 
-// A scope without nested scopes that may be skipped if the time it took is less than the threshold
 #define LUAU_TIMETRACE_OPTIONAL_TAIL_SCOPE(name, category, microsec) \
     static uint16_t lttScopeStaticOptTail = Luau::TimeTrace::createScopeData(name, category); \
     Luau::TimeTrace::OptionalTailScope lttScope(lttScopeStaticOptTail, microsec)
 
-// Extra key/value data can be added to regular scopes
 #define LUAU_TIMETRACE_ARGUMENT(name, value) \
     do \
     { \

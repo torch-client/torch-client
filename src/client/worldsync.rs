@@ -250,6 +250,11 @@ fn clear_arrivals() {
     arrivals().lock().unwrap().clear();
 }
 
+fn skipped_over(received: impl Fn((i32, i32)) -> bool, x: i32, z: i32, reach: i32) -> bool {
+    let toward = |dx: i32, dz: i32| (1..=reach).any(|d| received((x + dx * d, z + dz * d)));
+    (toward(-1, 0) && toward(1, 0)) || (toward(0, -1) && toward(0, 1))
+}
+
 pub(crate) fn mesh_waiting_columns(bot: &Client) {
     static TICKS: AtomicU32 = AtomicU32::new(0);
     if TICKS.fetch_add(1, Ordering::Relaxed) % FALLBACK_SCAN_EVERY != 0 {
@@ -298,6 +303,7 @@ pub(crate) fn mesh_waiting_columns(bot: &Client) {
             }
             let late = missing.iter().all(|&(nx, nz)| {
                 crate::util::chunk_tracking::is_in_view_distance(px, pz, radius, nx, nz)
+                    && skipped_over(|c| received.contains(&c), nx, nz, radius as i32)
             });
             if late {
                 candidates.push((col, missing));
@@ -347,9 +353,9 @@ pub(crate) fn mesh_waiting_columns(bot: &Client) {
         if before + (n as u64) < 16 {
             log_warn!(
                 "mesh",
-                "column {cx},{cz} waited {}s for its neighbours {missing:?}, which are inside the \
-                 server's view distance of the player and have not arrived; meshed with that side \
-                 as air, rebuilt when they come",
+                "column {cx},{cz} waited {}s for its neighbours {missing:?}, which the server \
+                 streamed past and have not arrived; meshed with that side as air, rebuilt when \
+                 they come",
                 MESH_FALLBACK_AFTER.as_secs()
             );
         }
@@ -755,6 +761,13 @@ pub(crate) fn column_kept_by_lod(_cx: i32, _cz: i32) -> bool {
     false
 }
 
+pub(crate) fn drop_maps(shared: &SharedMutex) {
+    reset_maps();
+    let mut s = shared.lock().unwrap();
+    s.session.map_updates.clear();
+    s.session.clear_maps = true;
+}
+
 pub(crate) fn reset_level(world: &azalea::local_player::WorldHolder, shared: &SharedMutex) {
     set_current_world(&world.shared);
     if let Some(q) = CHUNK_Q.get() {
@@ -776,10 +789,7 @@ pub(crate) fn reset_level(world: &azalea::local_player::WorldHolder, shared: &Sh
     blockentities::feed::reset();
     #[cfg(feature = "render_lod")]
     crate::client::lod::reset();
-    reset_maps();
     let mut s = shared.lock().unwrap();
-    s.session.map_updates.clear();
-    s.session.clear_maps = true;
     s.session.block_entities = Default::default();
     s.session.block_entities_version = s.session.block_entities_version.wrapping_add(1);
     s.session.clear_chunks = true;
@@ -843,6 +853,48 @@ mod readiness_tests {
             }
         }
         s
+    }
+
+    #[test]
+    fn the_edge_of_the_stream_is_not_skipped_over() {
+        let mut received = HashSet::new();
+        for x in -4..=4 {
+            for z in -4..=4 {
+                received.insert((x, z));
+            }
+        }
+        let has = |c: (i32, i32)| received.contains(&c);
+        for k in -5..=5 {
+            for edge in [(5, k), (-5, k), (k, 5), (k, -5)] {
+                assert!(!skipped_over(has, edge.0, edge.1, 10), "{edge:?}");
+            }
+        }
+        received.remove(&(1, 2));
+        received.remove(&(4, 0));
+        let has = |c: (i32, i32)| received.contains(&c);
+        assert!(skipped_over(has, 1, 2, 10));
+        assert!(skipped_over(has, 4, 0, 10));
+    }
+
+    #[test]
+    fn a_lost_block_is_skipped_over_and_a_lost_corner_is_not() {
+        let mut received = HashSet::new();
+        for x in -4..=4 {
+            for z in -4..=4 {
+                received.insert((x, z));
+            }
+        }
+        let block = [(0, 0), (1, 0), (0, 1), (1, 1)];
+        for lost in block {
+            received.remove(&lost);
+        }
+        received.remove(&(4, 4));
+        let has = |c: (i32, i32)| received.contains(&c);
+        for lost in block {
+            assert!(skipped_over(has, lost.0, lost.1, 10), "{lost:?}");
+            assert!(!skipped_over(has, lost.0, lost.1, 1), "{lost:?}");
+        }
+        assert!(!skipped_over(has, 4, 4, 10));
     }
 
     #[test]

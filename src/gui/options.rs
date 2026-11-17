@@ -139,6 +139,8 @@ const PLAYER_SHADOWS: &str = "Player Shadows";
 
 const ANTIALIASING: &str = "Antialiasing";
 
+const MENU_BLUR: &str = "Menu Blur";
+
 const LIGHTING_ENGINE: &str = "Lighting Engine";
 const VSYNC: &str = "VSync";
 
@@ -163,6 +165,13 @@ const EDIT_CONTROL_LAYOUT: &str = "Edit control layout...";
 const RESET_VIDEO: &str = "Reset Video Settings";
 
 const RESET_GAME: &str = "Reset Game Settings";
+
+#[cfg(feature = "benchmark_feature")]
+const BENCHMARK: &str = "Benchmark";
+#[cfg(feature = "benchmark_feature")]
+const BENCHMARK_IN_WORLD: &str = "Leave the world to run the benchmark";
+#[cfg(all(feature = "benchmark_feature", feature = "shader_support"))]
+const BENCHMARK_SHADER_PACK: &str = "Turn off the shader pack to run the benchmark";
 
 const RESET_ALL: &str = "Reset All Options";
 
@@ -617,9 +626,17 @@ const Y_STORAGE_HEADER: f32 = Y_GAME_LAST_GROUP_ROW + ROW_H;
 const Y_STORAGE_ROW_0: f32 = Y_STORAGE_HEADER + HEADER_PAD_TOP + HEADER_H;
 
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-const Y_GAME_RESET_ROW: f32 = Y_STORAGE_ROW_0 + ROW_H;
+const Y_GAME_AFTER_GROUPS: f32 = Y_STORAGE_ROW_0 + ROW_H;
 #[cfg(not(all(target_arch = "wasm32", feature = "asset_download")))]
-const Y_GAME_RESET_ROW: f32 = Y_GAME_LAST_GROUP_ROW + ROW_H;
+const Y_GAME_AFTER_GROUPS: f32 = Y_GAME_LAST_GROUP_ROW + ROW_H;
+
+#[cfg(feature = "benchmark_feature")]
+const Y_GAME_BENCHMARK_ROW: f32 = Y_GAME_AFTER_GROUPS;
+
+#[cfg(feature = "benchmark_feature")]
+const Y_GAME_RESET_ROW: f32 = Y_GAME_BENCHMARK_ROW + ROW_H;
+#[cfg(not(feature = "benchmark_feature"))]
+const Y_GAME_RESET_ROW: f32 = Y_GAME_AFTER_GROUPS;
 
 const GAME_CONTENT_H: f32 = Y_GAME_RESET_ROW + ROW_H;
 
@@ -907,6 +924,7 @@ const VIDEO_KEYS: &[&str] = &[
     "renderDistance",
     "gamma",
     "antialiasing",
+    "menuBlur",
     "renderScale",
     "ao",
     "lightingEnabled",
@@ -1513,6 +1531,9 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     let (x, y) = cell(0.0, Y_LEAVES_ROW);
     opt_toggle!(p, ctx, state; x, y, tr::cutout_leaves(), cutout_leaves);
+
+    let (x, y) = cell(1.0, Y_LEAVES_ROW);
+    opt_toggle!(p, ctx, state; x, y, MENU_BLUR, menu_blur);
 
     #[cfg(feature = "builtin_shaders")]
     {
@@ -2130,6 +2151,24 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         }
     }
 
+    #[cfg(feature = "benchmark_feature")]
+    let benchmark_tooltip = {
+        let (x, y) = cell(0.0, Y_GAME_BENCHMARK_ROW);
+        let blocked = benchmark_blocked(state);
+        let button = Button {
+            active: blocked.is_none(),
+            ..Button::new(x, y, BIG_W, WIDGET_HEIGHT, BENCHMARK)
+        };
+        if button.draw(p, ctx) {
+            state.benchmark.start();
+            state.nav = Some(Screen::Benchmark);
+        }
+        blocked.zip(
+            ctx.mouse()
+                .filter(|_| ctx.hovering(x, y, BIG_W, WIDGET_HEIGHT)),
+        )
+    };
+
     let (x, y) = cell(0.0, Y_GAME_RESET_ROW);
     if Button::new(x, y, BIG_W, WIDGET_HEIGHT, RESET_GAME).draw(p, ctx) {
         reset_game_options(&mut state.options);
@@ -2137,6 +2176,10 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     p.pop_clip(clip);
+    #[cfg(feature = "benchmark_feature")]
+    if let Some((reason, m)) = benchmark_tooltip {
+        draw_bind_tooltip(p, &[reason.to_owned()], m.x, m.y, ctx.vw);
+    }
     draw_scrollbar(
         p,
         state.game_scroll,
@@ -2150,6 +2193,18 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     if draw_done(p, screen_ctx) {
         state.nav = Some(Screen::Options);
     }
+}
+
+#[cfg(feature = "benchmark_feature")]
+fn benchmark_blocked(state: &GuiState) -> Option<&'static str> {
+    if !state.options_parent.is_menu() {
+        return Some(BENCHMARK_IN_WORLD);
+    }
+    #[cfg(feature = "shader_support")]
+    if state.shaderpacks.loaded.is_some() {
+        return Some(BENCHMARK_SHADER_PACK);
+    }
+    None
 }
 
 #[cfg(feature = "audio")]

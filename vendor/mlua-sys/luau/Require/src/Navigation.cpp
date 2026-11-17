@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-
 #include "Navigation.h"
 
 #include "Luau/Require.h"
@@ -205,7 +203,7 @@ void RuntimeLuauConfigTimer::start(int timeoutMs)
 {
     startTime = std::chrono::steady_clock::now();
     if (timeoutMs < 0)
-        timeoutDuration = std::nullopt; // Infinite timeout
+        timeoutDuration = std::nullopt;
     else
         timeoutDuration = std::chrono::milliseconds(timeoutMs);
 }
@@ -217,4 +215,4 @@ bool RuntimeLuauConfigTimer::isFinished() const
     return (std::chrono::steady_clock::now() - startTime) >= *timeoutDuration;
 }
 
-} // namespace Luau::Require
+}

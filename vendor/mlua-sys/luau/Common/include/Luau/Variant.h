@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
 #include <initializer_list>
@@ -87,7 +86,6 @@ public:
     Variant& operator=(const Variant& other)
     {
         Variant copy(other);
-        // static_cast<T&&> is equivalent to std::move() but faster in Debug
         return *this = static_cast<Variant&&>(copy);
     }
 
@@ -97,7 +95,7 @@ public:
         {
             tableDtor[typeId](&storage);
             typeId = other.typeId;
-            tableMove[typeId](&storage, &other.storage); // nothrow
+            tableMove[typeId](&storage, &other.storage);
         }
         return *this;
     }
@@ -182,7 +180,6 @@ private:
     template<typename T>
     static void fnMove(void* dst, void* src) noexcept
     {
-        // static_cast<T&&> is equivalent to std::move() but faster in Debug
         new (dst) T(static_cast<T&&>(*static_cast<T*>(src)));
     }
 
@@ -301,4 +298,4 @@ overloaded(Ts...) -> overloaded<Ts...>;
 template<class>
 inline constexpr bool always_false_v = false;
 
-} // namespace Luau
+}

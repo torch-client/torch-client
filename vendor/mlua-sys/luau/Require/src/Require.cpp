@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-
 #include "Luau/Require.h"
 
 #include "RequireImpl.h"
@@ -57,7 +55,6 @@ static int pushrequireclosureinternal(
 
     lua_pushlightuserdata(L, ctx);
 
-    // require-like closure captures config and ctx as upvalues
     lua_pushcclosurek(L, requirelikefunc, debugname, 2, Luau::Require::lua_requirecont);
     return 1;
 }

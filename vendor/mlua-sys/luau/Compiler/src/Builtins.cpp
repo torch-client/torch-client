@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Builtins.h"
 
 #include "Luau/Bytecode.h"
@@ -30,15 +29,10 @@ Builtin getBuiltin(AstExpr* node, const DenseHashMap<AstName, Global>& globals, 
             {
                 const Variable* v = variables.find(object->local);
 
-                // Local that is initialized and not modified might hold the built-in library itself
                 if (v && !v->written && v->init)
                 {
                     AstExprGlobal* object = nullptr;
 
-                    // Look for patterns like 'local m = math' and 'local math = math or replacement'
-                    // Fastcall is used in safe env where libraries like 'math' are built-in
-                    // This means that if we are still in safe env, 'math' was truthy and local was initialized to the library value
-                    // If safe env is false, 'math' could be a polyfill or something else and fastcall takes the fallback, preserving the behavior
                     if (AstExprGlobal* global = v->init->as<AstExprGlobal>())
                         object = global;
                     else if (AstExprBinary* cond = v->init->as<AstExprBinary>(); cond && cond->op == AstExprBinary::Or)
@@ -374,14 +368,13 @@ struct BuiltinVisitor : AstVisitor
         if (bfid >= 0 && builtinIsDisabled[bfid])
             bfid = -1;
 
-        // getBuiltinFunctionId optimistically assumes all select() calls are builtin but actually the second argument must be a vararg
         if (bfid == LBF_SELECT_VARARG && !(node->args.size == 2 && node->args.data[1]->is<AstExprVarargs>()))
             bfid = -1;
 
         if (bfid >= 0)
             result[node] = bfid;
 
-        return true; // propagate to nested calls
+        return true;
     }
 };
 
@@ -406,7 +399,7 @@ BuiltinInfo getBuiltinInfo(int bfid)
         return {-1, -1};
 
     case LBF_ASSERT:
-        return {-1, -1}; // assert() returns all values when first value is truthy
+        return {-1, -1};
 
     case LBF_MATH_ABS:
     case LBF_MATH_ACOS:
@@ -438,11 +431,11 @@ BuiltinInfo getBuiltinInfo(int bfid)
         return {1, 1, BuiltinInfo::Flag_NoneSafe};
 
     case LBF_MATH_LOG:
-        return {-1, 1}; // 1 or 2 parameters
+        return {-1, 1};
 
     case LBF_MATH_MAX:
     case LBF_MATH_MIN:
-        return {-1, 1}; // variadic
+        return {-1, 1};
 
     case LBF_MATH_MODF:
         return {1, 2, BuiltinInfo::Flag_NoneSafe};
@@ -462,7 +455,7 @@ BuiltinInfo getBuiltinInfo(int bfid)
         return {2, 1, BuiltinInfo::Flag_NoneSafe};
 
     case LBF_BIT32_BAND:
-        return {-1, 1}; // variadic
+        return {-1, 1};
 
     case LBF_BIT32_BNOT:
         return {1, 1, BuiltinInfo::Flag_NoneSafe};
@@ -470,17 +463,17 @@ BuiltinInfo getBuiltinInfo(int bfid)
     case LBF_BIT32_BOR:
     case LBF_BIT32_BXOR:
     case LBF_BIT32_BTEST:
-        return {-1, 1}; // variadic
+        return {-1, 1};
 
     case LBF_BIT32_EXTRACT:
-        return {-1, 1}; // 2 or 3 parameters
+        return {-1, 1};
 
     case LBF_BIT32_LROTATE:
     case LBF_BIT32_LSHIFT:
         return {2, 1, BuiltinInfo::Flag_NoneSafe};
 
     case LBF_BIT32_REPLACE:
-        return {-1, 1}; // 3 or 4 parameters
+        return {-1, 1};
 
     case LBF_BIT32_RROTATE:
     case LBF_BIT32_RSHIFT:
@@ -490,10 +483,10 @@ BuiltinInfo getBuiltinInfo(int bfid)
         return {1, 1};
 
     case LBF_STRING_BYTE:
-        return {-1, -1}; // 1, 2 or 3 parameters
+        return {-1, -1};
 
     case LBF_STRING_CHAR:
-        return {-1, 1}; // variadic
+        return {-1, 1};
 
     case LBF_STRING_LEN:
         return {1, 1, BuiltinInfo::Flag_NoneSafe};
@@ -502,7 +495,7 @@ BuiltinInfo getBuiltinInfo(int bfid)
         return {1, 1};
 
     case LBF_STRING_SUB:
-        return {-1, 1}; // 2 or 3 parameters
+        return {-1, 1};
 
     case LBF_MATH_CLAMP:
         return {3, 1, BuiltinInfo::Flag_NoneSafe};
@@ -519,20 +512,20 @@ BuiltinInfo getBuiltinInfo(int bfid)
         return {2, 1};
 
     case LBF_TABLE_INSERT:
-        return {-1, 0}; // 2 or 3 parameters
+        return {-1, 0};
 
     case LBF_TABLE_UNPACK:
-        return {-1, -1}; // 1, 2 or 3 parameters
+        return {-1, -1};
 
     case LBF_VECTOR:
-        return {-1, 1}; // 3 or 4 parameters in some configurations
+        return {-1, 1};
 
     case LBF_BIT32_COUNTLZ:
     case LBF_BIT32_COUNTRZ:
         return {1, 1, BuiltinInfo::Flag_NoneSafe};
 
     case LBF_SELECT_VARARG:
-        return {-1, -1}; // variadic
+        return {-1, -1};
 
     case LBF_RAWLEN:
         return {1, 1, BuiltinInfo::Flag_NoneSafe};
@@ -547,7 +540,7 @@ BuiltinInfo getBuiltinInfo(int bfid)
         return {2, 1};
 
     case LBF_TONUMBER:
-        return {-1, 1}; // 1 or 2 parameters
+        return {-1, 1};
 
     case LBF_TOSTRING:
         return {1, 1};
@@ -587,7 +580,7 @@ BuiltinInfo getBuiltinInfo(int bfid)
         return {3, 1, BuiltinInfo::Flag_NoneSafe};
     case LBF_VECTOR_MIN:
     case LBF_VECTOR_MAX:
-        return {-1, 1}; // variadic
+        return {-1, 1};
     case LBF_VECTOR_LERP:
         return {3, 1, BuiltinInfo::Flag_NoneSafe};
 
@@ -604,5 +597,5 @@ BuiltinInfo getBuiltinInfo(int bfid)
     LUAU_UNREACHABLE();
 }
 
-} // namespace Compile
-} // namespace Luau
+}
+}

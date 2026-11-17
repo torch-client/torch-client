@@ -7,6 +7,7 @@ use bevy::math::Vec3A;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
+use crate::entities::render::objects::frame::{map_levels, map_pixel_pose};
 use crate::entities::state::Display;
 use crate::entities::{CameraView, VIEW_RANGE_BLOCKS, display_orientation, display_quat};
 use crate::gui::painter::{Painter, PainterBuffers};
@@ -24,6 +25,7 @@ impl Plugin for WorldTextPlugin {
             Update,
             sync_text_displays
                 .after(FrameViewSystems)
+                .after(crate::entities::EntitySync)
                 .run_if(in_state(AppState::InGame)),
         );
     }
@@ -37,14 +39,36 @@ const DEFAULT_BACKGROUND: u32 = 0x3F00_0000;
 
 #[derive(Resource)]
 struct WorldTextAssets {
-    meshes: [Handle<Mesh>; 2],
+    meshes: [Handle<Mesh>; PASSES],
 }
 
 #[derive(Clone, Copy)]
 enum Pass {
     Normal = 0,
     SeeThrough = 1,
+    MapLabels = 2,
 }
+
+const PASSES: usize = 3;
+
+impl Pass {
+    const ALL: [Pass; PASSES] = [Pass::Normal, Pass::SeeThrough, Pass::MapLabels];
+
+    fn see_through(self) -> bool {
+        matches!(self, Pass::SeeThrough)
+    }
+
+    fn layering(self) -> i8 {
+        match self {
+            Pass::MapLabels => 2,
+            Pass::Normal | Pass::SeeThrough => 0,
+        }
+    }
+}
+
+const MAP_LABEL_HALF_EXTENT: f32 = 0.75;
+
+type Taken<'a> = (Painter<'a>, Vec<[f32; 3]>);
 
 struct Layout {
     text: Vec<Span>,
@@ -120,9 +144,13 @@ fn sync_text_displays(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<EntityMaterial>>,
     origin: Res<crate::renderer::RenderOrigin>,
+    (lightmap, rigs): (
+        Res<crate::renderer::systems::LightmapState>,
+        Res<crate::entities::EntityRigs>,
+    ),
     mut layouts: Local<Layouts>,
     frusta: Query<&Frustum, With<crate::renderer::systems::WorldCamera>>,
-    mut drawn: Local<bool>,
+    mut drawn: Local<[bool; PASSES]>,
 ) {
     crate::prof_span!("render:text_displays");
     let Some(gui) = gui else { return };
@@ -140,10 +168,57 @@ fn sync_text_displays(
 
     let partial = view.partial;
     let frustum = frusta.single().ok();
-    let mut painted: Option<([Painter<'_>; 2], [Vec<[f32; 3]>; 2])> = None;
+    let mut painted: [Option<Taken<'_>>; PASSES] = [None, None, None];
+    let mut light = None;
     layouts.generation = layouts.generation.wrapping_add(1);
     for anim in view.entities.iter() {
-        let Some(display) = anim.shared().display.as_deref() else {
+        let shared = anim.shared();
+        if let Some(markers) = shared.map_markers.as_deref()
+            && markers.list.iter().any(|d| d.name.is_some())
+            && rigs.contains(anim.id)
+        {
+            let world = anim.position(partial);
+            let pos = origin.to_render_array(world);
+            let center = Vec3A::from(pos);
+            let visible = frustum.is_none_or(|frustum| {
+                frustum.intersects_obb_identity(&Aabb {
+                    center,
+                    half_extents: Vec3A::splat(MAP_LABEL_HALF_EXTENT),
+                })
+            });
+            if visible
+                && let Some(painter) = painter_for(
+                    &mut painted[Pass::MapLabels as usize],
+                    &mut meshes,
+                    &assets,
+                    Pass::MapLabels,
+                    &gui.atlas,
+                    frame,
+                )
+            {
+                let pose = Mat4::from_translation(pos)
+                    * map_pixel_pose(
+                        shared.hanging_direction,
+                        shared.item_rotation,
+                        anim.is_invisible(),
+                    )
+                    .to_matrix();
+                let start = painter.colors.len();
+                crate::renderer::maps::paint_labels(painter, &markers.list, pose);
+                let light =
+                    light.get_or_insert_with(|| crate::client::worldsync::light_map().read());
+                let st = anim.sample(partial);
+                let (block, sky) = map_levels(&st, crate::entities::entity_levels(&**light, &st));
+                let [r, g, b] =
+                    crate::renderer::lightmap::light_color(&lightmap.current, block, sky);
+                for color in &mut painter.colors[start..] {
+                    color[0] *= r;
+                    color[1] *= g;
+                    color[2] *= b;
+                }
+            }
+        }
+        let Some(display) = shared.display.as_deref() else {
             continue;
         };
         if display.text.is_empty() {
@@ -173,80 +248,82 @@ fn sync_text_displays(
                 continue;
             }
         }
-        if painted.is_none() {
-            let Some(taken) = take_buffers(&mut meshes, &assets, &gui.atlas, frame) else {
-                return;
-            };
-            painted = Some(taken);
-        }
-        let (entity_yaw, entity_pitch) = anim.look(partial);
-        let matrix = pose(display, pos, entity_yaw, entity_pitch, &camera);
         let pass = if display.flags & Display::FLAG_SEE_THROUGH != 0 {
             Pass::SeeThrough
         } else {
             Pass::Normal
         };
+        let Some(painter) = painter_for(
+            &mut painted[pass as usize],
+            &mut meshes,
+            &assets,
+            pass,
+            &gui.atlas,
+            frame,
+        ) else {
+            continue;
+        };
+        let (entity_yaw, entity_pitch) = anim.look(partial);
+        let matrix = pose(display, pos, entity_yaw, entity_pitch, &camera);
         let layout = layouts.get(anim.id, &gui.atlas.font, display);
-        if let Some((painters, _)) = &mut painted {
-            paint(&mut painters[pass as usize], display, layout, matrix);
-        }
+        paint(painter, display, layout, matrix);
     }
     layouts.sweep();
 
-    match painted {
-        Some((painters, normals)) => {
-            put_back(&mut meshes, &assets, painters, normals);
-            *drawn = true;
-        }
-        None if *drawn => {
-            if let Some((painters, normals)) = take_buffers(&mut meshes, &assets, &gui.atlas, frame)
-            {
-                put_back(&mut meshes, &assets, painters, normals);
+    for pass in Pass::ALL {
+        let i = pass as usize;
+        match painted[i].take() {
+            Some(taken) => {
+                put_back(&mut meshes, &assets, pass, taken);
+                drawn[i] = true;
             }
-            *drawn = false;
+            None if drawn[i] => {
+                if let Some(taken) = take_buffers(&mut meshes, &assets, pass, &gui.atlas, frame) {
+                    put_back(&mut meshes, &assets, pass, taken);
+                }
+                drawn[i] = false;
+            }
+            None => {}
         }
-        None => {}
     }
+}
+
+fn painter_for<'s, 'a>(
+    slot: &'s mut Option<Taken<'a>>,
+    meshes: &mut Assets<Mesh>,
+    assets: &WorldTextAssets,
+    pass: Pass,
+    atlas: &'a crate::gui::atlas::GuiAtlas,
+    frame: u32,
+) -> Option<&'s mut Painter<'a>> {
+    if slot.is_none() {
+        *slot = Some(take_buffers(meshes, assets, pass, atlas, frame)?);
+    }
+    slot.as_mut().map(|(painter, _)| painter)
 }
 
 fn take_buffers<'a>(
     meshes: &mut Assets<Mesh>,
     assets: &WorldTextAssets,
+    pass: Pass,
     atlas: &'a crate::gui::atlas::GuiAtlas,
     frame: u32,
-) -> Option<([Painter<'a>; 2], [Vec<[f32; 3]>; 2])> {
-    if assets
-        .meshes
-        .iter()
-        .any(|handle| meshes.get(handle).is_none())
-    {
-        return None;
-    }
-    let mut bufs = [PainterBuffers::default(), PainterBuffers::default()];
-    let mut normals: [Vec<[f32; 3]>; 2] = [Vec::new(), Vec::new()];
-    for (i, handle) in assets.meshes.iter().enumerate() {
-        let mut mesh = meshes.get_mut(handle)?;
-        bufs[i] = PainterBuffers {
-            positions: f32x3(mesh.remove_attribute(Mesh::ATTRIBUTE_POSITION)),
-            uvs: f32x2(mesh.remove_attribute(Mesh::ATTRIBUTE_UV_0)),
-            colors: f32x4(mesh.remove_attribute(Mesh::ATTRIBUTE_COLOR)),
-            indices: match mesh.remove_indices() {
-                Some(Indices::U32(v)) => v,
-                _ => Vec::new(),
-            },
-            textures: Vec::new(),
-        };
-        normals[i] = f32x3(mesh.remove_attribute(Mesh::ATTRIBUTE_NORMAL));
-    }
-    let [normal_bufs, see_through_bufs] = bufs;
-    let mut painters = [
-        Painter::with_buffers(atlas, frame, normal_bufs),
-        Painter::with_buffers(atlas, frame, see_through_bufs),
-    ];
-    for painter in &mut painters {
-        painter.unihex_enabled = false;
-    }
-    Some((painters, normals))
+) -> Option<Taken<'a>> {
+    let mut mesh = meshes.get_mut(&assets.meshes[pass as usize])?;
+    let bufs = PainterBuffers {
+        positions: f32x3(mesh.remove_attribute(Mesh::ATTRIBUTE_POSITION)),
+        uvs: f32x2(mesh.remove_attribute(Mesh::ATTRIBUTE_UV_0)),
+        colors: f32x4(mesh.remove_attribute(Mesh::ATTRIBUTE_COLOR)),
+        indices: match mesh.remove_indices() {
+            Some(Indices::U32(v)) => v,
+            _ => Vec::new(),
+        },
+        textures: Vec::new(),
+    };
+    let normals = f32x3(mesh.remove_attribute(Mesh::ATTRIBUTE_NORMAL));
+    let mut painter = Painter::with_buffers(atlas, frame, bufs);
+    painter.unihex_enabled = false;
+    Some((painter, normals))
 }
 
 fn paint(painter: &mut Painter, display: &Display, layout: &Layout, pose: Mat4) {
@@ -308,22 +385,20 @@ fn pose(
 fn put_back(
     meshes: &mut Assets<Mesh>,
     assets: &WorldTextAssets,
-    painters: [Painter<'_>; 2],
-    mut normals: [Vec<[f32; 3]>; 2],
+    pass: Pass,
+    (painter, mut normals): Taken<'_>,
 ) {
-    for (i, painter) in painters.into_iter().enumerate() {
-        let bufs = painter.into_buffers();
-        let Some(mut mesh) = meshes.get_mut(&assets.meshes[i]) else {
-            continue;
-        };
-        normals[i].clear();
-        normals[i].resize(bufs.positions.len(), [0.0, 0.0, 1.0]);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, bufs.positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, bufs.uvs);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, std::mem::take(&mut normals[i]));
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, bufs.colors);
-        mesh.insert_indices(Indices::U32(bufs.indices));
-    }
+    let bufs = painter.into_buffers();
+    let Some(mut mesh) = meshes.get_mut(&assets.meshes[pass as usize]) else {
+        return;
+    };
+    normals.clear();
+    normals.resize(bufs.positions.len(), [0.0, 0.0, 1.0]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, bufs.positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, bufs.uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, bufs.colors);
+    mesh.insert_indices(Indices::U32(bufs.indices));
 }
 
 fn setup(
@@ -331,9 +406,8 @@ fn setup(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<EntityMaterial>,
     gui: &GuiAssets,
-) -> [Handle<Mesh>; 2] {
-    let mut handles = Vec::with_capacity(2);
-    for see_through in [false, true] {
+) -> [Handle<Mesh>; PASSES] {
+    Pass::ALL.map(|pass| {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
@@ -344,7 +418,6 @@ fn setup(
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
         mesh.insert_indices(Indices::U32(Vec::new()));
         let mesh = meshes.add(mesh);
-        handles.push(mesh.clone());
 
         let material = materials.add(EntityMaterial {
             texture: Some(gui.image.clone()),
@@ -353,12 +426,13 @@ fn setup(
             alpha_mode: AlphaMode::Blend,
             depth_bias: 0,
             sort_bias: 0.0,
-            see_through,
+            see_through: pass.see_through(),
+            layering: pass.layering(),
         });
 
         #[cfg_attr(not(feature = "builtin_shaders"), allow(unused_variables, unused_mut))]
         let mut spawned = commands.spawn((
-            Mesh3d(mesh),
+            Mesh3d(mesh.clone()),
             MeshMaterial3d(material),
             Transform::default(),
             Visibility::Visible,
@@ -366,8 +440,8 @@ fn setup(
         ));
         #[cfg(feature = "builtin_shaders")]
         spawned.insert(bevy::light::NotShadowCaster);
-    }
-    [handles[0].clone(), handles[1].clone()]
+        mesh
+    })
 }
 
 fn f32x3(values: Option<VertexAttributeValues>) -> Vec<[f32; 3]> {

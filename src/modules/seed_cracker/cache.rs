@@ -12,6 +12,8 @@ use crate::renderer::dimension::Dimension;
 
 const FORMAT: u64 = 1;
 
+const MAX_WORLDS: usize = 64;
+
 const FEEDBACK_SECS: f32 = 2.0;
 
 #[derive(Clone)]
@@ -50,7 +52,7 @@ fn dimension_of(name: &str) -> Option<Dimension> {
 }
 
 impl Cache {
-    pub fn to_json(&self) -> String {
+    fn to_value(&self) -> Value {
         let finds: Vec<Value> = self
             .finds
             .iter()
@@ -64,12 +66,20 @@ impl Cache {
         if let Some(seed) = self.seed {
             doc["seed"] = Value::String(seed.to_string());
         }
-        doc.to_string()
+        doc
+    }
+
+    fn is_empty(&self) -> bool {
+        self.finds.is_empty() && self.seed.is_none()
     }
 
     pub fn parse(text: &str) -> Result<Cache, String> {
         let doc: Value =
             serde_json::from_str(text.trim()).map_err(|e| format!("not JSON ({e})"))?;
+        Cache::from_value(&doc)
+    }
+
+    fn from_value(doc: &Value) -> Result<Cache, String> {
         match doc.get("seedcracker").and_then(Value::as_u64) {
             Some(FORMAT) => {}
             Some(v) => return Err(format!("format {v}, this client reads {FORMAT}")),
@@ -219,23 +229,63 @@ fn find_from_json(v: &Value) -> Result<(Observation, Drawn), String> {
     ))
 }
 
-pub(super) fn load() -> Option<Cache> {
-    let text = SEED_CRACKER_CACHE.load()?;
-    match Cache::parse(&text) {
+fn stored() -> Vec<Value> {
+    let Some(text) = SEED_CRACKER_CACHE.load() else {
+        return Vec::new();
+    };
+    let doc: Value = match serde_json::from_str(text.trim()) {
+        Ok(doc) => doc,
+        Err(e) => {
+            crate::log_warn!(
+                "seed_cracker",
+                "ignoring .seedcracker_cache: not JSON ({e})"
+            );
+            return Vec::new();
+        }
+    };
+    match doc.get("worlds").and_then(Value::as_array) {
+        Some(worlds) => worlds.clone(),
+        None if doc.get("hash").is_some() => vec![doc],
+        None => Vec::new(),
+    }
+}
+
+fn hash_of(world: &Value) -> Option<i64> {
+    seed_of(world.get("hash"))
+}
+
+pub(super) fn load(hash: i64) -> Option<Cache> {
+    let world = stored().into_iter().find(|w| hash_of(w) == Some(hash))?;
+    match Cache::from_value(&world) {
         Ok(c) => Some(c),
         Err(e) => {
-            crate::log_warn!("seed_cracker", "ignoring .seedcracker_cache: {e}");
+            crate::log_warn!(
+                "seed_cracker",
+                "ignoring .seedcracker_cache's world {hash}: {e}"
+            );
             None
         }
     }
 }
 
 pub(super) fn save(cache: &Cache) {
-    let text = cache.to_json();
-    SEED_CRACKER_CACHE.store(&text);
+    let doc = cache.to_value();
+    let mut worlds = stored();
+    worlds.retain(|w| hash_of(w) != Some(cache.hash));
+    let empty = cache.is_empty();
+    if !empty {
+        worlds.push(doc.clone());
+    }
+    let excess = worlds.len().saturating_sub(MAX_WORLDS);
+    worlds.drain(..excess);
+    SEED_CRACKER_CACHE.store(&json!({ "seedcracker": FORMAT, "worlds": worlds }).to_string());
     *SHARE
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = text;
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = if empty {
+        String::new()
+    } else {
+        doc.to_string()
+    };
 }
 
 pub(crate) fn share_pressed(now: f32) {
@@ -249,9 +299,7 @@ pub(crate) fn share_pressed(now: f32) {
             Some(held.clone())
         }
     };
-    let text = text
-        .or_else(|| SEED_CRACKER_CACHE.load())
-        .filter(|t| !t.trim().is_empty());
+    let text = text.or_else(|| stored().pop().map(|w| w.to_string()));
     let what = match text {
         Some(t) => {
             crate::platform::clipboard::set(&t);

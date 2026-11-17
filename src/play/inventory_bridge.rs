@@ -464,7 +464,7 @@ pub(crate) fn resolve_enchantments(
         .collect()
 }
 
-fn creative_stack(
+pub(crate) fn creative_stack(
     stack: &SlotStack,
     registries: Option<&azalea_core::registry_holder::RegistryHolder>,
 ) -> ItemStack {

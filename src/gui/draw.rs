@@ -13,12 +13,13 @@ use std::num::NonZeroU64;
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-    BlendFactor as F, BlendState, CachedRenderPipelineId, ColorTargetState, ColorWrites,
-    FragmentState, IndexFormat, LoadOp, Operations, PipelineCache, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType, ShaderStages,
-    SpecializedRenderPipeline, SpecializedRenderPipelines, StoreOp, TextureFormat,
-    TextureSampleType, TextureView, TextureViewId, VertexAttribute, VertexFormat, VertexState,
-    VertexStepMode,
+    BlendFactor as F, BlendState, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d,
+    FilterMode, FragmentState, IndexFormat, LoadOp, Operations, PipelineCache,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler,
+    SamplerBindingType, SamplerDescriptor, ShaderStages, SpecializedRenderPipeline,
+    SpecializedRenderPipelines, StoreOp, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewId,
+    VertexAttribute, VertexFormat, VertexState, VertexStepMode,
 };
 use bevy::render::renderer::{
     FlushCommands, RenderContext, RenderDevice, RenderGraph, RenderGraphSystems,
@@ -30,7 +31,7 @@ use bevy::shader::{Shader, ShaderDefVal};
 use bevy::window::WindowRef;
 
 use super::pool::{GLINT_UNIFORM_SIZE, GUI_VERTEX_STRIDE, GuiPool, GuiTextures};
-use crate::renderer::ssaa::SceneImage;
+use crate::renderer::ssaa::{MenuBlur, SceneImage};
 
 pub const UNIHEX_UV_BIAS: f32 = 2.0;
 
@@ -87,6 +88,8 @@ pub enum GuiPipelineKind {
     Gui,
     Blit,
     Vignette,
+    BlurDown,
+    BlurUp,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -157,12 +160,20 @@ impl SpecializedRenderPipeline for GuiPipeline {
                     )),
                     glint_def(),
                 ),
-                GuiPipelineKind::Blit => (
-                    "gui_scene_blit",
+                GuiPipelineKind::Blit | GuiPipelineKind::BlurDown | GuiPipelineKind::BlurUp => (
+                    match key.kind {
+                        GuiPipelineKind::BlurDown => "gui_blur_down",
+                        GuiPipelineKind::BlurUp => "gui_blur_up",
+                        _ => "gui_scene_blit",
+                    },
                     &self.shaders.blit,
                     self.blit_layout.clone(),
                     "blit_vertex",
-                    "blit_fragment",
+                    match key.kind {
+                        GuiPipelineKind::BlurDown => "blur_down_fragment",
+                        GuiPipelineKind::BlurUp => "blur_up_fragment",
+                        _ => "blit_fragment",
+                    },
                     Vec::new(),
                     None,
                     Vec::new(),
@@ -199,6 +210,112 @@ struct WindowPass {
     blit: Option<CachedRenderPipelineId>,
     gui: Option<CachedRenderPipelineId>,
     vignette: Option<CachedRenderPipelineId>,
+    blur: Option<BlurPipelines>,
+}
+
+#[derive(Clone, Copy)]
+struct BlurPipelines {
+    down: CachedRenderPipelineId,
+    up: CachedRenderPipelineId,
+    up_window: CachedRenderPipelineId,
+}
+
+const BLUR_LEVELS: usize = 3;
+
+const BLUR_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
+
+#[derive(Resource, Default)]
+struct BlurChain {
+    sampler: Option<Sampler>,
+    source: Option<TextureViewId>,
+    levels: Vec<TextureView>,
+    down: Vec<BindGroup>,
+    up: Vec<BindGroup>,
+}
+
+impl BlurChain {
+    fn ensure(
+        &mut self,
+        device: &RenderDevice,
+        layout: &bevy::render::render_resource::BindGroupLayout,
+        scene: &GpuImage,
+    ) {
+        let id = scene.texture_view.id();
+        if self.source == Some(id) {
+            return;
+        }
+        let sampler = self
+            .sampler
+            .get_or_insert_with(|| {
+                device.create_sampler(&SamplerDescriptor {
+                    label: Some("gui_blur"),
+                    mag_filter: FilterMode::Linear,
+                    min_filter: FilterMode::Linear,
+                    ..default()
+                })
+            })
+            .clone();
+        let size = scene.texture_descriptor.size;
+        self.levels = (1..=BLUR_LEVELS as u32)
+            .map(|n| {
+                let texture = device.create_texture(&TextureDescriptor {
+                    label: Some("gui_blur_level"),
+                    size: Extent3d {
+                        width: (size.width >> n).max(1),
+                        height: (size.height >> n).max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: BLUR_FORMAT,
+                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                texture.create_view(&TextureViewDescriptor::default())
+            })
+            .collect();
+        let group = |view: &TextureView| {
+            device.create_bind_group(
+                "gui_blur",
+                layout,
+                &BindGroupEntries::sequential((view, &sampler)),
+            )
+        };
+        self.down = std::iter::once(&scene.texture_view)
+            .chain(self.levels[..BLUR_LEVELS - 1].iter())
+            .map(&group)
+            .collect();
+        self.up = self.levels.iter().map(&group).collect();
+        self.source = Some(id);
+    }
+}
+
+fn blur_pass(
+    ctx: &mut RenderContext,
+    pipeline: &bevy::render::render_resource::RenderPipeline,
+    group: &BindGroup,
+    target: &TextureView,
+) {
+    let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+        label: Some("gui_blur"),
+        color_attachments: &[Some(RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Clear(LinearRgba::BLACK.into()),
+                store: StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_render_pipeline(pipeline);
+    pass.set_bind_group(0, group, &[]);
+    pass.draw(0..3, 0..1);
 }
 
 #[derive(Resource, Default)]
@@ -297,12 +414,21 @@ fn plan_gui_passes(
     gui_pipeline: Res<GuiPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<GuiPipeline>>,
     mut blit_group: ResMut<SceneBlitBindGroup>,
+    menu_blur: Option<Res<MenuBlur>>,
+    mut blur_chain: ResMut<BlurChain>,
+    #[cfg(feature = "benchmark_feature")] bench: Option<
+        Res<crate::renderer::benchmark::BenchImage>,
+    >,
 ) {
     plan.0.clear();
 
-    let scene_image = scene
-        .as_ref()
-        .and_then(|s| s.0.as_ref())
+    #[cfg(feature = "benchmark_feature")]
+    let bench_image = bench.as_ref().and_then(|b| b.0.as_ref());
+    #[cfg(not(feature = "benchmark_feature"))]
+    let bench_image: Option<&Handle<Image>> = None;
+
+    let scene_image = bench_image
+        .or_else(|| scene.as_ref().and_then(|s| s.0.as_ref()))
         .filter(|handle| {
             cameras.iter().any(|camera| {
                 matches!(&camera.target, Some(NormalizedRenderTarget::Image(t)) if t.handle == **handle)
@@ -324,6 +450,11 @@ fn plan_gui_passes(
             );
             blit_group.0 = Some((id, group));
         }
+    }
+    let blur_wanted = bench_image.is_none() && menu_blur.is_some_and(|b| b.0);
+    if blur_wanted && let Some(image) = scene_image {
+        let layout = pipeline_cache.get_bind_group_layout(&gui_pipeline.blit_layout);
+        blur_chain.ensure(&device, &layout, image);
     }
 
     for (&window, extracted) in windows.iter() {
@@ -384,6 +515,34 @@ fn plan_gui_passes(
             .any(|r| r.window == window && r.texture == super::painter::VIGNETTE_TEXTURE)
             .then(|| specialize(GuiPipelineKind::Vignette))
             .flatten();
+        let blur = if wants_blit && blur_wanted {
+            let up_window = specialize(GuiPipelineKind::BlurUp);
+            let mut level = |kind| {
+                let id = pipelines.specialize(
+                    &pipeline_cache,
+                    &gui_pipeline,
+                    GuiPipelineKey {
+                        kind,
+                        format: BLUR_FORMAT,
+                    },
+                );
+                pipeline_cache.get_render_pipeline(id).map(|_| id)
+            };
+            match (
+                level(GuiPipelineKind::BlurDown),
+                level(GuiPipelineKind::BlurUp),
+                up_window,
+            ) {
+                (Some(down), Some(up), Some(up_window)) => Some(BlurPipelines {
+                    down,
+                    up,
+                    up_window,
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         plan.0.push(WindowPass {
             window,
@@ -396,6 +555,7 @@ fn plan_gui_passes(
             blit,
             gui,
             vignette,
+            blur,
         });
     }
 }
@@ -487,6 +647,7 @@ pub(crate) fn gui_pass(world: &World, mut ctx: RenderContext) {
         .0
         .as_ref()
         .map(|(_, group)| group);
+    let chain = world.resource::<BlurChain>();
 
     let recorder = ctx.diagnostic_recorder();
     let recorder = recorder.as_deref();
@@ -494,6 +655,23 @@ pub(crate) fn gui_pass(world: &World, mut ctx: RenderContext) {
         let Some(attachment) = attachments.get(&pass.target) else {
             continue;
         };
+
+        let blur = pass.blur.and_then(|ids| {
+            let get = |id| pipeline_cache.get_render_pipeline(id);
+            let ready = chain.levels.len() == BLUR_LEVELS
+                && chain.down.len() == BLUR_LEVELS
+                && chain.up.len() == BLUR_LEVELS;
+            Some((get(ids.down)?, get(ids.up)?, get(ids.up_window)?)).filter(|_| ready)
+        });
+        if let Some((down, up, _)) = blur {
+            for i in 0..BLUR_LEVELS {
+                blur_pass(&mut ctx, down, &chain.down[i], &chain.levels[i]);
+            }
+            for i in (1..BLUR_LEVELS).rev() {
+                blur_pass(&mut ctx, up, &chain.up[i], &chain.levels[i - 1]);
+            }
+        }
+
         let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("gui"),
             color_attachments: &[Some(attachment.get_attachment(Some(pass.clear)))],
@@ -504,7 +682,11 @@ pub(crate) fn gui_pass(world: &World, mut ctx: RenderContext) {
         });
         let span = recorder.pass_span(&mut render_pass, "gui");
 
-        if let (Some(id), Some(group)) = (pass.blit, blit_group)
+        if let Some((_, _, up_window)) = blur {
+            render_pass.set_render_pipeline(up_window);
+            render_pass.set_bind_group(0, &chain.up[0], &[]);
+            render_pass.draw(0..3, 0..1);
+        } else if let (Some(id), Some(group)) = (pass.blit, blit_group)
             && let Some(pipeline) = pipeline_cache.get_render_pipeline(id)
         {
             render_pass.set_render_pipeline(pipeline);
@@ -600,6 +782,7 @@ pub fn build(app: &mut App) {
         .init_resource::<GuiImageViews>()
         .init_resource::<GuiImageGroups>()
         .init_resource::<SceneBlitBindGroup>()
+        .init_resource::<BlurChain>()
         .init_resource::<GuiPlan>()
         .init_resource::<GuiSwapchainRequests>()
         .init_resource::<SpecializedRenderPipelines<GuiPipeline>>()

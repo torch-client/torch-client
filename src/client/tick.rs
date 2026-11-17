@@ -131,6 +131,7 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
     crate::client::cooldowns::tick();
 
     let world = bot.world().ok();
+    let ticks_connected = bot.ticks_connected();
 
     #[cfg(feature = "audio")]
     crate::play::player_sounds::tick(bot);
@@ -168,6 +169,7 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
         if let Some(registries) = registries {
             crate::items::dispatch::refresh_trims(registries);
             crate::items::kinetic::refresh_quick_charge(registries);
+            publish_tip_registries(registries, ticks_connected);
         }
         let menu_slots: Arc<[SlotStack]> = bot
             .menu()
@@ -368,9 +370,16 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
 
     let attack_delay = {
         use azalea::attack::get_attack_strength_delay;
-        bot.component::<azalea::entity::Attributes>()
-            .map(|a| get_attack_strength_delay(&a))
-            .unwrap_or(DEFAULT_ATTACK_DELAY)
+        match bot.component::<azalea::entity::Attributes>() {
+            Ok(a) => {
+                crate::items::tips::publish_player(
+                    a.attack_speed.base,
+                    crate::client::tracking::difficulty() == 0,
+                );
+                get_attack_strength_delay(&a)
+            }
+            Err(_) => DEFAULT_ATTACK_DELAY,
+        }
     };
     let (attack_ticks, swap_ticks) = attack_strength_ticker(bot, &hotbar, hotbar_sel);
     let attack_strength = if attack_delay > 0.0 {
@@ -596,8 +605,30 @@ pub(crate) fn reset_session_locals(blocking: bool) {
     if let Some(mut ticker) = ticker {
         *ticker = Ticker::default();
     }
+    crate::items::tips::publish(None);
+    TIP_TICKS.store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
     #[cfg(feature = "audio")]
     crate::play::player_sounds::reset(blocking);
+}
+
+static TIP_TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+static TIP_PRINT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn publish_tip_registries(registries: &azalea_core::registry_holder::RegistryHolder, ticks: u64) {
+    use std::sync::atomic::Ordering;
+    let entries: usize = registries
+        .extra
+        .values()
+        .map(|r| r.map.len())
+        .sum::<usize>()
+        + registries.enchantment.map.len()
+        + registries.dimension_type.map.len();
+    let print = ((registries.extra.len() as u64) << 32) | entries as u64;
+    let last_ticks = TIP_TICKS.swap(ticks, Ordering::Relaxed);
+    let last_print = TIP_PRINT.swap(print, Ordering::Relaxed);
+    if ticks < last_ticks || print != last_print {
+        crate::items::tips::publish(Some(Arc::new(registries.clone())));
+    }
 }
 
 fn note_movement_write(what: &str, e: impl std::fmt::Display) {

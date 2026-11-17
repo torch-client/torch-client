@@ -187,14 +187,12 @@ const MAP_Z_OFFSET: f32 = -0.01;
 
 const MAP_BORDER_PIXELS: f32 = 7.0;
 
-const DECORATION_Z: f32 = -0.02;
-const DECORATION_Z_OFFSET: f32 = -0.001;
+const MAP_LAYER_BIAS: f32 = 8.0;
 
-const DECORATION_SCALE: [f32; 3] = [4.0, 4.0, 3.0];
-
-const LABEL_Z: f32 = -0.025 - 0.1;
-const LABEL_BACKGROUND: u32 = 0x8000_0000;
-const LABEL_MAX_SCALE: f32 = 6.0 / 9.0;
+fn map_layer(mut material: HandMaterial, layer: u8) -> HandMaterial {
+    material.base.depth_bias = f32::from(layer) * MAP_LAYER_BIAS;
+    material
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hand {
@@ -893,36 +891,6 @@ fn map_picture_mesh() -> Mesh {
     map_quad(0.0, MAP_EDGE_PIXELS, MAP_Z_OFFSET)
 }
 
-fn decoration_mesh(decorations: &[crate::session::MapDecoration]) -> Mesh {
-    let mut out = crate::entities::quads::QuadMesh::new();
-    for (index, decoration) in decorations.iter().enumerate() {
-        let Some((u0, u1)) = crate::renderer::maps::decoration_uv(decoration.kind) else {
-            continue;
-        };
-        let turn = decoration.rot as f32 * 360.0 / 16.0;
-        let pose = Mat4::from_translation(Vec3::new(
-            decoration.x as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0,
-            decoration.y as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0,
-            DECORATION_Z,
-        )) * Mat4::from_rotation_z(turn * DEG_TO_RAD)
-            * Mat4::from_scale(Vec3::from(DECORATION_SCALE))
-            * Mat4::from_translation(Vec3::new(-0.125, 0.125, 0.0));
-        let z = index as f32 * DECORATION_Z_OFFSET;
-        let corner = |x: f32, y: f32| pose.transform_point3(Vec3::new(x, y, z)).to_array();
-        out.quad(
-            [
-                corner(-1.0, 1.0),
-                corner(1.0, 1.0),
-                corner(1.0, -1.0),
-                corner(-1.0, -1.0),
-            ],
-            [[u0, 0.0], [u1, 0.0], [u1, 1.0], [u0, 1.0]],
-            [0.0, 0.0, 1.0],
-        );
-    }
-    out.finish()
-}
-
 fn label_mesh(
     decorations: &[crate::session::MapDecoration],
     atlas: Option<&crate::gui::atlas::GuiAtlas>,
@@ -933,27 +901,7 @@ fn label_mesh(
     if let Some(atlas) = atlas {
         let mut painter = crate::gui::painter::Painter::new(atlas, 0);
         painter.unihex_enabled = false;
-        for decoration in decorations {
-            let Some(name) = decoration.name.as_deref() else {
-                continue;
-            };
-            let width = atlas.font.width(name);
-            let scale = (25.0 / width).clamp(0.0, LABEL_MAX_SCALE);
-            let start = painter.positions.len();
-            painter.fill(
-                -1.0,
-                -1.0,
-                width + 1.0,
-                crate::text::LINE_HEIGHT + 1.0,
-                LABEL_BACKGROUND,
-            );
-            painter.text(name, 0.0, 0.0, false);
-            let x = decoration.x as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0 - width * scale / 2.0;
-            let y = decoration.y as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0 + 4.0;
-            for position in &mut painter.positions[start..] {
-                *position = [x + position[0] * scale, y + position[1] * scale, LABEL_Z];
-            }
-        }
+        crate::renderer::maps::paint_labels(&mut painter, decorations, Mat4::IDENTITY);
         bufs = painter.into_buffers();
     }
     let mut mesh = Mesh::new(
@@ -1220,14 +1168,15 @@ fn setup_hand(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<HandMaterial>>,
     glint: Option<Res<super::glint::GlintTexture>>,
+    mut map_textures: ResMut<crate::renderer::maps::MapTextures>,
 ) {
     let Some(skin) = super::skin::load_default_skin(&mut images, "first-person hand") else {
         return;
     };
 
-    let mut cutout = |texture: Option<Handle<Image>>| materials.add(cutout_material(texture));
-    let base = cutout(Some(skin.clone()));
-    let overlay = cutout(Some(skin));
+    let mut add = |material: HandMaterial| materials.add(material);
+    let base = add(cutout_material(Some(skin.clone())));
+    let overlay = add(cutout_material(Some(skin)));
     let paper = |images: &mut Assets<Image>, name: &str| {
         super::skin::load_texture(images, &format!("textures/map/{name}.png"), "held map")
     };
@@ -1239,21 +1188,31 @@ fn setup_hand(
         slim_arm: [RIGHT_ARM, LEFT_ARM].map(|def| meshes.add(arm_box_mesh(true, def.arm))),
         #[cfg(feature = "skins")]
         slim_sleeve: [RIGHT_ARM, LEFT_ARM].map(|def| meshes.add(arm_box_mesh(true, def.sleeve))),
-        map_background: cutout(paper(&mut images, "map_background")),
-        map_checkerboard: cutout(paper(&mut images, "map_background_checkerboard")),
-        map_picture: std::array::from_fn(|_| cutout(None)),
-        decorations: cutout(Some(crate::renderer::maps::build_decoration_sheet(
-            &mut images,
-        ))),
-        item: std::array::from_fn(|_| cutout(None)),
-        labels: materials.add(hand_material(StandardMaterial {
-            base_color: Color::WHITE,
-            unlit: true,
-            alpha_mode: AlphaMode::Blend,
-            double_sided: true,
-            cull_mode: None,
-            ..default()
-        })),
+        map_background: add(map_layer(
+            cutout_material(paper(&mut images, "map_background")),
+            0,
+        )),
+        map_checkerboard: add(map_layer(
+            cutout_material(paper(&mut images, "map_background_checkerboard")),
+            0,
+        )),
+        map_picture: std::array::from_fn(|_| add(map_layer(cutout_material(None), 1))),
+        decorations: add(map_layer(
+            cutout_material(Some(map_textures.decoration_sheet(&mut images))),
+            2,
+        )),
+        item: std::array::from_fn(|_| add(cutout_material(None))),
+        labels: add(map_layer(
+            hand_material(StandardMaterial {
+                base_color: Color::WHITE,
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            }),
+            3,
+        )),
         base,
         overlay,
     };
@@ -1403,7 +1362,7 @@ fn setup_hand(
             "picture",
         );
         let map_decorations = map_piece(
-            meshes.add(decoration_mesh(&[])),
+            meshes.add(crate::renderer::maps::decoration_mesh(&[])),
             assets.decorations.clone(),
             "decorations",
         );
@@ -1778,7 +1737,7 @@ fn bind_map(
     set_visible(nodes, decorations, !list.is_empty());
     if state.decorations_built != Some((map_id, revision)) {
         if let Ok((mut mesh, _)) = map_nodes.get_mut(decorations) {
-            mesh.0 = meshes.add(decoration_mesh(list));
+            mesh.0 = meshes.add(crate::renderer::maps::decoration_mesh(list));
         }
         state.decorations_built = Some((map_id, revision));
     }
@@ -2464,50 +2423,6 @@ mod tests {
         assert!((main_pose.translation.z - -0.75).abs() < 1e-5);
         let looking_up = one_handed_map(&map_frame(Hand::Main, -90.0));
         assert_eq!(looking_up.transforms().0.translation, main_pose.translation);
-    }
-
-    #[test]
-    fn hand_decoration_mesh_has_one_quad_per_marker() {
-        use crate::session::MapDecoration;
-
-        let marker = |kind: u8| MapDecoration {
-            kind,
-            x: 0,
-            y: 0,
-            rot: 0,
-            name: None,
-        };
-        assert_eq!(decoration_mesh(&[]).count_vertices(), 0);
-        assert_eq!(decoration_mesh(&[marker(0)]).count_vertices(), 4);
-        assert_eq!(
-            decoration_mesh(&[marker(0), marker(34)]).count_vertices(),
-            8
-        );
-        assert_eq!(decoration_mesh(&[marker(35)]).count_vertices(), 0);
-    }
-
-    #[test]
-    fn hand_decoration_sits_at_the_map_centre() {
-        use crate::session::MapDecoration;
-
-        let mesh = decoration_mesh(&[MapDecoration {
-            kind: 0,
-            x: 0,
-            y: 0,
-            rot: 0,
-            name: None,
-        }]);
-        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
-            Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) => v.clone(),
-            _ => panic!("no positions"),
-        };
-        let xs: Vec<f32> = positions.iter().map(|p| p[0]).collect();
-        let (min, max) = (
-            xs.iter().copied().fold(f32::MAX, f32::min),
-            xs.iter().copied().fold(f32::MIN, f32::max),
-        );
-        assert!((max - min - 8.0).abs() < 1e-5, "{min}..{max}");
-        assert!(((min + max) / 2.0 - (MAP_EDGE_PIXELS / 2.0 - 0.5)).abs() < 1e-5);
     }
 
     fn hand_clip(p: Vec3, aspect: f32) -> Vec4 {

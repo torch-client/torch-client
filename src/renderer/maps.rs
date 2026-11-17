@@ -5,48 +5,73 @@ use bevy::prelude::*;
 use crate::client::tracking::{MAP_BYTES, MAP_EDGE};
 use crate::session::MapDecoration;
 use crate::util::map_color::rgba_from_packed_id;
+use crate::util::mth::DEG_TO_RAD;
 
 pub const MAP_TEXTURE_PREFIX: &str = "map/";
 
-pub const DECORATION_SPRITES: [&str; 35] = [
-    "player",
-    "frame",
-    "red_marker",
-    "blue_marker",
-    "target_x",
-    "target_point",
-    "player_off_map",
-    "player_off_limits",
-    "woodland_mansion",
-    "ocean_monument",
-    "white_banner",
-    "orange_banner",
-    "magenta_banner",
-    "light_blue_banner",
-    "yellow_banner",
-    "lime_banner",
-    "pink_banner",
-    "gray_banner",
-    "light_gray_banner",
-    "cyan_banner",
-    "purple_banner",
-    "blue_banner",
-    "brown_banner",
-    "green_banner",
-    "red_banner",
-    "black_banner",
-    "red_x",
-    "desert_village",
-    "plains_village",
-    "savanna_village",
-    "snowy_village",
-    "taiga_village",
-    "jungle_temple",
-    "swamp_hut",
-    "trial_chambers",
+pub const DECORATION_ATLAS: &str = "map_decorations";
+
+pub struct DecorationType {
+    pub sprite: &'static str,
+    pub on_frame: bool,
+}
+
+const fn decoration(sprite: &'static str, on_frame: bool) -> DecorationType {
+    DecorationType { sprite, on_frame }
+}
+
+pub const DECORATION_TYPES: [DecorationType; 35] = [
+    decoration("player", false),
+    decoration("frame", true),
+    decoration("red_marker", false),
+    decoration("blue_marker", false),
+    decoration("target_x", true),
+    decoration("target_point", true),
+    decoration("player_off_map", false),
+    decoration("player_off_limits", false),
+    decoration("woodland_mansion", true),
+    decoration("ocean_monument", true),
+    decoration("white_banner", true),
+    decoration("orange_banner", true),
+    decoration("magenta_banner", true),
+    decoration("light_blue_banner", true),
+    decoration("yellow_banner", true),
+    decoration("lime_banner", true),
+    decoration("pink_banner", true),
+    decoration("gray_banner", true),
+    decoration("light_gray_banner", true),
+    decoration("cyan_banner", true),
+    decoration("purple_banner", true),
+    decoration("blue_banner", true),
+    decoration("brown_banner", true),
+    decoration("green_banner", true),
+    decoration("red_banner", true),
+    decoration("black_banner", true),
+    decoration("red_x", true),
+    decoration("desert_village", true),
+    decoration("plains_village", true),
+    decoration("savanna_village", true),
+    decoration("snowy_village", true),
+    decoration("taiga_village", true),
+    decoration("jungle_temple", true),
+    decoration("swamp_hut", true),
+    decoration("trial_chambers", true),
 ];
 
+pub fn shows_on_item_frame(kind: u8) -> bool {
+    DECORATION_TYPES
+        .get(kind as usize)
+        .is_some_and(|t| t.on_frame)
+}
+
 const DECORATION_PX: u32 = 8;
+
+const MAP_EDGE_PIXELS: f32 = MAP_EDGE as f32;
+
+const DECORATION_Z: f32 = -0.02;
+const DECORATION_Z_OFFSET: f32 = -0.001;
+
+const DECORATION_SCALE: [f32; 3] = [4.0, 4.0, 3.0];
 
 struct MapEntry {
     image: Handle<Image>,
@@ -57,6 +82,7 @@ struct MapEntry {
 #[derive(Resource, Default)]
 pub struct MapTextures {
     by_id: HashMap<i32, MapEntry>,
+    sheet: Option<Handle<Image>>,
 }
 
 impl MapTextures {
@@ -73,9 +99,19 @@ impl MapTextures {
         let entry = self.by_id.get(&id)?;
         Some((&entry.decorations, entry.revision))
     }
+
+    pub fn decoration_sheet(&mut self, images: &mut Assets<Image>) -> Handle<Image> {
+        self.sheet
+            .get_or_insert_with(|| build_decoration_sheet(images))
+            .clone()
+    }
+
+    pub fn sheet(&self) -> Option<Handle<Image>> {
+        self.sheet.clone()
+    }
 }
 
-pub fn build_decoration_sheet(images: &mut Assets<Image>) -> Handle<Image> {
+fn build_decoration_sheet(images: &mut Assets<Image>) -> Handle<Image> {
     let sheet = decoration_pixels();
     let handle = images.add(crate::renderer::rgba_image(
         sheet.width(),
@@ -88,11 +124,11 @@ pub fn build_decoration_sheet(images: &mut Assets<Image>) -> Handle<Image> {
 }
 
 fn decoration_pixels() -> image::RgbaImage {
-    let count = DECORATION_SPRITES.len() as u32;
+    let count = DECORATION_TYPES.len() as u32;
     let width = count * DECORATION_PX;
     let mut pixels = vec![0u8; (width * DECORATION_PX * 4) as usize];
     let dir = crate::assets_root().join("textures/map/decorations");
-    for (index, name) in DECORATION_SPRITES.iter().enumerate() {
+    for (index, name) in DECORATION_TYPES.iter().map(|t| t.sprite).enumerate() {
         let path = dir.join(format!("{name}.png"));
         let decoded = match crate::platform::assets::open_gui_image(&path) {
             Ok(image) => image,
@@ -122,9 +158,80 @@ fn decoration_pixels() -> image::RgbaImage {
 }
 
 pub fn decoration_uv(kind: u8) -> Option<(f32, f32)> {
-    let count = DECORATION_SPRITES.len() as f32;
+    let count = DECORATION_TYPES.len() as f32;
     let index = kind as usize;
-    (index < DECORATION_SPRITES.len()).then(|| (index as f32 / count, (index as f32 + 1.0) / count))
+    (index < DECORATION_TYPES.len()).then(|| (index as f32 / count, (index as f32 + 1.0) / count))
+}
+
+pub fn decoration_mesh(decorations: &[MapDecoration]) -> Mesh {
+    let mut out = crate::entities::quads::QuadMesh::new();
+    for (count, decoration) in decorations.iter().enumerate() {
+        let Some((u0, u1)) = decoration_uv(decoration.kind) else {
+            continue;
+        };
+        let turn = decoration.rot as f32 * 360.0 / 16.0;
+        let pose = Mat4::from_translation(Vec3::new(
+            decoration.x as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0,
+            decoration.y as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0,
+            DECORATION_Z,
+        )) * Mat4::from_rotation_z(turn * DEG_TO_RAD)
+            * Mat4::from_scale(Vec3::from(DECORATION_SCALE))
+            * Mat4::from_translation(Vec3::new(-0.125, 0.125, 0.0));
+        let z = count as f32 * DECORATION_Z_OFFSET;
+        let corner = |x: f32, y: f32| pose.transform_point3(Vec3::new(x, y, z)).to_array();
+        out.quad(
+            [
+                corner(-1.0, 1.0),
+                corner(1.0, 1.0),
+                corner(1.0, -1.0),
+                corner(-1.0, -1.0),
+            ],
+            [[u0, 0.0], [u1, 0.0], [u1, 1.0], [u0, 1.0]],
+            [0.0, 0.0, 1.0],
+        );
+    }
+    out.finish()
+}
+
+const LABEL_GLYPH_Z: f32 = -0.025 - 0.1;
+const LABEL_PLATE_Z: f32 = -0.025 - 0.1 + 0.01;
+const LABEL_BACKGROUND: u32 = 0x8000_0000;
+const LABEL_MAX_SCALE: f32 = 6.0 / 9.0;
+const LABEL_DROP: f32 = 4.0;
+
+pub fn paint_labels(
+    painter: &mut crate::gui::painter::Painter,
+    decorations: &[MapDecoration],
+    pose: Mat4,
+) {
+    for decoration in decorations {
+        let Some(name) = decoration.name.as_deref() else {
+            continue;
+        };
+        let width = painter.atlas.font.width(name);
+        let scale = (25.0 / width).clamp(0.0, LABEL_MAX_SCALE);
+        let x = decoration.x as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0 - width * scale / 2.0;
+        let y = decoration.y as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0 + LABEL_DROP;
+        let plate = painter.positions.len();
+        painter.fill(
+            -1.0,
+            -1.0,
+            width + 1.0,
+            crate::text::LINE_HEIGHT + 1.0,
+            LABEL_BACKGROUND,
+        );
+        let glyphs = painter.positions.len();
+        painter.text(name, 0.0, 0.0, false);
+        for (i, position) in painter.positions[plate..].iter_mut().enumerate() {
+            let z = if plate + i < glyphs {
+                LABEL_PLATE_Z
+            } else {
+                LABEL_GLYPH_Z
+            };
+            let local = Vec3::new(x + position[0] * scale, y + position[1] * scale, z);
+            *position = pose.transform_point3(local).to_array();
+        }
+    }
 }
 
 pub fn upload_maps(
@@ -132,6 +239,9 @@ pub fn upload_maps(
     mut images: ResMut<Assets<Image>>,
     mut maps: ResMut<MapTextures>,
 ) {
+    if maps.sheet.is_none() {
+        maps.decoration_sheet(&mut images);
+    }
     let (updates, cleared) = {
         let mut s = shared.0.lock().unwrap();
         if s.session.map_updates.is_empty() && !s.session.clear_maps {
@@ -183,6 +293,64 @@ pub fn upload_maps(
         {
             entry.decorations = decorations;
             entry.revision = entry.revision.wrapping_add(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn marker(kind: u8) -> MapDecoration {
+        MapDecoration {
+            kind,
+            x: 0,
+            y: 0,
+            rot: 0,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn decoration_mesh_has_one_quad_per_marker() {
+        assert_eq!(decoration_mesh(&[]).count_vertices(), 0);
+        assert_eq!(decoration_mesh(&[marker(0)]).count_vertices(), 4);
+        assert_eq!(
+            decoration_mesh(&[marker(0), marker(34)]).count_vertices(),
+            8
+        );
+        assert_eq!(decoration_mesh(&[marker(35)]).count_vertices(), 0);
+    }
+
+    #[test]
+    fn decoration_sits_at_the_map_centre() {
+        let mesh = decoration_mesh(&[marker(0)]);
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) => v.clone(),
+            _ => panic!("no positions"),
+        };
+        let xs: Vec<f32> = positions.iter().map(|p| p[0]).collect();
+        let (min, max) = (
+            xs.iter().copied().fold(f32::MAX, f32::min),
+            xs.iter().copied().fold(f32::MIN, f32::max),
+        );
+        assert!((max - min - 8.0).abs() < 1e-5, "{min}..{max}");
+        assert!(((min + max) / 2.0 - (MAP_EDGE_PIXELS / 2.0 - 0.5)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn frame_filter_follows_the_registry() {
+        for (kind, on_frame) in [
+            (0, false),
+            (1, true),
+            (2, false),
+            (3, false),
+            (6, false),
+            (10, true),
+            (34, true),
+            (35, false),
+        ] {
+            assert_eq!(shows_on_item_frame(kind), on_frame, "kind {kind}");
         }
     }
 }

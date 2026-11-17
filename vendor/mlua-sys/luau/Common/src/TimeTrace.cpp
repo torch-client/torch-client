@@ -1,4 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/TimeTrace.h"
 
 #include "Luau/StringUtils.h"
@@ -80,8 +79,8 @@ uint32_t getClockMicroseconds()
 
     return uint32_t((getClockTimestamp() - start) * period);
 }
-} // namespace TimeTrace
-} // namespace Luau
+}
+}
 
 #if defined(LUAU_ENABLE_TIME_TRACE)
 
@@ -161,7 +160,6 @@ void flushEvents(GlobalContext& context, uint32_t threadId, const std::vector<Ev
 
     const char* rawData = data.data();
 
-    // Formatting state
     bool unfinishedEnter = false;
     bool unfinishedArgs = false;
 
@@ -235,7 +233,6 @@ void flushEvents(GlobalContext& context, uint32_t threadId, const std::vector<Ev
             break;
         }
 
-        // Don't want to hit the string capacity and reallocate
         if (temp.size() > tempReserve - 1024)
         {
             fwrite(temp.data(), 1, temp.size(), context.traceFile);
@@ -260,7 +257,6 @@ void flushEvents(GlobalContext& context, uint32_t threadId, const std::vector<Ev
 
 ThreadContext& getThreadContext()
 {
-    // Check custom provider that which might implement a custom TLS
     if (auto provider = threadContextProvider())
         return provider();
 
@@ -272,7 +268,7 @@ uint16_t createScopeData(const char* name, const char* category)
 {
     return createToken(*Luau::TimeTrace::getGlobalContext(), name, category);
 }
-} // namespace TimeTrace
-} // namespace Luau
+}
+}
 
 #endif

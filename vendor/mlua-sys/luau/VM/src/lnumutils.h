@@ -1,5 +1,3 @@
-// This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-// This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #pragma once
 
 #include <math.h>
@@ -65,7 +63,6 @@ inline float luai_lerpf(float a, float b, float t)
 
 #define luai_num2int(i, d) ((i) = (int)(d))
 
-// On MSVC in 32-bit, double to unsigned cast compiles into a call to __dtoui3, so we invoke x87->int64 conversion path manually
 #if defined(_MSC_VER) && defined(_M_IX86)
 #define luai_num2unsigned(i, n) \
     { \

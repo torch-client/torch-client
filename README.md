@@ -5,7 +5,7 @@
 **Supported versions:** `26.1.1` and `1.21.11`. One build joins both; there is no separate install per version.
 
 > [!WARNING]
-> Torch is in early development. Some features are missing and things will break. [Report a bug or suggest a feature](https://github.com/torch-client/torch-client/issues/new/choose). Or join [the discord server](https://discord.gg/qqXSHEYXaq)
+> Torch is in early development. Some features are missing and things will break. [Report a bug or suggest a feature](https://github.com/torch-client/torch-client/issues/new/choose). Or join [the discord server](https://discord.gg/qqXSHEYXaq); or the [Matrix community](https://matrix.to/#/#torch-client:matrix.org))
 
 
 <img width="960" height="526" alt="preview" src="https://github.com/user-attachments/assets/7139ff66-3257-4841-b810-75796659f7b3" />

@@ -57,7 +57,6 @@ web_mobile = [
 ]
 
 android = [
-    "update_checker",
     "click_gui",
     "lua_mods",
     "mobile_ui",

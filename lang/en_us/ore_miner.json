@@ -1,0 +1,21 @@
+{
+  "ore_miner.end.done": "OreMiner: done; mined %s, not ore %s, unreachable %s",
+  "ore_miner.end.done.back": "OreMiner: done; mined %s, not ore %s, unreachable %s, back home",
+  "ore_miner.end.done.failed": "OreMiner: done; mined %s, not ore %s, unreachable %s, could not get home",
+  "ore_miner.end.done.home_elsewhere": "OreMiner: done; mined %s, not ore %s, unreachable %s, home is in another world",
+  "ore_miner.end.done.no_home": "OreMiner: done; mined %s, not ore %s, unreachable %s, no home set",
+  "ore_miner.end.full": "OreMiner: stopped, the inventory is full; mined %s, not ore %s, unreachable %s",
+  "ore_miner.end.hazard": "OreMiner: stopped, there is a fluid behind the next ore; mined %s, not ore %s, unreachable %s",
+  "ore_miner.end.need_esp": "OreMiner: stopped, switch Xray or OreESP on, or set Source to Seed Xray; mined %s, not ore %s, unreachable %s",
+  "ore_miner.end.need_seed": "OreMiner: stopped, Seed Xray has to be on with a seed for this Source; mined %s, not ore %s, unreachable %s",
+  "ore_miner.end.no_blocks": "OreMiner: stopped, no %s in render distance; mined %s, not ore %s, unreachable %s",
+  "ore_miner.end.no_kinds": "OreMiner: stopped, no ore family is switched on in Ores; mined %s, not ore %s, unreachable %s",
+  "ore_miner.end.no_ore": "OreMiner: no ore in range; mined %s, not ore %s, unreachable %s",
+  "ore_miner.end.no_route": "OreMiner: stopped, no route reaches the ores; mined %s, not ore %s, unreachable %s",
+  "ore_miner.end.stalled": "OreMiner: stopped, blocks are not breaking; mined %s, not ore %s, unreachable %s",
+  "ore_miner.home_set": "Home set",
+  "ore_miner.home_set_at": "OreMiner: home set at %s %s %s",
+  "ore_miner.no_seed_fallback": "OreMiner: Seed Xray has no seed, so the ores come from Xray or OreESP",
+  "ore_miner.no_tool": "OreMiner: no tool in the hotbar gets drops from some of these ores, so they are left",
+  "ore_miner.switched_auto_mine_off": "OreMiner: switched AutoMine off, the two cannot run together"
+}

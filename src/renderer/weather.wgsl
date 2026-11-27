@@ -57,7 +57,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
     let snow = (vertex.packed >> 8u) & 1u;
     out.snow = snow;
-    let ticks = globals.time * 20.0;
+    let ticks = globals.time * 20.0 * params.fade.w + params.fade.z;
     var uv = vertex.uv;
     if snow == 0u {
         let offset = -(ticks + vertex.column.z) / 32.0 * vertex.column.w;

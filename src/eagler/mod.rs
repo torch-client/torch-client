@@ -1,5 +1,7 @@
 mod handshake;
 pub(crate) use handshake::Refused;
+#[cfg(any(test, all(feature = "microsoft_web", target_arch = "wasm32")))]
+pub(crate) mod https;
 pub(crate) mod proxy;
 pub(crate) mod query;
 #[cfg(eagler_skins)]
@@ -70,9 +72,12 @@ async fn open_tunnel(target: &Target) -> eyre::Result<Tunnel> {
     let Some(destination) = &target.destination else {
         return open_relay(&target.url).await;
     };
-    let proxy = proxy::selected();
-    log_info!("net", "tunnel: going through the {} proxy", proxy.name);
-    match proxy.transport {
+    open_through(proxy::selected(), destination).await
+}
+
+async fn open_through(via: proxy::Proxy, destination: &proxy::Destination) -> eyre::Result<Tunnel> {
+    log_info!("net", "tunnel: going through the {} proxy", via.name);
+    match via.transport {
         proxy::Transport::Relay(base) => {
             open_relay(&format!("{base}{}", destination.authority())).await
         }
@@ -127,6 +132,16 @@ fn relayed_address(text: &str) -> Option<ServerAddr> {
         host: host.to_string(),
         port: port.parse().ok()?,
     })
+}
+
+#[cfg(all(feature = "microsoft_web", target_arch = "wasm32"))]
+async fn open_tcp(via: proxy::Proxy, host: &str, port: u16) -> eyre::Result<stream::Bridge> {
+    let destination = proxy::Destination {
+        host: host.to_string(),
+        port: Some(port),
+    };
+    let tunnel = open_through(via, &destination).await?;
+    Ok(stream::byte_stream(tunnel.socket, tunnel.wisp))
 }
 
 pub(crate) async fn tunnel_status(
@@ -243,11 +258,32 @@ mod tests {
     }
 }
 
+const LOGIN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+async fn login(
+    url: &str,
+    username: &str,
+    skin: Option<&[u8]>,
+) -> eyre::Result<(socket::Socket, azalea_auth::game_profile::GameProfile, u16)> {
+    log_info!("net", "eagler: opening a websocket to {url}");
+    let opening = socket::Socket::connect(url);
+    let mut socket = match crate::platform::time::timeout(handshake::STEP_TIMEOUT, opening).await {
+        Ok(socket) => socket?,
+        Err(()) => eyre::bail!(
+            "no websocket handshake from {url} within {} seconds",
+            handshake::STEP_TIMEOUT.as_secs()
+        ),
+    };
+    let (profile, version) = handshake::run(&mut socket, username, skin).await?;
+    Ok((socket, profile, version))
+}
+
 pub(crate) async fn prepare(address: &str, username: &str) -> eyre::Result<Option<ResolvedAddr>> {
     #[cfg(eagler_skins)]
     crate::gui::skinpick::wear(None, 0);
     #[cfg(eagler_skins)]
     skins::end();
+    stream::discard();
     let Some(target) = parse(address) else {
         return Ok(None);
     };
@@ -266,23 +302,24 @@ pub(crate) async fn prepare(address: &str, username: &str) -> eyre::Result<Optio
             socket: SocketAddr::from((Ipv4Addr::LOCALHOST, target.port)),
         }));
     }
-    log_info!("net", "eagler: opening a websocket to {}", target.url);
-    let opening = socket::Socket::connect(&target.url);
-    let mut socket = match crate::platform::time::timeout(handshake::STEP_TIMEOUT, opening).await {
-        Ok(socket) => socket?,
-        Err(()) => eyre::bail!(
-            "no websocket handshake from {} within {} seconds",
-            target.url,
-            handshake::STEP_TIMEOUT.as_secs()
-        ),
-    };
     #[cfg(eagler_skins)]
     let skin = crate::gui::skinpick::for_account(username);
     #[cfg(eagler_skins)]
     let wire = skin.as_ref().map(|s| s.wire.as_slice());
     #[cfg(not(eagler_skins))]
     let wire = None;
-    let (profile, version) = handshake::run(&mut socket, username, wire).await?;
+    let (socket, profile, version) = match login(&target.url, username, wire).await {
+        Err(e) if handshake::login_stalled(&e) => {
+            crate::log_warn!(
+                "net",
+                "eagler: {e}; trying once more in {} seconds",
+                LOGIN_RETRY_DELAY.as_secs()
+            );
+            crate::platform::time::sleep(LOGIN_RETRY_DELAY).await;
+            login(&target.url, username, wire).await?
+        }
+        outcome => outcome?,
+    };
     #[cfg(eagler_skins)]
     crate::gui::skinpick::wear(skin, profile.uuid.as_u128());
     log_info!(

@@ -109,7 +109,7 @@ pub fn step_capped(err: f32, rate: f32, dt: f32) -> f32 {
 }
 
 pub fn quantise(deg: f32) -> f32 {
-    let grid = crate::renderer::input::LOOK_SCALE;
+    let grid = crate::renderer::input::look_scale();
     (deg / grid).round() * grid
 }
 
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn a_turn_lands_on_the_pointer_grid() {
-        let grid = crate::renderer::input::LOOK_SCALE;
+        let grid = crate::renderer::input::look_scale();
         for deg in [0.0, 0.01, 0.37, -2.4, 17.9] {
             let q = quantise(deg);
             assert!(

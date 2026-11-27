@@ -1,9 +1,14 @@
+use crate::gui::clickevent::{self, Followup};
+use crate::gui::confirmcommand::{Accepted, Answer, CommandPrompt};
 use crate::gui::painter::Painter;
 use crate::gui::render::GuiInput;
 use crate::gui::tooltip::label;
 use crate::gui::widgets::{Button, MultiLineTextBox, TextBox, WIDGET_HEIGHT, WIDGET_WIDTH_BIG};
-use crate::gui::{Screen, ScreenCtx, tooltip};
-use crate::session::{Book, EditBookRequest, InteractionHand};
+use crate::gui::{Screen, ScreenCtx, confirmlink, tooltip};
+use crate::play::dialog::{Click, Submit};
+use crate::session::{Book, EditBookRequest, InteractionHand, SharedMutex};
+use crate::text::events::{self, Events, Hover, SpanEvent};
+use crate::text::{Font, Span};
 
 pub const IMAGE_W: f32 = 192.0;
 pub const IMAGE_H: f32 = 192.0;
@@ -99,22 +104,169 @@ pub fn forward_visible(page: usize, num_pages: usize) -> bool {
     num_pages > 0 && page + 1 < num_pages
 }
 
-pub fn page_text(p: &mut Painter, left: f32, top: f32, spans: &[crate::text::Span]) {
-    let mut lines = p.atlas.font.wrap(spans, TEXT_WIDTH);
-    for line in &mut lines {
-        for span in line.iter_mut() {
-            span.style.color = TEXT_COLOR;
+pub fn page_text(p: &mut Painter, left: f32, top: f32, spans: &[Span]) {
+    let lines = p.atlas.font.wrap(spans, TEXT_WIDTH);
+    draw_lines(p, left, top, &lines);
+}
+
+fn draw_lines(p: &mut Painter, left: f32, top: f32, lines: &[Vec<Span>]) {
+    for (i, line) in lines.iter().take(MAX_LINES).enumerate() {
+        p.text(
+            line,
+            left + TEXT_X,
+            top + TEXT_Y + i as f32 * LINE_HEIGHT,
+            false,
+        );
+    }
+}
+
+const LINE_HEIGHT: f32 = 9.0;
+
+#[derive(Default)]
+pub struct PageView {
+    page: Option<usize>,
+    source: Vec<Span>,
+    lines: Vec<Vec<Span>>,
+}
+
+impl PageView {
+    fn sync(&mut self, font: &Font, page: usize, spans: &[Span]) {
+        if self.page == Some(page) && self.source == spans {
+            return;
+        }
+        self.lines = font.wrap(spans, TEXT_WIDTH);
+        self.source.clear();
+        self.source.extend_from_slice(spans);
+        self.page = Some(page);
+    }
+
+    pub fn draw(&mut self, p: &mut Painter, left: f32, top: f32, page: usize, spans: &[Span]) {
+        self.sync(&p.atlas.font, page, spans);
+        draw_lines(p, left, top, &self.lines);
+    }
+
+    fn event_at<'e>(
+        &self,
+        font: &Font,
+        left: f32,
+        top: f32,
+        mx: f32,
+        my: f32,
+        events: &'e Events,
+    ) -> Option<&'e SpanEvent> {
+        events.as_ref()?;
+        let first = top + TEXT_Y;
+        if my < first {
+            return None;
+        }
+        let row = ((my - first) / LINE_HEIGHT) as usize;
+        let line = self.lines.iter().take(MAX_LINES).nth(row)?;
+        let mut x = left + TEXT_X;
+        if mx < x {
+            return None;
+        }
+        for span in line {
+            for c in span.text.chars() {
+                x += font.advance(c, span.style.bold);
+                if mx < x {
+                    return events::get(events, span.style);
+                }
+            }
+        }
+        None
+    }
+}
+
+#[derive(Default)]
+pub enum ReadOverlay {
+    #[default]
+    None,
+    Link(String),
+    Command(CommandPrompt),
+}
+
+pub struct Read<'a> {
+    pub input: GuiInput,
+    pub click: Option<Click>,
+    hover: Option<&'a SpanEvent>,
+}
+
+#[allow(clippy::too_many_arguments, reason = "one page, flat arguments")]
+pub fn read<'a>(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    view: &mut PageView,
+    overlay: &ReadOverlay,
+    left: f32,
+    top: f32,
+    page: usize,
+    spans: &[Span],
+    events: &'a Events,
+) -> Read<'a> {
+    view.draw(p, left, top, page, spans);
+    let mut input = ctx.input.clone();
+    if !matches!(overlay, ReadOverlay::None) {
+        input = confirmlink::masked(&input);
+        input.page_up = false;
+        input.page_down = false;
+        return Read {
+            input,
+            click: None,
+            hover: None,
+        };
+    }
+    let hover = input
+        .mouse
+        .and_then(|m| view.event_at(&p.atlas.font, left, top, m.x, m.y, events));
+    let click = (input.left_click)
+        .then(|| hover.and_then(|e| e.click.clone()))
+        .flatten();
+    if click.is_some() {
+        input.left_click = false;
+    }
+    Read {
+        input,
+        click,
+        hover,
+    }
+}
+
+impl Read<'_> {
+    pub fn tooltip(&self, p: &mut Painter, ctx: &ScreenCtx, advanced: bool) {
+        let (Some(event), Some(m)) = (self.hover, ctx.mouse()) else {
+            return;
+        };
+        match &event.hover {
+            Some(Hover::Lines(rows)) => tooltip::draw_lines(p, rows, m.x, m.y, ctx.vw, ctx.vh),
+            Some(Hover::Item(stack)) => {
+                tooltip::draw(p, stack, m.x, m.y, ctx.vw, ctx.vh, advanced, false)
+            }
+            None => {}
         }
     }
-    for (i, line) in lines.iter().take(MAX_LINES).enumerate() {
-        p.text(line, left + TEXT_X, top + TEXT_Y + i as f32 * 9.0, false);
+}
+
+pub fn shared_click(click: Click, overlay: &mut ReadOverlay, shared: &SharedMutex) {
+    match clickevent::dispatch(click, shared) {
+        Followup::Link(url) => *overlay = ReadOverlay::Link(url),
+        Followup::Dialog(dialog) => shared.lock().unwrap().session.dialog_show = Some(dialog),
+        Followup::Confirm(prompt) => *overlay = ReadOverlay::Command(prompt),
+        Followup::None | Followup::Suggest(_) => {}
     }
+}
+
+pub fn trim_command(command: &str) -> String {
+    command.strip_prefix('/').unwrap_or(command).to_string()
 }
 
 #[derive(Default)]
 pub struct BookState {
     pages: Vec<String>,
     view: Vec<Vec<crate::text::Span>>,
+    view_events: Vec<Events>,
+    pub(crate) page_view: PageView,
+    pub(crate) overlay: ReadOverlay,
+    pub(crate) lectern_click: Option<Click>,
     page: usize,
     slot: u32,
     field: MultiLineTextBox,
@@ -125,8 +277,33 @@ pub struct BookState {
 impl BookState {
     pub fn open_view(&mut self, book: &Book) {
         self.view = book.pages.to_vec();
+        self.view_events = book.events.to_vec();
         self.pages.clear();
         self.page = 0;
+        self.clear_overlay();
+    }
+
+    pub fn clear_overlay(&mut self) {
+        self.overlay = ReadOverlay::None;
+        self.lectern_click = None;
+    }
+
+    pub fn escape_overlay(&mut self, lectern: bool, shared: &SharedMutex) -> bool {
+        match std::mem::take(&mut self.overlay) {
+            ReadOverlay::None => false,
+            ReadOverlay::Link(_) => true,
+            ReadOverlay::Command(_) => {
+                if lectern {
+                    shared
+                        .lock()
+                        .unwrap()
+                        .session
+                        .inv_actions
+                        .push(crate::session::InvAction::Close);
+                }
+                true
+            }
+        }
     }
 
     pub fn open_edit(&mut self, book: &Book, hand: InteractionHand, selected: u8, author: &str) {
@@ -143,6 +320,7 @@ impl BookState {
         self.title = TextBox::new(TITLE_LENGTH, "");
         self.title.color = TEXT_COLOR;
         self.title.no_shadow = true;
+        self.title.centered = true;
         self.author = author.to_string();
     }
 
@@ -173,6 +351,8 @@ impl BookState {
         }
         if by > 0 {
             if self.page + 1 == self.pages.len() && self.pages.len() >= MAX_PAGES {
+                self.flush();
+                self.field.set_text(&self.pages[self.page]);
                 return;
             }
         } else if self.page == 0 {
@@ -191,28 +371,48 @@ impl BookState {
     }
 }
 
-pub fn draw_view(p: &mut Painter, state: &mut BookState, ctx: &ScreenCtx) -> Option<Screen> {
+pub fn draw_view(
+    p: &mut Painter,
+    state: &mut BookState,
+    ctx: &ScreenCtx,
+    shared: &SharedMutex,
+    advanced_tooltips: bool,
+) -> Option<BookOut> {
     let (left, top) = frame(p, ctx);
     let num_pages = state.view.len();
     state.page = clamp_page(state.page, num_pages);
 
-    if let Some(spans) = state.view.get(state.page) {
-        page_text(p, left, top, spans);
-    }
-    indicator(p, left, top, state.page, num_pages);
+    const NO_EVENTS: Events = None;
+    let overlay_was_up = !matches!(state.overlay, ReadOverlay::None);
+    let page = state.page;
+    let spans = state.view.get(page).map_or(&[][..], Vec::as_slice);
+    let events = state.view_events.get(page).unwrap_or(&NO_EVENTS);
+    let read = read(
+        p,
+        ctx,
+        &mut state.page_view,
+        &state.overlay,
+        left,
+        top,
+        page,
+        spans,
+        events,
+    );
+    indicator(p, left, top, page, num_pages);
+    let wctx = ctx.with_input(&read.input);
 
     let turn = arrows(
         p,
-        ctx,
+        &wctx,
         left,
         top,
-        back_visible(state.page),
-        forward_visible(state.page, num_pages),
+        back_visible(page),
+        forward_visible(page, num_pages),
         true,
     )
-    .saturating_add(page_key(ctx.input))
+    .saturating_add(page_key(wctx.input))
     .signum();
-    state.page = clamp_page(state.page.saturating_add_signed(turn as isize), num_pages);
+    let mut next_page = clamp_page(page.saturating_add_signed(turn as isize), num_pages);
 
     let x = ((ctx.vw - WIDGET_WIDTH_BIG) / 2.0).floor();
     let done = Button::new(
@@ -222,31 +422,128 @@ pub fn draw_view(p: &mut Painter, state: &mut BookState, ctx: &ScreenCtx) -> Opt
         WIDGET_HEIGHT,
         label!("gui.done"),
     );
-    done.draw(p, ctx).then_some(Screen::None)
+    let mut out = done.draw(p, &wctx).then_some(BookOut::Nav(Screen::None));
+
+    if matches!(state.overlay, ReadOverlay::None) {
+        read.tooltip(p, ctx, advanced_tooltips);
+    }
+    let click = read.click;
+    if let Some(click) = click {
+        match click {
+            Click::ChangePage(target) => {
+                next_page = clamp_page(target.saturating_sub(1).max(0) as usize, num_pages);
+            }
+            Click::RunCommand(command) => {
+                let command = trim_command(&command);
+                match crate::gui::confirmcommand::check(&command, shared) {
+                    Some(prompt) => state.overlay = ReadOverlay::Command(prompt),
+                    None => {
+                        crate::play::dialog::queue_submit(shared, Submit::RunCommand(command));
+                        out = Some(BookOut::Nav(Screen::None));
+                    }
+                }
+            }
+            other => shared_click(other, &mut state.overlay, shared),
+        }
+    }
+    state.page = next_page;
+
+    let fresh_input;
+    let ctx = if overlay_was_up {
+        ctx.with_input(ctx.input)
+    } else {
+        fresh_input = GuiInput {
+            left_click: false,
+            ..ctx.input.clone()
+        };
+        ctx.with_input(&fresh_input)
+    };
+    let ctx = &ctx;
+    match &state.overlay {
+        ReadOverlay::None => {}
+        ReadOverlay::Link(url) => {
+            if confirmlink::draw(p, ctx, url) {
+                state.overlay = ReadOverlay::None;
+            }
+        }
+        ReadOverlay::Command(prompt) => {
+            if let Some(answer) = prompt.draw(p, ctx, true, true) {
+                let accepted = matches!(answer, Answer::Accept).then(|| prompt.accept(true));
+                state.overlay = ReadOverlay::None;
+                match accepted {
+                    None => {}
+                    Some(Accepted::Run(command)) => {
+                        crate::play::dialog::queue_submit(shared, Submit::RunCommand(command));
+                        out = Some(BookOut::Nav(Screen::None));
+                    }
+                    Some(Accepted::Chat(text)) => out = Some(BookOut::Chat(text)),
+                    Some(Accepted::Copied) => out = Some(BookOut::Nav(Screen::None)),
+                }
+            }
+        }
+    }
+    out
 }
 
 pub enum BookOut {
     Nav(Screen),
     Send(EditBookRequest),
+    Chat(String),
 }
 
 pub fn draw_edit(p: &mut Painter, state: &mut BookState, ctx: &ScreenCtx) -> Option<BookOut> {
     let (left, top) = frame(p, ctx);
 
-    let turn = arrows(p, ctx, left, top, back_visible(state.page), true, true)
-        .saturating_add(page_key(ctx.input))
-        .signum();
+    let box_x = ((ctx.vw - TEXT_WIDTH) / 2.0).floor() - 8.0;
+    let box_y = 28.0;
+    let area = [box_x, box_y, TEXT_WIDTH + 8.0, 134.0];
+    let (field_x, field_y) = (box_x + 4.0, box_y + 4.0);
+
+    let on_box = ctx.mouse().is_some_and(|m| {
+        m.x >= area[0] && m.x < area[0] + area[2] && m.y >= area[1] && m.y < area[1] + area[3]
+    });
+    let arrow_input;
+    let arrow_ctx = if on_box && ctx.input.left_click {
+        arrow_input = GuiInput {
+            left_click: false,
+            ..ctx.input.clone()
+        };
+        ctx.with_input(&arrow_input)
+    } else {
+        ctx.with_input(ctx.input)
+    };
+
+    let turn = arrows(
+        p,
+        &arrow_ctx,
+        left,
+        top,
+        back_visible(state.page),
+        true,
+        true,
+    )
+    .saturating_add(page_key(ctx.input))
+    .signum();
     state.turn(turn);
     let num_pages = state.pages.len();
 
-    let field_x = ((ctx.vw - TEXT_WIDTH) / 2.0).floor() - 4.0;
-    let field_y = 28.0;
+    let field_input;
+    let field_in = if ctx.input.page_up || ctx.input.page_down {
+        field_input = GuiInput {
+            page_up: false,
+            page_down: false,
+            ..ctx.input.clone()
+        };
+        &field_input
+    } else {
+        ctx.input
+    };
     state
         .field
-        .handle_mouse(ctx.input, &p.atlas.font, field_x, field_y, TEXT_WIDTH);
+        .handle_mouse_in(field_in, &p.atlas.font, field_x, field_y, TEXT_WIDTH, area);
     state
         .field
-        .handle_input(ctx.input, &p.atlas.font, TEXT_WIDTH);
+        .handle_input(field_in, &p.atlas.font, TEXT_WIDTH);
     state
         .field
         .draw(p, field_x, field_y, TEXT_WIDTH, TEXT_COLOR);
@@ -287,20 +584,19 @@ pub fn draw_sign(p: &mut Painter, state: &mut BookState, ctx: &ScreenCtx) -> Opt
     let w = p.atlas.font.width_str(label_text);
     p.text_plain(
         label_text,
-        text_left + (TEXT_WIDTH - w) / 2.0,
+        text_left + ((TEXT_WIDTH - w) / 2.0).floor(),
         top + 32.0,
         TEXT_COLOR,
         false,
     );
 
-    let title_w = p.atlas.font.width_str(&state.title.text);
-    let box_x = ((ctx.vw - TEXT_WIDTH) / 2.0).floor() - 3.0 + (TEXT_WIDTH - title_w) / 2.0;
+    let box_x = ((ctx.vw - TEXT_WIDTH) / 2.0).floor() - 3.0;
     let box_y = top + 48.0;
-    let box_h = 8.0;
+    let box_h = 20.0;
     state.title.focused = true;
     state
         .title
-        .handle_mouse(ctx.input, &p.atlas.font, box_x, box_y, title_w, box_h);
+        .handle_mouse(ctx.input, &p.atlas.font, box_x, box_y, TEXT_WIDTH, box_h);
     state.title.handle_input(ctx.input);
     state.title.draw(p, box_x, box_y, TEXT_WIDTH, box_h);
 
@@ -308,7 +604,7 @@ pub fn draw_sign(p: &mut Painter, state: &mut BookState, ctx: &ScreenCtx) -> Opt
     let w = p.atlas.font.width_str(&byline);
     p.text_plain(
         &byline,
-        text_left + (TEXT_WIDTH - w) / 2.0,
+        text_left + ((TEXT_WIDTH - w) / 2.0).floor(),
         top + 58.0,
         DARK_GRAY,
         false,
@@ -330,7 +626,7 @@ pub fn draw_sign(p: &mut Painter, state: &mut BookState, ctx: &ScreenCtx) -> Opt
         label!("book.finalizeButton"),
     );
     finalize.active = !title.is_empty();
-    let pressed = finalize.draw(p, ctx) || (finalize.active && ctx.input.enter);
+    let pressed = finalize.draw(p, ctx) || (!state.title.text.is_empty() && ctx.input.enter);
     let cancel = Button::new(
         ctx.vw / 2.0 + 2.0,
         CONTROLS_TOP,

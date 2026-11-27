@@ -5,7 +5,7 @@ use std::sync::{
 
 use azalea::Client;
 use azalea::block::BlockState;
-use azalea::mining::{MineBlockPos, MineProgress, StopMiningBlockEvent};
+use azalea::mining::{HOLD_TO_MINE, MineBlockPos, MineProgress, StopMiningBlockEvent};
 use azalea::physics::collision::BlockWithShape;
 use azalea_core::direction::Direction;
 use azalea_core::game_type::GameMode;
@@ -45,27 +45,30 @@ struct UseItem {
 }
 static WAS_MINING: AtomicBool = AtomicBool::new(false);
 
-static LOCAL_BREAK: Mutex<Option<(BlockPos, crate::platform::time::Instant)>> = Mutex::new(None);
+static LOCAL_BREAK: Mutex<Vec<(BlockPos, crate::platform::time::Instant)>> = Mutex::new(Vec::new());
 
 const LOCAL_BREAK_TTL: std::time::Duration = std::time::Duration::from_secs(1);
 
+pub(crate) fn install_local_break_hook() {
+    let _ = azalea::mining::ON_LOCAL_BREAK.set(note_local_break);
+}
+
 fn note_local_break(pos: BlockPos) {
-    if let Ok(mut slot) = LOCAL_BREAK.lock() {
-        *slot = Some((pos, crate::platform::time::Instant::now()));
+    if let Ok(mut breaks) = LOCAL_BREAK.lock() {
+        breaks.retain(|(named, at)| *named != pos && at.elapsed() <= LOCAL_BREAK_TTL);
+        breaks.push((pos, crate::platform::time::Instant::now()));
     }
 }
 
 pub(crate) fn take_local_break(pos: BlockPos) -> bool {
-    let Ok(mut slot) = LOCAL_BREAK.lock() else {
+    let Ok(mut breaks) = LOCAL_BREAK.lock() else {
         return false;
     };
-    let Some((named, at)) = *slot else {
+    breaks.retain(|(_, at)| at.elapsed() <= LOCAL_BREAK_TTL);
+    let Some(i) = breaks.iter().position(|(named, _)| *named == pos) else {
         return false;
     };
-    if named != pos || at.elapsed() > LOCAL_BREAK_TTL {
-        return false;
-    }
-    *slot = None;
+    breaks.swap_remove(i);
     true
 }
 
@@ -75,6 +78,7 @@ pub(crate) fn reset_session_state() {
     SERVER_USING_ITEM.store(false, Ordering::Relaxed);
     USE_COMPLETED.store(false, Ordering::Relaxed);
     WAS_MINING.store(false, Ordering::Relaxed);
+    HOLD_TO_MINE.store(false, Ordering::Relaxed);
     let use_item = match USE_ITEM.try_lock() {
         Ok(guard) => Some(guard),
         Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
@@ -93,7 +97,7 @@ pub(crate) fn reset_session_state() {
         Err(std::sync::TryLockError::WouldBlock) => None,
     };
     if let Some(mut local_break) = local_break {
-        *local_break = None;
+        local_break.clear();
     }
 }
 
@@ -125,11 +129,25 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
 
     let remote: Vec<([i32; 3], u8)> = {
         let mut s = shared.lock().unwrap();
+        let aged = u32::from(s.session.world_run.runs);
+        let feet = s.session.player_pos;
         let remote = &mut s.session.remote_breaking;
         remote.retain(|_, r| {
-            r.age += 1;
+            r.age += aged;
             r.age <= REMOTE_BREAK_TIMEOUT
         });
+        if remote.len() > MAX_REMOTE_BREAKS {
+            let d2 = |r: &crate::session::RemoteBreak| {
+                (0..3)
+                    .map(|i| (f64::from(r.pos[i]) + 0.5 - feet[i]).powi(2))
+                    .sum::<f64>()
+            };
+            let mut near: Vec<(f64, i32)> = remote.iter().map(|(&id, r)| (d2(r), id)).collect();
+            near.select_nth_unstable_by(MAX_REMOTE_BREAKS, |a, b| a.0.total_cmp(&b.0));
+            for (_, id) in near.drain(MAX_REMOTE_BREAKS..) {
+                remote.remove(&id);
+            }
+        }
         let mut out: Vec<_> = remote.values().map(|r| (r.pos, r.stage)).collect();
         out.sort_unstable();
         out
@@ -210,6 +228,10 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
 
     crate::modules::basefinder::tick(bot, shared);
 
+    crate::modules::new_chunks::tick(shared);
+    crate::modules::coord_logger::tick();
+    crate::modules::gamemode_notifier::tick(bot);
+
     crate::modules::aim_assist::tick(bot, shared);
 
     crate::modules::auto_sell::tick(bot, shared);
@@ -218,9 +240,12 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
 
     crate::modules::auto_totem::tick(bot, shared);
 
+    let hand_attack_held = attack_held;
     let attack_held = crate::modules::auto_mine::tick(bot, shared, hit.as_ref()) || attack_held;
     let attack_held = crate::modules::pathfinder::attack(shared, hit.as_ref()) || attack_held;
     let attack_held = crate::modules::ore_miner::tick(bot, shared, hit.as_ref()) || attack_held;
+    let attack_held = crate::modules::builder::tick(bot, shared, hit.as_ref()) || attack_held;
+    let attack_held = crate::modules::farmer::tick(bot, shared, hit.as_ref()) || attack_held;
 
     crate::modules::auto_mace::tick(bot, shared);
 
@@ -230,6 +255,7 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
 
     crate::modules::scaffold::tick(bot, shared);
 
+    crate::modules::pathfinder::place_tick(bot, shared);
     crate::modules::pathfinder::tick(bot, shared);
 
     let attack_entity = attack_entity
@@ -283,6 +309,7 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
             attack_held,
             attack_clicked,
             forced_face,
+            hand_attack_held,
         );
         apply_place(bot, shared, use_held, use_clicked, hands_busy, confirmed);
         publish_item_in_use(bot);
@@ -325,6 +352,7 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
 
     if !piercing && attack_clicked && !attacked_entity && hand_hit.is_none() {
         crate::client::tick::request_attack_ticker_reset();
+        crate::client::tick::swing_local_player(false, shared);
     }
 
     if !piercing && !attacked_entity {
@@ -335,6 +363,7 @@ pub fn handle_interaction(bot: &Client, shared: &SharedMutex) {
             attack_held,
             attack_clicked,
             forced_face,
+            hand_attack_held,
         );
     }
     let restore = match &freecam {
@@ -384,6 +413,8 @@ fn publish_item_in_use(bot: &Client) {
 }
 
 const REMOTE_BREAK_TIMEOUT: u32 = 400;
+
+const MAX_REMOTE_BREAKS: usize = 1024;
 
 fn outline_boxes(state: BlockState, pos: BlockPos, held: ItemKind) -> Vec<[f32; 6]> {
     let shape = match azalea::physics::clip::holding_outline(state, held) {
@@ -487,7 +518,10 @@ fn freecam_click(bot: &Client) -> FreecamClick {
     }
     if crate::modules::auto_mine::enabled()
         || crate::modules::ore_miner::enabled()
+        || crate::modules::builder::enabled()
+        || crate::modules::farmer::enabled()
         || crate::modules::pathfinder::mining()
+        || crate::modules::pathfinder::placing()
     {
         return FreecamClick::Swallow;
     }
@@ -589,6 +623,7 @@ fn apply_break(
     held: bool,
     clicked: bool,
     forced_face: bool,
+    hand_held: bool,
 ) {
     let game_mode = bot
         .component::<GameMode>()
@@ -629,6 +664,8 @@ fn apply_break(
         (mining_at, was_mining)
     };
 
+    sync_permission_level(bot, shared);
+
     let target = hit.map(|h| h.block_pos);
     let outside = target.is_some_and(|pos| !within_border(bot, pos));
     let (start, delay) = break_step(
@@ -640,10 +677,10 @@ fn apply_break(
         target.filter(|_| !outside),
     );
     BREAK_DELAY.store(delay, Ordering::Relaxed);
-    if let Some(pos) = mining_at.or_else(|| hit.map(|h| h.block_pos).filter(|_| start)) {
-        note_local_break(pos);
-    }
-    if start {
+    let hold_in_tick =
+        start && !clicked && hand_held && !creative && !forced_face && mining_at.is_none();
+    HOLD_TO_MINE.store(hold_in_tick, Ordering::Relaxed);
+    if start && !hold_in_tick {
         let pos = hit
             .expect("break_step only starts when there is a target")
             .block_pos;
@@ -760,13 +797,13 @@ enum Used {
 }
 
 fn use_hand(bot: &Client, shared: &SharedMutex, hand: InteractionHand, click: &Click) -> Used {
-    if predict_place(bot, click.secondary_use, hand) {
+    if predict_place(bot, shared, click.secondary_use, hand) {
         consume_held_item(bot, hand);
         item_used(shared, hand);
         return Used::Done { swing: true };
     }
     let block_takes_it = matches!(click.hit, Some(HitResult::Block(hit))
-        if !hit.miss && !click.spectator && used_block_interaction(bot, hit, hand, click.secondary_use));
+        if !hit.miss && !click.spectator && used_block_interaction(bot, shared, hit, hand, click.secondary_use));
     let entity_first = matches!(click.hit, Some(HitResult::Entity(_)));
     if !block_takes_it && !entity_first && predict_bucket_use(bot, shared, hand) {
         item_used(shared, hand);
@@ -781,7 +818,7 @@ fn use_hand(bot: &Client, shared: &SharedMutex, hand: InteractionHand, click: &C
             if block.is_ok_and(|block| !within_border(bot, block)) {
                 return Used::Done { swing: false };
             }
-            match interact_entity(bot, hit, click, hand, stack.map(|s| s.kind)) {
+            match interact_entity(bot, shared, hit, click, hand, stack.map(|s| s.kind)) {
                 EntityUse::Success => return Used::Done { swing: true },
                 EntityUse::Unknown => return Used::Done { swing: false },
                 EntityUse::Pass => {
@@ -880,6 +917,7 @@ fn within_border(bot: &Client, pos: BlockPos) -> bool {
 
 fn interact_entity(
     bot: &Client,
+    shared: &SharedMutex,
     hit: &azalea_core::hit_result::EntityHitResult,
     click: &Click,
     hand: InteractionHand,
@@ -922,6 +960,13 @@ fn interact_entity(
     #[cfg(feature = "audio")]
     if let Some(item) = held {
         crate::play::player_sounds::dye_sheep(bot, hit.entity, item);
+    }
+    if target.kind == azalea_registry::builtin::EntityKind::CommandBlockMinecart {
+        if !can_use_game_master_blocks(bot, shared) {
+            return EntityUse::Pass;
+        }
+        open_command_minecart(bot, shared, hit.entity);
+        return EntityUse::Success;
     }
     entity_use(target, click.secondary_use, held)
 }
@@ -1233,7 +1278,7 @@ fn hand_stack(bot: &Client, hand: InteractionHand) -> Option<HandStack> {
             .get_component::<Equippable>()
             .is_some_and(|e| e.swappable),
         on_cooldown: crate::client::cooldowns::stack_percent(data) > 0,
-        use_on_ends: use_on_ends(data.kind),
+        use_on_ends: data.known_kind().is_some_and(use_on_ends),
     })
 }
 
@@ -1929,6 +1974,7 @@ fn fill_held_bucket(bot: &Client, filled: ItemKind, hand: InteractionHand) {
 
 fn used_block_interaction(
     bot: &Client,
+    shared: &SharedMutex,
     hit: &BlockHitResult,
     hand: InteractionHand,
     secondary_use: bool,
@@ -1950,9 +1996,11 @@ fn used_block_interaction(
     let Ok(world) = bot.world() else { return false };
     let state = world.read().get_block_state(hit.block_pos);
     let held = held_item_kind(bot, hand);
-    state.is_some_and(|state| {
-        crate::play::placement::has_use_interaction(state) || cauldron_takes(state, held)
-    })
+    let Some(state) = state else { return false };
+    if crate::play::placement::is_game_master_block(state.as_block_kind()) {
+        return can_use_game_master_blocks(bot, shared);
+    }
+    crate::play::placement::has_use_interaction(state) || cauldron_takes(state, held)
 }
 
 fn cauldron_takes(state: BlockState, held: Option<ItemKind>) -> bool {
@@ -1968,11 +2016,30 @@ fn cauldron_takes(state: BlockState, held: Option<ItemKind>) -> bool {
     }
 }
 
-fn open_game_master_block(bot: &Client, shared: &SharedMutex, hit: &BlockHitResult) {
+fn can_use_game_master_blocks(bot: &Client, shared: &SharedMutex) -> bool {
     let creative = bot
         .component::<GameMode>()
         .is_ok_and(|gm| *gm == GameMode::Creative);
-    if !creative || shared.lock().unwrap().session.op_level < 2 {
+    creative && shared.lock().unwrap().session.op_level >= crate::session::GAME_MASTER_LEVEL
+}
+
+fn sync_permission_level(bot: &Client, shared: &SharedMutex) {
+    use azalea::local_player::PermissionLevel;
+
+    let level = shared.lock().unwrap().session.op_level;
+    let synced = bot
+        .component::<PermissionLevel>()
+        .is_ok_and(|held| held.0 == level);
+    if !synced {
+        bot.ecs
+            .write()
+            .entity_mut(bot.entity)
+            .insert(PermissionLevel(level));
+    }
+}
+
+fn open_game_master_block(bot: &Client, shared: &SharedMutex, hit: &BlockHitResult) {
+    if !can_use_game_master_blocks(bot, shared) {
         return;
     }
     let Ok(world) = bot.world() else { return };
@@ -2032,12 +2099,44 @@ fn open_command_block(
     let conditional = Box::<dyn azalea::block::BlockTrait>::from(state).get_property("conditional")
         == Some("true");
     let mut s = shared.lock().unwrap();
-    s.session.command_block_open = Some(crate::session::CommandBlockOpen {
+    s.session.command_block_open = Some(crate::session::CommandBlockOpen::Block {
         pos: hit.block_pos,
         mode,
         conditional,
     });
     s.session.command_block_pos = Some(hit.block_pos);
+    s.session.command_minecart = None;
+}
+
+fn open_command_minecart(bot: &Client, shared: &SharedMutex, entity: azalea::ecs::entity::Entity) {
+    use azalea::entity::metadata::{CommandName, LastOutput};
+    use azalea_core::entity_id::MinecraftEntityId;
+
+    let (id, data) = {
+        let ecs = bot.ecs.read();
+        let Some(id) = ecs.get::<MinecraftEntityId>(entity) else {
+            return;
+        };
+        (
+            id.0,
+            crate::session::CommandBlockData {
+                command: ecs
+                    .get::<CommandName>(entity)
+                    .map(|c| c.to_string())
+                    .unwrap_or_default(),
+                track_output: true,
+                last_output: ecs
+                    .get::<LastOutput>(entity)
+                    .map(|output| crate::client::chat_text::to_plain(output))
+                    .unwrap_or_default(),
+                automatic: false,
+            },
+        )
+    };
+    let mut s = shared.lock().unwrap();
+    s.session.command_block_open = Some(crate::session::CommandBlockOpen::Minecart { id, data });
+    s.session.command_block_pos = None;
+    s.session.command_minecart = Some(id);
 }
 
 pub(crate) fn command_block_mode(state: azalea::block::BlockState) -> Option<CommandBlockMode> {
@@ -2049,10 +2148,16 @@ pub(crate) fn command_block_mode(state: azalea::block::BlockState) -> Option<Com
     }
 }
 
-fn predict_place(bot: &Client, secondary_use: bool, hand: InteractionHand) -> bool {
+fn predict_place(
+    bot: &Client,
+    shared: &SharedMutex,
+    secondary_use: bool,
+    hand: InteractionHand,
+) -> bool {
     use azalea_protocol::packets::game::s_use_item_on::ServerboundUseItemOn;
 
-    let Some(predicted) = predict_use(bot, UseKind::Place, secondary_use, None, hand) else {
+    let Some(predicted) = predict_use(bot, shared, UseKind::Place, secondary_use, None, hand)
+    else {
         return false;
     };
 
@@ -2081,6 +2186,7 @@ pub(crate) fn module_place(
     let main = InteractionHand::Main;
     let Some(predicted) = predict_use(
         bot,
+        shared,
         UseKind::Place,
         secondary_use,
         Some((hit.clone(), look)),
@@ -2129,11 +2235,23 @@ pub(crate) fn select_hotbar_slot(bot: &Client, slot: u8) {
         .insert(LastSentSelectedHotbarSlot { slot });
 }
 
+pub(crate) fn swap_hands(bot: &Client) {
+    crate::client::outbox::send(
+        bot,
+        ServerboundPlayerAction {
+            action: Action::SwapItemWithOffhand,
+            pos: BlockPos::new(0, 0, 0),
+            direction: Direction::Down,
+            seq: 0,
+        },
+    );
+}
+
 fn predict_bucket_use(bot: &Client, shared: &SharedMutex, hand: InteractionHand) -> bool {
     use azalea_protocol::packets::game::ServerboundUseItem;
     use azalea_protocol::packets::game::s_use_item_on::ServerboundUseItemOn;
 
-    let Some(predicted) = predict_use(bot, UseKind::Bucket, false, None, hand) else {
+    let Some(predicted) = predict_use(bot, shared, UseKind::Bucket, false, None, hand) else {
         return false;
     };
 
@@ -2254,6 +2372,7 @@ struct Predicted {
 
 fn predict_use(
     bot: &Client,
+    shared: &SharedMutex,
     kind: UseKind,
     secondary_use: bool,
     aimed: Option<(BlockHitResult, (f32, f32))>,
@@ -2266,6 +2385,17 @@ fn predict_use(
         Ok(GameMode::Creative) => true,
         _ => return None,
     };
+
+    if matches!(kind, UseKind::Place)
+        && held_item_kind(bot, hand)
+            .and_then(|item| {
+                crate::items::placed::placed_block(item.to_str().trim_start_matches("minecraft:"))
+            })
+            .is_some_and(crate::play::placement::is_game_master_block)
+        && !can_use_game_master_blocks(bot, shared)
+    {
+        return None;
+    }
 
     if bot.is_mining() {
         return None;

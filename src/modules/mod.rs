@@ -8,30 +8,36 @@ pub mod auto_totem;
 pub mod auto_walk;
 pub mod basefinder;
 pub mod better_tooltips;
+pub mod builder;
 pub mod chat_math;
 pub mod commands;
+pub mod coord_logger;
 pub mod crystal_aura;
 pub mod crystal_macro;
 mod edge;
 pub mod entities;
 pub mod esp;
 pub mod extra_hud;
+pub mod farmer;
 pub mod flight;
 pub mod freecam;
 pub mod friends;
 pub mod fullbright;
+pub mod gamemode_notifier;
 pub mod hooks;
 pub mod hud_panels;
 pub mod items;
 pub mod list;
 pub mod nametags;
 mod nearby;
+pub mod new_chunks;
 pub mod no_fall;
 pub mod no_render;
 pub mod ore_miner;
 pub mod pathfinder;
 #[cfg(feature = "click_gui")]
 pub mod persist;
+pub mod place;
 pub mod player_esp;
 pub mod registry;
 pub mod safe_anchor;
@@ -54,6 +60,9 @@ mod store;
 pub mod triggerbot;
 mod turn;
 #[cfg(feature = "ui_utils")]
+pub mod ui_utils;
+#[cfg(all(feature = "click_gui", not(feature = "ui_utils")))]
+#[path = "ui_utils_stub.rs"]
 pub mod ui_utils;
 mod value;
 pub mod vclip;

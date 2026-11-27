@@ -198,6 +198,7 @@ pub(super) struct LayersRig {
     ears_shown: bool,
     stuck: StuckRig,
     lit: Lit,
+    lighting: bool,
 }
 
 pub(super) fn spawn(
@@ -210,7 +211,11 @@ pub(super) fn spawn(
     lit: Lit,
 ) -> LayersRig {
     let mut baked = |name: &'static str| {
-        let material = materials.add(EntityMaterial::cutout(None, LightMode::Cardinal, lit));
+        let material = materials.add(EntityMaterial::cutout(
+            None,
+            crate::entities::unlit_light_mode(LightMode::Cardinal),
+            lit,
+        ));
         let node = commands
             .spawn((
                 MeshMaterial3d(material.clone()),
@@ -251,7 +256,11 @@ pub(super) fn spawn(
     commands.entity(parts[PART_HEAD]).add_child(ears);
 
     let stuck_material = |materials: &mut Assets<EntityMaterial>| {
-        materials.add(EntityMaterial::cutout(None, LightMode::Cardinal, lit))
+        materials.add(EntityMaterial::cutout(
+            None,
+            crate::entities::unlit_light_mode(LightMode::Cardinal),
+            lit,
+        ))
     };
     LayersRig {
         spin,
@@ -265,6 +274,7 @@ pub(super) fn spawn(
             stinger: stuck_material(materials),
         },
         lit,
+        lighting: crate::renderer::lighting_enabled(),
     }
 }
 
@@ -344,16 +354,21 @@ pub(super) fn update(
 
     update_stuck(&mut rig.stuck, parts, sample, slim, items, commands);
 
-    if lit != rig.lit {
+    let lighting = crate::renderer::lighting_enabled();
+    if lit != rig.lit || lighting != rig.lighting {
         for handle in [&rig.spin.material, &rig.stuck.arrow, &rig.stuck.stinger]
             .into_iter()
             .chain(rig.parrots.iter().map(|node| &node.material))
         {
-            if let Some(mut material) = items.entity_materials.get_mut(handle) {
-                material.params.set(lit);
-            }
+            crate::entities::relight_unlit(
+                items.entity_materials,
+                handle,
+                lit,
+                LightMode::Cardinal,
+            );
         }
         rig.lit = lit;
+        rig.lighting = lighting;
     }
 }
 

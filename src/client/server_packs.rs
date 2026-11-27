@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::SHARED;
 use crate::gui::serverlist::PackPolicy;
+use crate::session::SharedMutex;
 
 #[cfg(resource_packs)]
 const MAX_PACK_SIZE: u64 = 262_144_000;
@@ -32,7 +33,7 @@ type Loaded = Result<
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(resource_packs), allow(dead_code))]
-enum Reply {
+pub(crate) enum Reply {
     Loaded,
     Declined,
     FailedDownload,
@@ -80,6 +81,17 @@ impl Removal {
     }
 }
 
+enum Incoming {
+    Push {
+        id: Uuid,
+        url: String,
+        hash: String,
+        required: bool,
+        prompt: Option<azalea::FormattedText>,
+    },
+    Pop(Option<Uuid>),
+}
+
 struct Request {
     id: Uuid,
     url: String,
@@ -107,6 +119,7 @@ struct Pack {
     download: Download,
     active: bool,
     accepted: bool,
+    carried: bool,
     #[cfg(resource_packs)]
     layer: Option<Loaded>,
 }
@@ -135,6 +148,7 @@ pub struct ServerPacks {
     pub(crate) prompt: Option<Prompt>,
     pub(crate) open_prompt: bool,
     pub(crate) answer: Option<bool>,
+    incoming: Vec<Incoming>,
     policy: PackPolicy,
     status: PromptStatus,
     waiting: Vec<Request>,
@@ -169,6 +183,81 @@ impl ServerPacks {
             PackPolicy::Disabled => PromptStatus::Declined,
             PackPolicy::Prompt => PromptStatus::Pending,
         };
+    }
+
+    pub(crate) fn detach(&mut self, in_config: bool) -> ServerPacks {
+        let mut kept = std::mem::take(self);
+        if in_config {
+            let mut answer = ServerPacks::default();
+            answer.status = kept.status;
+            return answer;
+        }
+        kept.prompt = None;
+        kept.open_prompt = false;
+        kept.answer = None;
+        kept.waiting.clear();
+        kept.replies.clear();
+        kept.disconnect = false;
+        #[cfg(resource_packs)]
+        kept.loading.clear();
+        for pack in &mut kept.packs {
+            pack.carried = true;
+        }
+        kept
+    }
+
+    pub(crate) fn resume(&mut self, kept: ServerPacks, policy: PackPolicy) {
+        *self = kept;
+        let policy = match (policy, self.status) {
+            (PackPolicy::Prompt, PromptStatus::Allowed) => PackPolicy::Enabled,
+            (PackPolicy::Prompt, PromptStatus::Declined) => PackPolicy::Disabled,
+            _ => policy,
+        };
+        self.begin(policy);
+        match policy {
+            PackPolicy::Enabled => self.allow(),
+            PackPolicy::Disabled => self.reject(),
+            PackPolicy::Prompt => {}
+        }
+        BUSY.store(true, Ordering::Relaxed);
+        #[cfg(resource_packs)]
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn abandon(self, live: &ServerPacks) {
+        #[cfg(resource_packs)]
+        {
+            let mut dropped = self;
+            dropped.mounted &= !live.mounted;
+        }
+        #[cfg(not(resource_packs))]
+        let _ = live;
+    }
+
+    pub(crate) fn settle(&mut self) {
+        for incoming in std::mem::take(&mut self.incoming) {
+            match incoming {
+                Incoming::Push {
+                    id,
+                    url,
+                    hash,
+                    required,
+                    prompt,
+                } => {
+                    self.push(id, &url, &hash, required, prompt.as_ref());
+                }
+                Incoming::Pop(id) => self.pop(id),
+            }
+        }
+        self.take_answer();
+    }
+
+    pub(crate) fn left(&self) -> bool {
+        self.disconnect
+    }
+
+    pub(crate) fn take_replies(&mut self) -> Vec<(Uuid, Reply)> {
+        std::mem::take(&mut self.replies)
     }
 
     fn push(
@@ -250,6 +339,7 @@ impl ServerPacks {
             download: Download::Requested,
             active: false,
             accepted: false,
+            carried: false,
             #[cfg(resource_packs)]
             layer: None,
         };
@@ -265,7 +355,9 @@ impl ServerPacks {
         for pack in &mut self.packs {
             if !pack.accepted && pack.removal.is_none() {
                 pack.accepted = true;
-                self.replies.push((pack.id, Reply::Accepted));
+                if !pack.carried {
+                    self.replies.push((pack.id, Reply::Accepted));
+                }
             }
         }
     }
@@ -403,7 +495,7 @@ impl ServerPacks {
             };
             pack.download = Download::Done;
             pack.layer = Some(layer);
-            if pack.removal.is_none() {
+            if pack.removal.is_none() && !pack.carried {
                 self.replies.push((pack.id, Reply::Downloaded));
             }
         }
@@ -433,7 +525,7 @@ impl ServerPacks {
         let mut loaded = Vec::new();
         for pack in &mut self.packs {
             let should = pack.should_be_active();
-            if should && !pack.active {
+            if should && !pack.active && !pack.carried {
                 loaded.push(pack.id);
             }
             pack.active = should;
@@ -471,7 +563,8 @@ impl ServerPacks {
         let replies = &mut self.replies;
         self.packs.retain(|pack| match pack.removal {
             Some(reason) if !pack.active => {
-                replies.extend(reason.reply().map(|reply| (pack.id, reply)));
+                let reply = reason.reply().filter(|_| !pack.carried);
+                replies.extend(reply.map(|reply| (pack.id, reply)));
                 false
             }
             _ => true,
@@ -558,14 +651,65 @@ pub(crate) struct ServerPackPlugin;
 
 impl azalea::app::Plugin for ServerPackPlugin {
     fn build(&self, app: &mut azalea::app::App) {
-        app.add_systems(azalea::app::Update, update);
+        app.add_observer(config_packet)
+            .add_systems(azalea::app::Update, update);
     }
 }
 
+pub(crate) fn game_packet(shared: &SharedMutex, packet: &ClientboundGamePacket) {
+    let incoming = match packet {
+        ClientboundGamePacket::ResourcePackPush(p) => Incoming::Push {
+            id: p.id,
+            url: p.url.clone(),
+            hash: p.hash.clone(),
+            required: p.required,
+            prompt: p.prompt.clone(),
+        },
+        ClientboundGamePacket::ResourcePackPop(p) => Incoming::Pop(p.id),
+        _ => return,
+    };
+    queue(shared, incoming);
+}
+
+fn config_packet(
+    event: On<azalea::packet::config::ConfigPackEvent>,
+    states: Query<&crate::client::bot::State>,
+) {
+    let Some(shared) = SHARED.get() else {
+        return;
+    };
+    if states
+        .get(event.entity)
+        .is_ok_and(crate::client::bot::State::over)
+    {
+        return;
+    }
+    let incoming = match &event.packet {
+        ClientboundConfigPacket::ResourcePackPush(p) => Incoming::Push {
+            id: p.id,
+            url: p.url.clone(),
+            hash: p.hash.clone(),
+            required: p.required,
+            prompt: p.prompt.clone(),
+        },
+        ClientboundConfigPacket::ResourcePackPop(p) => Incoming::Pop(p.id),
+        _ => return,
+    };
+    queue(shared, incoming);
+}
+
+fn queue(shared: &SharedMutex, incoming: Incoming) {
+    shared
+        .lock()
+        .unwrap()
+        .session
+        .server_packs
+        .incoming
+        .push(incoming);
+    BUSY.store(true, Ordering::Relaxed);
+}
+
 fn update(
-    mut pushes: MessageReader<azalea::packet::game::ResourcePackEvent>,
-    mut game: MessageReader<azalea::packet::game::ReceiveGamePacketEvent>,
-    mut config: MessageReader<azalea::packet::config::ReceiveConfigPacketEvent>,
     mut commands: Commands,
     mut disconnect: MessageWriter<azalea::disconnect::DisconnectEvent>,
     query: Query<(Entity, Option<&azalea::InConfigState>), With<azalea::local_player::WorldHolder>>,
@@ -573,54 +717,41 @@ fn update(
     let Some(shared) = SHARED.get() else {
         return;
     };
-    let pops: Vec<Option<Uuid>> = game
-        .read()
-        .filter_map(|event| match event.packet.as_ref() {
-            ClientboundGamePacket::ResourcePackPop(p) => Some(p.id),
-            _ => None,
-        })
-        .chain(
-            config
-                .read()
-                .filter_map(|event| match event.packet.as_ref() {
-                    ClientboundConfigPacket::ResourcePackPop(p) => Some(p.id),
-                    _ => None,
-                }),
-        )
-        .collect();
-    let pushes: Vec<_> = pushes.read().collect();
-    if pushes.is_empty() && pops.is_empty() && !BUSY.load(Ordering::Relaxed) {
+    if !BUSY.load(Ordering::Relaxed) {
         return;
     }
 
     let (replies, leave) = {
         let mut s = shared.lock().unwrap();
         let packs = &mut s.session.server_packs;
-        for push in pushes {
-            packs.push(
-                push.id,
-                &push.url,
-                &push.hash,
-                push.required,
-                push.prompt.as_ref(),
-            );
-        }
-        for id in pops {
-            packs.pop(id);
-        }
-        packs.take_answer();
+        packs.settle();
         packs.tick();
         BUSY.store(packs.busy(), Ordering::Relaxed);
-        (
-            std::mem::take(&mut packs.replies),
-            std::mem::take(&mut packs.disconnect),
-        )
+        (packs.take_replies(), std::mem::take(&mut packs.disconnect))
     };
 
     let Ok((entity, in_config)) = query.single() else {
         return;
     };
-    let in_config = in_config.is_some();
+    send_replies(&mut commands, entity, in_config.is_some(), replies);
+    if leave {
+        disconnect.write(azalea::disconnect::DisconnectEvent {
+            entity,
+            reason: Some(declined_reason().into()),
+        });
+    }
+}
+
+pub(crate) fn declined_reason() -> String {
+    crate::gui::tooltip::translate("multiplayer.requiredTexturePrompt.disconnect", &[])
+}
+
+pub(crate) fn send_replies(
+    commands: &mut Commands,
+    entity: Entity,
+    in_config: bool,
+    replies: Vec<(Uuid, Reply)>,
+) {
     for (id, reply) in replies {
         crate::log_info!("resourcepacks", "server pack {id}: {reply:?}");
         if in_config {
@@ -660,14 +791,6 @@ fn update(
                 ServerboundResourcePack { id, action },
             ));
         }
-    }
-    if leave {
-        let reason =
-            crate::gui::tooltip::translate("multiplayer.requiredTexturePrompt.disconnect", &[]);
-        disconnect.write(azalea::disconnect::DisconnectEvent {
-            entity,
-            reason: Some(reason.into()),
-        });
     }
 }
 

@@ -1,0 +1,21 @@
+{
+  "client.status.connecting": "Connecting to %s...",
+  "client.status.still_closing": "The previous connection is still closing; try again",
+  "client.status.thread_failed": "Could not start the connection thread",
+  "client.status.refused": "Refused: %s",
+  "client.status.could_not_connect": "Could not connect: %s",
+  "client.status.waiting_for_chunks": "Connected, waiting for chunks...",
+  "client.status.spawned": "Spawned at (%s,%s,%s)",
+  "client.status.disconnected": "Disconnected",
+  "client.status.disconnected_because": "Disconnected: %s",
+  "client.status.connection_failed": "Connection failed: %s",
+  "client.status.connection_lost": "Connection lost",
+  "client.status.stalled": "Disconnected (bot thread stalled)",
+  "client.status.stalled_reason": "The connection stopped responding and was closed by the client.",
+  "client.status.transfer_unsupported": "The server tried to transfer you to another server. Transfers are not supported on this connection.",
+  "client.chat.signing_unavailable": "Signed chat is on, but this client has no signing certificate yet. Sent unsigned.",
+  "client.chat.tag_secure": "Verified message. Signed by the sender:",
+  "client.self_update.start_failed": "Could not start the download: %s",
+  "client.bedrock_art.no_answer": "GitHub did not answer",
+  "client.bedrock_art.damaged": "A button texture arrived damaged"
+}

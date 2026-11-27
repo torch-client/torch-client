@@ -4,10 +4,11 @@ use crate::client::assets::{Download, Stage, download, offers_assets, offers_sou
 use crate::gui::painter::Painter;
 use crate::gui::tooltip::label;
 use crate::gui::{GuiState, Screen, ScreenCtx};
+use crate::lang::{Key, tr, trf};
 use crate::util::bytes::Bytes;
 
-const PROMPT: &str = "The Mojang assets must be downloaded";
-const TOP_UP_PROMPT: &str = "Some Mojang assets are missing";
+const PROMPT: Key = Key::of("install.prompt");
+const TOP_UP_PROMPT: Key = Key::of("install.top_up_prompt");
 
 static TOP_UP: AtomicBool = AtomicBool::new(false);
 
@@ -37,7 +38,7 @@ fn leave_label() -> &'static str {
     if TOP_UP.load(Ordering::Relaxed) {
         label!("gui.back")
     } else {
-        "Exit"
+        tr!("install.exit")
     }
 }
 
@@ -45,7 +46,7 @@ fn continue_label() -> &'static str {
     if TOP_UP.load(Ordering::Relaxed) {
         label!("gui.continue")
     } else {
-        "Continue"
+        tr!("install.continue")
     }
 }
 
@@ -53,7 +54,7 @@ fn cancel_label() -> &'static str {
     if TOP_UP.load(Ordering::Relaxed) {
         label!("gui.cancel")
     } else {
-        "Cancel"
+        tr!("install.cancel")
     }
 }
 
@@ -68,15 +69,41 @@ fn action_and_leave(
     action: &str,
 ) -> bool {
     if !CAN_EXIT && !TOP_UP.load(Ordering::Relaxed) {
-        return button(p, ctx, (cx - BUTTON_W * 0.5).floor(), row, action);
+        return button_centred(p, ctx, cx, row, action);
     }
-    let left = (cx - BUTTON_W - BUTTON_GAP * 0.5).floor();
-    let right = (cx + BUTTON_GAP * 0.5).floor();
-    let pressed = button(p, ctx, left, row, action);
-    if button(p, ctx, right, row, leave_label()) {
-        leave(state);
+    button_pair(p, ctx, cx, row, action, leave_label(), || leave(state))
+}
+
+fn button_pair(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    cx: f32,
+    row: f32,
+    left: &str,
+    right: &str,
+    on_right: impl FnOnce(),
+) -> bool {
+    let w = button_w(p, &[left, right]);
+    let left_x = (cx - w - BUTTON_GAP * 0.5).floor();
+    let right_x = (cx + BUTTON_GAP * 0.5).floor();
+    let pressed = button(p, ctx, left_x, row, w, left);
+    if button(p, ctx, right_x, row, w, right) {
+        on_right();
     }
     pressed
+}
+
+fn button_centred(p: &mut Painter, ctx: &ScreenCtx, cx: f32, row: f32, label: &str) -> bool {
+    let w = button_w(p, &[label]);
+    button(p, ctx, (cx - w * 0.5).floor(), row, w, label)
+}
+
+fn button_w(p: &Painter, labels: &[&str]) -> f32 {
+    labels
+        .iter()
+        .map(|l| p.atlas.font.width_str(l) + BUTTON_PAD * 2.0)
+        .fold(BUTTON_W, f32::max)
+        .ceil()
 }
 
 fn leave(state: &mut GuiState) {
@@ -88,6 +115,7 @@ fn leave(state: &mut GuiState) {
 }
 
 const BUTTON_W: f32 = 100.0;
+const BUTTON_PAD: f32 = 8.0;
 const BUTTON_H: f32 = 20.0;
 const BUTTON_GAP: f32 = 8.0;
 
@@ -105,6 +133,7 @@ const BOXES_TOP: f32 = -24.0;
 const BOX_PAD: f32 = 6.0;
 const BOX_TEXT_TOP: f32 = 3.0;
 const PERCENT_INSET: f32 = 18.0;
+const BOX_RIGHT: f32 = PERCENT_INSET * 2.0;
 
 const ASSETS_SIZE: &str = "43.7 MiB";
 const AUDIO_SIZE: &str = if cfg!(feature = "small_audio") {
@@ -112,18 +141,40 @@ const AUDIO_SIZE: &str = if cfg!(feature = "small_audio") {
 } else {
     "330 MiB"
 };
-const CONTACTING: &str = "Contacting Mojang";
-const ASSETS_NAME: &str = "Built in";
-const AUDIO_NAME: &str = "Install audio";
+const CONTACTING: Key = Key::of("install.contacting");
+const ASSETS_NAME: Key = Key::of("install.built_in");
+const AUDIO_NAME: Key = Key::of("install.audio");
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-const IMPORT_NAME: &str = "Import assets file";
+const IMPORT_NAME: Key = Key::of("install.import");
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-const IMPORT_DETAIL: &str = "From another Torch page";
-const FROM_FILE: &str = "From the imported file";
+const IMPORT_DETAIL: Key = Key::of("install.import_detail");
+const FROM_FILE: Key = Key::of("install.from_file");
+const UNPACKING: Key = Key::of("install.unpacking");
+const SKIPPED: Key = Key::of("install.skipped");
+const WAITING: Key = Key::of("install.waiting");
+const ALREADY_INSTALLED: Key = Key::of("install.already_installed");
+const UNMOUNTABLE: Key = Key::of("install.fail.unmountable");
+
+const BOX_LINES: [Key; 8] = [
+    ASSETS_NAME,
+    AUDIO_NAME,
+    FROM_FILE,
+    CONTACTING,
+    UNPACKING,
+    SKIPPED,
+    WAITING,
+    ALREADY_INSTALLED,
+];
 
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-static IMPORT_LINE: std::sync::Mutex<Option<(&'static str, String, u32)>> =
-    std::sync::Mutex::new(None);
+enum ImportLine {
+    LanguageApplied,
+    Kept(String),
+    Refused(crate::client::assets::transfer::Refused),
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+static IMPORT_LINE: std::sync::Mutex<Option<ImportLine>> = std::sync::Mutex::new(None);
 
 fn sounds_from_file() -> bool {
     #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
@@ -152,12 +203,18 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     let top_up = TOP_UP.load(Ordering::Relaxed);
     let prompt = if top_up { TOP_UP_PROMPT } else { PROMPT };
-    p.text_centered(prompt, cx, mid - 46.0, 0xFFFFFF, false);
+    p.text_centered(prompt.get(), cx, mid - 46.0, 0xFFFFFF, false);
 
     match stage {
         Stage::Idle | Stage::Cancelled => {
             if stage == Stage::Cancelled {
-                p.text_centered("Download cancelled", cx, mid - 46.0 + LINE, 0xFFAA55, false);
+                p.text_centered(
+                    tr!("install.cancelled"),
+                    cx,
+                    mid - 46.0 + LINE,
+                    0xFFAA55,
+                    false,
+                );
             }
             let row = prompt_boxes(p, ctx, mid + BOXES_TOP);
             if action_and_leave(p, state, ctx, cx, row, continue_label()) {
@@ -172,15 +229,18 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         | Stage::Sounds => {
             let row = progress_boxes(p, ctx, mid + BOXES_TOP, dl, stage);
             if dl.sounds_running() {
-                let left = (cx - BUTTON_W - BUTTON_GAP * 0.5).floor();
-                let right = (cx + BUTTON_GAP * 0.5).floor();
-                if button(p, ctx, left, row, "Skip audio") {
+                if button_pair(
+                    p,
+                    ctx,
+                    cx,
+                    row,
+                    tr!("install.skip_audio"),
+                    cancel_label(),
+                    || dl.cancel(),
+                ) {
                     dl.skip_sounds();
                 }
-                if button(p, ctx, right, row, cancel_label()) {
-                    dl.cancel();
-                }
-            } else if button(p, ctx, (cx - BUTTON_W * 0.5).floor(), row, cancel_label()) {
+            } else if button_centred(p, ctx, cx, row, cancel_label()) {
                 dl.cancel();
             }
         }
@@ -191,33 +251,27 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                 leave(state);
                 return;
             }
-            p.text_centered("The assets are ready", cx, mid - 14.0, 0x7FDF7F, false);
+            p.text_centered(tr!("install.ready"), cx, mid - 14.0, 0x7FDF7F, false);
             p.text_centered(
                 if cfg!(target_arch = "wasm32") {
-                    "Reload the page to use them"
+                    tr!("install.reload_page")
                 } else {
-                    "Restart the client to use them"
+                    tr!("install.restart_client")
                 },
                 cx,
                 mid - 14.0 + LINE,
                 0xA0A0A8,
                 false,
             );
-            if button(
-                p,
-                ctx,
-                (cx - BUTTON_W * 0.5).floor(),
-                mid + 20.0,
-                leave_label(),
-            ) {
+            if button_centred(p, ctx, cx, mid + 20.0, leave_label()) {
                 leave(state);
             }
         }
         Stage::Done => {
             prepare();
-            p.text_centered("The assets are ready", cx, mid - 14.0, 0x7FDF7F, false);
+            p.text_centered(tr!("install.ready"), cx, mid - 14.0, 0x7FDF7F, false);
             p.text_centered(
-                "Preparing the atlases",
+                tr!("install.preparing"),
                 cx,
                 mid - 14.0 + LINE,
                 0xA0A0A8,
@@ -226,15 +280,14 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         }
 
         Stage::Failed => {
-            let error = dl.error();
-            let hint = if error == crate::client::assets::NETWORK_FAILURE {
-                "Check the connection and try again"
+            let hint = if dl.network_failed() {
+                tr!("install.check_connection")
             } else {
-                "The log says more"
+                tr!("install.see_log")
             };
-            p.text_centered(error, cx, mid - 14.0, 0xFF5555, false);
+            p.text_centered(dl.error(), cx, mid - 14.0, 0xFF5555, false);
             p.text_centered(hint, cx, mid - 14.0 + LINE, 0xA0A0A8, false);
-            if action_and_leave(p, state, ctx, cx, mid + 20.0, "Try again") {
+            if action_and_leave(p, state, ctx, cx, mid + 20.0, tr!("install.try_again")) {
                 begin(dl);
             }
         }
@@ -242,25 +295,47 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 }
 
 pub(super) fn of_total(done: u64, total: u64) -> String {
-    format!("{} of {}", Bytes(done), Bytes(total))
+    trf!("install.of_total", Bytes(done), Bytes(total))
 }
 
-fn box_span(ctx: &ScreenCtx) -> (f32, f32) {
-    let w = fitted(BOX_W, ctx);
+fn box_span(p: &Painter, ctx: &ScreenCtx, plain: &[&str]) -> (f32, f32) {
+    let font = &p.atlas.font;
+    let beside = BOX_LINES
+        .iter()
+        .map(|k| font.width_str(k.get()) + BOX_PAD + BOX_RIGHT);
+    let alone = plain.iter().map(|s| font.width_str(s) + BOX_PAD * 2.0);
+    let need = beside.chain(alone).fold(BOX_W, f32::max).ceil();
+    let w = fitted(need, ctx);
     (((ctx.vw - w) * 0.5).floor(), w)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+fn import_lines() -> Vec<String> {
+    if TOP_UP.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+    let (name, detail, _) = import_text();
+    vec![name.to_owned(), detail]
+}
+
+#[cfg(not(all(target_arch = "wasm32", feature = "asset_download")))]
+fn import_lines() -> Vec<String> {
+    Vec::new()
+}
+
 fn prompt_boxes(p: &mut Painter, ctx: &ScreenCtx, mut y: f32) -> f32 {
-    let (x, w) = box_span(ctx);
+    let import = import_lines();
+    let extra: Vec<&str> = import.iter().map(String::as_str).collect();
+    let (x, w) = box_span(p, ctx, &extra);
 
     if offers_assets() {
         chrome(p, x, y, w, BOX_H, false);
-        box_text(p, x + BOX_PAD, y, ASSETS_NAME, ASSETS_SIZE, DETAIL);
+        box_text(p, x + BOX_PAD, y, ASSETS_NAME.get(), ASSETS_SIZE, DETAIL);
         y += BOX_H + BOX_GAP;
     }
     if offers_sounds() && sounds_from_file() {
         chrome(p, x, y, w, BOX_H, false);
-        box_text(p, x + BOX_PAD, y, AUDIO_NAME, FROM_FILE, DETAIL);
+        box_text(p, x + BOX_PAD, y, AUDIO_NAME.get(), FROM_FILE.get(), DETAIL);
         y += BOX_H + BOX_GAP;
     } else if offers_sounds() {
         let hovered = ctx.hovering(x, y, w, BOX_H);
@@ -282,7 +357,7 @@ fn prompt_boxes(p: &mut Painter, ctx: &ScreenCtx, mut y: f32) -> f32 {
             );
         }
         p.outline(check_x, check_y, CHECK_SIZE, CHECK_SIZE, EDGE);
-        box_text(p, x + BOX_PAD, y, AUDIO_NAME, AUDIO_SIZE, DETAIL);
+        box_text(p, x + BOX_PAD, y, AUDIO_NAME.get(), AUDIO_SIZE, DETAIL);
         y += BOX_H + BOX_GAP;
     }
     #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
@@ -299,15 +374,9 @@ fn import_box(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, w: f32) -> f32 {
     if let Some(bytes) = crate::platform::upload::take_assets() {
         let line = match transfer::import_for_install(&bytes) {
             Ok(Prepared::Installed) => None,
-            Ok(Prepared::Kept(words)) if words.is_empty() => Some((
-                IMPORT_NAME,
-                "Language applied".to_owned(),
-                GREEN & 0xFF_FFFF,
-            )),
-            Ok(Prepared::Kept(words)) => {
-                Some(("Ready. Continue gets the jar", words, GREEN & 0xFF_FFFF))
-            }
-            Err(e) => Some((IMPORT_NAME, e.short(), 0xFF5555)),
+            Ok(Prepared::Kept(words)) if words.is_empty() => Some(ImportLine::LanguageApplied),
+            Ok(Prepared::Kept(words)) => Some(ImportLine::Kept(words)),
+            Err(e) => Some(ImportLine::Refused(e)),
         };
         *IMPORT_LINE.lock().unwrap() = line;
     }
@@ -317,12 +386,26 @@ fn import_box(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, w: f32) -> f32 {
         crate::platform::upload::choose_assets();
     }
     chrome(p, x, y, w, BOX_H, hovered);
-    let line = IMPORT_LINE.lock().unwrap().clone();
-    match line {
-        Some((name, detail, rgb)) => box_text(p, x + BOX_PAD, y, name, &detail, rgb),
-        None => box_text(p, x + BOX_PAD, y, IMPORT_NAME, IMPORT_DETAIL, DETAIL),
-    }
+    let (name, detail, rgb) = import_text();
+    box_text(p, x + BOX_PAD, y, name, &detail, rgb);
     y + BOX_H + BOX_GAP
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
+fn import_text() -> (&'static str, String, u32) {
+    match &*IMPORT_LINE.lock().unwrap() {
+        None => (IMPORT_NAME.get(), IMPORT_DETAIL.get().to_owned(), DETAIL),
+        Some(ImportLine::LanguageApplied) => {
+            let line = tr!("install.language_applied");
+            (IMPORT_NAME.get(), line.to_owned(), GREEN & 0xFF_FFFF)
+        }
+        Some(ImportLine::Kept(words)) => (
+            tr!("install.ready_for_jar"),
+            words.clone(),
+            GREEN & 0xFF_FFFF,
+        ),
+        Some(ImportLine::Refused(e)) => (IMPORT_NAME.get(), e.short(), 0xFF5555),
+    }
 }
 
 fn progress_boxes(
@@ -333,36 +416,46 @@ fn progress_boxes(
     stage: Stage,
 ) -> f32 {
     let (done, total) = dl.progress();
-    if offers_assets() || total > 0 {
-        let line = match stage {
-            Stage::Extracting => "Unpacking the assets".to_string(),
+    let (sound_done, sound_total) = dl.sound_progress();
+    let assets_line = if offers_assets() || total > 0 {
+        Some(match stage {
+            Stage::Extracting => UNPACKING.get().to_owned(),
             _ if total > 0 => of_total(done, total),
-            _ => CONTACTING.to_string(),
-        };
-        running_box(p, ctx, y, ASSETS_NAME, &line, done, total);
+            _ => CONTACTING.get().to_owned(),
+        })
+    } else {
+        None
+    };
+    let sounds_line = if offers_sounds() {
+        Some(if sounds_from_file() {
+            FROM_FILE.get().to_owned()
+        } else if dl.sounds_skipped() {
+            SKIPPED.get().to_owned()
+        } else if sound_total > 0 {
+            of_total(sound_done, sound_total)
+        } else if stage == Stage::Asking || dl.sounds_running() {
+            CONTACTING.get().to_owned()
+        } else if cfg!(target_arch = "wasm32") {
+            WAITING.get().to_owned()
+        } else {
+            ALREADY_INSTALLED.get().to_owned()
+        })
+    } else {
+        None
+    };
+    let span = box_span(p, ctx, &[]);
+
+    if let Some(line) = &assets_line {
+        running_box(p, span, y, ASSETS_NAME.get(), line, done, total);
         y += BOX_H + BOX_GAP;
     }
-    if offers_sounds() {
-        let (done, total) = dl.sound_progress();
-        let line = if sounds_from_file() {
-            FROM_FILE.to_string()
-        } else if dl.sounds_skipped() {
-            "Skipped".to_string()
-        } else if total > 0 {
-            of_total(done, total)
-        } else if stage == Stage::Asking || dl.sounds_running() {
-            CONTACTING.to_string()
-        } else if cfg!(target_arch = "wasm32") {
-            "Waiting".to_string()
-        } else {
-            "Already installed".to_string()
-        };
+    if let Some(line) = &sounds_line {
         let total = if dl.sounds_skipped() || sounds_from_file() {
             0
         } else {
-            total
+            sound_total
         };
-        running_box(p, ctx, y, AUDIO_NAME, &line, done, total);
+        running_box(p, span, y, AUDIO_NAME.get(), line, sound_done, total);
         y += BOX_H + BOX_GAP;
     }
     y + BOX_GAP
@@ -370,14 +463,13 @@ fn progress_boxes(
 
 fn running_box(
     p: &mut Painter,
-    ctx: &ScreenCtx,
+    (x, w): (f32, f32),
     y: f32,
     name: &str,
     line: &str,
     done: u64,
     total: u64,
 ) {
-    let (x, w) = box_span(ctx);
     chrome(p, x, y, w, BOX_H, false);
     if total > 0 {
         let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
@@ -411,12 +503,12 @@ fn fitted(ideal: f32, ctx: &ScreenCtx) -> f32 {
     ideal.min(ctx.vw - 40.0).max(60.0).floor()
 }
 
-fn button(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, label: &str) -> bool {
-    let hovered = ctx.hovering(x, y, BUTTON_W, BUTTON_H);
-    chrome(p, x, y, BUTTON_W, BUTTON_H, hovered);
+fn button(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32, w: f32, label: &str) -> bool {
+    let hovered = ctx.hovering(x, y, w, BUTTON_H);
+    chrome(p, x, y, w, BUTTON_H, hovered);
     p.text_centered(
         label,
-        x + BUTTON_W * 0.5,
+        x + w * 0.5,
         (y + (BUTTON_H - 8.0) * 0.5).floor(),
         0xFFFFFF,
         false,
@@ -454,10 +546,7 @@ fn prepare() {
 fn build() {
     if !crate::client::assets::mount() {
         PREPARING.store(false, Ordering::Relaxed);
-        download().report_failure(
-            "The assets could not be read",
-            "the set that just installed will not mount",
-        );
+        download().report_failure(UNMOUNTABLE, "the set that just installed will not mount");
         return;
     }
     crate::renderer::reload::install_downloaded();

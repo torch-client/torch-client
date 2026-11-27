@@ -54,7 +54,7 @@ impl Dimension {
         }
     }
 
-    fn registry_id(self) -> &'static str {
+    pub(crate) fn registry_id(self) -> &'static str {
         match self {
             Dimension::Overworld => "overworld",
             Dimension::Nether => "the_nether",

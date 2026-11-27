@@ -32,9 +32,9 @@ enum Item {
 
 fn category_prompt(category: &Category) -> Vec<Span> {
     let text = match category {
-        Category::Root => "Teleport to a player or team",
-        Category::Players { .. } => "Select a player",
-        Category::Teams => "Select a team",
+        Category::Root => crate::lang::tr!("gui.spectator.root_prompt"),
+        Category::Players { .. } => crate::lang::tr!("gui.spectator.players_prompt"),
+        Category::Teams => crate::lang::tr!("gui.spectator.teams_prompt"),
     };
     styled(text, Style::default())
 }
@@ -44,7 +44,9 @@ fn item_name(item: &Item) -> Vec<Span> {
         Item::Category(Category::Players { .. }) => {
             styled(label!("spectatorMenu.teleport"), Style::default())
         }
-        Item::Category(Category::Teams) => styled("Teleport to Team", Style::default()),
+        Item::Category(Category::Teams) => {
+            styled(crate::lang::tr!("gui.spectator.teams"), Style::default())
+        }
         Item::Category(Category::Root) => Vec::new(),
         Item::Player { name, .. } => name.clone(),
     }

@@ -149,7 +149,10 @@ impl<'a> Painter<'a> {
         }
     }
 
-    #[cfg(all(feature = "tutorial", feature = "mobile_ui"))]
+    #[cfg(all(
+        feature = "mobile_ui",
+        any(feature = "tutorial", target_arch = "wasm32")
+    ))]
     pub fn xform(&self) -> (f32, f32, f32) {
         self.xform
     }
@@ -483,10 +486,25 @@ impl<'a> Painter<'a> {
     }
 
     pub fn blit_sheet(&mut self, sheet: &str, sx: f32, sy: f32, w: f32, h: f32, x: f32, y: f32) {
+        self.blit_sheet_tinted(sheet, sx, sy, w, h, x, y, 0xFFFF_FFFF);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn blit_sheet_tinted(
+        &mut self,
+        sheet: &str,
+        sx: f32,
+        sy: f32,
+        w: f32,
+        h: f32,
+        x: f32,
+        y: f32,
+        argb: u32,
+    ) {
         let Some(r) = self.atlas.sheet(sheet) else {
             return;
         };
-        self.region_part(r, sx, sy, w, h, x, y, w, h, [1.0; 4]);
+        self.region_part(r, sx, sy, w, h, x, y, w, h, unpack(argb));
     }
 
     pub fn sprite_part(&mut self, name: &str, sx: f32, sy: f32, w: f32, h: f32, x: f32, y: f32) {

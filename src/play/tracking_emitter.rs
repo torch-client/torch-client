@@ -5,6 +5,8 @@ use crate::session::{ParticleEmit, SharedMutex, SideMutex, TrackingEmit};
 
 pub(crate) const DEFAULT_LIFE: u32 = 3;
 
+const MAX_EMITTERS: usize = 16_384 / 16;
+
 struct Emitter {
     entity: i32,
     particle: Particle,
@@ -19,7 +21,11 @@ static EMITTERS: SideMutex<Vec<Emitter>> = SideMutex::new(Vec::new());
 pub(crate) fn start(entity: i32, particle: Particle, life_time: u32, sound: Option<&'static str>) {
     #[cfg(not(feature = "audio"))]
     let _ = sound;
-    EMITTERS.lock().unwrap().push(Emitter {
+    let mut emitters = EMITTERS.lock().unwrap();
+    if emitters.len() >= MAX_EMITTERS {
+        emitters.remove(0);
+    }
+    emitters.push(Emitter {
         entity,
         particle,
         life_time,
@@ -35,18 +41,18 @@ pub(crate) fn reset() {
     }
 }
 
-pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
+pub(crate) fn tick(bot: &Client, shared: &SharedMutex, runs: bool) {
     let rounds = {
         let mut emitters = EMITTERS.lock().unwrap();
         if emitters.is_empty() {
             return;
         }
-        advance(bot, &mut emitters)
+        advance(bot, &mut emitters, runs)
     };
     crate::play::emit::queue(shared, rounds, ParticleEmit::Tracking);
 }
 
-fn advance(bot: &Client, emitters: &mut Vec<Emitter>) -> Vec<TrackingEmit> {
+fn advance(bot: &Client, emitters: &mut Vec<Emitter>, runs: bool) -> Vec<TrackingEmit> {
     use azalea::entity::Position;
     use azalea::entity::dimensions::EntityDimensions;
     use azalea::entity::indexing::EntityIdIndex;
@@ -58,6 +64,9 @@ fn advance(bot: &Client, emitters: &mut Vec<Emitter>) -> Vec<TrackingEmit> {
     let index = ecs.get::<EntityIdIndex>(bot.entity);
     let mut rounds = Vec::with_capacity(emitters.len());
     emitters.retain_mut(|emitter| {
+        if !runs && emitter.life > 0 {
+            return true;
+        }
         let entity = if emitter.entity == local {
             Some(bot.entity)
         } else {

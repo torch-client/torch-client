@@ -1,4 +1,5 @@
 mod boat;
+pub(crate) mod cart_lerp;
 mod mount;
 #[cfg(feature = "audio")]
 pub(crate) mod sound;
@@ -28,12 +29,13 @@ use azalea::physics::collision::entity_collisions::{
     AabbQuery, CollidableEntityQuery, VehicleCollidableQuery, VehicleCollisions,
 };
 use azalea::physics::collision::{
-    BorderSource, MoveCtx, MoverType, block_speed_factor_for, move_colliding,
+    BorderSource, MoveCtx, MoverType, MovingBlocks, block_speed_factor_with, move_colliding,
 };
 use azalea::physics::fluids::{FluidPush, PassengerFluidBox, update_fluid_interaction};
-use azalea::physics::travel::no_collision;
+use azalea::physics::travel::no_collision_with;
 use azalea::physics::{
-    EntityMovement, InsideKind, apply_effects_from_blocks_for, block_jump_factor, jump_boost_power,
+    EntityMovement, InsideKind, apply_effects_from_blocks_for, block_jump_factor_with,
+    jump_boost_power,
 };
 use azalea::world::{WorldBorder, WorldName, Worlds};
 use azalea_core::entity_id::MinecraftEntityId;
@@ -408,6 +410,59 @@ pub(crate) fn driven_pose() -> Option<DrivenPose> {
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Steered {
+    pub id: i32,
+    pub pos: Vec3,
+    pub boat: bool,
+    pub strider: bool,
+}
+
+pub(crate) fn steered() -> Option<Steered> {
+    RIDING.lock().unwrap().driven.as_ref().map(|d| Steered {
+        id: d.id,
+        pos: d.pos,
+        boat: matches!(d.mount, Mount::Boat(_)),
+        strider: d.mount == Mount::Strider,
+    })
+}
+
+pub(crate) fn piston_moved(id: i32, pos: Vec3, on_ground: bool, last_yd: f64) {
+    if let Some(d) = RIDING
+        .lock()
+        .unwrap()
+        .driven
+        .as_mut()
+        .filter(|d| d.id == id)
+    {
+        d.pos = pos;
+        d.on_ground = on_ground;
+        d.boat.moved(last_yd);
+    }
+}
+
+pub(crate) fn passenger_entities(
+    id_index: &EntityIdIndex,
+    vehicle_id: i32,
+) -> ([Entity; 4], usize) {
+    let mut passengers = [Entity::PLACEHOLDER; 4];
+    let mut riders = 0;
+    for id in crate::client::tracking::passengers()
+        .lock()
+        .unwrap()
+        .get(&vehicle_id)
+        .into_iter()
+        .flatten()
+        .take(passengers.len())
+    {
+        if let Some(e) = id_index.get_by_minecraft_entity(MinecraftEntityId(*id)) {
+            passengers[riders] = e;
+            riders += 1;
+        }
+    }
+    (passengers, riders)
+}
+
 pub(crate) fn note_vehicle_correction(pos: Vec3, y_rot: f32, x_rot: f32) {
     let Some(id) = crate::client::tracking::local_vehicle_id() else {
         return;
@@ -479,6 +534,9 @@ impl Plugin for RidingPlugin {
                 ride_post_travel
                     .after(PhysicsSystems)
                     .before(azalea::movement::send_position),
+                cart_lerp::tick_cart_lerps
+                    .after(PhysicsSystems)
+                    .before(ride_post_travel),
                 send_rider_rotation
                     .after(ride_post_travel)
                     .after(azalea::movement::send_player_input_packet)
@@ -591,6 +649,7 @@ fn ride_pre_travel(
             &WorldName,
             &OnClimbable,
             &ActiveEffects,
+            Option<&MovingBlocks>,
             MountMeta,
         ),
         Without<LocalEntity>,
@@ -627,6 +686,7 @@ fn ride_pre_travel(
         world_name,
         on_climbable,
         active_effects,
+        moving,
         (
             standing,
             camel_dash,
@@ -747,7 +807,7 @@ fn ride_pre_travel(
         let border_source = BorderSource::at(border, driven.pos.x, driven.pos.z);
         driven.with_target(|interp, target| {
             interp.interpolate_with(target, |shifted| {
-                no_collision(
+                no_collision_with(
                     &world,
                     Some(entity),
                     &aabb_query,
@@ -756,6 +816,7 @@ fn ride_pre_travel(
                     &dimensions.make_bounding_box(Vec3::new(shifted[0], shifted[1], shifted[2])),
                     false,
                     Default::default(),
+                    moving,
                 )
             });
         });
@@ -838,21 +899,7 @@ fn ride_pre_travel(
         })
     };
 
-    let mut passengers = [Entity::PLACEHOLDER; 4];
-    let mut riders = 0;
-    for id in crate::client::tracking::passengers()
-        .lock()
-        .unwrap()
-        .get(&vehicle_id)
-        .into_iter()
-        .flatten()
-        .take(passengers.len())
-    {
-        if let Some(e) = id_index.get_by_minecraft_entity(MinecraftEntityId(*id)) {
-            passengers[riders] = e;
-            riders += 1;
-        }
-    }
+    let (passengers, riders) = passenger_entities(id_index, vehicle_id);
 
     physics.base_tick_powder_snow();
     let mut ctx = MoveCtx {
@@ -875,6 +922,7 @@ fn ride_pre_travel(
         stands_on_lava: mount == Mount::Strider,
         fall_flying: false,
         border,
+        moving,
         direction: *direction,
         sprinting: Sprinting(false),
         on_climbable: *on_climbable,
@@ -897,7 +945,7 @@ fn ride_pre_travel(
                 boat::GRAVITY
             };
             boat.float(&world, &hull, gravity, &mut pos, &mut velocity, |target| {
-                no_collision(
+                no_collision_with(
                     &world,
                     Some(entity),
                     &aabb_query,
@@ -906,6 +954,7 @@ fn ride_pre_travel(
                     &hull.move_relative(Vec3::new(0.0, target - start_y, 0.0)),
                     false,
                     Default::default(),
+                    moving,
                 )
             });
             if pos != **ctx.position {
@@ -941,6 +990,7 @@ fn ride_pre_travel(
                     movement,
                     InsideKind::Boat,
                     active_effects,
+                    moving,
                 );
             }
             driven.y_rot = y_rot;
@@ -974,6 +1024,7 @@ fn ride_pre_travel(
                 movement,
                 InsideKind::Living,
                 active_effects,
+                moving,
             );
             if mount == Mount::Strider {
                 travel::float_strider(&mut physics, **position, &world);
@@ -1031,12 +1082,13 @@ fn riders_jump(
     movement_speed: f64,
 ) {
     let (world, attributes, position) = (ctx.world, ctx.attributes, **ctx.position);
+    let moving = ctx.moving;
     let boost = ctx.active_effects.map_or(0.0, jump_boost_power) as f64;
     let jump_power = |amount: f32| {
-        jump_strength * amount as f64 * block_jump_factor(world, Position::new(position)) as f64
-            + boost
+        let factor = block_jump_factor_with(world, moving, Position::new(position));
+        jump_strength * amount as f64 * factor as f64 + boost
     };
-    let speed_factor = || block_speed_factor_for(world, position, attributes) as f64;
+    let speed_factor = || block_speed_factor_with(world, moving, position, attributes) as f64;
     match mount.jump() {
         Jump::None => {}
         Jump::Leap => {

@@ -172,6 +172,7 @@ pub struct GuiPlugin {
     pub atlas: Arc<GuiAtlas>,
     pub shared: Arc<SharedMutex>,
     pub startup: StartupState,
+    pub options: crate::gui::GuiOptions,
 }
 
 #[derive(Clone, Default)]
@@ -190,7 +191,7 @@ pub struct AfterDownloadScreen(pub crate::gui::Screen);
 
 impl Plugin for GuiPlugin {
     fn build(&self, app: &mut App) {
-        let options = crate::gui::GuiOptions::default();
+        let options = self.options;
         #[cfg(feature = "audio")]
         {
             crate::audio::set_volumes(&options.volumes);
@@ -635,7 +636,7 @@ pub(crate) fn collect_input(
             slots.touch_slot_at(m)
         });
     }
-    let notches = crate::renderer::input::wheel_notches(&wheel);
+    let notches = crate::renderer::input::scroll_notches(&wheel, &state.options);
     let (wx, wy) = crate::renderer::input::accumulate_scroll(
         &mut wheel_acc,
         notches.x as f64,
@@ -647,6 +648,7 @@ pub(crate) fn collect_input(
     input.ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     input.shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     input.alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    crate::modules::better_tooltips::poll_key(&keys, &buttons, elsewhere);
     input.space_down = !elsewhere && keys.pressed(KeyCode::Space);
     input.up_down = !elsewhere && keys.pressed(KeyCode::ArrowUp);
     input.backspace = false;
@@ -811,12 +813,31 @@ pub(crate) fn collect_input(
     crate::platform::keyboard::resolve_taps();
     crate::platform::keyboard::settle();
 
-    #[cfg(target_os = "android")]
-    if input.enter && state.screen_is_menu() && crate::platform::keyboard::has_focus() {
-        crate::log_info!("input", "enter key: dismissing the keyboard");
-        input.enter = false;
-        input.select = false;
-        input.defocus = true;
+    #[cfg(any(target_os = "android", target_arch = "wasm32"))]
+    {
+        let enter_is_text = crate::platform::keyboard::take_enter_is_text();
+        let held = crate::platform::keyboard::has_focus();
+        #[cfg(target_arch = "wasm32")]
+        let here = {
+            if held {
+                let _ = crate::platform::keyboard::inset_px();
+            }
+            state.screen_is_menu()
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let here = true;
+        if input.enter
+            && !enter_is_text
+            && !state.screen.chat_open()
+            && here
+            && held
+            && crate::platform::keyboard::soft()
+        {
+            crate::log_info!("input", "enter key: dismissing the keyboard");
+            input.enter = false;
+            input.select = false;
+            input.defocus = true;
+        }
     }
 
     if elsewhere || state.screen_is_menu() {

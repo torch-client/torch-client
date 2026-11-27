@@ -98,12 +98,14 @@ pub(super) fn run_exit_tasks_on_exit(mut exit: bevy::ecs::message::MessageReader
 }
 
 #[inline]
-fn save_on_session_end() {
+pub(crate) fn save_on_session_end() {
     #[cfg(lua_mods)]
     crate::modules::script::leave();
     crate::modules::pathfinder::reset();
     crate::modules::auto_mine::reset();
     crate::modules::ore_miner::reset();
+    crate::modules::builder::reset();
+    crate::modules::farmer::reset();
     crate::modules::save();
     #[cfg(feature = "click_gui")]
     crate::gui::clickgui::flush_look();
@@ -115,6 +117,17 @@ fn reset_session_gui(
     #[cfg(feature = "skins")] faces: &mut crate::gui::player_faces::PlayerFaces,
 ) {
     save_on_session_end();
+    reset_session_screens(
+        state,
+        #[cfg(feature = "skins")]
+        faces,
+    );
+}
+
+fn reset_session_screens(
+    state: &mut crate::gui::GuiState,
+    #[cfg(feature = "skins")] faces: &mut crate::gui::player_faces::PlayerFaces,
+) {
     state.chat.reset_for_session();
     state.hud = Default::default();
     state.hud_overlays = Default::default();
@@ -127,6 +140,9 @@ fn reset_session_gui(
 
 struct NavPoll {
     ended: Option<Option<Vec<crate::text::Span>>>,
+    transfer_ready: bool,
+    transfer_unseen: bool,
+    in_world: bool,
     container_id: i32,
     container_kind: crate::session::ContainerKind,
     reopen: bool,
@@ -158,7 +174,11 @@ pub(super) fn apply_gui_nav(
     #[cfg(feature = "skins")] mut faces: ResMut<crate::gui::player_faces::PlayerFaces>,
 ) {
     if std::mem::take(&mut state.quit) {
-        shared.0.lock().unwrap().quit_requested = true;
+        {
+            let mut s = shared.0.lock().unwrap();
+            s.quit_requested = true;
+            s.transfer = None;
+        }
         #[cfg(target_os = "android")]
         if let Some(app) = bevy::android::ANDROID_APP.get() {
             run_exit_tasks();
@@ -194,6 +214,12 @@ pub(super) fn apply_gui_nav(
             && s.session.show_death_screen;
         NavPoll {
             ended,
+            transfer_ready: s
+                .transfer
+                .as_mut()
+                .is_some_and(|t| t.ready && !std::mem::replace(&mut t.claimed, true)),
+            transfer_unseen: std::mem::take(&mut s.transfer_unseen),
+            in_world: s.in_world,
             container_id: s.session.container_id,
             container_kind: s.session.container_kind,
             #[cfg(feature = "ui_utils")]
@@ -224,6 +250,25 @@ pub(super) fn apply_gui_nav(
             }),
         }
     };
+    if poll.transfer_ready || poll.transfer_unseen {
+        if poll.transfer_ready {
+            save_on_session_end();
+        }
+        reset_session_screens(
+            &mut state,
+            #[cfg(feature = "skins")]
+            &mut faces,
+        );
+        if poll.transfer_ready && state.connect.is_none() {
+            crate::client::bot::start_transfer();
+        }
+        state.nav = Some(if poll.in_world {
+            Screen::None
+        } else {
+            state.level_loading.begin_transfer();
+            Screen::LevelLoading
+        });
+    }
     if let Some(reason) = poll.ended {
         reset_session_gui(
             &mut state,
@@ -238,6 +283,10 @@ pub(super) fn apply_gui_nav(
             Ok(()) => {
                 state.level_loading.begin_connect();
                 state.nav = Some(Screen::LevelLoading);
+            }
+            Err(reason) if poll.transfer_ready => {
+                crate::log_warn!("net", "the Join was not started: {reason}");
+                crate::client::bot::start_transfer();
             }
             Err(reason) => {
                 state.level_loading.connecting = false;
@@ -298,7 +347,7 @@ pub(super) fn apply_gui_nav(
     let book_edit_open = poll.book_edit_open;
     let command_block_open = poll.command_block_open;
     if let Some(req) = command_block_open {
-        state.command_block.open(req.pos, req.mode, req.conditional);
+        state.command_block.open(req);
         state.nav = Some(Screen::CommandBlock);
     }
     if let Some(req) = poll.game_master_open {
@@ -422,7 +471,11 @@ pub(super) fn apply_gui_nav(
         return;
     }
     let is_container_screen = |s: Screen| s.is_modal();
-    if is_container_screen(state.screen) && !is_container_screen(next) && !silent_close {
+    if is_container_screen(state.screen)
+        && !is_container_screen(next)
+        && next != Screen::Dialog
+        && !silent_close
+    {
         shared
             .0
             .lock()
@@ -437,6 +490,7 @@ pub(super) fn apply_gui_nav(
     if state.screen == Screen::CommandBlock && next != Screen::CommandBlock {
         let mut s = shared.0.lock().unwrap();
         s.session.command_block_pos = None;
+        s.session.command_minecart = None;
         s.session.command_block_data = None;
     }
     if state.screen == Screen::TestInstanceBlock && next != Screen::TestInstanceBlock {
@@ -478,7 +532,7 @@ pub(super) fn mouse_look(
         let hand = if state.screen.is_open() || !crate::platform::pointer::is_locked() {
             Vec2::ZERO
         } else {
-            motion.delta * LOOK_SCALE
+            hand_turn(motion.delta, &state.options)
         };
         if hand == Vec2::ZERO && !crate::modules::hooks::drives_look() {
             return;
@@ -494,7 +548,32 @@ pub(super) fn mouse_look(
     }
 }
 
-pub(crate) const LOOK_SCALE: f32 = 0.15;
+#[cfg_attr(feature = "mobile_ui", allow(dead_code))]
+fn hand_turn(delta: Vec2, options: &crate::gui::GuiOptions) -> Vec2 {
+    let mut hand = delta * look_scale() * crate::modules::zoom::look_ratio();
+    if options.invert_mouse_x {
+        hand.x = -hand.x;
+    }
+    if options.invert_mouse_y {
+        hand.y = -hand.y;
+    }
+    hand
+}
+
+const TURN_DEGREES_PER_UNIT: f32 = 0.15;
+
+static LOOK_SCALE_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(TURN_DEGREES_PER_UNIT.to_bits());
+
+pub(crate) fn look_scale() -> f32 {
+    f32::from_bits(LOOK_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+pub(crate) fn set_look_scale(sensitivity: f64) {
+    let ss = sensitivity.clamp(0.0, 1.0) * 0.6 + 0.2;
+    let scale = (ss * ss * ss * 8.0) as f32 * TURN_DEGREES_PER_UNIT;
+    LOOK_SCALE_BITS.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
 
 pub(super) fn apply_server_look(
     mut angles: ResMut<CameraAngles>,
@@ -735,6 +814,7 @@ pub(super) fn track_lifecycle(
         match event {
             bevy::window::AppLifecycle::Suspended => {
                 crate::platform::notify::suspended();
+                crate::client::bot::start_in_background();
                 #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
                 crate::audio::devices::set_suspended(true);
             }
@@ -820,7 +900,8 @@ pub(super) fn web_pointer_lock(
 pub(super) fn fullscreen_key(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    state: Res<crate::gui::GuiState>,
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(unused_mut))]
+    mut state: ResMut<crate::gui::GuiState>,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))] mut windows: Query<
         &mut Window,
         With<bevy::window::PrimaryWindow>,
@@ -837,17 +918,22 @@ pub(super) fn fullscreen_key(
 
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     {
+        use bevy::window::{MonitorSelection, WindowMode};
         const ECHO_SECS: f64 = 0.5;
         let now = time.elapsed_secs_f64();
         let echo = last_toggle.is_some_and(|at| now - at < ECHO_SECS);
-        if pressed
-            && !echo
-            && let Ok(mut window) = windows.single_mut()
+        if pressed && !echo {
+            state.options.fullscreen = !state.options.fullscreen;
+            crate::gui::save_options(&state.options);
+        }
+        let wanted = state.options.fullscreen;
+        if let Ok(mut window) = windows.single_mut()
+            && matches!(window.mode, WindowMode::Windowed) == wanted
         {
-            use bevy::window::{MonitorSelection, WindowMode};
-            window.mode = match window.mode {
-                WindowMode::Windowed => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
-                _ => WindowMode::Windowed,
+            window.mode = if wanted {
+                WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+            } else {
+                WindowMode::Windowed
             };
             *last_toggle = Some(now);
         }
@@ -867,6 +953,46 @@ pub(super) fn fullscreen_key(
 
     #[cfg(target_os = "android")]
     let _ = pressed;
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub(super) fn remember_window_size(
+    mut resized: bevy::ecs::message::MessageReader<bevy::window::WindowResized>,
+    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
+    time: Res<Time<bevy::time::Real>>,
+    mut state: ResMut<crate::gui::GuiState>,
+    mut last_resize: Local<Option<f64>>,
+) {
+    const SETTLE_SECS: f64 = 0.5;
+    let Ok((entity, window)) = windows.single() else {
+        resized.clear();
+        return;
+    };
+    let now = time.elapsed_secs_f64();
+    if resized.read().any(|e| e.window == entity) {
+        *last_resize = Some(now);
+        return;
+    }
+    let Some(at) = *last_resize else {
+        return;
+    };
+    if now - at < SETTLE_SECS {
+        return;
+    }
+    *last_resize = None;
+    if state.options.fullscreen || !matches!(window.mode, bevy::window::WindowMode::Windowed) {
+        return;
+    }
+    let size = (
+        window.width().round() as u32,
+        window.height().round() as u32,
+    );
+    if size.0 == 0 || size.1 == 0 || size == crate::gui::window_size(&state.options) {
+        return;
+    }
+    state.options.window_width = size.0;
+    state.options.window_height = size.1;
+    crate::gui::save_options(&state.options);
 }
 
 pub(super) fn poll_module_binds(
@@ -1117,6 +1243,23 @@ pub(crate) fn wheel_notches(wheel: &AccumulatedMouseScroll) -> Vec2 {
     wheel.delta / per
 }
 
+pub(crate) fn scroll_notches(
+    wheel: &AccumulatedMouseScroll,
+    options: &crate::gui::GuiOptions,
+) -> Vec2 {
+    let notches = wheel_notches(wheel);
+    let sensitivity = options.mouse_wheel_sensitivity as f32;
+    let axis = |v: f32| {
+        let v = if !options.discrete_mouse_scroll || v == 0.0 {
+            v
+        } else {
+            v.signum()
+        };
+        v * sensitivity
+    };
+    Vec2::new(axis(notches.x), axis(notches.y))
+}
+
 pub(crate) fn accumulate_scroll(acc: &mut (f64, f64), dx: f64, dy: f64) -> (i32, i32) {
     if acc.0 != 0.0 && dx.signum() != acc.0.signum() {
         acc.0 = 0.0;
@@ -1162,7 +1305,7 @@ pub(super) fn handle_hotbar_scroll(
     if state.screen.is_open() {
         return;
     }
-    let notches = wheel_notches(&wheel);
+    let notches = scroll_notches(&wheel, &state.options);
     let (dx, dy) = (notches.x as f64, notches.y as f64);
     if dx == 0.0 && dy == 0.0 {
         return;
@@ -1200,7 +1343,7 @@ pub(super) fn handle_spectator_fly_speed_scroll(
     if state.screen.is_open() {
         return;
     }
-    let dy = wheel_notches(&wheel).y;
+    let dy = scroll_notches(&wheel, &state.options).y;
     if dy == 0.0 {
         return;
     }
@@ -1390,6 +1533,7 @@ pub(super) fn toggle_screen(
                     Screen::ExplorePacks => Screen::ResourcePacks,
                     #[cfg(feature = "mobile_ui")]
                     Screen::TouchLayout => Screen::Controls,
+                    Screen::MouseSettings => Screen::Controls,
                     #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
                     Screen::ExportAssets => Screen::ManageStorage,
                     #[cfg(feature = "benchmark_feature")]
@@ -1484,6 +1628,17 @@ pub(super) fn toggle_screen(
         } else {
             None
         }
+    } else if close_key
+        && matches!(
+            state.screen,
+            Screen::BookView | Screen::Container(crate::session::ContainerKind::Lectern)
+        )
+        && {
+            let lectern = state.screen != Screen::BookView;
+            state.book.escape_overlay(lectern, &shared.0)
+        }
+    {
+        None
     } else if state.screen.is_open() {
         if lua_escape {
             None

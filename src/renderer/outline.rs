@@ -196,8 +196,9 @@ fn drive_glow_cameras(
         && let Some(size) = size
         && (state.image.is_none() || state.size != size)
     {
-        let mut image = Image::new_target_texture(size.x, size.y, TextureFormat::Rgba8Unorm, None);
-        image.sampler = ImageSampler::nearest();
+        let mut image =
+            Image::new_target_texture(size.x, size.y, TextureFormat::Rgba8UnormSrgb, None);
+        image.sampler = ImageSampler::linear();
         let handle = images.add(image);
         commands
             .entity(glow_entity)
@@ -390,6 +391,7 @@ fn glow_material(
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct GlowCompositeMaterial {
     #[texture(0)]
+    #[sampler(1)]
     glow: Handle<Image>,
 }
 

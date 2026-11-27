@@ -6,6 +6,7 @@ use crate::gui::widgets::{
     centered_row_x, centered_x,
 };
 use crate::gui::{GAMMA_MAX, GuiState, Screen, ScreenCtx, keybinds};
+use crate::lang::Key;
 use crate::text::LINE_HEIGHT;
 
 mod tr {
@@ -73,6 +74,17 @@ mod tr {
         inactivity_minimized = "options.inactivityFpsLimit.minimized",
         reset = "controls.reset",
         reset_all_keys = "controls.resetAll",
+        mouse_settings = "options.mouse_settings",
+        mouse_settings_title = "options.mouse_settings.title",
+        sensitivity = "options.sensitivity",
+        sensitivity_min = "options.sensitivity.min",
+        sensitivity_max = "options.sensitivity.max",
+        mouse_wheel_sensitivity = "options.mouseWheelSensitivity",
+        discrete_mouse_scroll = "options.discrete_mouse_scroll",
+        invert_mouse_x = "options.invertMouseX",
+        invert_mouse_y = "options.invertMouseY",
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        fullscreen = "options.fullscreen",
     }
 }
 
@@ -95,118 +107,107 @@ fn chunks(n: impl std::fmt::Display) -> String {
 }
 
 #[cfg(feature = "audio")]
-const AUDIO_TITLE: &str = "Music & Sounds";
+const AUDIO_TITLE: Key = Key::of("options_screen.audio_title");
 
-const GAME_TITLE: &str = "Game";
-const GAME: &str = "Game...";
+const GAME_TITLE: Key = Key::of("options_screen.game_title");
+const GAME: Key = Key::of("options_screen.game");
 
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-const STORAGE_HEADER: &str = "Storage";
+const STORAGE_HEADER: Key = Key::of("options_screen.storage_header");
 #[cfg(feature = "asset_download")]
-const CLEAR_ASSETS: &str = "Clear Cached Assets";
+const CLEAR_ASSETS: Key = Key::of("options_screen.clear_assets");
 
 #[cfg(feature = "asset_download")]
-const CLEAR_ASSETS_TITLE: &str = "Clear cached assets?";
+const CLEAR_ASSETS_TITLE: Key = Key::of("options_screen.clear_assets.title");
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-const CLEAR_ASSETS_MESSAGE: &str = concat!(
-    "The stored copy of the game's assets will be deleted.\n",
-    "The client downloads about 44 MiB from Mojang again\n",
-    "the next time this page is opened.",
-);
+const CLEAR_ASSETS_MESSAGE: Key = Key::of("options_screen.clear_assets.message_web");
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-const CLEAR_ASSETS_WARNING: &str = "The page reloads immediately.";
+const CLEAR_ASSETS_WARNING: Key = Key::of("options_screen.clear_assets.warning_web");
 #[cfg(all(not(target_arch = "wasm32"), feature = "asset_download"))]
-const CLEAR_ASSETS_MESSAGE: &str = concat!(
-    "The downloaded copy of the game's assets will be deleted.\n",
-    "The client downloads them from Mojang again\n",
-    "the next time it starts.",
-);
+const CLEAR_ASSETS_MESSAGE: Key = Key::of("options_screen.clear_assets.message");
 #[cfg(all(not(target_arch = "wasm32"), feature = "asset_download"))]
-const CLEAR_ASSETS_WARNING: &str = "The client closes immediately.";
+const CLEAR_ASSETS_WARNING: Key = Key::of("options_screen.clear_assets.warning");
 #[cfg(feature = "asset_download")]
-const CLEAR_ASSETS_YES: &str = "Clear";
+const CLEAR_ASSETS_YES: Key = Key::of("options_screen.clear_assets.yes");
 #[cfg(feature = "asset_download")]
-const CLEAR_ASSETS_NO: &str = "Cancel";
+const CLEAR_ASSETS_NO: Key = Key::of("options_screen.clear_assets.no");
 
 #[cfg(feature = "builtin_shaders")]
-const SHADER_QUALITY: &str = "Shader Quality";
+const SHADER_QUALITY: Key = Key::of("options_screen.shader_quality");
 
 #[cfg(feature = "builtin_shaders")]
-const SHADERS: &str = "Shaders";
+const SHADERS: Key = Key::of("options_screen.shaders");
 
 #[cfg(feature = "builtin_shaders")]
-const PLAYER_SHADOWS: &str = "Player Shadows";
+const PLAYER_SHADOWS: Key = Key::of("options_screen.player_shadows");
 
-const ANTIALIASING: &str = "Antialiasing";
+const ANTIALIASING: Key = Key::of("options_screen.antialiasing");
 
-const MENU_BLUR: &str = "Menu Blur";
+const MENU_BLUR: Key = Key::of("options_screen.menu_blur");
 
-const LIGHTING_ENGINE: &str = "Lighting Engine";
-const VSYNC: &str = "VSync";
+const LIGHTING_ENGINE: Key = Key::of("options_screen.lighting_engine");
+const VSYNC: Key = Key::of("options_screen.vsync");
 
-const FPS_COUNTER: &str = "FPS Counter";
-
-#[cfg(feature = "mobile_ui")]
-const TOUCH_MOVEMENT: &str = "Movement";
+const FPS_COUNTER: Key = Key::of("options_screen.fps_counter");
 
 #[cfg(feature = "mobile_ui")]
-const TOUCH_SNEAK: &str = "Sneak";
-
-#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
-const BEDROCK_FETCHING: &str = "Downloading Bedrock buttons";
-#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
-const BEDROCK_FAILED: &str = "Bedrock buttons not downloaded.";
-#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
-const BEDROCK_RETRY: &str = "Retry";
+const TOUCH_MOVEMENT: Key = Key::of("options_screen.touch_movement");
 
 #[cfg(feature = "mobile_ui")]
-const EDIT_CONTROL_LAYOUT: &str = "Edit control layout...";
+const TOUCH_SNEAK: Key = Key::of("options_screen.touch_sneak");
 
-const RESET_VIDEO: &str = "Reset Video Settings";
+#[cfg(all(feature = "mobile_ui", feature = "asset_download"))]
+const BEDROCK_RETRY: Key = Key::of("options_screen.bedrock.retry");
 
-const RESET_GAME: &str = "Reset Game Settings";
+#[cfg(feature = "mobile_ui")]
+const EDIT_CONTROL_LAYOUT: Key = Key::of("options_screen.edit_control_layout");
+
+const RESET_VIDEO: Key = Key::of("options_screen.reset_video");
+
+const RESET_GAME: Key = Key::of("options_screen.reset_game");
 
 #[cfg(feature = "benchmark_feature")]
-const BENCHMARK: &str = "Benchmark";
+const BENCHMARK: Key = Key::of("options_screen.benchmark");
 #[cfg(feature = "benchmark_feature")]
-const BENCHMARK_IN_WORLD: &str = "Leave the world to run the benchmark";
+const BENCHMARK_IN_WORLD: Key = Key::of("options_screen.benchmark.in_world");
 #[cfg(all(feature = "benchmark_feature", feature = "shader_support"))]
-const BENCHMARK_SHADER_PACK: &str = "Turn off the shader pack to run the benchmark";
+const BENCHMARK_SHADER_PACK: Key = Key::of("options_screen.benchmark.shader_pack");
 
-const RESET_ALL: &str = "Reset All Options";
+const RESET_ALL: Key = Key::of("options_screen.reset_all");
 
-const MANAGE_STORAGE: &str = "Manage Storage...";
-const MANAGE_STORAGE_TITLE: &str = "Manage Storage";
-const OPEN_CLIENT_FOLDER: &str = "Open torch-client Folder";
+const MANAGE_STORAGE: Key = Key::of("options_screen.manage_storage");
+const MANAGE_STORAGE_TITLE: Key = Key::of("options_screen.manage_storage.title");
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+const OPEN_CLIENT_FOLDER: Key = Key::of("options_screen.open_client_folder");
 #[cfg(feature = "asset_download")]
-const CHECK_ASSETS: &str = "Install missing assets";
+const CHECK_ASSETS: Key = Key::of("options_screen.check_assets");
 #[cfg(feature = "asset_download")]
-const NOTHING_MISSING: &str = "Nothing is missing";
+const NOTHING_MISSING: Key = Key::of("options_screen.nothing_missing");
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-const EXPORT_DATA: &str = "Export Client Data";
+const EXPORT_DATA: Key = Key::of("options_screen.export_data");
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
 const EXPORT_FILE: &str = "torch-client-data.zip";
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-const EXPORT_ASSETS: &str = "Export Assets...";
+const EXPORT_ASSETS: Key = Key::of("options_screen.export_assets");
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-const IMPORT_ASSETS: &str = "Import Assets...";
+const IMPORT_ASSETS: Key = Key::of("options_screen.import_assets");
 #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
-const EXPORT_TOOLTIP: [&str; 5] = [
-    "Downloads a .zip with:",
-    "+ options, keybinds, modules",
-    "+ accounts, servers, HUD, skins",
-    "- not assets, mods or mod data",
-    "Has sign-ins: keep it private",
+const EXPORT_TOOLTIP: [Key; 5] = [
+    Key::of("options_screen.export_data.tip_1"),
+    Key::of("options_screen.export_data.tip_2"),
+    Key::of("options_screen.export_data.tip_3"),
+    Key::of("options_screen.export_data.tip_4"),
+    Key::of("options_screen.export_data.tip_5"),
 ];
 #[cfg(self_update)]
-const ENABLE_SELF_UPDATE: &str = "Enable self update";
+const ENABLE_SELF_UPDATE: Key = Key::of("options_screen.enable_self_update");
 
-const SPRINT_MODE: &str = "Sprint Mode";
+const SPRINT_MODE: Key = Key::of("options_screen.sprint_mode");
 
-const ALWAYS_OP_ITEMS: &str = "Always Show OP Items";
+const ALWAYS_OP_ITEMS: Key = Key::of("options_screen.always_op_items");
 
 #[cfg(feature = "skins")]
-const SKIN_HEADER: &str = "Skin Customisation";
+const SKIN_HEADER: Key = Key::of("options_screen.skin_header");
 
 #[cfg(feature = "skins")]
 fn skin_part_labels() -> [&'static str; 7] {
@@ -215,22 +216,20 @@ fn skin_part_labels() -> [&'static str; 7] {
         tr::jacket(),
         tr::left_sleeve(),
         tr::right_sleeve(),
-        "Left Pants Leg",
-        "Right Pants Leg",
+        crate::lang::tr!("options_screen.skin.left_pants_leg"),
+        crate::lang::tr!("options_screen.skin.right_pants_leg"),
         tr::hat(),
     ]
 }
 
-const SIGNED_CHAT: &str = "Allow Signed Chat";
+const SIGNED_CHAT: Key = Key::of("options_screen.signed_chat");
 
-const TOAST_HEADER: &str = "Toasts";
+const TOAST_HEADER: Key = Key::of("options_screen.toast_header");
 
-const TOAST_RECIPE: &str = "Recipes";
-const TOAST_SYSTEM: &str = "System";
+const TOAST_RECIPE: Key = Key::of("options_screen.toast_recipe");
+const TOAST_SYSTEM: Key = Key::of("options_screen.toast_system");
 
-const TOAST_TIME: &str = "Toast Time";
-
-const SIGNED_CHAT_UNAVAILABLE: &str = "Needs a Microsoft account";
+const SIGNED_CHAT_UNAVAILABLE: Key = Key::of("options_screen.signed_chat.unavailable");
 
 const FOV_MIN: i32 = 30;
 const FOV_MAX: i32 = 110;
@@ -689,25 +688,16 @@ fn render_distance_label(value: i32) -> String {
 }
 
 #[cfg(feature = "render_lod")]
-const LOD_HEADER: &str = "Far terrain";
+const LOD_HEADER: Key = Key::of("options_screen.lod.header");
 
 #[cfg(feature = "render_lod")]
-const LOD_HINT: [&str; 2] = [
-    "Real blocks draw to Render Distance, low-detail terrain to",
-    "LOD Distance, from chunks the server sent this session.",
+const LOD_HINT: [Key; 2] = [
+    Key::of("options_screen.lod.hint_1"),
+    Key::of("options_screen.lod.hint_2"),
 ];
 
 #[cfg(feature = "render_lod")]
-const REAL_BLOCKS: &str = "(real blocks)";
-
-#[cfg(feature = "render_lod")]
-const LOD_DISTANCE: &str = "LOD Distance";
-
-#[cfg(feature = "render_lod")]
-const LOD_DISTANCE_FLOOR: &str = "(Render Distance + 1)";
-
-#[cfg(feature = "render_lod")]
-const LOD_QUALITY: &str = "LOD Detail";
+const LOD_DISTANCE: Key = Key::of("options_screen.lod.distance");
 
 #[cfg(feature = "render_lod")]
 const LOD_DISTANCE_SLIDER_ID: u32 = 32;
@@ -718,7 +708,7 @@ const LOD_QUALITY_SLIDER_ID: u32 = 33;
 const DAMAGE_TILT_SLIDER_ID: u32 = 34;
 
 #[cfg(feature = "render_scale")]
-const RENDER_SCALE: &str = "Render Scale";
+const RENDER_SCALE: Key = Key::of("options_screen.render_scale");
 
 #[cfg(feature = "render_scale")]
 const RENDER_SCALE_SLIDER_ID: u32 = 35;
@@ -726,7 +716,7 @@ const RENDER_SCALE_SLIDER_ID: u32 = 35;
 #[cfg(feature = "render_scale")]
 fn render_scale_label(step: i32) -> String {
     let percent = crate::gui::render_scale_percent(step.max(0) as u32);
-    percent_value(RENDER_SCALE, percent as i32)
+    percent_value(RENDER_SCALE.get(), percent as i32)
 }
 
 #[cfg(feature = "render_lod")]
@@ -745,7 +735,10 @@ fn lod_distance_stop(chunks: u32) -> i32 {
 
 #[cfg(feature = "render_lod")]
 fn lod_render_distance_label(value: i32) -> String {
-    format!("{} {REAL_BLOCKS}", render_distance_label(value))
+    crate::lang::trf!(
+        "options_screen.lod.real_blocks",
+        render_distance_label(value)
+    )
 }
 
 #[cfg(feature = "render_lod")]
@@ -753,11 +746,11 @@ fn lod_distance_label(stop: i32, render_distance: u32) -> String {
     let lod_chunks = LOD_DISTANCE_STOPS[(stop.max(0) as usize).min(LOD_DISTANCE_STOPS.len() - 1)];
     let floor = render_distance + 1;
     if lod_chunks >= floor {
-        generic_value(LOD_DISTANCE, &chunks(lod_chunks))
+        generic_value(LOD_DISTANCE.get(), &chunks(lod_chunks))
     } else {
-        format!(
-            "{} {LOD_DISTANCE_FLOOR}",
-            generic_value(LOD_DISTANCE, &chunks(floor))
+        crate::lang::trf!(
+            "options_screen.lod.distance_floor",
+            generic_value(LOD_DISTANCE.get(), &chunks(floor))
         )
     }
 }
@@ -766,7 +759,7 @@ fn lod_distance_label(stop: i32, render_distance: u32) -> String {
 fn lod_quality_label(index: i32) -> String {
     let q = crate::gui::LodQuality::ALL
         [(index.max(0) as usize).min(crate::gui::LodQuality::ALL.len() - 1)];
-    format!("{LOD_QUALITY}: {}", q.caption())
+    crate::lang::trf!("options_screen.lod.quality", q.caption())
 }
 
 #[cfg(feature = "render_lod")]
@@ -777,11 +770,17 @@ fn draw_lod_group(
     cell: &dyn Fn(f32, f32) -> (f32, f32),
     header: &dyn Fn(&mut Painter, f32, f32, &str),
 ) {
-    header(p, Y_LOD_HEADER, HEADER_PAD_TOP, LOD_HEADER);
+    header(p, Y_LOD_HEADER, HEADER_PAD_TOP, LOD_HEADER.get());
 
     let (x, y) = cell(0.0, Y_LOD_HINT);
     for (i, line) in LOD_HINT.iter().enumerate() {
-        p.text_plain(line, x, y + i as f32 * (LINE_HEIGHT + 1.0), 0xA0A0A0, true);
+        p.text_plain(
+            line.get(),
+            x,
+            y + i as f32 * (LINE_HEIGHT + 1.0),
+            0xA0A0A0,
+            true,
+        );
     }
 
     let (x, y) = cell(0.0, Y_LOD_ROW_1);
@@ -839,7 +838,10 @@ fn brightness_label(value: i32) -> String {
 }
 
 fn toast_time_label(value: i32) -> String {
-    format!("{TOAST_TIME}: {}.{}s", value / 10, value % 10)
+    crate::lang::trf!(
+        "options_screen.toast_time",
+        format_args!("{}.{}", value / 10, value % 10)
+    )
 }
 
 fn max_framerate_label(fps: u32) -> String {
@@ -999,15 +1001,12 @@ fn reset_audio_options(o: &mut crate::gui::GuiOptions) {
 }
 
 #[cfg(feature = "audio")]
-const DEVICE_UNAVAILABLE: &str = " (unavailable)";
-
-#[cfg(feature = "audio")]
 fn device_caption(device: Option<&'static str>) -> String {
     use crate::audio::devices;
     match device {
         None => crate::gui::tooltip::label!("options.audioDevice.default").to_owned(),
         Some(name) if devices::fell_back() => {
-            format!("{}{DEVICE_UNAVAILABLE}", devices::label(name))
+            crate::lang::trf!("options_screen.device_unavailable", devices::label(name))
         }
         Some(name) => devices::label(name).to_owned(),
     }
@@ -1049,7 +1048,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let mut entries = vec![
         (tr::video(), Entry::Screen(Screen::VideoSettings)),
         (tr::controls(), Entry::Screen(Screen::Controls)),
-        (GAME, Entry::Screen(Screen::GameSettings)),
+        (GAME.get(), Entry::Screen(Screen::GameSettings)),
     ];
     #[cfg(feature = "audio")]
     entries.push((tr::audio(), Entry::Screen(Screen::AudioSettings)));
@@ -1059,8 +1058,8 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         Entry::Packs,
     ));
     #[cfg(feature = "hud_editor")]
-    entries.push(("Edit HUD...", Entry::Hud));
-    entries.push((MANAGE_STORAGE, Entry::Screen(Screen::ManageStorage)));
+    entries.push((crate::lang::tr!("options_screen.edit_hud"), Entry::Hud));
+    entries.push((MANAGE_STORAGE.get(), Entry::Screen(Screen::ManageStorage)));
 
     let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
     let top = LAYOUT.content_y(ctx.vh, menu_content_h(entries.len()));
@@ -1140,7 +1139,7 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         return;
     }
 
-    draw_title(p, ctx, MANAGE_STORAGE_TITLE);
+    draw_title(p, ctx, MANAGE_STORAGE_TITLE.get());
 
     let mut count = 1;
     if cfg!(not(any(target_arch = "wasm32", target_os = "android"))) {
@@ -1173,9 +1172,10 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
     #[allow(unused)]
     let mut next = 1;
 
-    if Button::new(left, top, COLUMN_W, WIDGET_HEIGHT, RESET_ALL).draw(p, ctx) {
+    if Button::new(left, top, COLUMN_W, WIDGET_HEIGHT, RESET_ALL.get()).draw(p, ctx) {
         reset_video_options(&mut state.options);
         reset_game_options(&mut state.options);
+        reset_mouse_options(&mut state.options);
         #[cfg(feature = "audio")]
         {
             reset_audio_options(&mut state.options);
@@ -1192,7 +1192,7 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
     {
         let (x, y) = cell(next);
         next += 1;
-        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, OPEN_CLIENT_FOLDER).draw(p, ctx) {
+        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, OPEN_CLIENT_FOLDER.get()).draw(p, ctx) {
             crate::platform::url::open_folder(&crate::platform::storage::dir());
         }
     }
@@ -1205,7 +1205,15 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
             crate::gui::tutorial::Spot::Restart,
             crate::gui::hud_layout::Rect::new(x, y, COLUMN_W, WIDGET_HEIGHT),
         );
-        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, "Restart Tutorial").draw(p, ctx) {
+        if Button::new(
+            x,
+            y,
+            COLUMN_W,
+            WIDGET_HEIGHT,
+            crate::lang::tr!("options_screen.restart_tutorial"),
+        )
+        .draw(p, ctx)
+        {
             crate::gui::tutorial::restart(state);
         }
     }
@@ -1215,9 +1223,9 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         let (x, y) = cell(next);
         next += 1;
         let label = if state.storage_nothing_missing {
-            NOTHING_MISSING
+            NOTHING_MISSING.get()
         } else {
-            CHECK_ASSETS
+            CHECK_ASSETS.get()
         };
         if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, label).draw(p, ctx) {
             state.storage_nothing_missing = !crate::gui::assetdownload::check_missing(state);
@@ -1228,7 +1236,7 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
     {
         let (x, y) = cell(next);
         next += 1;
-        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, CLEAR_ASSETS).draw(p, ctx) {
+        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, CLEAR_ASSETS.get()).draw(p, ctx) {
             state.confirm_clear_assets = true;
         }
     }
@@ -1239,7 +1247,7 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
         next += 1;
         let enable = Button {
             active: crate::client::self_update::skipping(),
-            ..Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, ENABLE_SELF_UPDATE)
+            ..Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, ENABLE_SELF_UPDATE.get())
         };
         if enable.draw(p, ctx) {
             crate::client::self_update::enable();
@@ -1250,21 +1258,24 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
     {
         let (x, y) = cell(next);
         next += 1;
-        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, EXPORT_ASSETS).draw(p, ctx) {
+        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, EXPORT_ASSETS.get()).draw(p, ctx) {
             state.asset_transfer.open();
             state.asset_transfer.import_line = None;
             state.nav = Some(Screen::ExportAssets);
         }
         let (x, y) = cell(next);
         next += 1;
-        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, IMPORT_ASSETS).draw(p, ctx) {
+        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, IMPORT_ASSETS.get()).draw(p, ctx) {
             crate::platform::upload::choose_assets();
         }
         if let Some(bytes) = crate::platform::upload::take_assets() {
             state.asset_transfer.import_line = Some(
                 match crate::client::assets::transfer::import_into_running(&bytes) {
                     Ok(line) => (line, false),
-                    Err(e) => (format!("Import failed: {}", e.long()), true),
+                    Err(e) => (
+                        crate::lang::trf!("options_screen.import_failed", e.long()),
+                        true,
+                    ),
                 },
             );
         }
@@ -1280,14 +1291,14 @@ pub fn draw_manage_storage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCt
     {
         let (x, y) = cell(next);
         next += 1;
-        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, EXPORT_DATA).draw(p, ctx) {
+        if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, EXPORT_DATA.get()).draw(p, ctx) {
             export_client_data();
         }
         if let Some(m) = ctx
             .mouse()
             .filter(|_| ctx.hovering(x, y, COLUMN_W, WIDGET_HEIGHT))
         {
-            let lines = EXPORT_TOOLTIP.map(str::to_owned);
+            let lines = EXPORT_TOOLTIP.map(|k| k.get().to_owned());
             draw_bind_tooltip(p, &lines, m.x, m.y, ctx.vw);
         }
     }
@@ -1411,14 +1422,14 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     opt_slider!(p, ctx, state; x, y, FOV_SLIDER_ID, fov, FOV_MIN, FOV_MAX, fov_label);
 
     let (x, y) = cell(0.0, Y_DISPLAY_ROW_2);
-    opt_toggle!(p, ctx, state; x, y, FPS_COUNTER, fps_counter);
+    opt_toggle!(p, ctx, state; x, y, FPS_COUNTER.get(), fps_counter);
 
     #[cfg(not(target_arch = "wasm32"))]
     let vsync_cell = Some(cell(1.0, Y_DISPLAY_ROW_2));
     #[cfg(target_arch = "wasm32")]
     let vsync_cell: Option<(f32, f32)> = None;
     if let Some((x, y)) = vsync_cell
-        && toggle(p, ctx, x, y, VSYNC, &mut state.options.vsync)
+        && toggle(p, ctx, x, y, VSYNC.get(), &mut state.options.vsync)
     {
         crate::gui::save_options(&state.options);
     }
@@ -1452,6 +1463,12 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     let (x, y) = cell(0.0, Y_DISPLAY_ROW_5);
     opt_toggle!(p, ctx, state; x, y, tr::hide_lightning_flashes(), hide_lightning_flashes);
+
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    {
+        let (x, y) = cell(1.0, Y_DISPLAY_ROW_5);
+        opt_toggle!(p, ctx, state; x, y, tr::fullscreen(), fullscreen);
+    }
 
     header(p, Y_QUALITY_HEADER, HEADER_PAD_TOP, tr::quality_header());
 
@@ -1504,7 +1521,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     let (x, y) = cell(1.0, Y_QUALITY_ROW_1);
-    opt_toggle!(p, ctx, state; x, y, ANTIALIASING, antialiasing);
+    opt_toggle!(p, ctx, state; x, y, ANTIALIASING.get(), antialiasing);
 
     let (x, y) = cell(0.0, Y_QUALITY_ROW_2);
     if toggle(
@@ -1512,7 +1529,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         ctx,
         x,
         y,
-        LIGHTING_ENGINE,
+        LIGHTING_ENGINE.get(),
         &mut state.options.lighting_enabled,
     ) {
         crate::gui::save_options(&state.options);
@@ -1533,16 +1550,16 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     opt_toggle!(p, ctx, state; x, y, tr::cutout_leaves(), cutout_leaves);
 
     let (x, y) = cell(1.0, Y_LEAVES_ROW);
-    opt_toggle!(p, ctx, state; x, y, MENU_BLUR, menu_blur);
+    opt_toggle!(p, ctx, state; x, y, MENU_BLUR.get(), menu_blur);
 
     #[cfg(feature = "builtin_shaders")]
     {
         let (x, y) = cell(1.0, Y_QUALITY_ROW_2);
-        opt_toggle!(p, ctx, state; x, y, SHADERS, shaders_enabled);
+        opt_toggle!(p, ctx, state; x, y, SHADERS.get(), shaders_enabled);
 
         let enabled = state.options.shaders_enabled;
 
-        let label = generic_value(SHADER_QUALITY, state.options.shader_quality.caption());
+        let label = generic_value(SHADER_QUALITY.get(), state.options.shader_quality.caption());
         let (x, y) = cell(0.0, Y_QUALITY_ROW_4);
         let mut quality = Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &label);
         quality.active = enabled;
@@ -1552,7 +1569,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         }
 
         let label = generic_value(
-            PLAYER_SHADOWS,
+            PLAYER_SHADOWS.get(),
             if state.options.player_shadows {
                 tr::on()
             } else {
@@ -1583,7 +1600,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             y,
             BIG_W,
             WIDGET_HEIGHT,
-            crate::gui::shaderpacks::SHADER_PACKS,
+            crate::gui::shaderpacks::SHADER_PACKS.get(),
         );
         #[cfg(feature = "tutorial")]
         crate::gui::tutorial::mark(
@@ -1597,7 +1614,7 @@ pub fn draw_video(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     let (x, y) = cell(0.0, Y_RESET_ROW);
-    let reset_video = Button::new(x, y, BIG_W, WIDGET_HEIGHT, RESET_VIDEO);
+    let reset_video = Button::new(x, y, BIG_W, WIDGET_HEIGHT, RESET_VIDEO.get());
     if reset_video.draw(p, ctx) {
         reset_video_options(&mut state.options);
         crate::gui::save_options(&state.options);
@@ -1680,14 +1697,17 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let reset_x = bar_x - RESET_W - BIND_PADDING;
     let change_x = reset_x - BIND_BUTTON_GAP - CHANGE_W;
 
+    #[cfg(not(feature = "mobile_ui"))]
+    let (mouse_x, mouse_w) = (centered_x(ctx.vw), WIDGET_WIDTH_BIG);
     #[cfg(feature = "mobile_ui")]
-    let (list_y, list_h) = {
+    let (mouse_x, mouse_w) = {
+        let grid_left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
         let edit = Button::new(
-            centered_x(ctx.vw),
+            grid_left,
             list_y,
-            WIDGET_WIDTH_BIG,
+            COLUMN_W,
             WIDGET_HEIGHT,
-            EDIT_CONTROL_LAYOUT,
+            EDIT_CONTROL_LAYOUT.get(),
         );
         #[cfg(feature = "tutorial")]
         crate::gui::tutorial::mark(
@@ -1698,9 +1718,23 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             state.keybinds.capturing = None;
             state.nav = Some(Screen::TouchLayout);
         }
-        let advance = WIDGET_HEIGHT + ROW_SPACING;
-        (list_y + advance, (list_h - advance).max(0.0))
+        (grid_left + COLUMN_STEP, COLUMN_W)
     };
+    let mouse = Button::new(
+        mouse_x,
+        list_y,
+        mouse_w,
+        WIDGET_HEIGHT,
+        tr::mouse_settings(),
+    );
+    if mouse.draw(p, screen_ctx) {
+        state.keybinds.capturing = None;
+        state.mouse_scroll = 0.0;
+        state.mouse_scroll_drag = None;
+        state.nav = Some(Screen::MouseSettings);
+    }
+    let advance = WIDGET_HEIGHT + ROW_SPACING;
+    let (list_y, list_h) = (list_y + advance, (list_h - advance).max(0.0));
 
     scroll_input(
         &mut state.controls_scroll,
@@ -1842,6 +1876,163 @@ pub fn draw_controls(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 }
 
+const SENSITIVITY_SLIDER_ID: u32 = 36;
+
+const MOUSE_WHEEL_SLIDER_ID: u32 = 37;
+
+const SENSITIVITY_STEPS: i32 = 200;
+
+const Y_MOUSE_ROW_0: f32 = 0.0;
+const Y_MOUSE_ROW_1: f32 = Y_MOUSE_ROW_0 + ROW_H;
+const Y_MOUSE_ROW_2: f32 = Y_MOUSE_ROW_1 + ROW_H;
+const Y_MOUSE_RESET_ROW: f32 = Y_MOUSE_ROW_2 + ROW_H;
+const MOUSE_LIST_H: f32 = Y_MOUSE_RESET_ROW + ROW_H + LIST_PAD_BOTTOM;
+
+const RESET_MOUSE: Key = Key::of("options_screen.reset_mouse");
+
+const MOUSE_KEYS: &[&str] = &[
+    "mouseSensitivity",
+    "mouseWheelSensitivity",
+    "discrete_mouse_scroll",
+    "invertXMouse",
+    "invertYMouse",
+];
+
+fn reset_mouse_options(o: &mut crate::gui::GuiOptions) {
+    crate::gui::reset_options(o, |key| MOUSE_KEYS.contains(&key));
+}
+
+fn sensitivity_label(step: i32) -> String {
+    if step <= 0 {
+        generic_value(tr::sensitivity(), tr::sensitivity_min())
+    } else if step >= SENSITIVITY_STEPS {
+        generic_value(tr::sensitivity(), tr::sensitivity_max())
+    } else {
+        percent_value(tr::sensitivity(), step)
+    }
+}
+
+fn mouse_wheel_label(value: f64) -> String {
+    generic_value(tr::mouse_wheel_sensitivity(), &format!("{value:.2}"))
+}
+
+fn mouse_wheel_step(value: f64) -> i32 {
+    ((value.log10() * 100.0).round() as i32).clamp(
+        crate::gui::MOUSE_WHEEL_SLIDER_MIN,
+        crate::gui::MOUSE_WHEEL_SLIDER_MAX,
+    )
+}
+
+pub fn draw_mouse(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
+    draw_title(p, ctx, tr::mouse_settings_title());
+
+    let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
+    let (list_x, list_y, list_w, list_h) = LAYOUT.content_rect(ctx.vw, ctx.vh);
+    scroll_input(
+        &mut state.mouse_scroll,
+        &mut state.mouse_scroll_drag,
+        ctx,
+        left,
+        BIG_W,
+        list_y,
+        list_h,
+        MOUSE_LIST_H,
+    );
+    let top = (list_y - state.mouse_scroll).floor();
+
+    let list_input = masked_input(
+        ctx,
+        (list_x, list_y, list_w, list_h),
+        state.mouse_scroll_drag.is_some(),
+    );
+    let list_ctx = &ctx.with_input(&list_input);
+    let screen_ctx = ctx;
+    let ctx = list_ctx;
+
+    let clip = p.push_clip(list_x, list_y, list_w, list_h);
+    let cell = |column: f32, row_y: f32| (left + column * COLUMN_STEP, top + row_y + ROW_INSET);
+
+    let stored_step =
+        (state.options.mouse_sensitivity * f64::from(SENSITIVITY_STEPS)).round() as i32;
+    let (x, y) = cell(0.0, Y_MOUSE_ROW_0);
+    let sensitivity = Slider {
+        id: SENSITIVITY_SLIDER_ID,
+        x,
+        y,
+        w: COLUMN_W,
+        h: WIDGET_HEIGHT,
+        min: 0,
+        max: SENSITIVITY_STEPS,
+        value: stored_step,
+        label: sensitivity_label,
+    };
+    let new_step = sensitivity.draw(p, ctx);
+    if new_step != stored_step {
+        state.options.mouse_sensitivity =
+            f64::from(new_step.clamp(0, SENSITIVITY_STEPS)) / f64::from(SENSITIVITY_STEPS);
+        crate::gui::save_options(&state.options);
+    }
+
+    let stored_wheel = state.options.mouse_wheel_sensitivity;
+    let stored_wheel_step = mouse_wheel_step(stored_wheel);
+    let (x, y) = cell(1.0, Y_MOUSE_ROW_0);
+    let wheel = Slider {
+        id: MOUSE_WHEEL_SLIDER_ID,
+        x,
+        y,
+        w: COLUMN_W,
+        h: WIDGET_HEIGHT,
+        min: crate::gui::MOUSE_WHEEL_SLIDER_MIN,
+        max: crate::gui::MOUSE_WHEEL_SLIDER_MAX,
+        value: stored_wheel_step,
+        label: |step: i32| {
+            mouse_wheel_label(if step == stored_wheel_step {
+                stored_wheel
+            } else {
+                crate::gui::log_mouse(step)
+            })
+        },
+    };
+    let new_wheel_step = wheel.draw(p, ctx);
+    if new_wheel_step != stored_wheel_step {
+        state.options.mouse_wheel_sensitivity = crate::gui::log_mouse(new_wheel_step).clamp(
+            crate::gui::MOUSE_WHEEL_SENSITIVITY_MIN,
+            crate::gui::MOUSE_WHEEL_SENSITIVITY_MAX,
+        );
+        crate::gui::save_options(&state.options);
+    }
+
+    let (x, y) = cell(0.0, Y_MOUSE_ROW_1);
+    opt_toggle!(p, ctx, state; x, y, tr::discrete_mouse_scroll(), discrete_mouse_scroll);
+
+    let (x, y) = cell(1.0, Y_MOUSE_ROW_1);
+    opt_toggle!(p, ctx, state; x, y, tr::invert_mouse_x(), invert_mouse_x);
+
+    let (x, y) = cell(0.0, Y_MOUSE_ROW_2);
+    opt_toggle!(p, ctx, state; x, y, tr::invert_mouse_y(), invert_mouse_y);
+
+    let (x, y) = cell(0.0, Y_MOUSE_RESET_ROW);
+    if Button::new(x, y, BIG_W, WIDGET_HEIGHT, RESET_MOUSE.get()).draw(p, ctx) {
+        reset_mouse_options(&mut state.options);
+        crate::gui::save_options(&state.options);
+    }
+
+    p.pop_clip(clip);
+    draw_scrollbar(
+        p,
+        state.mouse_scroll,
+        left,
+        BIG_W,
+        list_y,
+        list_h,
+        MOUSE_LIST_H,
+    );
+
+    if draw_done(p, screen_ctx) {
+        state.nav = Some(Screen::Controls);
+    }
+}
+
 #[cfg(feature = "mobile_ui")]
 pub fn draw_touch_layout(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let other = crate::mobile::pad::top_controls_bottom(ctx.vw, ctx.vh);
@@ -1853,7 +2044,7 @@ pub fn draw_touch_layout(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx)
     let row_w = COLUMN_W + BIND_BUTTON_GAP + RESET_W;
     let clear = crate::mobile::pad::movement_right(ctx.vw, ctx.vh) + ROW_SPACING;
     let x = ((ctx.vw - row_w) / 2.0).floor().max(clear.ceil());
-    let label = generic_value(TOUCH_MOVEMENT, state.options.touch_movement.caption());
+    let label = generic_value(TOUCH_MOVEMENT.get(), state.options.touch_movement.caption());
     #[cfg(feature = "tutorial")]
     crate::gui::tutorial::mark(
         crate::gui::tutorial::Spot::TouchMovement,
@@ -1876,7 +2067,7 @@ pub fn draw_touch_layout(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx)
     }
 
     let y = y + WIDGET_HEIGHT + ROW_SPACING;
-    let label = generic_value(TOUCH_SNEAK, state.options.touch_sneak.caption());
+    let label = generic_value(TOUCH_SNEAK.get(), state.options.touch_sneak.caption());
     if Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &label).draw(p, ctx) {
         state.options.touch_sneak = state.options.touch_sneak.next();
         crate::gui::save_options(&state.options);
@@ -1898,10 +2089,18 @@ pub fn draw_touch_layout(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx)
     let (y, retry) = if state.options.touch_movement.bedrock().is_some() {
         use crate::client::bedrock_art::{self, Status};
         let (text, failed) = match bedrock_art::status() {
-            Status::Fetching { done, total } => {
-                (Some(format!("{BEDROCK_FETCHING} {done}/{total}")), false)
-            }
-            Status::Failed(reason) => (Some(format!("{BEDROCK_FAILED} {reason}")), true),
+            Status::Fetching { done, total } => (
+                Some(crate::lang::trf!(
+                    "options_screen.bedrock.fetching",
+                    done,
+                    total
+                )),
+                false,
+            ),
+            Status::Failed(reason) => (
+                Some(crate::lang::trf!("options_screen.bedrock.failed", reason)),
+                true,
+            ),
             Status::Idle | Status::Ready => (None, false),
         };
         if let Some(text) = text {
@@ -1927,7 +2126,7 @@ pub fn draw_touch_layout(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx)
             y,
             RESET_W,
             WIDGET_HEIGHT,
-            BEDROCK_RETRY,
+            BEDROCK_RETRY.get(),
         )
         .draw(p, ctx)
     {
@@ -1957,13 +2156,16 @@ pub(in crate::gui) fn draw_bind_tooltip(
 #[cfg(feature = "asset_download")]
 fn draw_clear_assets(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     crate::gui::screens::dim_background(p, ctx.vw, ctx.vh);
-    let buttons = [CLEAR_ASSETS_NO.to_owned(), CLEAR_ASSETS_YES.to_owned()];
+    let buttons = [
+        CLEAR_ASSETS_NO.get().to_owned(),
+        CLEAR_ASSETS_YES.get().to_owned(),
+    ];
     let chosen = crate::gui::confirmlink::draw_box(
         p,
         ctx,
-        CLEAR_ASSETS_TITLE,
-        CLEAR_ASSETS_MESSAGE,
-        Some(CLEAR_ASSETS_WARNING),
+        CLEAR_ASSETS_TITLE.get(),
+        CLEAR_ASSETS_MESSAGE.get(),
+        Some(CLEAR_ASSETS_WARNING.get()),
         &buttons,
         COLUMN_W,
     );
@@ -1994,7 +2196,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         return;
     }
 
-    draw_title(p, ctx, GAME_TITLE);
+    draw_title(p, ctx, GAME_TITLE.get());
 
     let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
     let (list_x, list_y, list_w, list_h) = LAYOUT.content_rect(ctx.vw, ctx.vh);
@@ -2041,7 +2243,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     let (x, y) = cell(0.0, Y_GAME_ROW_1);
     let caption = generic_value(
-        SPRINT_MODE,
+        SPRINT_MODE.get(),
         if state.options.toggle_sprint {
             tr::sprint_toggle()
         } else {
@@ -2054,7 +2256,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     let (x, y) = cell(1.0, Y_GAME_ROW_1);
-    opt_toggle!(p, ctx, state; x, y, ALWAYS_OP_ITEMS, always_show_op_items);
+    opt_toggle!(p, ctx, state; x, y, ALWAYS_OP_ITEMS.get(), always_show_op_items);
 
     p.text_plain(
         tr::chat_header(),
@@ -2072,20 +2274,20 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             ctx,
             x,
             y,
-            SIGNED_CHAT,
+            SIGNED_CHAT.get(),
             &mut state.options.allow_signed_chat,
         ) {
             crate::gui::save_options(&state.options);
         }
     } else {
-        let caption = generic_value(SIGNED_CHAT, tr::off());
+        let caption = generic_value(SIGNED_CHAT.get(), tr::off());
         Button {
             active: false,
             ..Button::new(x, y, COLUMN_W, WIDGET_HEIGHT, &caption)
         }
         .draw(p, ctx);
         p.text_plain(
-            SIGNED_CHAT_UNAVAILABLE,
+            SIGNED_CHAT_UNAVAILABLE.get(),
             x + COLUMN_STEP,
             y + (WIDGET_HEIGHT - LINE_HEIGHT) / 2.0,
             0xA0A0A0,
@@ -2094,7 +2296,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     p.text_plain(
-        TOAST_HEADER,
+        TOAST_HEADER.get(),
         left,
         top + Y_TOAST_HEADER + ROW_INSET + HEADER_PAD_TOP,
         0xFFFFFF,
@@ -2104,9 +2306,9 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let (x, y) = cell(0.0, Y_TOAST_ROW_0);
     opt_toggle!(p, ctx, state; x, y, tr::toast_advancement(), toast_advancement);
     let (x, y) = cell(1.0, Y_TOAST_ROW_0);
-    opt_toggle!(p, ctx, state; x, y, TOAST_RECIPE, toast_recipe);
+    opt_toggle!(p, ctx, state; x, y, TOAST_RECIPE.get(), toast_recipe);
     let (x, y) = cell(0.0, Y_TOAST_ROW_1);
-    opt_toggle!(p, ctx, state; x, y, TOAST_SYSTEM, toast_system);
+    opt_toggle!(p, ctx, state; x, y, TOAST_SYSTEM.get(), toast_system);
 
     let (x, y) = cell(1.0, Y_TOAST_ROW_1);
     opt_slider!(p, ctx, state; x, y, TOAST_TIME_SLIDER_ID, toast_time,
@@ -2115,7 +2317,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     #[cfg(feature = "skins")]
     {
         p.text_plain(
-            SKIN_HEADER,
+            SKIN_HEADER.get(),
             left,
             top + Y_SKIN_HEADER + ROW_INSET + HEADER_PAD_TOP,
             0xFFFFFF,
@@ -2139,14 +2341,14 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
     {
         p.text_plain(
-            STORAGE_HEADER,
+            STORAGE_HEADER.get(),
             left,
             top + Y_STORAGE_HEADER + ROW_INSET + HEADER_PAD_TOP,
             0xFFFFFF,
             true,
         );
         let (x, y) = cell(0.0, Y_STORAGE_ROW_0);
-        if Button::new(x, y, BIG_W, WIDGET_HEIGHT, CLEAR_ASSETS).draw(p, ctx) {
+        if Button::new(x, y, BIG_W, WIDGET_HEIGHT, CLEAR_ASSETS.get()).draw(p, ctx) {
             state.confirm_clear_assets = true;
         }
     }
@@ -2157,7 +2359,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         let blocked = benchmark_blocked(state);
         let button = Button {
             active: blocked.is_none(),
-            ..Button::new(x, y, BIG_W, WIDGET_HEIGHT, BENCHMARK)
+            ..Button::new(x, y, BIG_W, WIDGET_HEIGHT, BENCHMARK.get())
         };
         if button.draw(p, ctx) {
             state.benchmark.start();
@@ -2170,7 +2372,7 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     };
 
     let (x, y) = cell(0.0, Y_GAME_RESET_ROW);
-    if Button::new(x, y, BIG_W, WIDGET_HEIGHT, RESET_GAME).draw(p, ctx) {
+    if Button::new(x, y, BIG_W, WIDGET_HEIGHT, RESET_GAME.get()).draw(p, ctx) {
         reset_game_options(&mut state.options);
         crate::gui::save_options(&state.options);
     }
@@ -2198,11 +2400,11 @@ pub fn draw_game(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 #[cfg(feature = "benchmark_feature")]
 fn benchmark_blocked(state: &GuiState) -> Option<&'static str> {
     if !state.options_parent.is_menu() {
-        return Some(BENCHMARK_IN_WORLD);
+        return Some(BENCHMARK_IN_WORLD.get());
     }
     #[cfg(feature = "shader_support")]
     if state.shaderpacks.loaded.is_some() {
-        return Some(BENCHMARK_SHADER_PACK);
+        return Some(BENCHMARK_SHADER_PACK.get());
     }
     None
 }
@@ -2211,7 +2413,7 @@ fn benchmark_blocked(state: &GuiState) -> Option<&'static str> {
 pub fn draw_audio(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     use crate::audio::category::SoundCategory;
 
-    draw_title(p, ctx, AUDIO_TITLE);
+    draw_title(p, ctx, AUDIO_TITLE.get());
 
     let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
     let (list_x, list_y, list_w, list_h) = LAYOUT.content_rect(ctx.vw, ctx.vh);

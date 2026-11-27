@@ -99,6 +99,7 @@ pub(crate) fn slot_stack(
     SlotStack {
         item,
         count: data.count.clamp(0, 255) as u8,
+        modded: data.modded_kind(),
         cooldown,
         damage,
         max_damage,
@@ -144,7 +145,7 @@ pub(crate) fn slot_stack(
         component_count: data.component_patch.iter().count() as u16,
         nbt_bytes,
         bundle: bundle_view(data, registries),
-        raw: (data.component_patch.iter().next().is_some()).then(|| {
+        raw: (data.component_patch.iter().next().is_some() || data.is_modded()).then(|| {
             let mut data = data.clone();
             data.count = 1;
             std::sync::Arc::new(ItemStack::Present(data))
@@ -353,13 +354,14 @@ fn book(data: &azalea_inventory::ItemStackData) -> Option<Book> {
             pages: written
                 .pages
                 .iter()
-                .map(|p| chat_text::to_spans(&p.raw))
+                .map(|p| chat_text::to_spans_styled(&p.raw, page_style()))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             title: written.title.raw.clone(),
             author: written.author.clone(),
             generation: written.generation.clamp(0, MAX_GENERATION as i32) as u8,
             signed: true,
+            events: Box::default(),
         });
     }
     let writable = data.get_component::<comp::WritableBookContent>()?;
@@ -370,7 +372,7 @@ fn book(data: &azalea_inventory::ItemStackData) -> Option<Book> {
             .map(|p| {
                 vec![crate::text::Span {
                     text: p.raw.clone(),
-                    style: Default::default(),
+                    style: page_style(),
                 }]
             })
             .collect::<Vec<_>>()
@@ -379,7 +381,37 @@ fn book(data: &azalea_inventory::ItemStackData) -> Option<Book> {
         author: String::new(),
         generation: 0,
         signed: false,
+        events: Box::default(),
     })
+}
+
+fn page_style() -> crate::text::Style {
+    crate::text::Style::colored(crate::gui::book::TEXT_COLOR)
+}
+
+pub(crate) fn attach_book_events(
+    stack: &ItemStack,
+    out: &mut SlotStack,
+    registries: Option<&azalea_core::registry_holder::RegistryHolder>,
+) {
+    use azalea_inventory::components as comp;
+
+    let ItemStack::Present(data) = stack else {
+        return;
+    };
+    let Some(written) = data.get_component::<comp::WrittenBookContent>() else {
+        return;
+    };
+    let Some(book) = out.extra.book_mut() else {
+        return;
+    };
+    let (pages, events): (Vec<_>, Vec<_>) = written
+        .pages
+        .iter()
+        .map(|p| chat_text::to_spans_events_styled(&p.raw, registries, page_style()))
+        .unzip();
+    book.pages = pages.into_boxed_slice();
+    book.events = events.into_boxed_slice();
 }
 
 const MAX_GENERATION: u8 = 3;
@@ -491,6 +523,9 @@ pub(crate) fn creative_stack(
         return out;
     }
     let mut out = ItemStack::new(kind, stack.count as i32);
+    if let Some(data) = out.as_present_mut() {
+        data.set_modded_kind(stack.modded);
+    }
     if !stack.extra.enchantments.is_empty() {
         let levels = resolve_enchantments(registries, &stack.extra.enchantments);
         if !levels.is_empty() {
@@ -606,10 +641,31 @@ pub(crate) fn set_creative_slot(bot: &Client, slot: u16, stack: ItemStack) {
     }
 }
 
+pub(crate) fn swap_with_hotbar(bot: &Client, source: u16, hotbar: u8) -> bool {
+    use azalea::entity::inventory::Inventory;
+    use azalea_inventory::operations::SwapClick;
+
+    let window_id = match bot.component::<Inventory>() {
+        Ok(inv) if inv.container_menu.is_none() => inv.id,
+        _ => return false,
+    };
+    bot.ecs.write().trigger(ContainerClickEvent {
+        entity: bot.entity,
+        window_id,
+        operation: SwapClick {
+            source_slot: source,
+            target_slot: hotbar,
+        }
+        .into(),
+    });
+    true
+}
+
 #[derive(Default)]
 pub(crate) struct AppliedInv {
     pub creative_cursor: Option<CreativeAnswer>,
     pub horse_selected: Vec<(usize, i32)>,
+    pub chat: Vec<Vec<crate::text::Span>>,
 }
 
 fn next_selection(selected: i32, size: usize, step: i8) -> Option<i32> {
@@ -875,6 +931,10 @@ pub(crate) fn apply_inv_actions(
             InvAction::SetBeacon { primary, secondary } => {
                 bot.write_packet(ServerboundSetBeacon { primary, secondary });
             }
+            InvAction::RunCommand(command) => {
+                use azalea_protocol::packets::game::s_chat_command::ServerboundChatCommand;
+                bot.write_packet(ServerboundChatCommand { command });
+            }
             InvAction::RenameItem(name) => {
                 bot.write_packet(ServerboundRenameItem { name });
             }
@@ -913,6 +973,11 @@ pub(crate) fn apply_inv_actions(
                         entity: bot.entity,
                         id,
                     });
+            }
+            #[cfg(feature = "click_gui")]
+            InvAction::ItemEdit(edit) => {
+                let lines = crate::play::item_components::run(bot, *edit, registries);
+                applied.chat.extend(lines);
             }
         }
     }

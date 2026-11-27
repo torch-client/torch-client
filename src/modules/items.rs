@@ -6,8 +6,9 @@ use azalea_registry::Registry;
 use azalea_registry::builtin::ItemKind;
 
 use super::list::{BitList, Built, Entry};
+use crate::lang::Key;
 
-static GROUPS: [&str; 1] = ["Items"];
+static GROUPS: [Key; 1] = [Key::of("lists.items.group.items")];
 
 fn build() -> Built {
     let mut entries = Vec::with_capacity(1500);
@@ -24,6 +25,7 @@ fn build() -> Built {
         entries.push(Entry {
             group: 0,
             label: Cow::Owned(kind.to_str().trim_start_matches("minecraft:").to_string()),
+            shown: Key::NONE,
             on: false,
             color: 0,
         });
@@ -31,7 +33,15 @@ fn build() -> Built {
     (entries, Vec::new())
 }
 
-pub static LIST: BitList = BitList::new("items", "Items", 214.0, &GROUPS, false, &[], build);
+pub static LIST: BitList = BitList::new(
+    "items",
+    Key::of("lists.items.title"),
+    214.0,
+    &GROUPS,
+    false,
+    &[],
+    build,
+);
 
 static BY_NAME: OnceLock<HashMap<String, u16>> = OnceLock::new();
 

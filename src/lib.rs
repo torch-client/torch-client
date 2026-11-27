@@ -8,10 +8,22 @@ mod client;
 mod diag;
 #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
 mod eagler;
+
+#[cfg(all(
+    target_arch = "wasm32",
+    feature = "online_mode",
+    not(feature = "microsoft_web")
+))]
+compile_error!(
+    "`online_mode` in a wasm32 build needs `microsoft_web` too: a page cannot reach the \
+     Microsoft and Mojang sign-in hosts any other way. Add `microsoft_web` to --features, \
+     or leave `online_mode` out of the web build."
+);
 mod entities;
 mod generated_items;
 mod gui;
 mod items;
+mod lang;
 mod lighting;
 #[cfg(feature = "mobile_ui")]
 mod mobile;
@@ -26,6 +38,8 @@ mod resourcepacks;
 mod session;
 #[cfg(feature = "shader_support")]
 mod shaderpack;
+#[cfg(singleplayer)]
+mod singleplayer;
 mod text;
 mod util;
 
@@ -109,16 +123,16 @@ pub(crate) fn textures_dir() -> PathBuf {
 }
 
 #[cfg(any(
-    feature = "online_mode",
-    feature = "eagler",
+    all(feature = "online_mode", not(target_arch = "wasm32")),
+    all(feature = "eagler", not(target_arch = "wasm32")),
     all(explore_modrinth, not(target_arch = "wasm32")),
     all(feature = "asset_download", not(target_arch = "wasm32"))
 ))]
 use rustls as tls;
 
 #[cfg(any(
-    feature = "online_mode",
-    feature = "eagler",
+    all(feature = "online_mode", not(target_arch = "wasm32")),
+    all(feature = "eagler", not(target_arch = "wasm32")),
     all(explore_modrinth, not(target_arch = "wasm32")),
     all(feature = "asset_download", not(target_arch = "wasm32"))
 ))]
@@ -149,8 +163,8 @@ pub(crate) fn android_tls_config() -> Option<rustls::ClientConfig> {
 }
 
 #[cfg(not(any(
-    feature = "online_mode",
-    feature = "eagler",
+    all(feature = "online_mode", not(target_arch = "wasm32")),
+    all(feature = "eagler", not(target_arch = "wasm32")),
     all(explore_modrinth, not(target_arch = "wasm32")),
     all(feature = "asset_download", not(target_arch = "wasm32"))
 )))]
@@ -375,6 +389,14 @@ pub fn load_assets(packed: Vec<u8>) -> Result<(), String> {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: bevy::android::android_activity::AndroidApp) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| android_run(app))).is_err() {
+        platform::logcat::write("android_main panicked, aborting");
+        std::process::abort();
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_run(app: bevy::android::android_activity::AndroidApp) {
     platform::logcat::redirect_stdio();
     step("android_main entered");
     let _ = bevy::android::ANDROID_APP.set(app.clone());
@@ -597,9 +619,10 @@ fn run(args: platform::cli::Args) -> eyre::Result<()> {
     client::lod::cache::install();
     #[cfg(feature = "ui_utils")]
     crate::modules::ui_utils::install();
-    if crate::diag::trace_enabled()
-        && azalea_protocol::packet_trace::set_sent_packet_hook(Box::new(|p| {
-            if let Some(name) = p.name {
+    let tracing = crate::diag::trace_enabled();
+    if tracing
+        && azalea_protocol::packet_trace::set_sent_packet_hook(Box::new(move |p| {
+            if tracing && let Some(name) = p.name {
                 crate::diag::note_sent_packet(name);
             }
         }))

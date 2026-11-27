@@ -66,9 +66,7 @@ pub fn define(bot: &Client, shared: &SharedMutex, a: BlockPos, b: BlockPos) {
     if w > MAX_SIDE || d > MAX_SIDE || volume > MAX_VOLUME {
         say(
             shared,
-            &format!(
-                "AutoMine: that box is {w} x {h} x {d}; the most is {MAX_SIDE} on a side and {MAX_VOLUME} blocks. Define a smaller one"
-            ),
+            &crate::lang::trf!("auto_mine.area.too_big", w, h, d, MAX_SIDE, MAX_VOLUME),
         );
         return;
     }
@@ -85,17 +83,12 @@ pub fn define(bot: &Client, shared: &SharedMutex, a: BlockPos, b: BlockPos) {
         stairs: stairs(min, max, near),
     };
     let narrow = area.stairs.is_empty();
-    say(
-        shared,
-        &format!(
-            "AutoMine: area {w} x {h} x {d} ({volume} blocks){}",
-            if narrow {
-                ", too narrow for an exit staircase"
-            } else {
-                ""
-            },
-        ),
-    );
+    let text = if narrow {
+        crate::lang::trf!("auto_mine.area.defined.narrow", w, h, d, volume)
+    } else {
+        crate::lang::trf!("auto_mine.area.defined", w, h, d, volume)
+    };
+    say(shared, &text);
     for (slot, v) in BOUNDS
         .iter()
         .zip([min.x, min.y, min.z, max.x, max.y, max.z])
@@ -239,10 +232,7 @@ impl Run {
 pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>, s: &Store) -> bool {
     let Some(area) = current() else {
         if !NO_AREA_SAID.swap(true, Relaxed) {
-            say(
-                shared,
-                "AutoMine: no area yet; press Define area and click two corners",
-            );
+            say(shared, crate::lang::tr!("auto_mine.area.none"));
         }
         draw::clear();
         super::clear(shared);
@@ -261,10 +251,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>, s:
         stop_run(bot);
         forget();
         super::clear(shared);
-        say(
-            shared,
-            "AutoMine: left the world the area is in, so it was cleared",
-        );
+        say(shared, crate::lang::tr!("auto_mine.area.left_world"));
         return false;
     }
     if s.flag(setting::PROGRESS) {
@@ -279,7 +266,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>, s:
         return false;
     }
 
-    let now = crate::client::tracking::game_time();
+    let now = crate::client::tracking::client_ticks();
     let feet = player_pos_to_block_pos(pos);
     let mut guard = RUN.lock().unwrap_or_else(PoisonError::into_inner);
     let run = guard.get_or_insert_with(|| Run::new(&area));
@@ -305,6 +292,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>, s:
                         QuietOpts {
                             parkour: false,
                             mining: false,
+                            placing: None,
                         },
                     );
                     run.stage = Stage::Travel {
@@ -352,6 +340,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>, s:
                                     QuietOpts {
                                         parkour: false,
                                         mining: false,
+                                        placing: None,
                                     },
                                 );
                                 run.stage = Stage::Travel {
@@ -812,27 +801,26 @@ fn stop(
     stop_run(bot);
     store().set_enabled(Id::AutoMine, false);
     let text = match why {
-        Halt::Done => {
-            let mut text = if skipped == 0 {
-                "AutoMine: area cleared".to_string()
-            } else {
-                format!("AutoMine: area done; {skipped} blocks left ({unreachable} out of reach)")
-            };
-            if unloaded > 0 {
-                text.push_str(&format!(", {unloaded} layer pairs were partly unloaded"));
+        Halt::Done => match (skipped == 0, unloaded > 0) {
+            (true, false) => crate::lang::tr!("auto_mine.area.cleared").to_string(),
+            (true, true) => crate::lang::trf!("auto_mine.area.cleared.unloaded", unloaded),
+            (false, false) => {
+                crate::lang::trf!("auto_mine.area.done", skipped, unreachable)
             }
-            text
-        }
-        Halt::Hazard => "AutoMine: stopped, there is a fluid behind the next block".to_string(),
-        Halt::Stalled => "AutoMine: stopped, blocks are not breaking".to_string(),
-        Halt::Full => "AutoMine: stopped, the inventory is full".to_string(),
-        Halt::NotLoaded => {
-            "AutoMine: stopped, the area is not loaded; go closer and switch AutoMine back on"
-                .to_string()
-        }
-        Halt::NoRoute => {
-            "AutoMine starts from the top, go to the top of the area you want to mine".to_string()
-        }
+            (false, true) => {
+                crate::lang::trf!(
+                    "auto_mine.area.done.unloaded",
+                    skipped,
+                    unreachable,
+                    unloaded
+                )
+            }
+        },
+        Halt::Hazard => crate::lang::tr!("auto_mine.area.hazard").to_string(),
+        Halt::Stalled => crate::lang::tr!("auto_mine.area.stalled").to_string(),
+        Halt::Full => crate::lang::tr!("auto_mine.area.full").to_string(),
+        Halt::NotLoaded => crate::lang::tr!("auto_mine.area.not_loaded").to_string(),
+        Halt::NoRoute => crate::lang::tr!("auto_mine.area.no_route").to_string(),
     };
     let mut st = shared.lock().unwrap();
     st.session.auto_mine = None;

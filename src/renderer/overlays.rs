@@ -623,7 +623,7 @@ fn esp_mesh(frame: &crate::modules::esp::EspFrame, origin: RenderOrigin) -> Mesh
                     z + corner[2] * size,
                 ]);
                 colors.push(color);
-                packed.push(c as u32 | edges << 2 | (f as u32) << 6);
+                packed.push(c as u32 | edges << 2 | (f as u32) << 6 | (slot.fade as u32) << 9);
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
         }
@@ -893,7 +893,7 @@ fn put_esp_buffers(
 }
 
 #[cfg(feature = "click_gui")]
-type EspPlayer = ([f64; 3], [f32; 2], bool);
+type EspTarget = ([f64; 3], [f32; 2], [u8; 3]);
 
 #[cfg(feature = "click_gui")]
 #[allow(clippy::too_many_arguments, reason = "a Bevy system's parameters")]
@@ -905,7 +905,7 @@ pub(super) fn update_player_esp(
     mut overlay: ResMut<PlayerEspOverlay>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut targets: Query<&mut Visibility, With<PlayerEspMarker>>,
-    mut players: Local<Vec<EspPlayer>>,
+    mut players: Local<Vec<EspTarget>>,
 ) {
     let Some(cfg) = crate::modules::player_esp::config() else {
         if overlay.shown {
@@ -919,6 +919,11 @@ pub(super) fn update_player_esp(
         return;
     };
 
+    let white = [0xFF, 0xFF, 0xFF];
+    let accent = gui.clickgui.look().accent();
+    let accent = [(accent >> 16) as u8, (accent >> 8) as u8, accent as u8];
+    let rgb = |c: u32| [(c >> 16) as u8, (c >> 8) as u8, c as u8];
+
     players.clear();
     {
         let s = shared.0.lock().unwrap();
@@ -927,7 +932,16 @@ pub(super) fn update_player_esp(
                 continue;
             }
             let friend = cfg.friend_color && crate::modules::friends::is_friend(&p.username);
-            players.push((p.anim.position(view.partial), p.body.bounding_box, friend));
+            let color = if friend { accent } else { white };
+            players.push((p.anim.position(view.partial), p.body.bounding_box, color));
+        }
+    }
+    if cfg.entities {
+        for e in view.entities.iter() {
+            if let Some(c) = crate::modules::entities::esp_color(e.kind) {
+                let size = [e.bounding_box_width(), e.bounding_box_height()];
+                players.push((e.position(view.partial), size, rgb(c)));
+            }
         }
     }
 
@@ -937,18 +951,12 @@ pub(super) fn update_player_esp(
     }
     overlay.empty = !any;
 
-    let white = [0xFF, 0xFF, 0xFF];
-    let accent = gui.clickgui.look().accent();
-    let accent = [(accent >> 16) as u8, (accent >> 8) as u8, accent as u8];
-    let rgb = |friend: bool| if friend { accent } else { white };
-
     let (boxes, box_mesh) = overlay.boxes.clone();
     if let Some(mut mesh) = meshes.get_mut(&box_mesh) {
         let (mut positions, mut colors, mut packed, mut indices) = take_esp_buffers(&mut mesh);
-        for &(feet, [w, h], friend) in players.iter() {
+        for &(feet, [w, h], [r, g, b]) in players.iter() {
             let feet = origin.to_render_array(feet);
             let half = Vec3::new(w * 0.5, 0.0, w * 0.5);
-            let [r, g, b] = rgb(friend);
             box_quads(
                 feet - half,
                 feet + half + Vec3::Y * h,
@@ -982,8 +990,7 @@ pub(super) fn update_player_esp(
         let forward = view.camera_rotation * view.hurt_tilt.inverse() * Vec3::NEG_Z;
         let start = (view.camera_render + forward).to_array();
         let (mut positions, mut colors, mut packed, mut indices) = take_esp_buffers(&mut mesh);
-        for &(feet, [_, h], friend) in players.iter() {
-            let [r, g, b] = rgb(friend);
+        for &(feet, [_, h], [r, g, b]) in players.iter() {
             let base = positions.len() as u32;
             positions.push(start);
             positions.push((origin.to_render_array(feet) + Vec3::Y * (h * 0.5)).to_array());

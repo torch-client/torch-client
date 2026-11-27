@@ -1151,6 +1151,9 @@ fn login_finished(_ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
             skip_string(&mut r)?;
         }
     }
+    if r.remaining() == 16 {
+        return Some(body.into());
+    }
     if r.remaining() != 0 {
         return None;
     }
@@ -2391,7 +2394,7 @@ fn creative_slot(ids: &Ids, body: &[u8]) -> Option<Box<[u8]>> {
     let Some(item) = ids.from_native.map(IdSpace::Item, r.varint()?) else {
         crate::log_warn!(
             "net",
-            "clearing a creative slot: this server has no id for what was put in it"
+            "clearing a creative slot: this server's version has no id for the vanilla item put in it"
         );
         out.truncate(2);
         write_varint(&mut out, 0);
@@ -4830,6 +4833,7 @@ mod tests {
                     ],
                     removed_components: vec![DataComponentKind::Food],
                 },
+                modded_kind: None,
             },
         ));
         let mut body = Vec::new();
@@ -4894,6 +4898,71 @@ mod tests {
         assert_eq!(r.count(), Some(3), "the payload keeps its own length");
         assert_eq!(r.take(3), Some(&[1, 2, 3][..]));
         assert_eq!(r.remaining(), 0);
+    }
+
+    const MODDED_774: i32 = 1505 + 7;
+    const MODDED_NATIVE: i32 = 1537 + 7;
+
+    #[test]
+    fn a_modded_stack_comes_in_past_the_end_and_the_walk_goes_on() {
+        let mut body = Vec::new();
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 2);
+        write_varint(&mut body, 2);
+        for item in [MODDED_774, ITEM_AT_THE_SEAM] {
+            write_varint(&mut body, 1);
+            write_varint(&mut body, item);
+            write_varint(&mut body, 0);
+            write_varint(&mut body, 0);
+        }
+        write_varint(&mut body, 0);
+
+        let out = container_set_content(ids(), &body).expect("the walk does not stop");
+        let mut r = Reader::new(&out);
+        assert_eq!(
+            (r.varint(), r.varint(), r.count()),
+            (Some(1), Some(2), Some(2))
+        );
+        for item in [MODDED_NATIVE, ITEM_AT_THE_SEAM_NATIVE] {
+            assert_eq!(r.varint(), Some(1));
+            assert_eq!(r.varint(), Some(item));
+            assert_eq!((r.count(), r.count()), (Some(0), Some(0)));
+        }
+        assert_eq!(r.varint(), Some(0));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn a_creative_slot_sends_a_modded_item_back_as_itself() {
+        let mut body = 9u16.to_be_bytes().to_vec();
+        write_varint(&mut body, 1);
+        write_varint(&mut body, MODDED_NATIVE);
+        write_varint(&mut body, 0);
+        write_varint(&mut body, 0);
+
+        let out = creative_slot(ids(), &body).expect("a whole stack");
+        let mut r = Reader::new(&out);
+        assert_eq!(r.take(2), Some(&9u16.to_be_bytes()[..]));
+        assert_eq!(r.varint(), Some(1), "not cleared");
+        assert_eq!(r.varint(), Some(MODDED_774));
+        assert_eq!((r.count(), r.count()), (Some(0), Some(0)));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn a_hashed_modded_stack_maps_back() {
+        let mut body = vec![1];
+        write_varint(&mut body, MODDED_NATIVE);
+        write_varint(&mut body, 1);
+        write_varint(&mut body, 0);
+        write_varint(&mut body, 0);
+
+        let mut r = Reader::new(&body);
+        let mut out = Vec::new();
+        assert_eq!(hashed_stack(ids(), &mut r, &mut out), Some(true));
+        let mut r = Reader::new(&out);
+        assert_eq!(r.u8(), Some(1));
+        assert_eq!(r.varint(), Some(MODDED_774));
     }
 
     fn container_ids() -> (i32, i32) {
@@ -5054,7 +5123,8 @@ mod tests {
         assert!(packet.session_id.is_nil());
         assert_eq!(packet.game_profile.name, "Steve");
 
-        assert!(login_finished(ids775(), &out).is_none());
+        assert_eq!(login_finished(ids775(), &out).as_deref(), Some(&out[..]));
+        assert!(login_finished(ids775(), &out[..out.len() - 1]).is_none());
     }
 
     #[test]

@@ -62,6 +62,30 @@ pub(super) fn fullscreen_pipeline(
     layout: &wgpu::PipelineLayout,
     format: TextureFormat,
 ) -> wgpu::RenderPipeline {
+    screen_pipeline(
+        device,
+        label,
+        module,
+        layout,
+        ["vertex", "fragment"],
+        &[opaque_target(format)],
+        &[],
+    )
+}
+
+pub(super) fn screen_pipeline(
+    device: &RenderDevice,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    [vertex, fragment]: [&str; 2],
+    targets: &[Option<ColorTargetState>],
+    constants: &[(&str, f64)],
+) -> wgpu::RenderPipeline {
+    let options = || wgpu::PipelineCompilationOptions {
+        constants,
+        ..Default::default()
+    };
     device
         .wgpu_device()
         .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -69,8 +93,8 @@ pub(super) fn fullscreen_pipeline(
             layout: Some(layout),
             vertex: wgpu::VertexState {
                 module,
-                entry_point: Some("vertex"),
-                compilation_options: Default::default(),
+                entry_point: Some(vertex),
+                compilation_options: options(),
                 buffers: &[],
             },
             primitive: wgpu::PrimitiveState::default(),
@@ -78,9 +102,9 @@ pub(super) fn fullscreen_pipeline(
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module,
-                entry_point: Some("fragment"),
-                compilation_options: Default::default(),
-                targets: &[opaque_target(format)],
+                entry_point: Some(fragment),
+                compilation_options: options(),
+                targets,
             }),
             multiview_mask: None,
             cache: None,

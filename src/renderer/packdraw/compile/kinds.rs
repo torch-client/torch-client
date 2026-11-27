@@ -234,6 +234,8 @@ pub(crate) enum Segment {
     WorldTranslucent,
     AfterTranslucent,
     HandTranslucent,
+    #[cfg_attr(not(feature = "native_shaders"), allow(dead_code))]
+    Display,
 }
 
 impl EntityKind {
@@ -458,6 +460,10 @@ impl ShadowCasters {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SkyParts {
     pub(crate) sky: bool,
+    pub(crate) sunrise: bool,
+    pub(crate) void: bool,
+    pub(crate) end: bool,
+    pub(crate) end_flash: bool,
     pub(crate) sun: bool,
     pub(crate) moon: bool,
     pub(crate) stars: bool,
@@ -465,8 +471,13 @@ pub(crate) struct SkyParts {
 
 impl SkyParts {
     pub(super) fn read(properties: &std::collections::HashMap<String, String>) -> SkyParts {
+        let sky = false_key(properties, "sky");
         SkyParts {
-            sky: false_key(properties, "sky"),
+            sky,
+            sunrise: sky,
+            void: sky,
+            end: sky,
+            end_flash: sky,
             sun: false_key(properties, "sun"),
             moon: false_key(properties, "moon"),
             stars: false_key(properties, "stars"),
@@ -597,6 +608,18 @@ mod tests {
         let props = std::collections::HashMap::from([("stars".to_string(), "false".to_string())]);
         let parts = SkyParts::read(&props);
         assert!(parts.sky && parts.sun && parts.moon && !parts.stars);
+        let parts = SkyParts::read(&std::collections::HashMap::from([(
+            "sky".to_string(),
+            "false".to_string(),
+        )]));
+        assert!(
+            !parts.sky
+                && !parts.sunrise
+                && !parts.void
+                && !parts.end
+                && !parts.end_flash
+                && parts.sun
+        );
     }
 
     #[test]

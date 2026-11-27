@@ -2,24 +2,18 @@ use crate::gui::painter::Painter;
 use crate::gui::tooltip::label;
 use crate::gui::widgets::{self, Button, WIDGET_HEIGHT, WIDGET_WIDTH_BIG};
 use crate::gui::{Screen, ScreenCtx};
+use crate::lang::Key;
 use crate::session::SharedMutex;
 
-const TITLE: &str = "Enable signed chat?";
+const TITLE: Key = Key::of("gui.signed_chat.title");
 
-const BODY: &[&str] = &[
-    "The server rejected your message because it was not signed.",
-    "Signing proves the message came from your Microsoft account,",
-    "which also makes it reportable to Mojang.",
-    "",
-    "This lasts until you disconnect. Options -> Game -> Chat has",
-    "the permanent setting.",
-];
+const BODY: Key = Key::of("gui.signed_chat.body");
 
 const GREY: u32 = 0xA0A0A0;
 
 pub fn draw(p: &mut Painter, ctx: &ScreenCtx, shared: &SharedMutex) -> Option<Screen> {
     p.text_centered(
-        TITLE,
+        TITLE.get(),
         ctx.vw / 2.0,
         (ctx.vh / 2.0 - 60.0).floor(),
         0xFFFFFF,
@@ -27,7 +21,7 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, shared: &SharedMutex) -> Option<Sc
     );
 
     let cy = (ctx.vh / 2.0).floor();
-    for (i, line) in BODY.iter().enumerate() {
+    for (i, line) in BODY.get().split('\n').enumerate() {
         let w = p.atlas.font.width_str(line);
         p.text_plain(
             line,

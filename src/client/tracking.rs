@@ -83,6 +83,7 @@ pub struct Equipment {
     pub armor_trim: [Option<&'static str>; 4],
     pub worn: [crate::util::combat::Worn; 4],
     pub armor: Arc<[crate::session::SlotStack; 4]>,
+    pub hands: Arc<[crate::session::SlotStack; 2]>,
     pub body_armor: Option<&'static str>,
     pub body_block: Option<u32>,
     pub saddle: Option<&'static str>,
@@ -231,8 +232,30 @@ pub(crate) fn local_entity_id() -> i32 {
     LOCAL_ENTITY_ID.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+pub(crate) static CAMERA_ENTITY_ID: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(i32::MIN);
+
+pub(crate) fn spectated_id() -> Option<i32> {
+    match CAMERA_ENTITY_ID.load(std::sync::atomic::Ordering::Relaxed) {
+        i32::MIN => None,
+        id if id == local_entity_id() => None,
+        id => Some(id),
+    }
+}
+
+pub(crate) fn set_camera_entity(id: Option<i32>) {
+    CAMERA_ENTITY_ID.store(id.unwrap_or(i32::MIN), std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) static LOCAL_VEHICLE_ID: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(-1);
+
+pub(crate) static MINECART_IMPROVEMENTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn minecart_improvements() -> bool {
+    MINECART_IMPROVEMENTS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 pub(crate) fn local_vehicle_id() -> Option<i32> {
     match LOCAL_VEHICLE_ID.load(std::sync::atomic::Ordering::Relaxed) {
@@ -281,6 +304,8 @@ pub(crate) const MAP_BYTES: usize = MAP_EDGE * MAP_EDGE;
 
 struct StoredMap {
     colors: Box<[u8; MAP_BYTES]>,
+    scale: u8,
+    locked: bool,
     markers: Option<Arc<crate::session::FrameMarkers>>,
 }
 
@@ -288,18 +313,23 @@ global! {
 fn maps() -> SideMutex<HashMap<i32, StoredMap>>
 }
 
+#[allow(clippy::too_many_arguments, reason = "one packet's fields, flat")]
 pub(crate) fn apply_map_patch(
     id: i32,
+    scale: u8,
+    locked: bool,
     start_x: u8,
     start_y: u8,
     width: u8,
     height: u8,
     colors: &[u8],
     decorations: Option<&[crate::session::MapDecoration]>,
-) -> Arc<Vec<u8>> {
+) -> crate::session::MapRect {
     let mut maps = maps().lock().unwrap();
     let map = maps.entry(id).or_insert_with(|| StoredMap {
         colors: Box::new([0u8; MAP_BYTES]),
+        scale,
+        locked,
         markers: None,
     });
     for x in 0..width as usize {
@@ -316,7 +346,28 @@ pub(crate) fn apply_map_patch(
     if let Some(decorations) = decorations {
         replace_frame_markers(map, decorations);
     }
-    Arc::new(map.colors.to_vec())
+    patch_rect(start_x, start_y, width, height)
+}
+
+fn patch_rect(start_x: u8, start_y: u8, width: u8, height: u8) -> crate::session::MapRect {
+    let end = |start: u8, len: u8| (start as usize + len as usize).min(MAP_EDGE) as u8;
+    let edge = MAP_EDGE as u8;
+    crate::session::MapRect {
+        x0: start_x.min(edge),
+        y0: start_y.min(edge),
+        x1: end(start_x, width),
+        y1: end(start_y, height),
+    }
+}
+
+pub(crate) fn with_map_colors<R>(id: i32, f: impl FnOnce(&[u8; MAP_BYTES]) -> R) -> Option<R> {
+    let maps = maps().lock().unwrap();
+    Some(f(&*maps.get(&id)?.colors))
+}
+
+pub(crate) fn map_meta(id: i32) -> Option<(u8, bool)> {
+    let maps = maps().lock().unwrap();
+    maps.get(&id).map(|map| (map.scale, map.locked))
 }
 
 fn replace_frame_markers(map: &mut StoredMap, decorations: &[crate::session::MapDecoration]) {
@@ -387,6 +438,16 @@ pub(crate) fn game_time() -> i64 {
     GAME_TIME.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+static CLIENT_TICKS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1 << 20);
+
+pub(crate) fn client_ticks() -> i64 {
+    CLIENT_TICKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn advance_client_ticks() {
+    CLIENT_TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) static DIFFICULTY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
 
 pub(crate) fn difficulty() -> u8 {
@@ -413,8 +474,8 @@ pub(crate) fn overworld_clock(
         .1;
 
     Some(crate::session::WorldClock {
-        ticks: state.total_ticks as f64 + state.partial_tick as f64,
-        rate: state.rate,
+        ticks: state.total_ticks as i64 as f64 + f64::from(clock_partial(state.partial_tick)),
+        rate: clock_rate(state.rate),
         drift: 0.0,
     })
 }
@@ -431,7 +492,23 @@ pub(crate) fn end_clock(
         .clock_updates
         .iter()
         .find(|(id, _)| id.key_owned(&guard.registries) == Some(WorldClockKey::TheEnd))?;
-    Some((state.total_ticks as i64, state.partial_tick, state.rate))
+    Some((
+        state.total_ticks as i64,
+        clock_partial(state.partial_tick),
+        clock_rate(state.rate),
+    ))
+}
+
+fn clock_rate(rate: f32) -> f32 {
+    if rate.is_finite() { rate.max(0.0) } else { 0.0 }
+}
+
+fn clock_partial(partial: f32) -> f32 {
+    if partial.is_finite() { partial } else { 0.0 }
+}
+
+global! {
+pub(crate) fn cart_lerps() -> SideMutex<HashMap<i32, crate::util::minecart_lerp::CartLerp>>
 }
 
 global! {
@@ -451,5 +528,20 @@ pub(crate) fn set_current_world(world: &Arc<parking_lot::RwLock<azalea_world::Wo
     let mut slot = current_world().lock().unwrap();
     if slot.as_ref().is_none_or(|w| !Arc::ptr_eq(w, world)) {
         *slot = Some(world.clone());
+    }
+}
+
+#[cfg(test)]
+mod map_tests {
+    use super::*;
+
+    #[test]
+    fn patch_rect_is_cut_to_the_map() {
+        let r = patch_rect(120, 0, 20, 128);
+        assert_eq!((r.x0, r.y0, r.x1, r.y1), (120, 0, 128, 128));
+        assert!(patch_rect(0, 0, 0, 0).is_empty());
+        assert!(patch_rect(5, 5, 1, 0).is_empty());
+        let column = patch_rect(7, 0, 1, 128);
+        assert_eq!((column.x0, column.x1), (7, 8));
     }
 }

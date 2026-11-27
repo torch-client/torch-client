@@ -17,6 +17,15 @@ const _: () = assert!(std::mem::size_of::<PackQuad>() == 16);
 pub struct BlockIds {
     ids: Box<[u16]>,
     lighting: PackLighting,
+    colors: VertexColors,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VertexColors {
+    #[default]
+    Iris,
+    #[cfg_attr(not(feature = "native_shaders"), allow(dead_code))]
+    Vanilla,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,11 +40,21 @@ impl BlockIds {
         BlockIds {
             ids,
             lighting: PackLighting::default(),
+            colors: VertexColors::Iris,
         }
     }
 
     pub fn lighting(&self) -> PackLighting {
         self.lighting
+    }
+
+    pub fn colors(&self) -> VertexColors {
+        self.colors
+    }
+
+    #[cfg_attr(not(feature = "native_shaders"), allow(dead_code))]
+    pub fn with_colors(self, colors: VertexColors) -> BlockIds {
+        BlockIds { colors, ..self }
     }
 
     pub(crate) fn build(
@@ -54,7 +73,11 @@ impl BlockIds {
         }
         let mut ids = vec![UNMAPPED; BlockState::MAX_STATE as usize + 1].into_boxed_slice();
         if by_block.is_empty() {
-            return BlockIds { ids, lighting };
+            return BlockIds {
+                ids,
+                lighting,
+                colors: VertexColors::Iris,
+            };
         }
         for (raw, slot) in ids.iter_mut().enumerate() {
             let Ok(state) = BlockState::try_from(raw as u32) else {
@@ -78,7 +101,11 @@ impl BlockIds {
                 *slot = entry.id;
             }
         }
-        BlockIds { ids, lighting }
+        BlockIds {
+            ids,
+            lighting,
+            colors: VertexColors::Iris,
+        }
     }
 
     pub fn of(&self, state: u16) -> u16 {
@@ -87,16 +114,17 @@ impl BlockIds {
 
     #[cfg(target_arch = "wasm32")]
     pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(2 + self.ids.len() * 2);
+        let mut bytes = Vec::with_capacity(3 + self.ids.len() * 2);
         bytes.push(self.lighting.old_lighting as u8);
         bytes.push(self.lighting.separate_ao as u8);
+        bytes.push((self.colors == VertexColors::Vanilla) as u8);
         bytes.extend(self.ids.iter().flat_map(|id| id.to_le_bytes()));
         bytes
     }
 
     #[cfg(target_arch = "wasm32")]
     pub fn decode(bytes: &[u8]) -> Option<BlockIds> {
-        let (flags, ids) = bytes.split_first_chunk::<2>()?;
+        let (flags, ids) = bytes.split_first_chunk::<3>()?;
         if ids.len() % 2 != 0 {
             return None;
         }
@@ -108,6 +136,11 @@ impl BlockIds {
             lighting: PackLighting {
                 old_lighting: flags[0] != 0,
                 separate_ao: flags[1] != 0,
+            },
+            colors: if flags[2] != 0 {
+                VertexColors::Vanilla
+            } else {
+                VertexColors::Iris
             },
         })
     }
@@ -168,6 +201,7 @@ pub struct PackBlock {
     pub tint: [f32; 3],
     pub shades: [f32; 6],
     pub lighting: PackLighting,
+    pub colors: VertexColors,
 }
 
 impl PackBlock {
@@ -281,6 +315,7 @@ mod tests {
             old_lighting: false,
             separate_ao: false,
         },
+        colors: VertexColors::Iris,
     };
 
     struct Decoded {

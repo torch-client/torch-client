@@ -8,6 +8,7 @@ use crate::client::skins::SkinRef;
 use crate::gui::ScreenCtx;
 use crate::gui::painter::Painter;
 use crate::gui::widgets::{Button, WIDGET_HEIGHT};
+use crate::lang::{Key, tr};
 use crate::renderer::anim::AnimSample;
 
 const PRESETS: [&str; 24] = [
@@ -35,6 +36,32 @@ const PRESETS: [&str; 24] = [
     "Zombie",
     "Pig",
     "Mooshroom",
+];
+const PRESET_LABELS: [Key; 24] = [
+    Key::of("skinpick.preset.default_steve"),
+    Key::of("skinpick.preset.default_alex"),
+    Key::of("skinpick.preset.tennis_steve"),
+    Key::of("skinpick.preset.tennis_alex"),
+    Key::of("skinpick.preset.tuxedo_steve"),
+    Key::of("skinpick.preset.tuxedo_alex"),
+    Key::of("skinpick.preset.athlete_steve"),
+    Key::of("skinpick.preset.athlete_alex"),
+    Key::of("skinpick.preset.cyclist_steve"),
+    Key::of("skinpick.preset.cyclist_alex"),
+    Key::of("skinpick.preset.boxer_steve"),
+    Key::of("skinpick.preset.boxer_alex"),
+    Key::of("skinpick.preset.prisoner_steve"),
+    Key::of("skinpick.preset.prisoner_alex"),
+    Key::of("skinpick.preset.scottish_steve"),
+    Key::of("skinpick.preset.scottish_alex"),
+    Key::of("skinpick.preset.developer_steve"),
+    Key::of("skinpick.preset.developer_alex"),
+    Key::NONE,
+    Key::NONE,
+    Key::of("skinpick.preset.creeper"),
+    Key::of("skinpick.preset.zombie"),
+    Key::of("skinpick.preset.pig"),
+    Key::of("skinpick.preset.mooshroom"),
 ];
 const PRESET_PNGS: [&[u8]; 24] = [
     include_bytes!("../eagler/skins/preset_0.png"),
@@ -145,7 +172,7 @@ impl SkinPick {
             self.open(None);
         }
         let n = self.skins.len();
-        p.text_plain("Skin", x + 1.0, y, 0xA0A0A0, true);
+        p.text_plain(tr!("skinpick.skin"), x + 1.0, y, 0xA0A0A0, true);
         let row = y + 12.0;
         if Button::new(x, row, ARROW_W, WIDGET_HEIGHT, "<").draw(p, ctx) {
             self.index = (self.index + n - 1) % n;
@@ -154,8 +181,16 @@ impl SkinPick {
             self.index = (self.index + 1) % n;
         }
         let skin = &self.skins[self.index];
-        let model = if skin.slim { "Slim" } else { "Classic" };
-        let label = format!("{} ({model})", skin.name);
+        let model = if skin.slim {
+            tr!("skinpick.model.slim")
+        } else {
+            tr!("skinpick.model.classic")
+        };
+        let name = match PRESET_LABELS.get(self.index) {
+            Some(key) => key.or(PRESETS[self.index]),
+            None => skin.name.as_str(),
+        };
+        let label = format!("{name} ({model})");
         let mid_w = w - 2.0 * (ARROW_W + GAP);
         Button::new(x + ARROW_W + GAP, row, mid_w, WIDGET_HEIGHT, &label).draw(p, ctx);
 
@@ -163,7 +198,7 @@ impl SkinPick {
         let half = (w - GAP) / 2.0;
         let row = row + WIDGET_HEIGHT + GAP;
         #[cfg(target_arch = "wasm32")]
-        if Button::new(x, row, half, WIDGET_HEIGHT, "Upload Skin...").draw(p, ctx) {
+        if Button::new(x, row, half, WIDGET_HEIGHT, tr!("skinpick.upload")).draw(p, ctx) {
             crate::platform::upload::choose_png();
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -172,11 +207,11 @@ impl SkinPick {
             y: row,
             w: half,
             h: WIDGET_HEIGHT,
-            label: "Drop Skin File",
+            label: tr!("skinpick.drop_file"),
             active: false,
         }
         .draw(p, ctx);
-        let label = format!("Model: {model}");
+        let label = crate::lang::trf!("skinpick.model", model);
         let toggle = Button {
             x: x + half + GAP,
             y: row,
@@ -195,7 +230,7 @@ impl SkinPick {
             y: row,
             w: half,
             h: WIDGET_HEIGHT,
-            label: "Delete Skin",
+            label: tr!("skinpick.delete"),
             active: uploaded,
         };
         if delete.draw(p, ctx) {
@@ -205,7 +240,7 @@ impl SkinPick {
         }
         if self.rejected {
             p.text_plain(
-                "Not a skin PNG",
+                tr!("skinpick.rejected"),
                 x + half + GAP + 4.0,
                 row + 6.0,
                 0xFF5555,

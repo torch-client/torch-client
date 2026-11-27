@@ -5,6 +5,7 @@ use crate::gui::painter::Painter;
 use crate::gui::tooltip::label;
 use crate::gui::widgets::{Button, WIDGET_HEIGHT, WIDGET_WIDTH_BIG, centered_x};
 use crate::gui::{GuiState, Screen, ScreenCtx};
+use crate::lang::Key;
 use crate::platform::time::{SystemTime, UNIX_EPOCH};
 use crate::text::{Span, Style, texts};
 
@@ -12,7 +13,11 @@ use crate::text::{Span, Style, texts};
 const LANGUAGE_X_OFFSET: f32 = 124.0;
 #[cfg(feature = "asset_download")]
 const LANGUAGE_ICON: (f32, f32) = (15.0, 15.0);
-const EDIT_PROFILE: &str = "Edit Profile";
+#[cfg(not(singleplayer))]
+const SINGLEPLAYER_SOON: Key = Key::of("title.singleplayer_soon");
+#[cfg(singleplayer)]
+const SINGLEPLAYER_TIP: Key = Key::of("title.singleplayer_tip");
+const EDIT_PROFILE: Key = Key::of("title.edit_profile");
 const PROFILE_LABEL_PAD: f32 = 8.0;
 
 const LOGO_W: f32 = 256.0;
@@ -23,6 +28,7 @@ const EDITION_H: f32 = 14.0;
 const EDITION_OVERLAP: f32 = 7.0;
 
 const BOTTOM_ROW_STEP: f32 = 36.0;
+const MENU_ROW_STEP: f32 = 24.0;
 
 const HALF_WIDTH: f32 = 98.0;
 #[allow(dead_code, reason = "asserted on by this module's layout test")]
@@ -32,6 +38,10 @@ use crate::ASSET_VERSION;
 
 fn first_row_y(vh: f32) -> f32 {
     (vh / 4.0).floor() + 48.0
+}
+
+fn last_row_y(vh: f32) -> f32 {
+    first_row_y(vh) + MENU_ROW_STEP
 }
 
 pub(crate) fn logo(p: &mut Painter, vw: f32, y: f32) {
@@ -68,13 +78,39 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     let x = centered_x(ctx.vw);
-    let top = first_row_y(ctx.vh);
+    let last = last_row_y(ctx.vh);
+
+    #[cfg(singleplayer)]
+    if Button::new(
+        x,
+        first_row_y(ctx.vh),
+        WIDGET_WIDTH_BIG,
+        WIDGET_HEIGHT,
+        label!("menu.singleplayer"),
+    )
+    .draw(p, ctx)
+    {
+        state.worlds.select.open();
+        state.nav = Some(Screen::SelectWorld);
+    }
+    #[cfg(not(singleplayer))]
+    Button {
+        active: false,
+        ..Button::new(
+            x,
+            first_row_y(ctx.vh),
+            WIDGET_WIDTH_BIG,
+            WIDGET_HEIGHT,
+            SINGLEPLAYER_SOON.get(),
+        )
+    }
+    .draw(p, ctx);
 
     #[cfg(feature = "online_mode")]
     crate::client::ban::check_once();
     if Button::new(
         x,
-        top,
+        last,
         WIDGET_WIDTH_BIG,
         WIDGET_HEIGHT,
         label!("menu.multiplayer"),
@@ -86,7 +122,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         crate::gui::bannotice::before_multiplayer(state);
     }
 
-    let bottom = top + BOTTOM_ROW_STEP;
+    let bottom = last + BOTTOM_ROW_STEP;
     #[cfg(feature = "asset_download")]
     if crate::gui::widgets::icon_button(
         p,
@@ -128,8 +164,8 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     p.text_plain(&version, 2.0, ctx.vh - 10.0, 0xFFFFFF, true);
 
     let disclaimer_y = ctx.vh - 20.0;
-    let credits_x =
-        p.text_plain(DISCLAIMER, 2.0, disclaimer_y, 0xA0A0A0, true) + p.atlas.font.width_str(" ");
+    let credits_x = p.text_plain(DISCLAIMER.get(), 2.0, disclaimer_y, 0xA0A0A0, true)
+        + p.atlas.font.width_str(" ");
     if credits_link(p, ctx, credits_x, disclaimer_y) {
         state.credits_parent = Screen::Title;
         state.nav = Some(Screen::Credits);
@@ -137,8 +173,8 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     #[cfg(all(feature = "update_checker", not(target_arch = "wasm32")))]
     if let Some(tag) = crate::client::update_checker::available() {
-        let label = format!("Update available: {tag}");
-        if link(p, ctx, &label, 0xFFFF00, 2.0, ctx.vh - 30.0) {
+        let label = crate::lang::trf!("title.update_available", tag);
+        if link(p, ctx, &label, 0xFFFF00, false, 2.0, ctx.vh - 30.0) {
             crate::platform::url::open(crate::client::update_checker::RELEASES_URL);
         }
     }
@@ -159,9 +195,9 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         const W: f32 = 90.0;
         if crate::platform::fullscreen::available() {
             let label = if crate::platform::fullscreen::is_fullscreen() {
-                "Exit Fullscreen"
+                crate::lang::tr!("title.exit_fullscreen")
             } else {
-                "Fullscreen"
+                crate::lang::tr!("title.fullscreen")
             };
             if Button::new(ctx.vw - W - 4.0, 4.0, W, WIDGET_HEIGHT, label).draw(p, ctx) {
                 crate::platform::fullscreen::toggle();
@@ -170,7 +206,8 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     {
-        let w = p.atlas.font.width_str(EDIT_PROFILE) + 2.0 * PROFILE_LABEL_PAD;
+        let edit_profile = EDIT_PROFILE.get();
+        let w = p.atlas.font.width_str(edit_profile) + 2.0 * PROFILE_LABEL_PAD;
         #[cfg(feature = "tutorial")]
         crate::gui::tutorial::mark(
             crate::gui::tutorial::Spot::EditProfile,
@@ -186,7 +223,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             ctx.vh - WIDGET_HEIGHT - 14.0,
             w,
             WIDGET_HEIGHT,
-            EDIT_PROFILE,
+            edit_profile,
         )
         .draw(p, ctx)
         {
@@ -196,35 +233,50 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     if crate::platform::address::EAGLER {
-        let w = p.atlas.font.width_str(EAGLER_MODE);
+        let eagler_mode = EAGLER_MODE.get();
+        let w = p.atlas.font.width_str(eagler_mode);
         p.text_plain(
-            EAGLER_MODE,
+            eagler_mode,
             (ctx.vw - w - 2.0).floor(),
             ctx.vh - 10.0,
             0xFFAA00,
             true,
         );
     }
+
+    #[cfg(singleplayer)]
+    if ctx.hovering(x, first_row_y(ctx.vh), WIDGET_WIDTH_BIG, WIDGET_HEIGHT) {
+        crate::gui::worlds::hover_tooltip(p, ctx, SINGLEPLAYER_TIP.get());
+    }
 }
 
-const DISCLAIMER: &str = "Not affiliated with Mojang or Microsoft.";
-const CREDITS: &str = "(Open Credits)";
+const DISCLAIMER: Key = Key::of("title.disclaimer");
+const CREDITS: Key = Key::of("title.open_credits");
 
 fn credits_link(p: &mut Painter, ctx: &ScreenCtx, x: f32, y: f32) -> bool {
+    let credits = CREDITS.get();
     #[cfg(feature = "tutorial")]
     crate::gui::tutorial::mark(
         crate::gui::tutorial::Spot::Credits,
         crate::gui::hud_layout::Rect::new(
             x,
             y - 1.0,
-            p.atlas.font.width_str(CREDITS),
+            p.atlas.font.width_str(credits),
             crate::text::LINE_HEIGHT + 1.0,
         ),
     );
-    link(p, ctx, CREDITS, 0xFFFFFF, x, y)
+    link(p, ctx, credits, 0xFFFFFF, false, x, y)
 }
 
-fn link(p: &mut Painter, ctx: &ScreenCtx, text: &str, color: u32, x: f32, y: f32) -> bool {
+pub(crate) fn link(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    text: &str,
+    color: u32,
+    underline: bool,
+    x: f32,
+    y: f32,
+) -> bool {
     let w = p.atlas.font.width_str(text);
     let (hx, hy, hw, hh) = (x, y - 1.0, w, crate::text::LINE_HEIGHT + 1.0);
     let hovered = ctx.hovering(hx, hy, hw, hh);
@@ -232,7 +284,7 @@ fn link(p: &mut Painter, ctx: &ScreenCtx, text: &str, color: u32, x: f32, y: f32
         text: text.to_owned(),
         style: Style {
             color,
-            underline: hovered,
+            underline: underline || hovered,
             ..Style::default()
         },
     };
@@ -245,7 +297,7 @@ fn link(p: &mut Painter, ctx: &ScreenCtx, text: &str, color: u32, x: f32, y: f32
     clicked
 }
 
-const EAGLER_MODE: &str = "Eagler mode (wss:// enabled)";
+const EAGLER_MODE: Key = Key::of("title.eagler_mode");
 
 fn session_splash() -> Option<&'static str> {
     static SPLASH: OnceLock<Option<String>> = OnceLock::new();
@@ -283,5 +335,12 @@ mod tests {
     fn the_bottom_row_sits_36_below_the_last_menu_row() {
         let top = first_row_y(240.0);
         assert_eq!(top + BOTTOM_ROW_STEP - (top + WIDGET_HEIGHT), 16.0);
+    }
+
+    #[test]
+    fn singleplayer_pushes_multiplayer_down_one_row() {
+        assert_eq!(first_row_y(240.0), 108.0);
+        assert_eq!(last_row_y(240.0), 132.0);
+        assert_eq!(last_row_y(240.0) + BOTTOM_ROW_STEP, 168.0);
     }
 }

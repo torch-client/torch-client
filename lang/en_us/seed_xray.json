@@ -1,0 +1,7 @@
+{
+  "seed_xray.check.empty": "Seed check: nothing simulated around you yet",
+  "seed_xray.check.head": "Seed check over %s chunks: matched/predicted, real",
+  "seed_xray.hopped": "Seed Xray: this server is not on 26.2, ores may be wrong",
+  "seed_xray.mismatch": "Seed Xray: this seed does not match the server's, expect wrong ores",
+  "seed_xray.no_seed": "Seed Xray: no seed set"
+}

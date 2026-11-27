@@ -51,10 +51,7 @@ pub(super) fn candidates(
             if !(seed_on && crate::modules::seed_xray::predicted(mask, feet, range, &mut out)) {
                 if seed_on && !*said {
                     *said = true;
-                    super::say(
-                        shared,
-                        "OreMiner: Seed Xray has no seed, so the ores come from Xray or OreESP",
-                    );
+                    super::say(shared, crate::lang::tr!("ore_miner.no_seed_fallback"));
                 }
                 from_frame(bot, shared, want, feet, range, &mut out)?;
             } else if out.is_empty() && (s.enabled(Id::Xray) || s.enabled(Id::OreEsp)) {

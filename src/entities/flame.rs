@@ -224,7 +224,7 @@ pub(crate) fn sync_flames(
                 }
             }
             for material in &node.materials {
-                EntityMaterial::relight(&mut materials, material, lit);
+                super::relight_unlit(&mut materials, material, lit, LightMode::Cardinal);
             }
         }
     }
@@ -253,7 +253,7 @@ fn spawn_node(
     let materials = textures.clone().map(|texture| {
         materials.add(EntityMaterial::cutout(
             Some(texture),
-            LightMode::Cardinal,
+            super::unlit_light_mode(LightMode::Cardinal),
             lit,
         ))
     });

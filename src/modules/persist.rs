@@ -179,12 +179,6 @@ fn read_setting(s: &Store, idx: usize, kind: Kind, v: &Json) {
     }
 }
 
-pub fn save(s: &Store) {
-    let text = document(s);
-    storage::MODULES.store(&text);
-    *LAST_WRITTEN.lock().unwrap_or_else(PoisonError::into_inner) = Some(text);
-}
-
 static LAST_WRITTEN: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn flush_changed(s: &Store) {

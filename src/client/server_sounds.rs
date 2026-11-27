@@ -1,5 +1,5 @@
 use azalea::ecs::entity::Entity;
-use azalea::ecs::prelude::{MessageReader, Query};
+use azalea::ecs::prelude::{Local, MessageReader, Query, Res};
 use azalea::entity::dimensions::EntityDimensions;
 use azalea::entity::indexing::EntityIdIndex;
 use azalea::entity::inventory::Inventory;
@@ -7,11 +7,13 @@ use azalea::entity::metadata::Silent;
 use azalea::entity::{EntityKindComponent, Position};
 use azalea::packet::game::ReceiveGamePacketEvent;
 use azalea_core::entity_id::MinecraftEntityId;
+use azalea_core::tick::TickRateManager;
 use azalea_inventory::components::{BreakSound, EquipmentSlot};
 use azalea_protocol::packets::game::ClientboundGamePacket;
 use azalea_protocol::packets::game::c_game_event::EventType;
 use azalea_protocol::packets::game::c_sound::SoundSource;
 use azalea_registry::builtin::EntityKind;
+use azalea_registry::identifier::Identifier;
 
 use crate::audio::{self, SoundCategory};
 use crate::items::kinetic::{event_name, identifier_name};
@@ -36,9 +38,23 @@ pub(crate) fn play_server_sounds(
     indexes: Query<&EntityIdIndex>,
     mobs: Query<Mob<'static>>,
     inventories: Query<&Inventory>,
+    rate: Option<Res<TickRateManager>>,
+    mut level: Local<Option<Identifier>>,
 ) {
+    let runs = rate.is_none_or(|rate| rate.runs_next());
     for event in events.read() {
         match event.packet.as_ref() {
+            ClientboundGamePacket::Login(p) => {
+                *level = Some(p.common.dimension.clone());
+                entity_sounds::new_level();
+            }
+            ClientboundGamePacket::Respawn(p) => {
+                if level.as_ref() != Some(&p.common.dimension) {
+                    *level = Some(p.common.dimension.clone());
+                    entity_sounds::new_level();
+                }
+            }
+            ClientboundGamePacket::RemoveEntities(p) => entity_sounds::removed(&p.entity_ids),
             ClientboundGamePacket::Sound(p) => {
                 let name = event_name(&p.sound);
                 let at = [p.x, p.y, p.z].map(|v| f64::from(v) / 8.0);
@@ -82,23 +98,7 @@ pub(crate) fn play_server_sounds(
                 audio::play_at(&name, SoundCategory::Blocks, at, 4.0, pitch);
             }
             ClientboundGamePacket::AddEntity(p) if p.entity_type == EntityKind::LightningBolt => {
-                let at = [p.position.x, p.position.y, p.position.z];
-                let thunder = 0.8 + audio::random_f32() * 0.2;
-                audio::play_at(
-                    "entity.lightning_bolt.thunder",
-                    SoundCategory::Weather,
-                    at,
-                    10000.0,
-                    thunder,
-                );
-                let impact = 0.5 + audio::random_f32() * 0.2;
-                audio::play_at(
-                    "entity.lightning_bolt.impact",
-                    SoundCategory::Weather,
-                    at,
-                    2.0,
-                    impact,
-                );
+                entity_sounds::lightning(p.id.0, [p.position.x, p.position.y, p.position.z], runs);
             }
             ClientboundGamePacket::GameEvent(p) => {
                 let Ok((pos, _, _, dims)) = mobs.get(event.entity) else {
@@ -129,7 +129,7 @@ pub(crate) fn play_server_sounds(
                 }
             }
             ClientboundGamePacket::EntityEvent(p) if p.event_id == FIREWORKS_EXPLODE => {
-                entity_sounds::firework_blast(p.entity_id.0);
+                entity_sounds::firework_blast(p.entity_id.0, runs);
             }
             ClientboundGamePacket::EntityEvent(p) => {
                 let Some(entity) = find_entity(event, p.entity_id, &indexes) else {

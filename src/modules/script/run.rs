@@ -678,6 +678,7 @@ impl Runtime {
         }
         super::render::drop_owner(k);
         super::ghost::drop_owner(k);
+        super::build::drop_owner(k);
     }
 
     fn stopped(&mut self, k: usize) {
@@ -693,6 +694,7 @@ impl Runtime {
         game::release_scroll(k);
         super::render::drop_owner(k);
         super::ghost::drop_owner(k);
+        super::build::drop_owner(k);
     }
 
     fn relist(&mut self) {

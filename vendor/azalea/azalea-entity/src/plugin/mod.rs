@@ -10,7 +10,7 @@ use azalea_core::{
     entity_id::MinecraftEntityId,
     game_type::GameMode,
     position::{BlockPos, ChunkPos, Vec3},
-    tick::GameTick,
+    tick::{Frozen, GameTick, TickRateSystems},
 };
 use azalea_registry::{
     builtin::{BlockKind, EntityKind},
@@ -67,7 +67,11 @@ impl Plugin for EntityPlugin {
             ),
         )
         .add_systems(GameTick,
-            (update_in_loaded_chunk, update_fluid_on_eyes, tick_shulker_peek),
+            (
+                update_in_loaded_chunk,
+                update_fluid_on_eyes,
+                tick_shulker_peek.after(TickRateSystems),
+            ),
         )
         .add_observer(handle_add_effect)
         .add_observer(handle_remove_effects)
@@ -250,12 +254,18 @@ pub fn update_bounding_box(
 
 pub fn tick_shulker_peek(
     mut commands: Commands,
-    mut query: Query<(Entity, &metadata::Peek, Option<&mut ShulkerPeekAmount>)>,
+    mut query: Query<(
+        Entity,
+        &metadata::Peek,
+        &MinecraftEntityId,
+        Option<&mut ShulkerPeekAmount>,
+    )>,
+    frozen: Option<Res<Frozen>>,
 ) {
-    for (entity, peek, current) in &mut query {
+    for (entity, peek, id, current) in &mut query {
         let target = peek.0 as f32 * 0.01;
         let now = current.as_ref().map_or(0.0, |c| c.0);
-        if now == target {
+        if now == target || frozen.as_ref().is_some_and(|frozen| !frozen.entity_ticks(id.0)) {
             continue;
         }
         let clamp = |v: f32, lo: f32, hi: f32| if v < lo { lo } else if v > hi { hi } else { v };

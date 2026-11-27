@@ -500,7 +500,7 @@ fn update_clouds(
     };
     let status = gui.options.clouds;
 
-    let partial = view.partial;
+    let partial = view.world_partial;
     let color = env.sky.cloud_color;
 
     let Some((texture_cells_w, texture_cells_h)) =

@@ -24,7 +24,7 @@ use crate::client::tracking::{
 };
 use crate::play::emit;
 use crate::play::entity_feed::entity_event::JUMP;
-use crate::session::{ItemUseEmit, LevelParticle, ParticleEmit, SideMutex};
+use crate::session::{FireworkEmit, ItemUseEmit, LevelParticle, ParticleEmit, SideMutex};
 use crate::util::javarandom::JavaRandom;
 use crate::util::mth::DEG_TO_RAD;
 
@@ -56,6 +56,7 @@ const BODY_BREAK: u8 = 65;
 const DROWN_PARTICLES: u8 = 67;
 const SADDLE_BREAK: u8 = 68;
 const RAVAGER_ROARED: u8 = 69;
+const FIREWORKS_EXPLODE: u8 = 17;
 
 const TAMING_PARTICLES: u32 = 7;
 const ALLAY_HEARTS: u32 = 3;
@@ -146,13 +147,20 @@ pub(crate) fn emit_event_particles(
     entities: Query<EcsBody>,
     inventories: Query<&Inventory>,
     holders: Query<&WorldHolder>,
+    rockets: crate::play::rockets::RocketQuery,
 ) {
+    crate::play::rockets::scan(&rockets);
+    let mut fireworks = Vec::new();
     let pending: Vec<Pending> = events
         .read()
         .filter_map(|event| {
             let ClientboundGamePacket::EntityEvent(p) = event.packet.as_ref() else {
                 return None;
             };
+            if p.event_id == FIREWORKS_EXPLODE {
+                fireworks.push(p.entity_id.0);
+                return None;
+            }
             handled(p.event_id).then(|| Pending {
                 event: p.event_id,
                 id: p.entity_id.0,
@@ -161,12 +169,13 @@ pub(crate) fn emit_event_particles(
             })
         })
         .collect();
-    if pending.is_empty() {
-        return;
-    }
     let Some(shared) = crate::SHARED.get() else {
         return;
     };
+    queue_fireworks(shared, &fireworks);
+    if pending.is_empty() {
+        return;
+    }
     let local = local_entity_id();
 
     let mut bodies = snapshot_bodies(&pending);
@@ -221,6 +230,41 @@ pub(crate) fn emit_event_particles(
         .unwrap_or(0);
     emits.truncate(fit);
     crate::session::push_particle_emits(queue, emits);
+}
+
+fn queue_fireworks(shared: &crate::session::SharedMutex, ids: &[i32]) {
+    if ids.is_empty() {
+        return;
+    }
+    let emits: Vec<_> = ids
+        .iter()
+        .filter_map(|&id| crate::play::rockets::get(id))
+        .map(|rocket| {
+            ParticleEmit::Firework(FireworkEmit {
+                pos: rocket.at,
+                velocity: rocket.velocity,
+                explosions: rocket.explosions,
+            })
+        })
+        .collect();
+    let mut state = shared.lock().unwrap();
+    let queue = &mut state.session.particle_emits;
+    let limit = crate::session::MAX_PENDING_FIREWORK_EMITS;
+    let waiting = queue
+        .iter()
+        .filter(|emit| matches!(emit, ParticleEmit::Firework(_)))
+        .count();
+    let keep = emits.len().min(limit);
+    let mut evict = (waiting + keep).saturating_sub(limit);
+    if evict > 0 {
+        queue.retain(|emit| {
+            let old = evict > 0 && matches!(emit, ParticleEmit::Firework(_));
+            evict -= usize::from(old);
+            !old
+        });
+    }
+    let skip = emits.len() - keep;
+    crate::session::push_particle_emits(queue, emits.into_iter().skip(skip));
 }
 
 fn handled(event: u8) -> bool {

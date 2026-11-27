@@ -7,10 +7,12 @@ use super::store;
 use crate::gui::Snapshot;
 use crate::gui::hud_layout::{Anchor, ElementId, Hud, ModPanel};
 use crate::gui::painter::Painter;
+use crate::lang::Key;
 
 pub struct Panel {
     pub module: Id,
     pub def: ModPanel,
+    pub label: Key,
     pub draw: fn(&mut Painter, &Snapshot),
 }
 
@@ -20,37 +22,53 @@ const PANELS: &[Panel] = &[
         module: Id::ExtraHud,
         def: ModPanel {
             key: "mod:builtin.extra_hud/armor",
-            label: "Armor",
+            label: "",
             w: 82.0,
             h: 34.0,
             anchor: Anchor::Bottom,
             offset: Vec2::new(-168.0, 0.0),
         },
+        label: Key::of("modmsg.hud_panel.armor"),
         draw: super::extra_hud::draw_armor,
     },
     Panel {
         module: Id::SeedCracker,
         def: ModPanel {
             key: "mod:builtin.seed_cracker/progress",
-            label: "Seed Cracker",
+            label: "",
             w: super::seed_cracker::HUD_W,
             h: super::seed_cracker::HUD_H,
             anchor: Anchor::TopLeft,
             offset: Vec2::new(2.0, 40.0),
         },
+        label: Key::of("modmsg.hud_panel.seed_cracker"),
         draw: super::seed_cracker::draw_hud,
     },
     Panel {
         module: Id::AutoMine,
         def: ModPanel {
             key: "mod:builtin.auto_mine/progress",
-            label: "AutoMine",
+            label: "",
             w: super::auto_mine::hud::HUD_W,
             h: super::auto_mine::hud::HUD_H,
             anchor: Anchor::TopLeft,
             offset: Vec2::new(2.0, 100.0),
         },
+        label: Key::of("modmsg.hud_panel.auto_mine"),
         draw: super::auto_mine::hud::draw,
+    },
+    Panel {
+        module: Id::AutoFarm,
+        def: ModPanel {
+            key: "mod:builtin.farmer/progress",
+            label: "",
+            w: super::farmer::hud::HUD_W,
+            h: super::farmer::hud::HUD_H,
+            anchor: Anchor::TopLeft,
+            offset: Vec2::new(2.0, 130.0),
+        },
+        label: Key::of("modmsg.hud_panel.auto_farm"),
+        draw: super::farmer::hud::draw,
     },
 ];
 #[cfg(not(feature = "click_gui"))]
@@ -139,7 +157,10 @@ pub const COUNT: usize = PANELS.len();
 const _: () = assert!(COUNT <= crate::gui::hud_layout::MOD_PANELS);
 
 pub fn def(i: usize) -> Option<ModPanel> {
-    PANELS.get(i).map(|p| p.def)
+    PANELS.get(i).map(|p| ModPanel {
+        label: p.label.get(),
+        ..p.def
+    })
 }
 
 pub fn draw(p: &mut Painter, vw: f32, vh: f32, snap: &Snapshot, hud: &mut Hud) {

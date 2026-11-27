@@ -1,0 +1,17 @@
+{
+  "asset_export.title": "Export Assets",
+  "asset_export.language_builtin": "%s: English (built in)",
+  "asset_export.size": "About %s",
+  "asset_export.export": "Export",
+  "asset_export.part.jar": "Jar Assets",
+  "asset_export.part.panorama": "Panorama",
+  "asset_export.part.unifont": "Unifont",
+  "asset_export.part.sounds": "Sound subset",
+  "asset_export.part.languages": "Languages table",
+  "asset_export.part.language": "Current language",
+  "asset_export.imported": "Imported: %s",
+  "asset_export.imported_reload": "Imported: %s. Reload the page to use them",
+  "asset_export.refused.not_ours": "not a Torch assets file",
+  "asset_export.refused.version": "made for %s, this needs %s",
+  "asset_export.refused.empty": "the file holds nothing to import"
+}

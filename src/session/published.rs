@@ -24,7 +24,7 @@ impl ChatTag {
 
     pub fn tooltip(self) -> Option<&'static str> {
         match self {
-            ChatTag::Secure => Some("Verified message. Signed by the sender:"),
+            ChatTag::Secure => Some(crate::lang::tr!("client.chat.tag_secure")),
             ChatTag::Modified => Some("Message modified by the server. Original:"),
             ChatTag::NotSecure => Some("Unverified message. Cannot be reported."),
             ChatTag::System => Some("Server message. Cannot be reported."),
@@ -69,6 +69,14 @@ pub enum ParticleEmit {
     Tracking(TrackingEmit),
     Cloud(CloudEmit),
     ItemUse(ItemUseEmit),
+    Firework(FireworkEmit),
+}
+
+#[derive(Clone)]
+pub struct FireworkEmit {
+    pub pos: [f64; 3],
+    pub velocity: [f64; 3],
+    pub explosions: std::sync::Arc<[azalea_inventory::components::FireworkExplosion]>,
 }
 
 #[derive(Clone)]
@@ -126,6 +134,8 @@ pub struct LevelEventEmit {
 
 pub const MAX_PENDING_PARTICLE_EMITS: usize = 256;
 
+pub const MAX_PENDING_FIREWORK_EMITS: usize = 32;
+
 pub fn push_particle_emit(queue: &mut Vec<ParticleEmit>, emit: ParticleEmit) {
     push_particle_emits(queue, std::iter::once(emit));
 }
@@ -178,8 +188,37 @@ impl LevelParticle {
 #[derive(Clone)]
 pub struct MapUpdate {
     pub id: i32,
-    pub colors: std::sync::Arc<Vec<u8>>,
+    pub dirty: MapRect,
     pub decorations: Option<std::sync::Arc<Vec<MapDecoration>>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MapRect {
+    pub x0: u8,
+    pub y0: u8,
+    pub x1: u8,
+    pub y1: u8,
+}
+
+impl MapRect {
+    pub fn is_empty(self) -> bool {
+        self.x0 >= self.x1 || self.y0 >= self.y1
+    }
+
+    pub fn union(self, other: MapRect) -> MapRect {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        MapRect {
+            x0: self.x0.min(other.x0),
+            y0: self.y0.min(other.y0),
+            x1: self.x1.max(other.x1),
+            y1: self.y1.max(other.y1),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,6 +240,7 @@ pub struct FrameMarkers {
 pub struct SlotStack {
     pub item: &'static str,
     pub count: u8,
+    pub modded: Option<std::num::NonZeroU32>,
     pub cooldown: u8,
     pub damage: u16,
     pub max_damage: u16,
@@ -287,6 +327,10 @@ impl Extra {
     pub fn make_mut(&mut self) -> &mut StackExtra {
         self.0.get_or_insert_default()
     }
+
+    pub fn book_mut(&mut self) -> Option<&mut Book> {
+        self.0.as_mut()?.book.as_deref_mut()
+    }
 }
 
 impl From<StackExtra> for Extra {
@@ -312,16 +356,32 @@ impl PartialEq for Extra {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct Book {
     pub pages: Box<[Vec<crate::text::Span>]>,
     pub title: String,
     pub author: String,
     pub generation: u8,
     pub signed: bool,
+    pub events: Box<[crate::text::events::Events]>,
+}
+
+impl PartialEq for Book {
+    fn eq(&self, other: &Book) -> bool {
+        self.pages == other.pages
+            && self.title == other.title
+            && self.author == other.author
+            && self.generation == other.generation
+            && self.signed == other.signed
+    }
 }
 
 impl Book {
+    pub fn page_events(&self, i: usize) -> &crate::text::events::Events {
+        const NONE: crate::text::events::Events = None;
+        self.events.get(i).unwrap_or(&NONE)
+    }
+
     pub fn raw_pages(&self) -> Vec<String> {
         self.pages
             .iter()
@@ -467,9 +527,11 @@ pub struct OtherPlayerInfo {
     pub name_tag_distance: f32,
     pub below_name_distance: f32,
     pub armor: Option<std::sync::Arc<[SlotStack; 4]>>,
+    pub hands: Option<std::sync::Arc<[SlotStack; 2]>>,
     #[cfg(feature = "skins")]
     pub skin: crate::client::skins::SkinState,
     pub anim: HumanoidAnim,
+    pub(crate) cart_ride: Option<crate::util::minecart_lerp::CartRide>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -663,13 +725,15 @@ pub struct MerchantOffer {
 
 impl MerchantOffer {
     fn satisfied_by(&self, buy_a: &SlotStack, buy_b: &SlotStack) -> bool {
-        if self.cost_a.item != buy_a.item || buy_a.count < self.cost_a.count {
+        let same_item =
+            |cost: &SlotStack, buy: &SlotStack| cost.item == buy.item && cost.modded == buy.modded;
+        if !same_item(&self.cost_a, buy_a) || buy_a.count < self.cost_a.count {
             return false;
         }
         if self.cost_b.is_empty() {
             buy_b.is_empty()
         } else {
-            self.cost_b.item == buy_b.item && buy_b.count >= self.cost_b.count
+            same_item(&self.cost_b, buy_b) && buy_b.count >= self.cost_b.count
         }
     }
 }
@@ -898,5 +962,27 @@ mod merchant_tests {
         let em = cost("emerald", 1);
         assert_eq!(list.future_xp(&em, &SlotStack::default(), 0), 0);
         assert_eq!(list.future_xp(&em, &SlotStack::default(), 1), 7);
+    }
+}
+
+#[cfg(test)]
+mod map_rect_tests {
+    use super::MapRect;
+
+    fn rect(x0: u8, y0: u8, x1: u8, y1: u8) -> MapRect {
+        MapRect { x0, y0, x1, y1 }
+    }
+
+    #[test]
+    fn union_spans_both_and_ignores_empty() {
+        assert_eq!(
+            rect(0, 0, 4, 4).union(rect(10, 2, 12, 128)),
+            rect(0, 0, 12, 128)
+        );
+        assert_eq!(rect(5, 5, 6, 6).union(MapRect::default()), rect(5, 5, 6, 6));
+        assert_eq!(MapRect::default().union(rect(5, 5, 6, 6)), rect(5, 5, 6, 6));
+        assert!(rect(3, 9, 4, 9).is_empty());
+        assert_eq!(rect(3, 9, 4, 9).union(rect(1, 1, 2, 2)), rect(1, 1, 2, 2));
+        assert!(MapRect::default().union(MapRect::default()).is_empty());
     }
 }

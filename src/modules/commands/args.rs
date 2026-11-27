@@ -1,5 +1,7 @@
 #![cfg_attr(not(lua_mods), allow(dead_code))]
 
+use crate::lang::{tr, trf};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tok {
     pub text: String,
@@ -26,16 +28,14 @@ pub fn tokens(raw: &str) -> Result<Vec<Tok>, String> {
                     }
                     '\\' => match chars.next() {
                         Some((_, e @ ('"' | '\\'))) => text.push(e),
-                        Some((_, e)) => {
-                            return Err(format!("Invalid escape sequence '\\{e}' in quoted string"));
-                        }
+                        Some((_, e)) => return Err(trf!("commands.args.bad_escape", e)),
                         None => break,
                     },
                     c => text.push(c),
                 }
             }
             if !closed {
-                return Err("Unclosed quoted string".to_string());
+                return Err(tr!("commands.args.unclosed").to_string());
             }
         } else {
             while let Some(&(_, c)) = chars.peek() {
@@ -118,7 +118,7 @@ pub fn bind(args: &[Arg], raw: &str) -> Result<Vec<(&'static str, ArgValue)>, St
             if a.optional {
                 return Ok(out);
             }
-            return Err(format!("Missing <{}>", a.name));
+            return Err(trf!("commands.args.missing", a.name));
         };
         let value = match a.kind {
             ArgKind::String => {
@@ -129,28 +129,25 @@ pub fn bind(args: &[Arg], raw: &str) -> Result<Vec<(&'static str, ArgValue)>, St
             ArgKind::Int => ArgValue::Int(
                 tok.text
                     .parse()
-                    .map_err(|_| format!("<{}> is a whole number, not `{}`", a.name, tok.text))?,
+                    .map_err(|_| trf!("commands.args.not_int", a.name, tok.text))?,
             ),
             ArgKind::Number => ArgValue::Num(
                 tok.text
                     .parse::<f64>()
                     .ok()
                     .filter(|x| x.is_finite())
-                    .ok_or_else(|| format!("<{}> is a number, not `{}`", a.name, tok.text))?,
+                    .ok_or_else(|| trf!("commands.args.not_number", a.name, tok.text))?,
             ),
             ArgKind::Bool => match tok.text.as_str() {
                 "true" => ArgValue::Bool(true),
                 "false" => ArgValue::Bool(false),
-                other => return Err(format!("<{}> is true or false, not `{other}`", a.name)),
+                other => return Err(trf!("commands.args.not_bool", a.name, other)),
             },
         };
         out.push((a.name, value));
     }
     if toks.len() > args.len() {
-        return Err(format!(
-            "Too many arguments, starting at `{}`",
-            toks[args.len()].text
-        ));
+        return Err(trf!("commands.args.too_many", toks[args.len()].text));
     }
     Ok(out)
 }

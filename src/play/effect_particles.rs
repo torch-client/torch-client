@@ -7,6 +7,7 @@ use azalea::prelude::*;
 use azalea_core::entity_id::MinecraftEntityId;
 use azalea_world::WorldName;
 
+use crate::client::tick_rate::WorldTick;
 use crate::play::emit::{self, Viewer};
 use crate::session::{LevelParticle, ParticleEmit, SharedMutex, SideMutex};
 use crate::util::javarandom::JavaRandom;
@@ -32,7 +33,7 @@ static STATE: SideMutex<State> = SideMutex::new(State {
     rng: None,
 });
 
-pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
+pub(crate) fn tick(bot: &Client, shared: &SharedMutex, world_tick: &WorldTick) {
     let Some(viewer) = Viewer::of(bot) else {
         return;
     };
@@ -46,7 +47,11 @@ pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
     let ecs = bot.ecs.read();
     let mut emits = Vec::new();
     for (name, pos, dims, id, particles, ambience, invisible, local) in query.iter(&ecs) {
-        if particles.0.is_empty() || !viewer.in_world(name) || !viewer.near(**pos) {
+        if particles.0.is_empty()
+            || !viewer.in_world(name)
+            || !viewer.near(**pos)
+            || !world_tick.entity_ticks(id.0)
+        {
             continue;
         }
         let bound = if invisible.0 { 15 } else { 4 };

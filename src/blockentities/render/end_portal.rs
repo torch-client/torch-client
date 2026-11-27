@@ -144,7 +144,7 @@ fn sync_portals(
     let snapshot =
         (view.block_entities_version != portals.version).then(|| view.block_entities.clone());
     portals.version = view.block_entities_version;
-    let game_time = ((view.game_time % 24000) as f32 + view.partial) / 24000.0;
+    let game_time = ((view.game_time % 24000) as f32 + view.world_partial) / 24000.0;
     let Portals {
         textures, batches, ..
     } = &mut *portals;

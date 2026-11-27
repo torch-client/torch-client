@@ -100,6 +100,14 @@ pub(crate) struct FrameValues {
     inputs: Inputs,
 }
 
+pub(crate) fn celestial_position(view_rotation: Mat4, sun_path_rotation: f32, angle: f32) -> Vec3 {
+    let m = view_rotation
+        * Mat4::from_rotation_y((-90.0f32).to_radians())
+        * Mat4::from_rotation_z(sun_path_rotation.to_radians())
+        * Mat4::from_rotation_x(angle);
+    m.transform_point3(Vec3::new(0.0, 100.0, 0.0))
+}
+
 fn celestial_fraction(angle: f32) -> f32 {
     (angle.to_degrees() + 90.0).rem_euclid(360.0) / 360.0
 }
@@ -136,13 +144,8 @@ impl FrameValues {
         let (camera_int, camera_fract) = split_position(camera_world);
         let (previous_camera_int, previous_camera_fract) = split_position(previous_unshifted);
 
-        let celestial = |angle: f32| -> Vec3 {
-            let m = view_rotation
-                * Mat4::from_rotation_y((-90.0f32).to_radians())
-                * Mat4::from_rotation_z(constants.sun_path_rotation.to_radians())
-                * Mat4::from_rotation_x(angle);
-            m.transform_point3(Vec3::new(0.0, 100.0, 0.0))
-        };
+        let celestial =
+            |angle: f32| celestial_position(view_rotation, constants.sun_path_rotation, angle);
         let sun_angle = celestial_fraction(inputs.sun_angle);
         let is_day = sun_angle < 0.5;
         let shadow_angle = if is_day {
@@ -388,6 +391,41 @@ impl FrameValues {
             fog_color: self.inputs.fog_color.extend(1.0),
             fog: Vec4::new(self.inputs.fog_range.x, self.inputs.fog_range.y, 0.0, 0.0),
         }
+    }
+}
+
+#[cfg(feature = "native_shaders")]
+impl FrameValues {
+    pub(crate) fn view_rotation(&self) -> Mat4 {
+        self.view_rotation
+    }
+
+    pub(crate) fn view_rotation_inverse(&self) -> Mat4 {
+        self.view_rotation_inverse
+    }
+
+    pub(crate) fn previous_view_rotation(&self) -> Mat4 {
+        self.previous_view_rotation
+    }
+
+    pub(crate) fn time_counter(&self) -> f32 {
+        self.time_counter
+    }
+
+    pub(crate) fn frame_time(&self) -> f32 {
+        self.frame_time
+    }
+
+    pub(crate) fn frame_counter(&self) -> u32 {
+        self.frame_counter
+    }
+
+    pub(crate) fn far(&self) -> f32 {
+        self.far
+    }
+
+    pub(crate) fn wetness(&self) -> f32 {
+        self.wetness
     }
 }
 

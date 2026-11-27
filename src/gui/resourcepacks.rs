@@ -39,10 +39,10 @@ mod tr {
 }
 
 const VANILLA_HAYSTACK: &str = "vanilla\ndefault\nthe default look and feel of minecraft";
-const SAVE: &str = "Save";
-const SAVED: &str = "Saved";
-const SAVE_TOOLTIP: &str = "Copy this pack into the resource packs folder";
-const SAVED_TOOLTIP: &str = "A copy is already in the resource packs folder";
+const SAVE: crate::lang::Key = crate::lang::Key::of("gui.resource_packs.save");
+const SAVED: crate::lang::Key = crate::lang::Key::of("gui.resource_packs.saved");
+const SAVE_TOOLTIP: crate::lang::Key = crate::lang::Key::of("gui.resource_packs.save_tooltip");
+const SAVED_TOOLTIP: crate::lang::Key = crate::lang::Key::of("gui.resource_packs.saved_tooltip");
 const SAVE_W: f32 = 34.0;
 
 pub(in crate::gui) const LIST_W: f32 = 200.0;
@@ -445,7 +445,11 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Sha
                     let description_w = text_w - SAVE_W - PADDING;
                     entry_text_widths(p, &name, &server.description, cx, cy, text_w, description_w);
                     let (bx, by) = (cx + ICON + PADDING + description_w + PADDING, cy + 12.0);
-                    let label = if server.saved { SAVED } else { SAVE };
+                    let label = if server.saved {
+                        SAVED.get()
+                    } else {
+                        SAVE.get()
+                    };
                     let button = Button {
                         active: !server.saved,
                         ..Button::new(bx, by, SAVE_W, 18.0, label)
@@ -455,9 +459,9 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Sha
                     }
                     if list_ctx.hovering(bx, by, SAVE_W, 18.0) {
                         tooltip = Some(if server.saved {
-                            SAVED_TOOLTIP
+                            SAVED_TOOLTIP.get()
                         } else {
-                            SAVE_TOOLTIP
+                            SAVE_TOOLTIP.get()
                         });
                     }
                     continue;
@@ -559,7 +563,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Sha
     let mut x = footer.x;
     #[cfg(explore_modrinth)]
     {
-        let explore = crate::gui::explore_packs::EXPLORE;
+        let explore = crate::gui::explore_packs::EXPLORE.get();
         if Button::new(x, footer.y, footer.w, WIDGET_HEIGHT, explore).draw(p, ctx) {
             state.explore_packs.open();
             state.nav = Some(Screen::ExplorePacks);

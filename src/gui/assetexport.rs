@@ -6,10 +6,11 @@ use crate::gui::painter::Painter;
 use crate::gui::tooltip::label;
 use crate::gui::widgets::{Button, WIDGET_HEIGHT};
 use crate::gui::{GuiState, Screen, ScreenCtx};
+use crate::lang::Key;
 use crate::util::bytes::Bytes;
 
-const TITLE: &str = "Export Assets";
-const EXPORT: &str = "Export";
+const TITLE: Key = Key::of("asset_export.title");
+const EXPORT: Key = Key::of("asset_export.export");
 const ROW_SPACING: f32 = 4.0;
 const LINE_H: f32 = 12.0;
 
@@ -50,7 +51,7 @@ fn language_caption(state: &State) -> String {
         return generic_value(Part::Language.caption(), on_off(false));
     };
     if offer.language == crate::client::language::ENGLISH {
-        return format!("{}: English (built in)", Part::Language.caption());
+        return crate::lang::trf!("asset_export.language_builtin", Part::Language.caption());
     }
     let name = crate::client::language::list()
         .and_then(|list| {
@@ -74,7 +75,7 @@ fn on_off(on: bool) -> &'static str {
 }
 
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
-    draw_title(p, ctx, TITLE);
+    draw_title(p, ctx, TITLE.get());
     let st = &mut state.asset_transfer;
     if st.offer.is_none() {
         st.open();
@@ -122,7 +123,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let any = Part::ALL.iter().any(|p| st.chosen(*p));
     let line_y = top + grid_h + ROW_SPACING;
     p.text_centered(
-        &format!("About {}", Bytes(size)),
+        &crate::lang::trf!("asset_export.size", Bytes(size)),
         ctx.vw / 2.0,
         line_y + 2.0,
         0xA0A0A0,
@@ -131,7 +132,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     let export = Button {
         active: any,
-        ..Button::new(left, line_y + LINE_H, wide, WIDGET_HEIGHT, EXPORT)
+        ..Button::new(left, line_y + LINE_H, wide, WIDGET_HEIGHT, EXPORT.get())
     };
     if export.draw(p, ctx) {
         let mut on = [false; 6];

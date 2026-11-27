@@ -1,0 +1,8 @@
+{
+  "keybinds.category.client": "Client",
+  "keybinds.spectator_menu": "Spectator Menu",
+  "keybinds.freecam": "Detached Camera",
+  "keybinds.pause": "Pause Menu",
+  "keybinds.click_gui": "Click GUI",
+  "keybinds.hud_editor": "Edit HUD"
+}

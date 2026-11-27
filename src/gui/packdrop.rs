@@ -92,22 +92,22 @@ pub(in crate::gui) fn open_folder(
     _: &str,
     _: &Path,
 ) -> bool {
-    if Button::new(x, at.y, at.w, WIDGET_HEIGHT, CHOOSE_FILES).draw(p, ctx) {
+    if Button::new(x, at.y, at.w, WIDGET_HEIGHT, CHOOSE_FILES.get()).draw(p, ctx) {
         crate::platform::upload::choose();
     }
     ctx.hovering(x, at.y, at.w, WIDGET_HEIGHT)
 }
 
 #[cfg(target_arch = "wasm32")]
-const CHOOSE_FILES: &str = "Choose Files...";
+const CHOOSE_FILES: crate::lang::Key = crate::lang::Key::of("gui.packs.choose_files");
 #[cfg(target_arch = "wasm32")]
-const IN_MEMORY: &str = "Kept until this tab closes";
+const IN_MEMORY: crate::lang::Key = crate::lang::Key::of("gui.packs.in_memory");
 
 pub(in crate::gui) fn folder_tooltip(p: &mut Painter, ctx: &ScreenCtx) {
     #[cfg(not(target_arch = "wasm32"))]
     tooltip(p, ctx, &translate("pack.folderInfo", &[]));
     #[cfg(target_arch = "wasm32")]
-    tooltip(p, ctx, IN_MEMORY);
+    tooltip(p, ctx, IN_MEMORY.get());
 }
 
 pub(in crate::gui) fn tooltip(p: &mut Painter, ctx: &ScreenCtx, text: &str) {
@@ -128,7 +128,7 @@ pub(in crate::gui) const MESSAGE_WARNING: u32 = 0xFF_FF55;
 const MESSAGE_MARGIN: f32 = 8.0;
 
 pub(in crate::gui) fn failed_message(names: &[String]) -> Option<String> {
-    (!names.is_empty()).then(|| format!("{} failed to load. Check the log.", names.join(", ")))
+    (!names.is_empty()).then(|| crate::lang::trf!("gui.packs.failed", names.join(", ")))
 }
 
 pub(in crate::gui) fn message(

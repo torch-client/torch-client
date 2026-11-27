@@ -1,7 +1,13 @@
-use std::mem::ManuallyDrop;
+use std::{
+    io::{self, Cursor, Write},
+    mem::ManuallyDrop,
+    num::NonZeroU32,
+};
 
-use azalea_buf::AzBuf;
-use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
+use azalea_buf::{AzBuf, AzBufVar, BufReadError};
+use azalea_inventory::{
+    DataComponentPatch, ItemStack, ItemStackData, read_item_kind, write_item_kind,
+};
 use azalea_protocol_macros::ClientboundGamePacket;
 use azalea_registry::builtin::ItemKind;
 
@@ -32,12 +38,28 @@ pub struct MerchantOffer {
     pub demand: i32,
 }
 
-#[derive(AzBuf, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ItemCost {
     pub item: ItemKind,
-    #[var]
     pub count: i32,
     pub components: DataComponentExactPredicate,
+    pub modded_item: Option<NonZeroU32>,
+}
+impl AzBuf for ItemCost {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        let (item, modded_item) = read_item_kind(buf)?;
+        Ok(Self {
+            item,
+            count: i32::azalea_read_var(buf)?,
+            components: DataComponentExactPredicate::azalea_read(buf)?,
+            modded_item,
+        })
+    }
+    fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
+        write_item_kind(self.item, self.modded_item, buf)?;
+        self.count.azalea_write_var(buf)?;
+        self.components.azalea_write(buf)
+    }
 }
 impl ItemCost {
     pub fn into_item_stack(self) -> ItemStackData {
@@ -50,11 +72,13 @@ impl ItemCost {
             }
         }
 
-        ItemStackData {
+        let mut stack = ItemStackData {
             kind: self.item,
             count: self.count,
             component_patch,
-        }
+        };
+        stack.set_modded_kind(self.modded_item);
+        stack
     }
 }
 

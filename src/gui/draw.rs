@@ -802,6 +802,9 @@ pub fn build(app: &mut App) {
                     .after(bevy::render::view::prepare_view_targets),
                 prepare_gui_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 prepare_gui_image_groups.in_set(RenderSystems::PrepareBindGroups),
+                crate::gui::map_view::bind_map_images
+                    .in_set(RenderSystems::PrepareBindGroups)
+                    .before(prepare_gui_image_groups),
                 present_gui_windows
                     .in_set(RenderSystems::Render)
                     .after(bevy::render::renderer::render_system),

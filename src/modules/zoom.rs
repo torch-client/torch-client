@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::registry::{Id, zoom as setting};
 use super::store;
@@ -24,4 +24,22 @@ pub fn settings() -> Settings {
         fov: s.num(setting::FOV),
         duration: s.num(setting::DURATION).max(0.001),
     }
+}
+
+static RATIO_BITS: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+
+pub fn set_fov_ratio(ratio: f32) {
+    let ratio = if ratio.is_finite() {
+        ratio.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    RATIO_BITS.store(ratio.to_bits(), Ordering::Relaxed);
+}
+
+pub fn look_ratio() -> f32 {
+    if !store().flag(setting::SLOW_LOOK) {
+        return 1.0;
+    }
+    f32::from_bits(RATIO_BITS.load(Ordering::Relaxed))
 }

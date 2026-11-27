@@ -71,6 +71,121 @@ fn container_with_five_stacks_has_no_remainder_row() {
 }
 
 #[test]
+fn compact_container_merges_and_orders_by_total() {
+    let stack = |kind, count| ItemStack::Present(ItemStackData::new(kind, count));
+    let items = vec![
+        stack(ItemKind::Dirt, 10),
+        ItemStack::Empty,
+        stack(ItemKind::Stone, 64),
+        stack(ItemKind::Dirt, 64),
+        stack(ItemKind::Sand, 5),
+        stack(ItemKind::Gravel, 5),
+        stack(ItemKind::Glass, 1),
+        stack(ItemKind::Clay, 1),
+        stack(ItemKind::Ice, 1),
+    ];
+    let name = |s: &ItemStack| {
+        vec![Span::new(
+            s.as_present().map_or("", |d| d.kind.to_str()).to_owned(),
+        )]
+    };
+    let mut out = Vec::new();
+    compact_container_rows(&items, name, &mut out);
+    let rows: Vec<String> = out.iter().map(|l| text(l)).collect();
+    assert_eq!(rows.len(), 6, "{rows:?}");
+    assert!(out[..5].iter().all(|line| !line[0].style.italic));
+    assert!(out[5][0].style.italic);
+    if !has_lang() {
+        return;
+    }
+    for (row, want) in rows
+        .iter()
+        .zip(["dirt", "stone", "sand", "gravel", "glass"])
+    {
+        assert!(row.contains(want), "{row} should name {want}");
+    }
+    assert!(rows[0].ends_with("x74"), "{}", rows[0]);
+    assert!(
+        rows[5].contains('2'),
+        "two merged entries left over: {}",
+        rows[5]
+    );
+}
+
+#[test]
+fn compact_container_keeps_differently_named_stacks_apart() {
+    let mut items: Vec<ItemStack> = (0..3)
+        .map(|_| ItemStack::Present(ItemStackData::new(ItemKind::Stone, 1)))
+        .collect();
+    items[0] = ItemStack::Present(ItemStackData::new(ItemKind::Stone, 2));
+    let mut out = Vec::new();
+    compact_container_rows(&items, |_| vec![Span::new("n")], &mut out);
+    assert_eq!(out.len(), 1);
+
+    let name = |s: &ItemStack| vec![Span::new(if s.count() == 2 { "special" } else { "n" })];
+    out.clear();
+    compact_container_rows(&items, name, &mut out);
+    assert_eq!(out.len(), 2);
+    if has_lang() {
+        assert!(text(&out[0]).contains("special"));
+        assert!(text(&out[1]).starts_with('n'));
+    }
+}
+
+fn ctx(advanced: bool) -> Ctx<'static> {
+    Ctx {
+        registries: None,
+        advanced,
+        attack_speed_base: None,
+        peaceful: false,
+        containers: ContainerRows::Vanilla,
+    }
+}
+
+#[test]
+fn map_rows_follow_the_client_data() {
+    use crate::gui::map_view::MapMeta;
+    let data = ItemStackData::new(ItemKind::FilledMap, 1);
+    let mut out = Vec::new();
+    map_rows(7, None, &data, &ctx(true), &mut out);
+    assert_eq!(out.len(), 1);
+
+    out.clear();
+    map_rows(
+        7,
+        Some(MapMeta {
+            scale: 0,
+            locked: false,
+        }),
+        &data,
+        &ctx(false),
+        &mut out,
+    );
+    assert_eq!(out.len(), 1, "the id alone");
+
+    out.clear();
+    map_rows(
+        7,
+        Some(MapMeta {
+            scale: 2,
+            locked: true,
+        }),
+        &data,
+        &ctx(true),
+        &mut out,
+    );
+    assert_eq!(out.len(), 4, "id, locked, scale, level");
+    if has_lang() {
+        assert_eq!(text(&out[2]), "Scaling at 1:4");
+        assert_eq!(text(&out[3]), "(Level 2/4)");
+    }
+}
+
+fn has_lang() -> bool {
+    translate("filled_map.unknown", &[]) != "filled_map.unknown"
+}
+
+#[test]
 fn pot_sides_print_front_left_right_back() {
     let items = [
         ItemKind::AnglerPotterySherd,

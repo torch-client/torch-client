@@ -15,11 +15,17 @@ use super::{as_system, declare_packet_handlers};
 use crate::{
     client::InConfigState,
     connection::RawConnection,
-    cookies::{RequestCookieEvent, StoreCookieEvent},
+    cookies::{RequestCookieEvent, StoreCookieEvent, TransferEvent},
     disconnect::DisconnectEvent,
     local_player::WorldHolder,
     packet::game::{KeepAliveEvent, ResourcePackEvent},
 };
+
+#[derive(EntityEvent)]
+pub struct ConfigPackEvent {
+    pub entity: Entity,
+    pub packet: ClientboundConfigPacket,
+}
 
 pub fn process_raw_packet(
     ecs: &mut World,
@@ -160,10 +166,21 @@ impl ConfigPacketHandler<'_> {
                 prompt: p.prompt.to_owned(),
             });
         });
+        self.pack_packet(ClientboundConfigPacket::ResourcePackPush(p.clone()));
     }
 
     pub fn resource_pack_pop(&mut self, p: &ClientboundResourcePackPop) {
         debug!("Got resource pack pop packet {p:?}");
+        self.pack_packet(ClientboundConfigPacket::ResourcePackPop(p.clone()));
+    }
+
+    fn pack_packet(&mut self, packet: ClientboundConfigPacket) {
+        as_system::<Commands>(self.ecs, |mut commands| {
+            commands.trigger(ConfigPackEvent {
+                entity: self.player,
+                packet,
+            });
+        });
     }
 
     pub fn update_enabled_features(&mut self, p: &ClientboundUpdateEnabledFeatures) {
@@ -200,6 +217,14 @@ impl ConfigPacketHandler<'_> {
 
     pub fn transfer(&mut self, p: &ClientboundTransfer) {
         debug!("Got transfer packet {p:?}");
+
+        as_system::<Commands>(self.ecs, |mut commands| {
+            commands.trigger(TransferEvent {
+                entity: self.player,
+                host: p.host.clone(),
+                port: p.port,
+            });
+        });
     }
 
     pub fn select_known_packs(&mut self, p: &ClientboundSelectKnownPacks) {

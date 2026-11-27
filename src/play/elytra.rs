@@ -9,7 +9,7 @@ use azalea::entity::{
 use azalea::packet::game::SendGamePacketEvent;
 use azalea::physics::{PhysicsSystems, travel::travel};
 use azalea_core::entity_id::MinecraftEntityId;
-use azalea_core::tick::GameTick;
+use azalea_core::tick::{Frozen, GameTick};
 use azalea_inventory::ItemStack;
 use azalea_inventory::components::{
     Damage, EquipmentSlot, Equippable, Glider, MaxDamage, Unbreakable,
@@ -158,7 +158,7 @@ fn stop_on_climbable(
 
 #[allow(clippy::type_complexity)]
 fn firework_boost(
-    rockets: Query<&AttachedToTarget, With<FireworkRocket>>,
+    rockets: Query<(&AttachedToTarget, &MinecraftEntityId), With<FireworkRocket>>,
     mut players: Query<
         (
             &MinecraftEntityId,
@@ -168,14 +168,17 @@ fn firework_boost(
         ),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
+    frozen: Res<Frozen>,
 ) {
     for (id, fall_flying, direction, mut physics) in &mut players {
         if !**fall_flying {
             continue;
         }
         let look = view_vector(*direction);
-        for attached in &rockets {
-            if attached.0.0.is_none_or(|target| target as i32 != id.0) {
+        for (attached, rocket) in &rockets {
+            if attached.0.0.is_none_or(|target| target as i32 != id.0)
+                || !frozen.entity_ticks(rocket.0)
+            {
                 continue;
             }
             let movement = physics.velocity;

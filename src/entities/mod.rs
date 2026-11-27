@@ -969,10 +969,7 @@ impl RenderSpec {
     }
 
     pub fn effective_light_mode(&self) -> LightMode {
-        match self.light_mode() {
-            LightMode::Cardinal if !crate::renderer::lighting_enabled() => LightMode::Flat,
-            mode => mode,
-        }
+        unlit_light_mode(self.light_mode())
     }
 
     pub fn ignoring_invisibility(mut self) -> RenderSpec {
@@ -1007,6 +1004,7 @@ pub struct EntityAssets {
     specs: Vec<Option<GpuSpec>>,
     block_atlas: Option<Handle<Image>>,
     block_meshes: HashMap<BlockRef, Option<Handle<Mesh>>>,
+    block_meshes_unshaded: bool,
     built_meshes: HashMap<(usize, String), Handle<Mesh>>,
     materials: SharedMaterials<MaterialKey, MAX_SHARED_MATERIALS>,
     glint_texture: Option<Handle<Image>>,
@@ -1201,6 +1199,20 @@ impl EntityAssets {
         self.block_meshes.remove(block);
     }
 
+    fn sync_block_mesh_shade(&mut self, meshes: &mut Assets<Mesh>) {
+        let unshaded = !crate::renderer::lighting_enabled();
+        if unshaded == self.block_meshes_unshaded {
+            return;
+        }
+        self.block_meshes_unshaded = unshaded;
+        for (block, mesh) in &self.block_meshes {
+            let (Some(handle), Some(rebuilt)) = (mesh, blockmodel::mesh(*block)) else {
+                continue;
+            };
+            let _ = meshes.insert(handle.id(), rebuilt);
+        }
+    }
+
     fn built_mesh(
         &mut self,
         idx: usize,
@@ -1385,6 +1397,30 @@ impl Blend {
             Blend::Additive => (AlphaMode::Add, 0.0),
             Blend::WaterMask => (AlphaMode::Blend, 0.0),
         }
+    }
+}
+
+pub(crate) fn unlit_light_mode(mode: LightMode) -> LightMode {
+    match mode {
+        LightMode::Cardinal if !crate::renderer::lighting_enabled() => LightMode::Flat,
+        mode => mode,
+    }
+}
+
+pub(crate) fn relight_unlit(
+    materials: &mut Assets<EntityMaterial>,
+    handle: &Handle<EntityMaterial>,
+    lit: Lit,
+    mode: LightMode,
+) {
+    EntityMaterial::relight(materials, handle, lit);
+    let wanted = unlit_light_mode(mode) as u32;
+    if materials
+        .get(handle)
+        .is_some_and(|m| m.params.mode != wanted)
+        && let Some(mut material) = materials.get_mut(handle)
+    {
+        material.params.mode = wanted;
     }
 }
 
@@ -1865,6 +1901,7 @@ fn sync_entities(
     {
         assets.armor_glint_texture = Some(glint.0.clone());
     }
+    assets.sync_block_mesh_shade(&mut meshes);
 
     let cap = max_rendered_entities();
     let anims = &*view.entities;
@@ -1885,13 +1922,20 @@ fn sync_entities(
         frame.extend(idx.iter().map(|&(_, i)| anims[i].sample(partial)));
     }
     if !view.item_pickups.is_empty() {
-        frame.retain(|st| {
-            !view
-                .item_pickups
+        let replaced: std::collections::HashSet<i32> = view
+            .item_pickups
+            .iter()
+            .filter_map(|p| p.replaces())
+            .collect();
+        if !replaced.is_empty() {
+            frame.retain(|st| !replaced.contains(&st.id));
+        }
+        frame.extend(
+            view.item_pickups
                 .iter()
-                .any(|p| p.replaces() == Some(st.id))
-        });
-        frame.extend(view.item_pickups.iter().map(|p| p.sample(partial)));
+                .filter(|p| p.drawn())
+                .map(|p| p.sample(view.world_partial)),
+        );
     }
     beams::aim_guardians(frame, &view);
     let glowing = &mut *glowing;

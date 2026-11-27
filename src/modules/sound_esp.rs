@@ -14,10 +14,15 @@ use super::registry::{Id, sound_esp as setting};
 use super::seed_xray::Tick;
 use super::{Edge, Phase, store};
 use crate::items::kinetic::{event_name, sound_name};
+use crate::lang::Key;
 
 static EDGE: Edge = Edge::new(Id::SoundEsp);
 
-static GROUPS: [&str; 3] = ["Blocks", "Entities", "Other"];
+static GROUPS: [Key; 3] = [
+    Key::of("lists.sounds.group.blocks"),
+    Key::of("lists.sounds.group.entities"),
+    Key::of("lists.sounds.group.other"),
+];
 
 const COLOR: u32 = 0xFF_55_55;
 
@@ -89,6 +94,7 @@ fn build() -> Built {
         entries.push(Entry {
             group,
             label: Cow::Borrowed(name),
+            shown: Key::NONE,
             on: UNNATURAL.iter().any(|p| name.contains(p)),
             color: COLOR,
         });
@@ -98,7 +104,7 @@ fn build() -> Built {
 
 pub static SOUNDS: BitList = BitList::new(
     "sound_esp",
-    "Sounds",
+    Key::of("lists.sounds.title"),
     214.0,
     &GROUPS,
     true,
@@ -346,6 +352,7 @@ pub fn append(cap: usize, boxes: &mut Vec<Found>, slots: &mut Vec<Slot>) {
             sides,
             range2: u32::MAX,
             exposed: false,
+            fade: false,
         };
         let slot = slots.iter().position(|s| *s == slot).unwrap_or_else(|| {
             slots.push(slot);

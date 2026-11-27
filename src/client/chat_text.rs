@@ -24,16 +24,31 @@ pub fn to_spans(text: &FormattedText) -> Vec<Span> {
     to_spans_styled(text, Style::default())
 }
 
+pub fn to_plain(text: &FormattedText) -> String {
+    to_spans(text)
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect()
+}
+
 pub fn to_spans_events(
     text: &FormattedText,
     registries: Option<&RegistryHolder>,
+) -> (Vec<Span>, Events) {
+    to_spans_events_styled(text, registries, Style::default())
+}
+
+pub fn to_spans_events_styled(
+    text: &FormattedText,
+    registries: Option<&RegistryHolder>,
+    root: Style,
 ) -> (Vec<Span>, Events) {
     let mut out = Vec::new();
     let mut sink = Some(Sink {
         registries,
         table: Vec::new(),
     });
-    walk(text, Style::default(), &mut out, &mut sink);
+    walk(text, root, &mut out, &mut sink);
     out.retain(|s| !s.text.is_empty());
     let table = sink.map(|s| s.table).unwrap_or_default();
     let events = (!table.is_empty()).then(|| table.into());

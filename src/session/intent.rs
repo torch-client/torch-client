@@ -31,6 +31,9 @@ pub enum InvAction {
         enabled: bool,
     },
     Close,
+    RunCommand(String),
+    #[cfg(feature = "click_gui")]
+    ItemEdit(Box<crate::play::item_components::ItemEdit>),
 }
 
 #[derive(Clone, Copy)]
@@ -39,11 +42,17 @@ pub enum DropRequest {
     HeldStack,
 }
 
-#[derive(Clone, Copy)]
-pub struct CommandBlockOpen {
-    pub pos: azalea_core::position::BlockPos,
-    pub mode: CommandBlockMode,
-    pub conditional: bool,
+#[derive(Clone)]
+pub enum CommandBlockOpen {
+    Block {
+        pos: azalea_core::position::BlockPos,
+        mode: CommandBlockMode,
+        conditional: bool,
+    },
+    Minecart {
+        id: i32,
+        data: CommandBlockData,
+    },
 }
 
 pub use azalea_protocol::packets::game::s_set_command_block::Mode as CommandBlockMode;
@@ -56,13 +65,20 @@ pub struct CommandBlockData {
     pub automatic: bool,
 }
 
-pub struct CommandBlockUpdate {
-    pub pos: azalea_core::position::BlockPos,
-    pub command: String,
-    pub mode: CommandBlockMode,
-    pub track_output: bool,
-    pub conditional: bool,
-    pub automatic: bool,
+pub enum CommandBlockUpdate {
+    Block {
+        pos: azalea_core::position::BlockPos,
+        command: String,
+        mode: CommandBlockMode,
+        track_output: bool,
+        conditional: bool,
+        automatic: bool,
+    },
+    Minecart {
+        id: i32,
+        command: String,
+        track_output: bool,
+    },
 }
 
 #[derive(Clone, Debug)]

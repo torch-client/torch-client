@@ -9,6 +9,7 @@ use std::{
 
 use azalea_block::{
     BlockState,
+    fluid_state::{FluidKind, FluidState},
     properties::{self, SlabKind, StairShape},
 };
 use azalea_core::{
@@ -24,7 +25,9 @@ use azalea_world::{
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
-use super::{mining::MiningCache, positions::RelBlockPos};
+use super::{
+    mining::MiningCache, placing::PlaceRules, positions::RelBlockPos, safety::MoveSafety,
+};
 use crate::pathfinder::positions::SmallChunkSectionPos;
 
 const MAX_VIEW_DISTANCE: usize = 32;
@@ -43,6 +46,8 @@ pub struct CachedWorld {
     #[allow(clippy::type_complexity)]
     cached_mining_costs: UnsafeCell<Option<Box<[(RelBlockPos, f32)]>>>,
     cost_table: bool,
+    place_rules: Option<Arc<dyn PlaceRules>>,
+    safety: MoveSafety,
 }
 
 type CachedChunk = Box<[PalettedContainer<BlockState>]>;
@@ -122,16 +127,24 @@ pub struct SectionBitsets {
     pub solid: FastFixedBitSet<4096>,
     pub standable: FastFixedBitSet<4096>,
     pub water: FastFixedBitSet<4096>,
+    pub flowing: FastFixedBitSet<4096>,
+    pub danger: FastFixedBitSet<4096>,
+    pub hot: FastFixedBitSet<4096>,
 }
 
 const PASSABLE: u8 = 1;
 const SOLID: u8 = 2;
 const STANDABLE: u8 = 4;
 const WATER: u8 = 8;
+const FLOWING: u8 = 16;
+const DANGER: u8 = 32;
+const HOT: u8 = 64;
 
-fn block_flags(state: BlockState) -> u8 {
+fn block_flags(state: BlockState, avoid_hazards: bool) -> u8 {
     let mut flags = 0;
-    if is_block_state_passable(state) {
+    let shunned = avoid_hazards && is_block_state_danger(state);
+    let water = is_block_state_water(state);
+    if is_block_state_passable(state) && !shunned && !water {
         flags |= PASSABLE;
     }
     if is_block_state_solid(state) {
@@ -140,8 +153,17 @@ fn block_flags(state: BlockState) -> u8 {
     if is_block_state_standable(state) {
         flags |= STANDABLE;
     }
-    if is_block_state_water(state) {
+    if water && !shunned {
         flags |= WATER;
+        if !FluidState::from(state).is_source() {
+            flags |= FLOWING;
+        }
+    }
+    if shunned {
+        flags |= DANGER;
+    }
+    if avoid_hazards && is_block_state_hot(state) {
+        flags |= HOT;
     }
     flags
 }
@@ -161,6 +183,15 @@ impl SectionBitsets {
         if flags & WATER != 0 {
             self.water.set(i);
         }
+        if flags & FLOWING != 0 {
+            self.flowing.set(i);
+        }
+        if flags & DANGER != 0 {
+            self.danger.set(i);
+        }
+        if flags & HOT != 0 {
+            self.hot.set(i);
+        }
     }
 }
 
@@ -178,7 +209,32 @@ impl CachedWorld {
             cached_blocks: Default::default(),
             cached_mining_costs: UnsafeCell::new(None),
             cost_table: true,
+            place_rules: None,
+            safety: MoveSafety::new(),
         }
+    }
+
+    pub fn with_safety(mut self, safety: MoveSafety) -> Self {
+        if self.safety != safety {
+            self.safety = safety;
+            *self.cached_blocks.get_mut() = CachedSections::default();
+            *self.cached_mining_costs.get_mut() = None;
+        }
+        self
+    }
+
+    pub fn safety(&self) -> MoveSafety {
+        self.safety
+    }
+
+    pub fn with_place_rules(mut self, rules: Option<Arc<dyn PlaceRules>>) -> Self {
+        self.place_rules = rules;
+        *self.cached_mining_costs.get_mut() = None;
+        self
+    }
+
+    pub fn place_rules(&self) -> Option<&dyn PlaceRules> {
+        self.place_rules.as_deref()
     }
 
     pub fn without_cost_table(mut self) -> Self {
@@ -262,17 +318,13 @@ impl CachedWorld {
     }
 
     fn calculate_bitsets_for_section(&self, section_pos: SmallChunkSectionPos) -> CachedSection {
+        let avoid = self.safety.avoid_hazards;
         let bitsets = self.with_section(section_pos, |section| {
-            let mut bitsets = Box::new(SectionBitsets {
-                passable: FastFixedBitSet::<4096>::new(),
-                solid: FastFixedBitSet::<4096>::new(),
-                standable: FastFixedBitSet::<4096>::new(),
-                water: FastFixedBitSet::<4096>::new(),
-            });
+            let mut bitsets = Box::<SectionBitsets>::default();
 
             match &section.palette {
                 Palette::SingleValue(state) => {
-                    let flags = block_flags(*state);
+                    let flags = block_flags(*state, avoid);
                     if flags != 0 {
                         for i in 0..4096 {
                             bitsets.apply(i, flags);
@@ -280,8 +332,8 @@ impl CachedWorld {
                     }
                 }
                 Palette::Linear(values) | Palette::Hashmap(values) => {
-                    let flags: Vec<u8> = values.iter().map(|s| block_flags(*s)).collect();
-                    let default_flags = block_flags(BlockState::default());
+                    let flags: Vec<u8> = values.iter().map(|s| block_flags(*s, avoid)).collect();
+                    let default_flags = block_flags(BlockState::default(), avoid);
                     section.storage.for_each(|i, id| {
                         let f = flags.get(id as usize).copied().unwrap_or(default_flags);
                         bitsets.apply(i, f);
@@ -290,7 +342,7 @@ impl CachedWorld {
                 Palette::Global => {
                     section.storage.for_each(|i, id| {
                         let state = BlockState::try_from(id as u32).unwrap_or_default();
-                        bitsets.apply(i, block_flags(state));
+                        bitsets.apply(i, block_flags(state, avoid));
                     });
                 }
             }
@@ -343,6 +395,68 @@ impl CachedWorld {
         self.check_bitset_for_block(pos, |bitsets, index| bitsets.water.index(index))
     }
 
+    pub fn is_block_flowing(&self, pos: RelBlockPos) -> bool {
+        self.check_bitset_for_block(pos.apply(self.origin), |bitsets, index| {
+            bitsets.flowing.index(index)
+        })
+    }
+
+    pub fn is_block_danger(&self, pos: RelBlockPos) -> bool {
+        self.check_bitset_for_block(pos.apply(self.origin), |bitsets, index| {
+            bitsets.danger.index(index)
+        })
+    }
+
+    pub fn is_block_hot(&self, pos: RelBlockPos) -> bool {
+        self.check_bitset_for_block(pos.apply(self.origin), |bitsets, index| {
+            bitsets.hot.index(index)
+        })
+    }
+
+    pub fn is_block_open(&self, pos: RelBlockPos) -> bool {
+        self.check_bitset_for_block(pos.apply(self.origin), |bitsets, index| {
+            bitsets.passable.index(index) || bitsets.water.index(index)
+        })
+    }
+
+    pub fn is_node_safe(&self, pos: RelBlockPos) -> bool {
+        if !self.safety.avoid_hazards {
+            return true;
+        }
+        if self.is_block_danger(pos.down(1))
+            || self.is_block_danger(pos)
+            || self.is_block_danger(pos.up(1))
+        {
+            return false;
+        }
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let side = RelBlockPos::new(pos.x + dx, pos.y, pos.z + dz);
+            if self.is_block_hot(side) || self.is_block_hot(side.up(1)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn lands_in_danger(&self, pos: RelBlockPos, void_is_danger: bool) -> bool {
+        if !self.safety.avoid_hazards {
+            return false;
+        }
+        let fall = self.fall_distance(pos);
+        if fall == u32::MAX {
+            return void_is_danger;
+        }
+        self.is_block_danger(pos.down(fall as i32 + 1))
+    }
+
+    pub fn water_depth(&self, pos: RelBlockPos, max: u32) -> u32 {
+        let mut depth = 0;
+        while depth < max && self.is_block_water(pos.down(depth as i32)) {
+            depth += 1;
+        }
+        depth
+    }
+
     pub fn get_block_state(&self, pos: RelBlockPos) -> BlockState {
         self.get_block_state_at_pos(pos.apply(self.origin))
     }
@@ -381,6 +495,12 @@ impl CachedWorld {
                     f32::INFINITY
                 }
             });
+        }
+
+        if self.with_cached_section(pos.apply(self.origin), |cached, index| {
+            cached.bitsets.water.index(index) || cached.bitsets.danger.index(index)
+        }) {
+            return f32::INFINITY;
         }
 
         if !self.cost_table {
@@ -506,6 +626,14 @@ impl CachedWorld {
 
         if mining_cost == f32::INFINITY {
             return f32::INFINITY;
+        }
+
+        if let Some(rules) = &self.place_rules {
+            let multiplier = rules.break_multiplier(pos);
+            if !multiplier.is_finite() {
+                return f32::INFINITY;
+            }
+            mining_cost *= multiplier;
         }
 
         fn check_should_avoid_this_block(
@@ -710,7 +838,40 @@ pub fn is_block_state_standable(block_state: BlockState) -> bool {
 }
 
 pub fn is_block_state_water(block_state: BlockState) -> bool {
-    block_state == BlockState::from(BlockKind::Water)
+    if block_state.is_air() || !block_state.is_collision_shape_empty() {
+        return false;
+    }
+    FluidState::from(block_state).kind == FluidKind::Water
+}
+
+pub fn is_block_state_danger(block_state: BlockState) -> bool {
+    match BlockKind::from(block_state) {
+        BlockKind::Lava
+        | BlockKind::Fire
+        | BlockKind::SoulFire
+        | BlockKind::MagmaBlock
+        | BlockKind::Cactus
+        | BlockKind::SweetBerryBush
+        | BlockKind::WitherRose
+        | BlockKind::PowderSnow => true,
+        BlockKind::Campfire | BlockKind::SoulCampfire => block_state
+            .property::<properties::Lit>()
+            .unwrap_or_default(),
+        BlockKind::BubbleColumn => block_state
+            .property::<properties::Drag>()
+            .unwrap_or_default(),
+        _ => false,
+    }
+}
+
+pub fn is_block_state_hot(block_state: BlockState) -> bool {
+    match BlockKind::from(block_state) {
+        BlockKind::Lava | BlockKind::Fire | BlockKind::SoulFire => true,
+        BlockKind::Campfire | BlockKind::SoulCampfire => block_state
+            .property::<properties::Lit>()
+            .unwrap_or_default(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

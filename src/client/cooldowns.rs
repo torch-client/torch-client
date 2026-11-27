@@ -80,6 +80,9 @@ pub(crate) fn stack_percent(data: &azalea_inventory::ItemStackData) -> u8 {
     let group = use_cooldown
         .as_ref()
         .and_then(|c| c.cooldown_group.as_ref());
+    if group.is_none() && data.is_modded() {
+        return 0;
+    }
     percent(group, data.kind.to_str().trim_start_matches("minecraft:"))
 }
 

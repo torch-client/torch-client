@@ -329,6 +329,7 @@ fn list_of(items: Vec<NbtTag>, path: &str) -> Result<NbtList, String> {
     })
 }
 
+#[derive(Clone)]
 enum Data {
     Byte(Vec<i8>),
     Int(Vec<i32>),
@@ -363,10 +364,56 @@ impl Data {
             Data::Unpacked(v) => v.get(i).map(|&n| n as f64),
         }
     }
+
+    fn each_index(&self, what: &str, mut f: impl FnMut(usize, u32)) -> Result<(), String> {
+        match self {
+            Data::Byte(v) => v
+                .iter()
+                .enumerate()
+                .for_each(|(i, &n)| f(i, n as u8 as u32)),
+            Data::Int(v) => v.iter().enumerate().for_each(|(i, &n)| f(i, n as u32)),
+            Data::Unpacked(v) => v.iter().enumerate().for_each(|(i, &n)| f(i, n)),
+            Data::Long(_) => {
+                return Err(format!(
+                    "{what} works on a byte, int or unpacked array, not a long array"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 struct Array(Arc<Data>);
 
+fn mcedit_ids(blocks: &[i8], data: &[i8], add: &[i8]) -> Vec<u32> {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| {
+            let high = add.get(i >> 1).map_or(0, |&a| {
+                if i & 1 == 0 {
+                    a as u8 & 0x0f
+                } else {
+                    a as u8 >> 4
+                }
+            });
+            let meta = data.get(i).map_or(0, |&d| d as u8 & 0x0f);
+            (u32::from(high) << 12) | (u32::from(b as u8) << 4) | u32::from(meta)
+        })
+        .collect()
+}
+
+fn bytes_of<'a>(d: &'a Data, what: &str) -> mlua::Result<&'a [i8]> {
+    match d {
+        Data::Byte(v) => Ok(v),
+        other => Err(Error::runtime(format!(
+            "array:mcedit: {what} is a byte array, not a {} array",
+            other.kind()
+        ))),
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct Indices {
     data: Arc<Data>,
     bits: u32,
@@ -421,6 +468,18 @@ impl Indices {
             Data::Byte(v) => v[range].iter().for_each(|&n| f(n as u8 as u32)),
         }
     }
+
+    pub(super) fn get(&self, i: usize) -> u32 {
+        if i >= self.count {
+            return 0;
+        }
+        match self.data.as_ref() {
+            Data::Long(longs) => entry(longs, self.bits, self.spanning, i),
+            Data::Unpacked(v) => v.get(i).copied().unwrap_or(0),
+            Data::Int(v) => v.get(i).map_or(0, |&n| n as u32),
+            Data::Byte(v) => v.get(i).map_or(0, |&n| n as u8 as u32),
+        }
+    }
 }
 
 fn array(lua: &Lua, d: Data) -> mlua::Result<Value> {
@@ -463,29 +522,34 @@ fn each_entry(
             longs.len()
         ));
     }
+    for i in range {
+        f(entry(longs, bits, spanning, i));
+    }
+    Ok(())
+}
+
+fn entry(longs: &[i64], bits: u32, spanning: bool, i: usize) -> u32 {
     let mask = if bits == 32 {
         u32::MAX as u64
     } else {
         (1u64 << bits) - 1
     };
-    for i in range {
-        let v = if spanning {
-            let bit = i * bits as usize;
-            let (k, shift) = (bit / 64, (bit % 64) as u32);
-            let lo = (longs[k] as u64) >> shift;
-            let hi = if shift + bits > 64 {
-                (longs[k + 1] as u64) << (64 - shift)
-            } else {
-                0
-            };
-            (lo | hi) & mask
+    let v = if spanning {
+        let bit = i * bits as usize;
+        let (k, shift) = (bit / 64, (bit % 64) as u32);
+        let lo = (longs[k] as u64) >> shift;
+        let hi = if shift + bits > 64 {
+            (longs[k + 1] as u64) << (64 - shift)
         } else {
-            let (k, slot) = (i / per_long, (i % per_long) as u32);
-            ((longs[k] as u64) >> (slot * bits)) & mask
+            0
         };
-        f(v as u32);
-    }
-    Ok(())
+        (lo | hi) & mask
+    } else {
+        let per_long = (64 / bits) as usize;
+        let (k, slot) = (i / per_long, (i % per_long) as u32);
+        ((longs[k] as u64) >> (slot * bits)) & mask
+    };
+    v as u32
 }
 
 fn packed_counts(
@@ -612,6 +676,88 @@ impl UserData for Array {
                 Ok(t)
             },
         );
+        methods.add_method(
+            "mcedit",
+            |lua, a, (data, add): (mlua::AnyUserData, Option<mlua::AnyUserData>)| {
+                let blocks = bytes_of(&a.0, "Blocks")?;
+                if blocks.len() > MAX_UNPACK {
+                    return Err(Error::runtime(format!(
+                        "array:mcedit: at most {MAX_UNPACK} entries"
+                    )));
+                }
+                let data = data.borrow::<Array>()?;
+                let add = add.as_ref().map(|u| u.borrow::<Array>()).transpose()?;
+                let out = mcedit_ids(
+                    blocks,
+                    bytes_of(&data.0, "Data")?,
+                    match &add {
+                        Some(a) => bytes_of(&a.0, "AddBlocks")?,
+                        None => &[],
+                    },
+                );
+                array(lua, Data::Unpacked(out))
+            },
+        );
+        methods.add_method("find", |lua, a, set: Table| {
+            let mut wanted = std::collections::HashSet::new();
+            for pair in set.pairs::<f64, Value>() {
+                let (k, v) = pair?;
+                if !matches!(v, Value::Nil | Value::Boolean(false)) && k.fract() == 0.0 && k >= 0.0
+                {
+                    wanted.insert(k as u32);
+                }
+            }
+            let mut found = Vec::new();
+            a.0.each_index("array:find", |i, v| {
+                if wanted.contains(&v) {
+                    found.push(i + 1);
+                }
+            })
+            .map_err(Error::runtime)?;
+            lua.create_sequence_from(found)
+        });
+        methods.add_method("remap", |lua, a, map: Table| {
+            let mut to = HashMap::new();
+            for pair in map.pairs::<f64, f64>() {
+                let (k, v) = pair?;
+                if k.fract() == 0.0
+                    && k >= 0.0
+                    && v.fract() == 0.0
+                    && (0.0..=f64::from(u32::MAX)).contains(&v)
+                {
+                    to.insert(k as u32, v as u32);
+                }
+            }
+            let mut out = Vec::with_capacity(a.0.len());
+            a.0.each_index("array:remap", |_, v| {
+                out.push(to.get(&v).copied().unwrap_or(0))
+            })
+            .map_err(Error::runtime)?;
+            array(lua, Data::Unpacked(out))
+        });
+        methods.add_method_mut("set", |_, a, (i, v): (f64, f64)| {
+            if !matches!(a.0.as_ref(), Data::Unpacked(_)) {
+                return Err(Error::runtime(format!(
+                    "array:set works on an unpacked array, not a {} array",
+                    a.0.kind()
+                )));
+            }
+            if v.fract() != 0.0 || !(0.0..=f64::from(u32::MAX)).contains(&v) {
+                return Err(Error::runtime(format!(
+                    "array:set: {v} is not a whole number 0 to 2^32 - 1"
+                )));
+            }
+            let len = a.0.len();
+            if i.fract() != 0.0 || i < 1.0 || i > len as f64 {
+                return Err(Error::runtime(format!(
+                    "array:set: entry {i} is not 1 to {len}"
+                )));
+            }
+            if let Data::Unpacked(out) = Arc::make_mut(&mut a.0) {
+                out[i as usize - 1] = v as u32;
+            }
+            Ok(())
+        });
     }
 }
 
@@ -730,7 +876,49 @@ pub(super) fn table(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Table> {
 
 #[cfg(test)]
 mod tests {
-    use super::{unpack, varints};
+    use std::sync::Arc;
+
+    use super::{Data, Indices, mcedit_ids, unpack, varints};
+
+    #[test]
+    fn mcedit_ids_join_add_blocks_and_meta() {
+        let out = mcedit_ids(&[0x35, 0x01, 0x04], &[2, 0x7f], &[0x21]);
+        assert_eq!(out, vec![0x135 << 4 | 2, 0x201 << 4 | 15, 4 << 4]);
+    }
+
+    #[test]
+    fn get_matches_each() {
+        let longs = vec![
+            0x0123_4567_89ab_cdefi64,
+            -0x0fed_cba9_8765_4321,
+            0x5555_aaaa_3333_cccc,
+            -1,
+        ];
+        let cases = [
+            (Data::Long(longs.clone()), 5, true, 51),
+            (Data::Long(longs.clone()), 5, false, 48),
+            (Data::Long(longs.clone()), 7, true, 36),
+            (Data::Long(longs), 7, false, 36),
+            (Data::Unpacked(vec![0, 7, 70_000, 3]), 0, false, 4),
+            (Data::Int(vec![1, -2, 300]), 0, false, 3),
+            (Data::Byte(vec![1, -2, 127]), 0, false, 3),
+        ];
+        for (data, bits, spanning, count) in cases {
+            let ix = Indices {
+                data: Arc::new(data),
+                bits,
+                spanning,
+                count,
+            };
+            let mut all = Vec::new();
+            ix.each(0..count, |v| all.push(v));
+            assert_eq!(all.len(), count);
+            for (i, &v) in all.iter().enumerate() {
+                assert_eq!(ix.get(i), v, "entry {i}, bits {bits}, spanning {spanning}");
+            }
+            assert_eq!(ix.get(count), 0);
+        }
+    }
 
     #[test]
     fn varints_read_one_and_two_bytes() {

@@ -1,0 +1,13 @@
+{
+  "lua_list.done": "Готово",
+  "lua_list.cancel": "Отмена",
+  "lua_list.file.asks": "Мод %s запрашивает файл",
+  "lua_list.file.any": "Любой файл",
+  "lua_list.file.takes": "Принимает: %s",
+  "lua_list.file.hint_web": "Выберите файл или перетащите его на страницу",
+  "lua_list.file.hint_native": "Перетащите файл на это окно",
+  "lua_list.file.choose": "Выбрать файл",
+  "lua_list.file.not_a_file": "%s не файл",
+  "lua_list.file.too_big": "%s больше %s МиБ",
+  "lua_list.file.unreadable": "не удалось прочитать %s: %s"
+}

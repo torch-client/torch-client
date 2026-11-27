@@ -1,4 +1,4 @@
-use azalea_block::{BlockState, BlockTrait, fluid_state::{FluidKind, FluidState}};
+use azalea_block::{BlockTrait, fluid_state::{FluidKind, FluidState}};
 use azalea_core::{
     aabb::Aabb,
     game_type::GameMode,
@@ -20,12 +20,13 @@ use bevy_ecs::prelude::*;
 use crate::{
     client_movement::ClientMovementState,
     collision::{
-        BorderSource, MoveCtx, MoverType, Shapes,
+        BorderSource, MoveCtx, MoverType, MovingBlocks, Shapes,
         auto_jump::update_auto_jump,
+        block_state_with,
         entity_collisions::{AabbQuery, CollidableEntityQuery, get_entity_collisions},
         move_colliding,
         world_collisions::{
-            PowderSnowCollision, get_block_and_liquid_collisions, get_block_collisions_for,
+            PowderSnowCollision, get_block_and_liquid_collisions, get_block_collisions_with,
         },
     },
     compute_modified_friction, get_block_pos_below_that_affects_movement,
@@ -58,6 +59,7 @@ pub fn travel(
                 Option<&Inventory>,
                 Option<&FallFlying>,
                 Option<&WorldBorder>,
+                Option<&MovingBlocks>,
             ),
             &mut Physics,
             &mut LookDirection,
@@ -81,7 +83,7 @@ pub fn travel(
         pose,
         abilities,
         gamemode,
-        (active_effects, inventory, fall_flying, border),
+        (active_effects, inventory, fall_flying, border, moving),
         mut physics,
         direction,
         position,
@@ -112,6 +114,7 @@ pub fn travel(
             stands_on_lava: false,
             fall_flying: fall_flying.is_some_and(|flying| **flying),
             border,
+            moving,
             direction: *direction,
             sprinting,
             on_climbable: *on_climbable,
@@ -133,7 +136,7 @@ pub fn travel(
     }
 }
 
-fn wearing_leather_boots(inventory: Option<&Inventory>) -> bool {
+pub fn wearing_leather_boots(inventory: Option<&Inventory>) -> bool {
     inventory
         .and_then(|inventory| inventory.get_equipment(EquipmentSlot::Feet))
         .is_some_and(|boots| boots.kind() == ItemKind::LeatherBoots)
@@ -237,7 +240,7 @@ fn travel_in_air(ctx: &mut MoveCtx) {
         || block_pos_below.y >= ctx.world.chunks.min_y() + ctx.world.chunks.height() as i32;
     let block_friction = if ctx.physics.on_ground() {
         let block_below: Box<dyn BlockTrait> =
-            block_state_below.unwrap_or(BlockState::AIR).into();
+            block_state_with(ctx.world, ctx.moving, block_pos_below).into();
         compute_modified_friction(
             block_below.behavior().friction,
             ctx.attributes.friction_modifier_value() as f32,
@@ -350,6 +353,7 @@ fn travel_in_fluid(ctx: &mut MoveCtx) {
             ctx.border_source(),
             ctx.physics.bounding_box,
             velocity.up(0.6).down(ctx.position.y).up(y),
+            ctx.moving,
         )
     {
         ctx.physics.velocity.y = 0.3;
@@ -390,10 +394,11 @@ fn is_free(
     border: Option<BorderSource>,
     bounding_box: Aabb,
     delta: Vec3,
+    moving: Option<&MovingBlocks>,
 ) -> bool {
     let bounding_box = bounding_box.move_relative(delta);
 
-    no_collision(
+    no_collision_with(
         world,
         Some(source_entity),
         aabb_query,
@@ -402,6 +407,7 @@ fn is_free(
         &bounding_box,
         false,
         PowderSnowCollision::default(),
+        moving,
     ) && !contains_any_liquid(world, bounding_box)
 }
 
@@ -415,10 +421,35 @@ pub fn no_collision(
     include_liquid_collisions: bool,
     powder_snow: PowderSnowCollision,
 ) -> bool {
+    no_collision_with(
+        world,
+        source_entity,
+        aabb_query,
+        collidable_entity_query,
+        border,
+        aabb,
+        include_liquid_collisions,
+        powder_snow,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn no_collision_with(
+    world: &World,
+    source_entity: Option<Entity>,
+    aabb_query: &AabbQuery,
+    collidable_entity_query: &CollidableEntityQuery,
+    border: Option<BorderSource>,
+    aabb: &Aabb,
+    include_liquid_collisions: bool,
+    powder_snow: PowderSnowCollision,
+    moving: Option<&MovingBlocks>,
+) -> bool {
     let collisions = if include_liquid_collisions {
         get_block_and_liquid_collisions(world, aabb)
     } else {
-        get_block_collisions_for(world, aabb, powder_snow)
+        get_block_collisions_with(world, aabb, powder_snow, moving)
     };
 
     for collision in collisions {

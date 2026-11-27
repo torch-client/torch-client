@@ -1,6 +1,5 @@
 use crate::gui::widgets::TextBox;
-use crate::modules::list::BitList;
-use crate::text::contains_ci;
+use crate::modules::list::{BitList, Match};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Row {
@@ -46,20 +45,26 @@ impl Picker {
         }
         self.built = Some(key);
         self.rows.clear();
-        for g in 0..self.list.groups.len() {
+        for g in 0..self.list.group_count() {
             let range = self.list.group_range(g);
             let mut any = query.is_empty();
             let start = self.rows.len();
             self.rows.push(Row::Header(g as u16));
-            if self.is_open(g) || !query.is_empty() {
-                for i in range {
-                    if query.is_empty() || contains_ci(self.list.label(i), query) {
-                        self.rows.push(Row::Item(i as u32));
-                        any = true;
+            if query.is_empty() {
+                if self.is_open(g) {
+                    self.rows.extend(range.map(|i| Row::Item(i as u32)));
+                }
+            } else {
+                for kind in Match::ALL {
+                    for i in range.clone() {
+                        if self.list.row_match(i, query) == Some(kind) {
+                            self.rows.push(Row::Item(i as u32));
+                            any = true;
+                        }
                     }
                 }
             }
-            if !any && !contains_ci(self.list.groups[g], query) {
+            if !any && !self.list.group_matches(g, query) {
                 self.rows.truncate(start);
             }
         }

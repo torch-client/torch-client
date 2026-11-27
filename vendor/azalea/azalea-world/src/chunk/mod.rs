@@ -95,11 +95,7 @@ impl Chunk {
         let section_count = (dimension_height / SECTION_HEIGHT) as usize;
         let vanilla = SectionWidths {
             blocks: GlobalBits::Registry(block_state_registry_bits()),
-            biomes: if biome_registry_len == 0 {
-                GlobalBits::AsSent
-            } else {
-                GlobalBits::Registry(registry_bits(biome_registry_len))
-            },
+            biomes: biome_width(biome_registry_len),
         };
         let first = decode_sections(data, section_count, vanilla);
         let clean = |pass: &DecodePass| pass.failure.is_none() && pass.consumed == data.len();
@@ -131,6 +127,34 @@ impl Chunk {
             },
             failure,
         )
+    }
+
+    pub fn replace_biomes(
+        &mut self,
+        data: &[u8],
+        biome_registry_len: usize,
+    ) -> Result<(), ChunkDecodeFailure> {
+        let section_count = self.sections.len();
+        let first = decode_biomes(data, section_count, biome_width(biome_registry_len));
+        let clean = |pass: &BiomePass| pass.failure.is_none() && pass.consumed == data.len();
+        let mut chosen = first;
+        if !clean(&chosen) && chosen.ambiguous {
+            let second = decode_biomes(data, section_count, GlobalBits::AsSent);
+            if clean(&second) || second.biomes.len() > chosen.biomes.len() {
+                chosen = second;
+                if let Some(failure) = chosen.failure.as_mut() {
+                    failure.read_as_sent = true;
+                }
+            }
+        }
+        if let Some(failure) = chosen.failure {
+            return Err(failure);
+        }
+        for (section, biomes) in self.sections.iter_mut().zip(chosen.biomes) {
+            section.biomes = biomes;
+        }
+        self.version = next_version();
+        Ok(())
     }
 
     pub fn version(&self) -> u64 {
@@ -228,6 +252,76 @@ pub struct ChunkDecodeFailure {
     pub error: String,
 }
 
+pub const BIOME_UPDATE: &str = "biome update";
+
+fn biome_width(biome_registry_len: usize) -> GlobalBits {
+    if biome_registry_len == 0 {
+        GlobalBits::AsSent
+    } else {
+        GlobalBits::Registry(registry_bits(biome_registry_len))
+    }
+}
+
+fn global_mismatch<S: PalletedContainerKind>(c: &PalettedContainer<S>, sent: u8) -> bool {
+    matches!(c.palette, crate::palette::Palette::Global) && c.bits_per_entry != sent
+}
+
+fn width_for(
+    kind: &Option<PaletteKind>,
+    sent: Option<u8>,
+    global: GlobalBits,
+    stored: fn(u8) -> u8,
+) -> Option<u8> {
+    let sent = sent?;
+    Some(match (kind, global) {
+        (Some(PaletteKind::Global), GlobalBits::Registry(bits)) => bits,
+        (Some(PaletteKind::Global), GlobalBits::AsSent) => sent,
+        _ => stored(sent),
+    })
+}
+
+struct BiomePass {
+    biomes: Vec<PalettedContainer<Biome>>,
+    failure: Option<ChunkDecodeFailure>,
+    consumed: usize,
+    ambiguous: bool,
+}
+
+fn decode_biomes(data: &[u8], section_count: usize, global: GlobalBits) -> BiomePass {
+    let mut buf = Cursor::new(data);
+    let mut pass = BiomePass {
+        biomes: Vec::with_capacity(section_count),
+        failure: None,
+        consumed: 0,
+        ambiguous: false,
+    };
+    for section in 0..section_count {
+        match PalettedContainer::<Biome>::read_with(&mut buf, global) {
+            Ok((biomes, sent)) => {
+                pass.ambiguous |= global_mismatch(&biomes, sent);
+                pass.biomes.push(biomes);
+            }
+            Err(e) => {
+                let read_bits = width_for(&e.kind, e.sent_bits, global, Biome::storage_bits);
+                pass.ambiguous |= e.kind == Some(PaletteKind::Global) && read_bits != e.sent_bits;
+                pass.failure = Some(ChunkDecodeFailure {
+                    section,
+                    sections: section_count,
+                    part: BIOME_UPDATE,
+                    sent_bits: e.sent_bits,
+                    palette: e.kind,
+                    read_bits,
+                    read_as_sent: false,
+                    error: e.error.to_string(),
+                });
+                break;
+            }
+        }
+    }
+    pass.consumed = buf.position() as usize;
+    pass
+}
+
 struct DecodePass {
     sections: Vec<Section>,
     decoded: usize,
@@ -245,17 +339,6 @@ fn decode_sections(data: &[u8], section_count: usize, widths: SectionWidths) -> 
         consumed: 0,
         ambiguous: false,
     };
-    fn global_mismatch<S: PalletedContainerKind>(c: &PalettedContainer<S>, sent: u8) -> bool {
-        matches!(c.palette, crate::palette::Palette::Global) && c.bits_per_entry != sent
-    }
-    fn width_for(kind: &Option<PaletteKind>, sent: Option<u8>, global: GlobalBits, stored: fn(u8) -> u8) -> Option<u8> {
-        let sent = sent?;
-        Some(match (kind, global) {
-            (Some(PaletteKind::Global), GlobalBits::Registry(bits)) => bits,
-            (Some(PaletteKind::Global), GlobalBits::AsSent) => sent,
-            _ => stored(sent),
-        })
-    }
     for index in 0..section_count {
         let fail = |part: &'static str,
                     sent_bits: Option<u8>,
@@ -341,6 +424,18 @@ pub fn set_decode_failure_hook(hook: DecodeFailureHook) {
 pub fn report_decode_failure(pos: ChunkPos, failure: &ChunkDecodeFailure) {
     match DECODE_FAILURE_HOOK.get() {
         Some(hook) => hook(pos, failure),
+        None if failure.part == BIOME_UPDATE => warn!(
+            "column {},{}: a biome update would not decode at section {} of {} ({:?} bits sent, \
+             read at {:?}, {:?} palette): {}; the column keeps the biomes it had",
+            pos.x,
+            pos.z,
+            failure.section,
+            failure.sections,
+            failure.sent_bits,
+            failure.read_bits,
+            failure.palette,
+            failure.error
+        ),
         None => warn!(
             "column {},{}: section {} of {} would not decode ({}, {:?} bits sent, read at {:?}, \
              {:?} palette): {}; the rest of the column is air",
@@ -571,6 +666,29 @@ mod tests {
     fn block_section_wider_than_a_u32_fails() {
         let bytes = [0, 0, 0, 0, 33];
         assert!(Section::azalea_read(&mut Cursor::new(&bytes[..])).is_err());
+    }
+
+    #[test]
+    fn replace_biomes_is_all_or_nothing() {
+        use azalea_registry::DataRegistry;
+
+        let biome_of = |chunk: &Chunk, section: usize| {
+            chunk.sections[section].biomes.get_at_index(0).protocol_id()
+        };
+        let mut chunk = Chunk::default();
+        let version = chunk.version();
+        let mut bytes = [0, 5].repeat(chunk.sections.len());
+        bytes.push(9);
+
+        chunk.replace_biomes(&bytes, 65).unwrap();
+        assert!((0..chunk.sections.len()).all(|i| biome_of(&chunk, i) == 5));
+        assert_ne!(chunk.version(), version);
+
+        let version = chunk.version();
+        let failure = chunk.replace_biomes(&[0, 6], 65).unwrap_err();
+        assert_eq!((failure.section, failure.part), (1, BIOME_UPDATE));
+        assert_eq!(biome_of(&chunk, 0), 5);
+        assert_eq!(chunk.version(), version);
     }
 
     #[test]

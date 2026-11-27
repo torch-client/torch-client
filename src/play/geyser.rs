@@ -15,7 +15,7 @@ use azalea_core::aabb::Aabb;
 use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::game_type::GameMode;
 use azalea_core::position::BlockPos;
-use azalea_core::tick::GameTick;
+use azalea_core::tick::{GameTick, TickRateManager};
 use azalea_registry::builtin::BlockKind;
 use azalea_registry::tags::entities::NOT_AFFECTED_BY_GEYSERS;
 
@@ -56,7 +56,11 @@ fn launch(
         Without<LocalEntity>,
     >,
     worlds: Res<Worlds>,
+    rate: Res<TickRateManager>,
 ) {
+    if !rate.runs_normally() {
+        return;
+    }
     for (mut physics, position, dimensions, abilities, world_name, id_index, game_mode) in
         &mut query
     {

@@ -24,6 +24,8 @@ pub(crate) mod icon;
 #[cfg(target_os = "android")]
 pub(crate) mod java;
 pub(crate) mod keyboard;
+#[cfg(feature = "multi_language")]
+pub(crate) mod locale;
 #[cfg(target_os = "android")]
 pub(crate) mod logcat;
 pub(crate) mod notify;

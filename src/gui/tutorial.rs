@@ -6,6 +6,7 @@ use crate::gui::painter::Painter;
 use crate::gui::render::GuiInput;
 use crate::gui::widgets::Button;
 use crate::gui::{GuiState, Screen, ScreenCtx};
+use crate::lang::{Key, tr};
 use crate::platform::storage::TUTORIAL;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -81,7 +82,7 @@ impl Place {
 struct Step {
     place: Place,
     spot: Option<Spot>,
-    text: &'static str,
+    text: Key,
 }
 
 static STEPS: std::sync::LazyLock<Vec<Step>> = std::sync::LazyLock::new(steps);
@@ -92,151 +93,151 @@ fn steps() -> Vec<Step> {
         Step {
             place: Place::Home,
             spot: None,
-            text: "A quick tour. Skip leaves it at any point.",
+            text: const { Key::of("tutorial.welcome") },
         },
         Step {
             place: Place::Title,
             spot: Some(Spot::Credits),
-            text: "Credits: the licence and the project's links.",
+            text: const { Key::of("tutorial.credits") },
         },
         Step {
             place: Place::Title,
             spot: Some(Spot::EditProfile),
-            text: "Edit Profile sets the name you join with.",
+            text: const { Key::of("tutorial.edit_profile") },
         },
         Step {
             place: Place::Accounts,
             spot: Some(Spot::Accounts),
-            text: "Add an account, then Select it to play as it.",
+            text: const { Key::of("tutorial.accounts") },
         },
         Step {
             place: Place::Multiplayer,
             spot: Some(Spot::Version),
-            text: "Picking a version here forces it. Left alone, the client matches each server.",
+            text: const { Key::of("tutorial.version") },
         },
         Step {
             place: Place::Video,
             spot: Some(Spot::Video),
-            text: "Video Settings: render distance, GUI scale, brightness.",
+            text: const { Key::of("tutorial.video") },
         },
     ];
     #[cfg(all(feature = "shader_support", not(target_arch = "wasm32")))]
     steps.extend([
-    Step {
-        place: Place::Video,
-        spot: Some(Spot::ShaderButton),
-        text: "Shaders: open Shader Packs at the bottom of Video Settings.",
-    },
-    Step {
-        place: Place::ShaderPacks,
-        spot: Some(Spot::ShaderFolder),
-        text: if cfg!(target_os = "android") {
-            "Put a shader pack zip in this folder. R reads the folder again."
-        } else {
-            "Put a shader pack zip in this folder, or drop it on the window. R reads the folder again."
+        Step {
+            place: Place::Video,
+            spot: Some(Spot::ShaderButton),
+            text: const { Key::of("tutorial.shader_button") },
         },
-    },
-    Step {
-        place: Place::ShaderPacks,
-        spot: Some(Spot::ShaderList),
-        text: "Tap a pack to turn it on. (none) turns shaders off.",
-    },
+        Step {
+            place: Place::ShaderPacks,
+            spot: Some(Spot::ShaderFolder),
+            text: if cfg!(target_os = "android") {
+                const { Key::of("tutorial.shader_folder_android") }
+            } else {
+                const { Key::of("tutorial.shader_folder") }
+            },
+        },
+        Step {
+            place: Place::ShaderPacks,
+            spot: Some(Spot::ShaderList),
+            text: const { Key::of("tutorial.shader_list") },
+        },
     ]);
     #[cfg(all(feature = "hud_editor", feature = "mobile_ui"))]
     steps.extend([
         Step {
             place: Place::Editor(Layer::Areas),
             spot: Some(Spot::Tab(Layer::Areas)),
-            text: "The HUD editor. Areas are touch zones.",
+            text: const { Key::of("tutorial.editor_areas") },
         },
         Step {
             place: Place::Editor(Layer::Areas),
             spot: Some(Spot::LookArea),
-            text: "Look area: only turns the camera.",
+            text: const { Key::of("tutorial.look_area") },
         },
         Step {
             place: Place::Editor(Layer::Areas),
             spot: Some(Spot::ZoomArea),
-            text: "Zoom: double tap and hold. Triple tap locks it.",
+            text: const { Key::of("tutorial.zoom_area") },
         },
         Step {
             place: Place::Editor(Layer::Areas),
             spot: None,
-            text: "Elsewhere: tap attacks, hold mines, double tap places.",
+            text: const { Key::of("tutorial.elsewhere") },
         },
         Step {
             place: Place::Editor(Layer::Areas),
             spot: Some(Spot::NewArea),
-            text: "Adds an area. Drag to move, drag an edge to resize.",
+            text: const { Key::of("tutorial.new_area") },
         },
         Step {
             place: Place::Editor(Layer::Controls),
             spot: Some(Spot::Tab(Layer::Controls)),
-            text: "Touch buttons. Drag to move, pinch to resize.",
+            text: const { Key::of("tutorial.editor_controls") },
         },
         Step {
             place: Place::Editor(Layer::Controls),
             spot: Some(Spot::ChatButton),
-            text: "Chat. Its SWAP button turns chat portrait.",
+            text: const { Key::of("tutorial.chat_button") },
         },
     ]);
     #[cfg(feature = "mobile_ui")]
     steps.push(Step {
         place: Place::Chat,
         spot: Some(Spot::Swap),
-        text: "SWAP: chat like a messaging app. Tap again to go back.",
+        text: const { Key::of("tutorial.swap") },
     });
     #[cfg(feature = "hud_editor")]
     steps.extend([
         Step {
             place: Place::Editor(Layer::Extras),
             spot: Some(Spot::Tab(Layer::Extras)),
-            text: "The HUD itself: hotbar, chat, coordinates.",
+            text: const { Key::of("tutorial.editor_extras") },
         },
         Step {
             place: Place::Editor(Layer::Extras),
             spot: Some(Spot::Reset),
-            text: "Resets only the open tab.",
+            text: const { Key::of("tutorial.editor_reset") },
         },
         Step {
             place: Place::Editor(Layer::Extras),
             spot: Some(Spot::Done),
-            text: "Saves the layout.",
+            text: const { Key::of("tutorial.editor_done") },
         },
         Step {
             place: Place::Options,
             spot: Some(Spot::EditHud),
-            text: "Reopen the editor from here.",
+            text: const { Key::of("tutorial.edit_hud") },
         },
     ]);
     #[cfg(feature = "mobile_ui")]
     steps.extend([
-    Step {
-        place: Place::Controls,
-        spot: Some(Spot::TouchLayout),
-        text: "Controls, then Edit control layout, changes the touch controls.",
-    },
-    Step {
-        place: Place::TouchLayout,
-        spot: Some(Spot::TouchMovement),
-        text: "Tap Movement until it reads Bedrock D-Pad or Bedrock Joystick for Bedrock Edition's controls.",
-    },
-    Step {
-        place: Place::BedrockLook,
-        spot: None,
-        text: "The Bedrock controls, in Mojang's art. Your own controls come back after this step.",
-    },
+        Step {
+            place: Place::Controls,
+            spot: Some(Spot::TouchLayout),
+            text: const { Key::of("tutorial.touch_layout") },
+        },
+        Step {
+            place: Place::TouchLayout,
+            spot: Some(Spot::TouchMovement),
+            text: const { Key::of("tutorial.touch_movement") },
+        },
+        Step {
+            place: Place::BedrockLook,
+            spot: None,
+            text: const { Key::of("tutorial.bedrock_look") },
+        },
     ]);
     steps.extend([
         Step {
             place: Place::Options,
             spot: Some(Spot::Storage),
-            text: "Resets live in Manage Storage.",
+            text: const { Key::of("tutorial.storage") },
         },
         Step {
             place: Place::Storage,
             spot: Some(Spot::Restart),
-            text: "Replays this tour.",
+            text: const { Key::of("tutorial.restart") },
         },
     ]);
     steps
@@ -492,7 +493,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, input: &GuiInput) {
     }
 
     let w = CAPTION_W.min(vw - 2.0 * INSET);
-    let lines = crate::gui::widgets::wrap(p, &[step.text], w - INSET);
+    let lines = crate::gui::widgets::wrap(p, &[step.text.get()], w - INSET);
     let h = lines.len() as f32 * LINE_H + 3.0 * INSET + BUTTON_H;
     let centred = (((vw - w) / 2.0).floor(), ((vh - h) / 2.0).floor());
     let (x, y) = match target {
@@ -513,15 +514,15 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, input: &GuiInput) {
     let by = y + h - BUTTON_H - INSET;
     let next_step = run.next();
     let prev_step = run.prev();
-    let skip =
-        next_step.is_some() && Button::new(x + INSET, by, BUTTON_W, BUTTON_H, "Skip").draw(p, &ctx);
+    let skip = next_step.is_some()
+        && Button::new(x + INSET, by, BUTTON_W, BUTTON_H, tr!("tutorial.skip")).draw(p, &ctx);
     let back = prev_step.is_some()
         && Button::new(
             (x + (w - BUTTON_W) / 2.0).floor(),
             by,
             BUTTON_W,
             BUTTON_H,
-            "Back",
+            tr!("tutorial.back"),
         )
         .draw(p, &ctx);
     let next = Button::new(
@@ -529,7 +530,11 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, input: &GuiInput) {
         by,
         BUTTON_W,
         BUTTON_H,
-        if next_step.is_some() { "Next" } else { "Done" },
+        if next_step.is_some() {
+            tr!("tutorial.next")
+        } else {
+            tr!("tutorial.done")
+        },
     )
     .draw(p, &ctx);
 

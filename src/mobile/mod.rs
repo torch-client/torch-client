@@ -618,6 +618,7 @@ fn close_target(gui: &mut GuiState) -> Screen {
         Screen::VideoSettings | Screen::Controls | Screen::GameSettings | Screen::ManageStorage => {
             Screen::Options
         }
+        Screen::MouseSettings => Screen::Controls,
         #[cfg(resource_packs)]
         Screen::ResourcePacks => Screen::Options,
         #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
@@ -715,7 +716,7 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, view: View, hud: &mut Hud) {
                     button(
                         p,
                         layout.texting_button,
-                        "SWAP",
+                        crate::lang::tr!("mobile.swap"),
                         false,
                         crate::gui::chat::texting(),
                     );
@@ -791,21 +792,39 @@ pub fn draw(p: &mut Painter, ctx: &ScreenCtx, view: View, hud: &mut Hud) {
                 p,
                 jump.center(),
                 jump.w * 0.5,
-                "JUMP",
+                crate::lang::tr!("mobile.jump"),
                 ui.pressed(Cell::Jump.index()),
                 false,
             );
         });
     }
     hud.draw(p, vw, vh, ElementId::UseButton, |p| {
-        button(p, layout.use_button, "USE", ui.use_pressed, false);
+        button(
+            p,
+            layout.use_button,
+            crate::lang::tr!("mobile.use"),
+            ui.use_pressed,
+            false,
+        );
     });
     hud.draw(p, vw, vh, ElementId::ChatButton, |p| {
-        button(p, layout.close_button, "CHAT", false, false);
+        button(
+            p,
+            layout.close_button,
+            crate::lang::tr!("mobile.chat"),
+            false,
+            false,
+        );
     });
     #[cfg(feature = "module_panel")]
     hud.draw(p, vw, vh, ElementId::ModButton, |p| {
-        button(p, layout.texting_button, "MOD", false, false);
+        button(
+            p,
+            layout.texting_button,
+            crate::lang::tr!("mobile.mod"),
+            false,
+            false,
+        );
     });
 
     draw_hold_hints(p, &layout, ui);

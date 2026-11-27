@@ -2,11 +2,12 @@ use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 
 use super::{
-    BIND_H, BindTarget, ClickGuiState, Focus, INDENT, KeyOwner, Overlay, PILL_H, PILL_W, TIP_LINE,
-    Tab, Ui, Window, pill, text_y, theme,
+    BIND_H, BindTarget, ClickGuiState, Focus, INDENT, KeyOwner, Overlay, PILL_H, PILL_W, TAB_MODS,
+    TIP_LINE, Tab, Ui, Window, pill, text_y, theme,
 };
 use crate::gui::painter::Painter;
-use crate::modules::registry::{self, COUNT, Mode, ModuleIx, SETTING_COUNT};
+use crate::lang::{tr, trf, trn};
+use crate::modules::registry::{self, COUNT, ModuleIx, SETTING_COUNT};
 use crate::modules::script::{self, Verdict};
 
 static DROPPED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -112,7 +113,7 @@ impl ClickGuiState {
         let look = self.look;
         let active = self.focus == Focus::On(Window::Config) && self.drag.is_none();
         let Some((x, top, cw, view_h, scroll)) =
-            self.config_shell(p, ui, "Mods", self.mods_h, active, MODS_W)
+            self.config_shell(p, ui, TAB_MODS.get(), self.mods_h, active, MODS_W)
         else {
             return;
         };
@@ -127,20 +128,21 @@ impl ClickGuiState {
         let busy = script::busy();
         let profile = crate::modules::store().profile();
         let (reload, style) = if busy {
-            ("Reloading...", Style::Idle)
+            (tr!("clickgui.mods.reloading"), Style::Idle)
         } else {
-            ("Reload mods", Style::Primary)
+            (tr!("clickgui.mods.reload"), Style::Primary)
         };
+        let explore = tr!("clickgui.mods.explore");
         #[cfg(not(target_arch = "wasm32"))]
         let buttons = [
             (reload, style, Act::Reload),
-            ("Open mods folder", Style::Plain, Act::Folder),
-            ("Explore mods", Style::Plain, Act::Explore),
+            (tr!("clickgui.mods.open_folder"), Style::Plain, Act::Folder),
+            (explore, Style::Plain, Act::Explore),
         ];
         #[cfg(target_arch = "wasm32")]
         let buttons = [
             (reload, style, Act::Reload),
-            ("Explore mods", Style::Plain, Act::Explore),
+            (explore, Style::Plain, Act::Explore),
         ];
         let n = buttons.len() as f32;
         let cell = ((iw - 4.0 * (n - 1.0)) / n).floor();
@@ -161,10 +163,10 @@ impl ClickGuiState {
             }
         }
         cy += if row { bh } else { n * bh + (n - 1.0) * 3.0 } + 3.0;
-        const NEW: &str = "New mod";
-        let nw = (p.atlas.font.width_str(NEW) + 16.0).floor();
+        let new = tr!("clickgui.mods.new");
+        let nw = (p.atlas.font.width_str(new) + 16.0).floor();
         let dw = iw - nw - 4.0;
-        if self.button(p, ui, ix + dw + 4.0, cy, nw, bh, NEW, Style::Plain, active) {
+        if self.button(p, ui, ix + dw + 4.0, cy, nw, bh, new, Style::Plain, active) {
             act = Some(Act::Author(None));
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -175,7 +177,7 @@ impl ClickGuiState {
             cy,
             dw,
             bh,
-            "Drop mods to upload",
+            tr!("clickgui.mods.drop_native"),
             Style::Idle,
             active,
         );
@@ -187,7 +189,7 @@ impl ClickGuiState {
             cy,
             dw,
             bh,
-            "Choose or drop mods",
+            tr!("clickgui.mods.drop_web"),
             Style::Plain,
             active,
         ) {
@@ -214,14 +216,14 @@ impl ClickGuiState {
                 .filter(|m| m.error.is_some() && !m.disabled)
                 .count();
             let off = mods.iter().filter(|m| m.disabled).count();
-            let _ = write!(self.scratch, "Installed: {}", mods.len());
-            if off > 0 {
-                let _ = write!(self.scratch, ", {off} disabled");
-            }
-            if failed > 0 {
-                let _ = write!(self.scratch, ", {failed} failed");
-            }
-            self.label(p, &self.scratch, ix, cy, iw, look.text_dim());
+            let n = mods.len();
+            let line = match (off > 0, failed > 0) {
+                (false, false) => trf!("clickgui.mods.installed", n),
+                (true, false) => trf!("clickgui.mods.installed_disabled", n, off),
+                (false, true) => trf!("clickgui.mods.installed_failed", n, failed),
+                (true, true) => trf!("clickgui.mods.installed_disabled_failed", n, off, failed),
+            };
+            self.label(p, &line, ix, cy, iw, look.text_dim());
             cy += TIP_LINE + 2.0;
 
             if mods.is_empty() {
@@ -234,7 +236,7 @@ impl ClickGuiState {
                     ix + CARD_PAD,
                     cy,
                     iw - 2.0 * CARD_PAD,
-                    "No mods yet.",
+                    tr!("clickgui.mods.empty"),
                     look.text(),
                 );
                 cy = self.paragraph(
@@ -242,8 +244,7 @@ impl ClickGuiState {
                     ix + CARD_PAD,
                     cy,
                     iw - 2.0 * CARD_PAD,
-                    "Drop a .lua file, a mod folder or a .zip on this window, or put it in the mods folder and \
-                     press Reload mods.",
+                    tr!("clickgui.mods.empty_help"),
                     look.text_dim(),
                 );
                 cy += CARD_PAD;
@@ -331,18 +332,19 @@ impl ClickGuiState {
 
                 match &m.error {
                     _ if m.disabled => {
-                        self.label(p, "Disabled", cx, cy, cw, look.text_dim());
+                        self.label(
+                            p,
+                            tr!("clickgui.mods.disabled"),
+                            cx,
+                            cy,
+                            cw,
+                            look.text_dim(),
+                        );
                         cy += TIP_LINE;
                     }
                     None => {
-                        self.scratch.clear();
-                        let n = m.modules.len();
-                        let _ = write!(
-                            self.scratch,
-                            "Loaded, {n} module{}",
-                            if n == 1 { "" } else { "s" }
-                        );
-                        self.label(p, &self.scratch, cx, cy, cw, OK);
+                        let line = trn!("clickgui.mods.loaded", m.modules.len());
+                        self.label(p, &line, cx, cy, cw, OK);
                         cy += TIP_LINE;
                         for module in &m.modules {
                             let hidden = module.mode > profile;
@@ -352,11 +354,7 @@ impl ClickGuiState {
                                 look.accent()
                             };
                             p.rounded_rect(cx + 1.0, cy + 3.0, 3.0, 3.0, 1.0, 0xFF00_0000 | dot);
-                            let tag = if hidden {
-                                Mode::NAMES[module.mode as usize]
-                            } else {
-                                ""
-                            };
+                            let tag = if hidden { module.mode.label() } else { "" };
                             let tw = p.atlas.font.width_str(tag);
                             if hidden {
                                 self.label(p, tag, cx + cw - tw, cy, tw, look.text_dim());
@@ -378,13 +376,13 @@ impl ClickGuiState {
                                 cx,
                                 cy,
                                 cw,
-                                "Dimmed modules are hidden at this profile; the tag is the profile they need.",
+                                tr!("clickgui.mods.hidden_note"),
                                 look.text_dim(),
                             );
                         }
                     }
                     Some(e) => {
-                        self.label(p, "Failed to load", cx, cy, cw, ERROR);
+                        self.label(p, tr!("clickgui.mods.failed"), cx, cy, cw, ERROR);
                         cy += TIP_LINE;
                         let e = e.split("\nstack traceback").next().unwrap_or(e);
                         cy = self.paragraph(p, cx, cy, cw, e, look.text());
@@ -392,7 +390,7 @@ impl ClickGuiState {
                 }
                 if let Some(e) = &m.last_error {
                     cy += 3.0;
-                    self.label(p, "Switched off by an error", cx, cy, cw, ERROR);
+                    self.label(p, tr!("clickgui.mods.switched_off"), cx, cy, cw, ERROR);
                     cy += TIP_LINE;
                     cy = self.paragraph(p, cx, cy, cw, e, look.text());
                 }
@@ -400,12 +398,9 @@ impl ClickGuiState {
                 for g in &m.perms {
                     cy += 3.0;
                     let line = if g.granted {
-                        format!("{}: allowed", g.perm)
+                        trf!("clickgui.mods.perm_allowed", g.perm)
                     } else {
-                        format!(
-                            "{}: blocked. The mod cannot use {} until you allow it.",
-                            g.perm, g.perm
-                        )
+                        trf!("clickgui.mods.perm_blocked", g.perm)
                     };
                     let ink = if g.granted { OK } else { PENDING };
                     cy = self.paragraph(p, cx, cy, cw, &line, ink);
@@ -433,14 +428,26 @@ impl ClickGuiState {
 
                 cy += 4.0;
                 if self.mod_uninstall.as_deref() == Some(m.id.as_str()) {
-                    let q = format!("Delete {name}? This removes the mod and its saved settings.");
+                    let q = trf!("clickgui.mods.delete_question", name);
                     cy = self.paragraph(p, cx, cy, cw, &q, PENDING);
                     cy += 2.0;
                     let half = ((cw - 4.0) * 0.5).floor();
                     let style = if busy { Style::Idle } else { Style::Primary };
-                    if self.button(p, ui, cx, cy, half, bh, "Delete", style, active) && !busy {
+                    if self.button(
+                        p,
+                        ui,
+                        cx,
+                        cy,
+                        half,
+                        bh,
+                        tr!("clickgui.mods.delete"),
+                        style,
+                        active,
+                    ) && !busy
+                    {
                         act = Some(Act::Uninstall(m.id.clone()));
                     }
+                    let cancel = tr!("clickgui.cancel");
                     if self.button(
                         p,
                         ui,
@@ -448,31 +455,31 @@ impl ClickGuiState {
                         cy,
                         cw - half - 4.0,
                         bh,
-                        "Cancel",
+                        cancel,
                         Style::Plain,
                         active,
                     ) {
                         act = Some(Act::AskUninstall(None));
                     }
                 } else {
-                    const RESET: &str = "Reset data";
-                    let rw = (p.atlas.font.width_str(RESET) + 12.0).floor();
-                    if self.button(p, ui, cx + cw - rw, cy, rw, bh, RESET, Style::Plain, active)
+                    let reset = tr!("clickgui.mods.reset_data");
+                    let rw = (p.atlas.font.width_str(reset) + 12.0).floor();
+                    if self.button(p, ui, cx + cw - rw, cy, rw, bh, reset, Style::Plain, active)
                         && !busy
                     {
                         act = Some(Act::Reset(m.id.clone()));
                     }
                     if m.shape == script::Shape::File {
-                        const EDIT: &str = "Edit";
-                        let ew = (p.atlas.font.width_str(EDIT) + 16.0).floor();
+                        let edit = tr!("clickgui.mods.edit");
+                        let ew = (p.atlas.font.width_str(edit) + 16.0).floor();
                         let ex = cx + cw - rw - 4.0 - ew;
-                        if self.button(p, ui, ex, cy, ew, bh, EDIT, Style::Primary, active) {
+                        if self.button(p, ui, ex, cy, ew, bh, edit, Style::Primary, active) {
                             act = Some(Act::Author(Some(m.file.clone())));
                         }
                     }
-                    const DELETE: &str = "Delete";
-                    let uw = (p.atlas.font.width_str(DELETE) + 12.0).floor();
-                    if self.button(p, ui, cx, cy, uw, bh, DELETE, Style::Plain, active) && !busy {
+                    let delete = tr!("clickgui.mods.delete");
+                    let uw = (p.atlas.font.width_str(delete) + 12.0).floor();
+                    if self.button(p, ui, cx, cy, uw, bh, delete, Style::Plain, active) && !busy {
                         act = Some(Act::AskUninstall(Some(m.id.clone())));
                     }
                 }
@@ -549,19 +556,18 @@ impl ClickGuiState {
         p.rounded_rect(x, y, w, TILE_H, look.radius, fill);
         self.scratch.clear();
         let (status, colour) = if m.disabled {
-            ("Disabled", look.text_dim())
+            (tr!("clickgui.mods.disabled"), look.text_dim())
         } else if m.error.is_some() {
-            ("Failed to load", ERROR)
+            (tr!("clickgui.mods.failed"), ERROR)
         } else if m.last_error.is_some() {
-            ("Error, see details", ERROR)
+            (tr!("clickgui.mods.error_details"), ERROR)
         } else if let Some(g) = m.perms.iter().find(|g| !g.granted) {
-            use std::fmt::Write;
-            let _ = write!(self.scratch, "Needs {}: click", g.perm);
+            self.scratch
+                .push_str(&trf!("clickgui.mods.needs_perm", g.perm));
             ("", PENDING)
         } else {
-            use std::fmt::Write;
-            let n = m.modules.len();
-            let _ = write!(self.scratch, "{n} module{}", if n == 1 { "" } else { "s" });
+            let line = trn!("clickgui.mods.modules", m.modules.len());
+            self.scratch.push_str(&line);
             ("", OK)
         };
         let strip = if m.disabled {
@@ -620,7 +626,6 @@ impl ClickGuiState {
         active: bool,
         act: &mut Option<Act>,
     ) -> f32 {
-        use std::fmt::Write;
         let look = self.look;
         let bh = BIND_H - 1.0;
         let h = self.drop_card_h;
@@ -633,13 +638,8 @@ impl ClickGuiState {
         let mut cy = top + CARD_PAD;
 
         let installs = self.mod_drop.iter().filter(|c| c.installs()).count();
-        self.scratch.clear();
-        let _ = write!(
-            self.scratch,
-            "Install {installs} mod{}?",
-            if installs == 1 { "" } else { "s" }
-        );
-        self.label(p, &self.scratch, cx, cy, cw, PENDING);
+        let question = trn!("clickgui.mods.install_question", installs);
+        self.label(p, &question, cx, cy, cw, PENDING);
         cy += TIP_LINE + 3.0;
 
         let drop = std::mem::take(&mut self.mod_drop);
@@ -657,10 +657,11 @@ impl ClickGuiState {
             );
             cy += TIP_LINE;
             let (line, colour) = match &c.verdict {
-                Verdict::New => (format!("{}: new", c.file), OK),
-                Verdict::Replaces(old) => {
-                    (format!("{}: replaces {}", c.file, old.join(", ")), PENDING)
-                }
+                Verdict::New => (trf!("clickgui.mods.verdict_new", c.file), OK),
+                Verdict::Replaces(old) => (
+                    trf!("clickgui.mods.verdict_replaces", c.file, old.join(", ")),
+                    PENDING,
+                ),
                 Verdict::Rejected(why) => (format!("{}: {why}", c.file), ERROR),
             };
             cy = self.paragraph(p, cx, cy, cw, &line, colour);
@@ -687,10 +688,21 @@ impl ClickGuiState {
         } else {
             Style::Idle
         };
-        if self.button(p, ui, cx, cy, half, bh, "Install", style, active) && style == Style::Primary
+        if self.button(
+            p,
+            ui,
+            cx,
+            cy,
+            half,
+            bh,
+            tr!("clickgui.mods.install"),
+            style,
+            active,
+        ) && style == Style::Primary
         {
             *act = Some(Act::Install);
         }
+        let cancel = tr!("clickgui.cancel");
         if self.button(
             p,
             ui,
@@ -698,7 +710,7 @@ impl ClickGuiState {
             cy,
             cw - half - 4.0,
             bh,
-            "Cancel",
+            cancel,
             Style::Plain,
             active,
         ) {
@@ -723,7 +735,8 @@ impl ClickGuiState {
         };
         let bh = BIND_H - 1.0;
         let cy = self.paragraph(p, ix, cy, iw, &note, ERROR);
-        let dw = (p.atlas.font.width_str("Dismiss") + 12.0).floor();
+        let dismiss = crate::lang::tr!("clickgui.dismiss");
+        let dw = (p.atlas.font.width_str(dismiss) + 12.0).floor();
         if self.button(
             p,
             ui,
@@ -731,7 +744,7 @@ impl ClickGuiState {
             cy + 2.0,
             dw,
             bh,
-            "Dismiss",
+            dismiss,
             Style::Plain,
             active,
         ) {
@@ -750,15 +763,12 @@ impl ClickGuiState {
         author: &Option<String>,
         source: &Option<String>,
     ) -> f32 {
-        use std::fmt::Write;
         let ink = self.look.text_dim();
-        for (prefix, value) in [("By ", author), ("Source: ", source)] {
-            let Some(value) = value else { continue };
-            let mut line = std::mem::take(&mut self.scratch);
-            line.clear();
-            let _ = write!(line, "{prefix}{value}");
-            y = self.paragraph(p, x, y, w, &line, ink);
-            self.scratch = line;
+        if let Some(author) = author {
+            y = self.paragraph(p, x, y, w, &trf!("clickgui.mods.by", author), ink);
+        }
+        if let Some(source) = source {
+            y = self.paragraph(p, x, y, w, &trf!("clickgui.mods.source", source), ink);
         }
         y
     }

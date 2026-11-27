@@ -11,6 +11,26 @@ pub(crate) fn connected(address: &str) {
     let _ = address;
 }
 
+pub(crate) fn transferred(address: &str) {
+    #[cfg(target_os = "android")]
+    if !BACKGROUNDED.load(Ordering::Relaxed) {
+        android::call(android::Call::Start(address));
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = address;
+}
+
+pub(crate) fn backgrounded() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        BACKGROUNDED.load(Ordering::Relaxed)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
 pub(crate) fn disconnected(reason: Option<&str>) {
     #[cfg(target_os = "android")]
     android::call(android::Call::Stop(

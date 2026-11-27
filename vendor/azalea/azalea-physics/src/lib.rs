@@ -32,9 +32,9 @@ use azalea_world::{World, WorldName, Worlds};
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 use clip::box_traverse_blocks;
-use collision::{BLOCK_SHAPE, VoxelShape, move_colliding};
+use collision::{BLOCK_SHAPE, VoxelShape, block_state_with, move_colliding};
 
-use crate::collision::{MoveCtx, entity_collisions::update_last_bounding_box};
+use crate::collision::{MoveCtx, MovingBlocks, entity_collisions::update_last_bounding_box};
 use crate::inside_block::{InsideBlockCtx, handle_entity_inside_block};
 pub use crate::inside_block::InsideKind;
 pub use crate::inside_block::{COBWEB, COBWEB_WEAVING};
@@ -78,6 +78,7 @@ pub fn ai_step(
             &ActiveEffects,
             &WorldName,
             &EntityKindComponent,
+            Option<&MovingBlocks>,
         ),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
@@ -92,6 +93,7 @@ pub fn ai_step(
         active_effects,
         world_name,
         entity_kind,
+        moving,
     ) in &mut query
     {
         physics.base_tick_powder_snow();
@@ -145,7 +147,7 @@ pub fn ai_step(
                     if (physics.on_ground() || in_water && fluid_height <= fluid_jump_threshold)
                         && physics.no_jump_delay == 0
                     {
-                        jump_from_ground(
+                        jump_from_ground_with(
                             &mut physics,
                             *position,
                             *look_direction,
@@ -153,6 +155,7 @@ pub fn ai_step(
                             world_name,
                             &worlds,
                             active_effects,
+                            moving,
                         );
                         physics.no_jump_delay = 10;
                     }
@@ -191,7 +194,12 @@ pub fn apply_effects_from_blocks(
             &ActiveEffects,
             Option<&PlayerAbilities>,
             Option<&client_movement::ClientMovementState>,
-            (Option<&GameMode>, Option<&Inventory>, Option<&mut TicksFrozen>),
+            (
+                Option<&GameMode>,
+                Option<&Inventory>,
+                Option<&mut TicksFrozen>,
+                Option<&MovingBlocks>,
+            ),
         ),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
@@ -205,7 +213,7 @@ pub fn apply_effects_from_blocks(
         active_effects,
         abilities,
         movement_state,
-        (gamemode, inventory, ticks_frozen),
+        (gamemode, inventory, ticks_frozen, moving),
     ) in &mut query
     {
         let Some(world_lock) = worlds.get(world_name) else {
@@ -217,38 +225,60 @@ pub fn apply_effects_from_blocks(
             continue;
         }
 
-        step_on(
-            &mut physics,
-            &world,
-            **position,
-            movement_state.is_some_and(|s| s.trying_to_crouch),
-        );
-
-        let movement_this_tick = [EntityMovement {
+        let movement = EntityMovement {
             from: physics.old_position,
             to: **position,
-        }];
-
-        check_inside_blocks(
+        };
+        apply_effects_from_blocks_to_player(
             &mut physics,
             dimensions,
             &world,
-            &movement_this_tick,
-            &InsideBlockCtx {
-                active_effects,
-                abilities,
-                position: **position,
-                width: dimensions.width,
-                kind: InsideKind::Living,
-            },
+            movement,
+            active_effects,
+            abilities,
+            movement_state.is_some_and(|s| s.trying_to_crouch),
+            inventory,
+            ticks_frozen,
+            moving,
         );
+    }
+}
 
-        if physics.is_in_powder_snow
-            && can_freeze(inventory)
-            && let Some(mut ticks_frozen) = ticks_frozen
-        {
-            ticks_frozen.0 = (ticks_frozen.0 + 1).min(TICKS_REQUIRED_TO_FREEZE);
-        }
+#[allow(clippy::too_many_arguments)]
+pub fn apply_effects_from_blocks_to_player(
+    physics: &mut Physics,
+    dimensions: &EntityDimensions,
+    world: &World,
+    movement: EntityMovement,
+    active_effects: &ActiveEffects,
+    abilities: Option<&PlayerAbilities>,
+    shift_key_down: bool,
+    inventory: Option<&Inventory>,
+    ticks_frozen: Option<Mut<TicksFrozen>>,
+    moving: Option<&MovingBlocks>,
+) {
+    step_on(physics, world, moving, movement.to, shift_key_down);
+
+    check_inside_blocks(
+        physics,
+        dimensions,
+        world,
+        moving,
+        &[movement],
+        &InsideBlockCtx {
+            active_effects,
+            abilities,
+            position: movement.to,
+            width: dimensions.width,
+            kind: InsideKind::Living,
+        },
+    );
+
+    if physics.is_in_powder_snow
+        && can_freeze(inventory)
+        && let Some(mut ticks_frozen) = ticks_frozen
+    {
+        ticks_frozen.0 = (ticks_frozen.0 + 1).min(TICKS_REQUIRED_TO_FREEZE);
     }
 }
 
@@ -270,12 +300,18 @@ fn can_freeze(inventory: Option<&Inventory>) -> bool {
     .any(|item| FREEZE_IMMUNE_WEARABLES.contains(&item.kind()))
 }
 
-fn step_on(physics: &mut Physics, world: &World, position: Vec3, shift_key_down: bool) {
+fn step_on(
+    physics: &mut Physics,
+    world: &World,
+    moving: Option<&MovingBlocks>,
+    position: Vec3,
+    shift_key_down: bool,
+) {
     if !physics.on_ground() {
         return;
     }
     let pos = azalea_entity::on_pos_legacy(&world.chunks, Position::new(position));
-    let state = world.get_block_state(pos).unwrap_or_default();
+    let state = block_state_with(world, moving, pos);
     if BlockKind::from(state) != BlockKind::SlimeBlock {
         return;
     }
@@ -294,12 +330,14 @@ pub fn apply_effects_from_blocks_for(
     movement: EntityMovement,
     kind: InsideKind,
     active_effects: &ActiveEffects,
+    moving: Option<&MovingBlocks>,
 ) {
-    step_on(physics, world, movement.to, false);
+    step_on(physics, world, moving, movement.to, false);
     check_inside_blocks(
         physics,
         dimensions,
         world,
+        moving,
         &[movement],
         &InsideBlockCtx {
             active_effects,
@@ -315,6 +353,7 @@ fn check_inside_blocks(
     physics: &mut Physics,
     dimensions: &EntityDimensions,
     world: &World,
+    moving: Option<&MovingBlocks>,
     movements: &[EntityMovement],
     inside_ctx: &InsideBlockCtx,
 ) -> Vec<BlockState> {
@@ -330,7 +369,7 @@ fn check_inside_blocks(
             box_traverse_blocks(movement.from, movement.to, &bounding_box_at_target)
         {
 
-            let traversed_block_state = world.get_block_state(traversed_block).unwrap_or_default();
+            let traversed_block_state = block_state_with(world, moving, traversed_block);
             if traversed_block_state.is_air() {
                 continue;
             }
@@ -399,12 +438,35 @@ pub fn jump_from_ground(
     worlds: &Worlds,
     active_effects: &ActiveEffects,
 ) {
+    jump_from_ground_with(
+        physics,
+        position,
+        look_direction,
+        sprinting,
+        world_name,
+        worlds,
+        active_effects,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn jump_from_ground_with(
+    physics: &mut Physics,
+    position: Position,
+    look_direction: LookDirection,
+    sprinting: Sprinting,
+    world_name: &WorldName,
+    worlds: &Worlds,
+    active_effects: &ActiveEffects,
+    moving: Option<&MovingBlocks>,
+) {
     let world_lock = worlds
         .get(world_name)
         .expect("All entities should be in a valid world");
     let world = world_lock.read();
 
-    let base_jump = jump_power(&world, position);
+    let base_jump = 0.42 * block_jump_factor_with(&world, moving, position);
     let jump_power = base_jump + jump_boost_power(active_effects);
     if jump_power <= 1.0E-5 {
         return;
@@ -462,6 +524,7 @@ fn handle_relative_friction_and_calculate_movement(ctx: &mut MoveCtx, block_fric
         let feet = BlockPos::from(*ctx.position);
 
         let on_climbable_now = !ctx.no_physics
+            && !ctx.moving.is_some_and(|moving| moving.covers(feet))
             && azalea_entity::climbable_at(ctx.world, feet, ctx.fall_flying);
 
         if on_climbable_now || (ctx.physics.was_in_powder_snow && ctx.powder_snow_walkable) {
@@ -525,8 +588,16 @@ fn get_friction_influenced_speed(
 }
 
 pub fn block_jump_factor(world: &World, position: Position) -> f32 {
+    block_jump_factor_with(world, None, position)
+}
+
+pub fn block_jump_factor_with(
+    world: &World,
+    moving: Option<&MovingBlocks>,
+    position: Position,
+) -> f32 {
     let factor_of = |pos: BlockPos| {
-        block_jump_factor_of(BlockKind::from(world.chunks.get_block_state(pos).unwrap_or_default()))
+        block_jump_factor_of(BlockKind::from(block_state_with(world, moving, pos)))
     };
     let here = factor_of(position.into());
     if here != 1. {
@@ -540,10 +611,6 @@ pub const fn block_jump_factor_of(block: BlockKind) -> f32 {
         BlockKind::HoneyBlock => 0.5,
         _ => 1.0,
     }
-}
-
-fn jump_power(world: &World, position: Position) -> f32 {
-    0.42 * block_jump_factor(world, position)
 }
 
 pub fn jump_boost_power(active_effects: &ActiveEffects) -> f32 {

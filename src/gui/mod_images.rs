@@ -18,7 +18,9 @@ fn bind_mod_images(
     mut sampler: ResMut<ModImageSampler>,
     mut views: ResMut<GuiImageViews>,
 ) {
-    views.0.retain(|&key, _| images.has(key));
+    views
+        .0
+        .retain(|&key, _| super::map_view::is_map_key(key) || images.has(key));
     let sampler = sampler
         .0
         .get_or_insert_with(|| {

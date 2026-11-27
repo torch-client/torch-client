@@ -685,6 +685,7 @@ struct Rig {
     overlay: Handle<EntityMaterial>,
     armor: [ArmorSlotRig; 4],
     lit: Lit,
+    lighting: bool,
     body_draw: BodyDraw,
     glow: u32,
     #[cfg(feature = "skins")]
@@ -820,7 +821,7 @@ fn spawn_rig(
     let skin_material = |materials: &mut Assets<EntityMaterial>| {
         materials.add(EntityMaterial::cutout(
             Some(assets.skin.clone()),
-            LightMode::Cardinal,
+            crate::entities::unlit_light_mode(LightMode::Cardinal),
             lit,
         ))
     };
@@ -921,7 +922,11 @@ fn spawn_rig(
     ];
     let head_item = item_node(PART_HEAD, ItemSlot::Head, "head_item", head_material);
 
-    let skull_material = materials.add(EntityMaterial::cutout(None, LightMode::Cardinal, lit));
+    let skull_material = materials.add(EntityMaterial::cutout(
+        None,
+        crate::entities::unlit_light_mode(LightMode::Cardinal),
+        lit,
+    ));
     let skull_node = commands
         .spawn((
             MeshMaterial3d(skull_material.clone()),
@@ -943,7 +948,11 @@ fn spawn_rig(
     };
 
     #[cfg(feature = "skins")]
-    let cape_material = materials.add(EntityMaterial::cutout(None, LightMode::Cardinal, lit));
+    let cape_material = materials.add(EntityMaterial::cutout(
+        None,
+        crate::entities::unlit_light_mode(LightMode::Cardinal),
+        lit,
+    ));
     #[cfg(feature = "skins")]
     let cape = {
         let entity = commands
@@ -965,7 +974,11 @@ fn spawn_rig(
         }
     };
 
-    let wings_material = materials.add(EntityMaterial::cutout(None, LightMode::Cardinal, lit));
+    let wings_material = materials.add(EntityMaterial::cutout(
+        None,
+        crate::entities::unlit_light_mode(LightMode::Cardinal),
+        lit,
+    ));
     let wings = [0usize, 1].map(|i| {
         let entity = commands
             .spawn((
@@ -981,12 +994,17 @@ fn spawn_rig(
         entity
     });
 
-    let armor_materials =
-        [(); 4].map(|_| materials.add(EntityMaterial::cutout(None, LightMode::Cardinal, lit)));
+    let armor_materials = [(); 4].map(|_| {
+        materials.add(EntityMaterial::cutout(
+            None,
+            crate::entities::unlit_light_mode(LightMode::Cardinal),
+            lit,
+        ))
+    });
     let trim_materials = [(); 4].map(|_| {
         materials.add(EntityMaterial::new(
             None,
-            LightMode::Cardinal,
+            crate::entities::unlit_light_mode(LightMode::Cardinal),
             AlphaMode::Mask(ALPHA_CUTOUT),
             ALPHA_CUTOUT,
             lit,
@@ -1059,6 +1077,7 @@ fn spawn_rig(
         overlay,
         armor,
         lit,
+        lighting: super::lighting_enabled(),
         body_draw: BodyDraw::Shown,
         glow: 0,
         #[cfg(feature = "skins")]
@@ -1164,6 +1183,16 @@ struct WornSkin {
     state: crate::client::skins::SkinState,
 }
 
+fn cart_passenger_offset(
+    ride: Option<&crate::util::minecart_lerp::CartRide>,
+    partial: f32,
+) -> Vec3 {
+    ride.and_then(|ride| ride.passenger_offset(partial))
+        .map_or(Vec3::ZERO, |[x, y, z]| {
+            Vec3::new(x as f32, y as f32, z as f32)
+        })
+}
+
 fn sync_player_models(
     shared: Res<crate::renderer::systems::Shared>,
     view: Res<crate::renderer::frame_view::FrameView>,
@@ -1202,7 +1231,7 @@ fn sync_player_models(
     let dirs = diffuse_lights(crate::renderer::dimension::current());
 
     let partial = view.partial;
-    let players: Vec<(i32, [f64; 3], AnimSample, WornSkin, Body)> = {
+    let players: Vec<(i32, [f64; 3], AnimSample, WornSkin, Body, Vec3)> = {
         let s = shared.0.lock().unwrap();
         s.session
             .other_players
@@ -1217,6 +1246,7 @@ fn sync_player_models(
                         state: p.skin.clone(),
                     },
                     Body::of(&p.body, view.gamemode),
+                    cart_passenger_offset(p.cart_ride.as_ref(), partial),
                 )
             })
             .collect()
@@ -1249,7 +1279,7 @@ fn sync_player_models(
     taken.resize(rigs.entries.len(), false);
     assign.clear();
     unmatched.clear();
-    for (k, (id, _, _, _, _)) in players.iter().enumerate() {
+    for (k, (id, _, _, _, _, _)) in players.iter().enumerate() {
         match slot_of.get(id) {
             Some(&i) if !taken[i] => {
                 taken[i] = true;
@@ -1283,7 +1313,7 @@ fn sync_player_models(
     }
 
     let light = crate::client::worldsync::light_map().read();
-    for ((id, feet, sample, worn, body), slot) in players.iter().zip(assign.iter()) {
+    for ((id, feet, sample, worn, body, ride_offset), slot) in players.iter().zip(assign.iter()) {
         let Some(slot) = *slot else { continue };
         rigs.entries[slot].id = Some(*id);
         let lit = player_lit(&lightmap.current, &light, *feet, sample, body.scale, dirs);
@@ -1295,7 +1325,7 @@ fn sync_player_models(
         };
         apply_rig(
             &mut rigs.entries[slot],
-            origin.to_render_array(*feet),
+            origin.to_render_array(*feet) + *ride_offset,
             sample,
             *id,
             owner,
@@ -1337,7 +1367,9 @@ fn sync_player_models(
             view.local_body.scale,
             dirs,
         );
-        let shown = if camera_view.detached() {
+        let shown = if view.spectate.is_some() {
+            RigVisibility::Hidden
+        } else if camera_view.detached() {
             RigVisibility::Shown
         } else if pose_hidden {
             RigVisibility::HiddenPosed
@@ -1348,7 +1380,8 @@ fn sync_player_models(
         let owner = items.assets.local_owner().unwrap_or_default();
         apply_rig(
             local,
-            origin.to_render_array(local_pos),
+            origin.to_render_array(local_pos)
+                + cart_passenger_offset(view.cart_ride.as_ref(), partial),
             &local_pose,
             crate::client::tracking::local_entity_id(),
             owner,
@@ -1564,6 +1597,9 @@ fn update_skin(
 ) {
     let generation = items.skins.generation();
     if rig.worn == *skin && rig.seen_textures == generation {
+        return;
+    }
+    if layers.get(rig.parts[PART_RIGHT_ARM]).is_err() {
         return;
     }
     let slim_changed = rig.worn.slim() != skin.slim();
@@ -1901,27 +1937,33 @@ fn apply_rig(
     );
 
     let relit = lit != rig.lit;
-    if relit {
+    let lighting = super::lighting_enabled();
+    if relit || lighting != rig.lighting {
         #[cfg(feature = "skins")]
         let cape = Some(&rig.cape.material);
         #[cfg(not(feature = "skins"))]
         let cape = None;
-        for handle in [&rig.base, &rig.overlay, &rig.wings.material]
+        let cardinal = [&rig.base, &rig.overlay, &rig.wings.material]
             .into_iter()
             .chain(cape)
-            .chain(rig.held.iter().map(|held| &held.material))
-            .chain([&rig.head_item.material, &rig.skull.material])
+            .chain([&rig.skull.material])
             .chain(
                 rig.armor
                     .iter()
                     .flat_map(|slot| [&slot.material, &slot.trim_material]),
             )
-        {
-            if let Some(mut material) = items.entity_materials.get_mut(handle) {
-                material.params.set(lit);
-            }
+            .map(|handle| (handle, LightMode::Cardinal));
+        let flat = rig
+            .held
+            .iter()
+            .map(|held| &held.material)
+            .chain([&rig.head_item.material])
+            .map(|handle| (handle, LightMode::Flat));
+        for (handle, mode) in cardinal.chain(flat) {
+            crate::entities::relight_unlit(items.entity_materials, handle, lit, mode);
         }
         rig.lit = lit;
+        rig.lighting = lighting;
     }
     draw_body(rig, body.draw, relit, items.entity_materials);
 }

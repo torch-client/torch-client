@@ -282,7 +282,6 @@ impl Bound {
 }
 
 pub struct BindDef {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub action: Action,
     pub id: &'static str,
     pub name: &'static str,
@@ -292,10 +291,16 @@ pub struct BindDef {
 
 impl BindDef {
     pub fn label(&self) -> &'static str {
-        if self.id.starts_with("key.client.") || self.id == "key.spectatorHotbar" {
-            self.name
-        } else {
-            tr_or(self.id, self.name)
+        match self.action {
+            Action::SpectatorAction => crate::lang::tr!("keybinds.spectator_menu"),
+            Action::Freecam => crate::lang::tr!("keybinds.freecam"),
+            #[cfg(target_arch = "wasm32")]
+            Action::Pause => crate::lang::tr!("keybinds.pause"),
+            #[cfg(feature = "click_gui")]
+            Action::ClickGui => crate::lang::tr!("keybinds.click_gui"),
+            #[cfg(feature = "hud_editor")]
+            Action::HudEditor => crate::lang::tr!("keybinds.hud_editor"),
+            _ => tr_or(self.id, self.name),
         }
     }
 
@@ -307,6 +312,8 @@ impl BindDef {
             GAMEPLAY => "key.categories.gameplay",
             INVENTORY => "key.categories.inventory",
             SPECTATOR => "key.categories.spectator",
+            DEBUG => "key.category.minecraft.debug",
+            CLIENT => return crate::lang::tr!("keybinds.category.client"),
             _ => return self.category,
         };
         tr_or(key, self.category)

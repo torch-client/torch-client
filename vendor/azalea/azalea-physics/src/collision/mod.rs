@@ -8,7 +8,7 @@ mod shape_offset;
 pub mod sturdy;
 pub mod world_collisions;
 
-use std::{ops::Add, sync::LazyLock};
+use std::{collections::HashSet, ops::Add, sync::LazyLock};
 
 use azalea_block::{BlockState, BlockTrait, fluid_state::FluidState};
 use azalea_core::{
@@ -23,7 +23,7 @@ use azalea_entity::{
 };
 use azalea_registry::{builtin::BlockKind, tags::blocks::SUPPRESSES_BOUNCE};
 use azalea_world::{ChunkStorage, World, WorldBorder};
-use bevy_ecs::{entity::Entity, world::Mut};
+use bevy_ecs::{component::Component, entity::Entity, world::Mut};
 pub use blocks::BlockWithShape;
 pub use discrete_voxel_shape::*;
 use entity_collisions::{
@@ -34,13 +34,40 @@ pub use shape::*;
 pub use sturdy::{is_face_sturdy, is_solid};
 use tracing::warn;
 
-use self::world_collisions::{PowderSnowCollision, get_block_collisions_for};
+use self::world_collisions::{PowderSnowCollision, get_block_collisions_with};
 use crate::{
     block_speed_factor, client_movement::ClientMovementState,
     collision::entity_collisions::AabbQuery, compute_modified_friction,
     get_block_pos_below_that_affects_movement,
-    travel::{effective_gravity, no_collision},
+    travel::{effective_gravity, no_collision_with},
 };
+
+#[derive(Clone, Component, Debug, Default)]
+pub struct MovingBlocks {
+    pub cells: HashSet<BlockPos>,
+    pub boxes: Vec<(BlockPos, Aabb)>,
+}
+
+impl MovingBlocks {
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    pub fn covers(&self, pos: BlockPos) -> bool {
+        self.cells.contains(&pos)
+    }
+}
+
+pub(crate) fn block_state_with(
+    world: &World,
+    moving: Option<&MovingBlocks>,
+    pos: BlockPos,
+) -> BlockState {
+    if moving.is_some_and(|moving| moving.covers(pos)) {
+        return BlockState::AIR;
+    }
+    world.get_block_state(pos).unwrap_or_default()
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct BorderSource<'a> {
@@ -107,6 +134,7 @@ impl MoveCtx<'_, '_, '_, '_> {
 }
 
 fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
+    let moving = ctx.moving;
     let powder_snow = ctx.powder_snow();
     let border = ctx.border_source();
     let entity_bounding_box = ctx.physics.bounding_box;
@@ -138,6 +166,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
             &entity_collisions,
             powder_snow,
             border,
+            moving,
         )
     };
 
@@ -156,6 +185,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
             &entity_collisions,
             powder_snow,
             border,
+            moving,
         );
         let directly_up_delta = collide_bounding_box(
             Vec3::ZERO.with_y(max_up_step),
@@ -164,6 +194,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
             &entity_collisions,
             powder_snow,
             border,
+            moving,
         );
         if directly_up_delta.y < max_up_step {
             let target_movement = collide_bounding_box(
@@ -173,6 +204,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
                 &entity_collisions,
                 powder_snow,
                 border,
+                moving,
             )
             .add(directly_up_delta);
             if target_movement.horizontal_distance_squared()
@@ -192,6 +224,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
                 &entity_collisions,
                 powder_snow,
                 border,
+                moving,
             ));
         }
     }
@@ -216,6 +249,7 @@ pub struct MoveCtx<'world, 'state, 'a, 'b> {
     pub stands_on_lava: bool,
     pub fall_flying: bool,
     pub border: Option<&'a WorldBorder>,
+    pub moving: Option<&'a MovingBlocks>,
 
     pub direction: LookDirection,
     pub sprinting: Sprinting,
@@ -298,7 +332,7 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
         horizontal_collision && is_horizontal_collision_minor(physics, ctx.direction, collide_result);
 
     let block_pos_below = azalea_entity::on_pos_legacy(&world.chunks, **position);
-    let block_state_below = world.get_block_state(block_pos_below).unwrap_or_default();
+    let block_state_below = block_state_with(world, ctx.moving, block_pos_below);
 
     check_fall_damage(
         physics,
@@ -324,7 +358,7 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
     let speed_factor = if flying {
         1.0
     } else {
-        block_speed_factor_for(world, ***position, ctx.attributes)
+        block_speed_factor_with(world, ctx.moving, ***position, ctx.attributes)
     };
     if speed_factor != 1.0 {
         physics.velocity.x *= f64::from(speed_factor);
@@ -458,14 +492,21 @@ fn is_horizontal_collision_minor(
 }
 
 pub fn block_speed_factor_for(world: &World, position: Vec3, attributes: &Attributes) -> f32 {
-    let here = BlockKind::from(world.get_block_state(BlockPos::from(position)).unwrap_or_default());
+    block_speed_factor_with(world, None, position, attributes)
+}
+
+pub fn block_speed_factor_with(
+    world: &World,
+    moving: Option<&MovingBlocks>,
+    position: Vec3,
+    attributes: &Attributes,
+) -> f32 {
+    let here = BlockKind::from(block_state_with(world, moving, BlockPos::from(position)));
     let factor = block_speed_factor(here);
 
     let factor = if factor == 1.0 && !matches!(here, BlockKind::Water | BlockKind::BubbleColumn) {
         let below = get_block_pos_below_that_affects_movement(Position::new(position));
-        block_speed_factor(BlockKind::from(
-            world.get_block_state(below).unwrap_or_default(),
-        ))
+        block_speed_factor(BlockKind::from(block_state_with(world, moving, below)))
     } else {
         factor
     };
@@ -505,6 +546,7 @@ fn maybe_back_off_from_edge(move_ctx: &mut MoveCtx, mut movement: Vec3) -> Vec3 
         collidable_entity_query: move_ctx.collidable_entity_query,
         powder_snow: move_ctx.powder_snow(),
         border: move_ctx.border_source(),
+        moving: move_ctx.moving,
     };
 
     let Some(abilities) = move_ctx.abilities else {
@@ -577,6 +619,7 @@ pub struct CanFallAtLeastCtx<'world, 'state, 'a, 'b> {
     collidable_entity_query: &'a CollidableEntityQuery<'world, 'state>,
     powder_snow: PowderSnowCollision,
     border: Option<BorderSource<'a>>,
+    moving: Option<&'a MovingBlocks>,
 }
 
 fn can_fall_at_least(
@@ -598,7 +641,7 @@ fn can_fall_at_least(
             z: aabb.max.z - EPSILON + delta_z,
         },
     };
-    no_collision(
+    no_collision_with(
         ctx.world,
         Some(ctx.source_entity),
         ctx.aabb_query,
@@ -607,6 +650,7 @@ fn can_fall_at_least(
         &aabb,
         false,
         ctx.powder_snow,
+        ctx.moving,
     )
 }
 
@@ -617,6 +661,7 @@ fn collide_bounding_box(
     entity_collisions: &[VoxelShape],
     powder_snow: PowderSnowCollision,
     border: Option<BorderSource>,
+    moving: Option<&MovingBlocks>,
 ) -> Vec3 {
     let mut collision_boxes: Vec<VoxelShape> = Vec::with_capacity(entity_collisions.len() + 1);
 
@@ -629,7 +674,7 @@ fn collide_bounding_box(
         collision_boxes.push(shape);
     }
 
-    let block_collisions = get_block_collisions_for(world, &swept, powder_snow);
+    let block_collisions = get_block_collisions_with(world, &swept, powder_snow, moving);
     collision_boxes.extend(block_collisions);
     collide_with_shapes(movement, *entity_bounding_box, &collision_boxes)
 }

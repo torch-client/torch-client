@@ -10,6 +10,7 @@ use azalea_core::entity_id::MinecraftEntityId;
 use azalea_registry::builtin::ItemKind;
 use azalea_world::WorldName;
 
+use crate::client::tick_rate::WorldTick;
 use crate::client::tracking::{EntityAttributes, attributes, equipment};
 use crate::items::consume::Consumption;
 use crate::play::emit::{self, Viewer};
@@ -99,7 +100,7 @@ fn play_sound(consume: &Consumption, at: [f64; 3]) {
     crate::audio::play_at(&event, SoundCategory::Players, at, volume, pitch);
 }
 
-pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
+pub(crate) fn tick(bot: &Client, shared: &SharedMutex, world_tick: &WorldTick) {
     let Some(viewer) = Viewer::of(bot) else {
         return;
     };
@@ -134,6 +135,9 @@ pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
             seen: 0,
         });
         usage.seen = *tick;
+        if !world_tick.entity_ticks(id.0) {
+            continue;
+        }
         if usage.item != Some(held) {
             usage.item = None;
             continue;

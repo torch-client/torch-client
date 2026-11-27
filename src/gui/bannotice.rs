@@ -84,8 +84,8 @@ fn message(ban: &BanDetails) -> String {
         &[reason_text(ban), status, SUSPENSION_HELP.to_string()],
     );
     if let Some(id) = &ban.id {
-        text.push_str("\n\nBan ID: ");
-        text.push_str(id);
+        text.push_str("\n\n");
+        text.push_str(&crate::lang::trf!("gui.ban_notice.ban_id", id));
     }
     text
 }

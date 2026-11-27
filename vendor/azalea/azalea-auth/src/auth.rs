@@ -1,19 +1,28 @@
+use std::{collections::HashMap, time::Duration};
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
-    collections::HashMap,
     path::PathBuf,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::time::sleep;
-use tracing::{error, trace};
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::error;
+use tracing::trace;
 use uuid::Uuid;
+#[cfg(target_arch = "wasm32")]
+use web_time::{SystemTime, UNIX_EPOCH};
 
-use crate::cache::{self, CachedAccount, ExpiringValue};
+use crate::cache::ExpiringValue;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cache::{self, CachedAccount};
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 pub struct AuthOpts<'a> {
     pub check_ownership: bool,
@@ -45,6 +54,7 @@ pub enum AuthError {
     GetXboxLiveAuth(#[from] XboxLiveAuthError),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn auth(cache_key: &str, opts: AuthOpts<'_>) -> Result<AuthResult, AuthError> {
     let cached_account = if let Some(cache_file) = &opts.cache_file {
         cache::get_account_in_cache(cache_file, cache_key).await
@@ -64,7 +74,7 @@ pub async fn auth(cache_key: &str, opts: AuthOpts<'_>) -> Result<AuthResult, Aut
         let client_id = opts.client_id.unwrap_or(CLIENT_ID);
         let scope = opts.scope.unwrap_or(SCOPE);
 
-        let client = reqwest::Client::new();
+        let client = crate::HttpClient::new();
         let mut msa = if let Some(account) = cached_account {
             account.msa
         } else {
@@ -95,7 +105,7 @@ pub async fn auth(cache_key: &str, opts: AuthOpts<'_>) -> Result<AuthResult, Aut
         }
 
         let msa_token = &msa.data.access_token;
-        trace!("Got access token: {msa_token}");
+        trace!("Got access token");
 
         let res = get_minecraft_token(&client, msa_token).await?;
 
@@ -133,7 +143,7 @@ pub async fn auth(cache_key: &str, opts: AuthOpts<'_>) -> Result<AuthResult, Aut
 }
 
 pub async fn get_minecraft_token(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     msa: &str,
 ) -> Result<MinecraftTokenResponse, AuthError> {
     let xbl_auth = auth_with_xbox_live(client, msa).await?;
@@ -162,20 +172,21 @@ pub async fn get_minecraft_token(
     })
 }
 
-#[derive(Debug)]
+crate::redacted_debug!(MinecraftTokenResponse { mca, xbl ; minecraft_access_token });
 pub struct MinecraftTokenResponse {
     pub mca: ExpiringValue<MinecraftAuthResponse>,
     pub xbl: ExpiringValue<XboxLiveAuth>,
     pub minecraft_access_token: String,
 }
 
-#[derive(Debug)]
+crate::redacted_debug!(AuthResult { profile ; access_token });
 pub struct AuthResult {
     pub access_token: String,
     pub profile: ProfileResponse,
 }
 
-#[derive(Debug, Deserialize)]
+crate::redacted_debug!(DeviceCodeResponse { user_code, verification_uri, expires_in, interval ; device_code });
+#[derive(Deserialize)]
 pub struct DeviceCodeResponse {
     pub user_code: String,
     pub device_code: String,
@@ -184,7 +195,8 @@ pub struct DeviceCodeResponse {
     pub interval: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+crate::redacted_debug!(AccessTokenResponse { token_type, expires_in, scope ; access_token, refresh_token, user_id });
+#[derive(Clone, Deserialize, Serialize)]
 pub struct AccessTokenResponse {
     pub token_type: String,
     pub expires_in: u64,
@@ -194,7 +206,8 @@ pub struct AccessTokenResponse {
     pub user_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+crate::redacted_debug!(XboxLiveAuthResponse { issue_instant, not_after ; token, display_claims });
+#[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct XboxLiveAuthResponse {
     pub issue_instant: String,
@@ -203,13 +216,15 @@ pub struct XboxLiveAuthResponse {
     pub display_claims: HashMap<String, Vec<HashMap<String, String>>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+crate::redacted_debug!(XboxLiveAuth { ; token, user_hash });
+#[derive(Deserialize, Serialize)]
 pub struct XboxLiveAuth {
     pub token: String,
     pub user_hash: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+crate::redacted_debug!(MinecraftAuthResponse { username, roles, token_type, expires_in ; access_token });
+#[derive(Deserialize, Serialize)]
 pub struct MinecraftAuthResponse {
     pub username: String,
     pub roles: Vec<String>,
@@ -246,13 +261,13 @@ const SCOPE: &str = "service::user.auth.xboxlive.com::MBI_SSL";
 #[derive(Debug, Error)]
 pub enum GetMicrosoftAuthTokenError {
     #[error("Http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] crate::HttpError),
     #[error("Authentication timed out")]
     Timeout,
 }
 
 pub async fn get_ms_link_code(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     client_id: Option<&str>,
     scope: Option<&str>,
 ) -> Result<DeviceCodeResponse, GetMicrosoftAuthTokenError> {
@@ -277,8 +292,9 @@ pub async fn get_ms_link_code(
         .await?)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn get_ms_auth_token(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     res: DeviceCodeResponse,
     client_id: Option<&str>,
 ) -> Result<ExpiringValue<AccessTokenResponse>, GetMicrosoftAuthTokenError> {
@@ -324,8 +340,9 @@ pub async fn get_ms_auth_token(
     Err(GetMicrosoftAuthTokenError::Timeout)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn interactive_get_ms_auth_token(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     cache_key: &str,
     client_id: Option<&str>,
     scope: Option<&str>,
@@ -344,13 +361,13 @@ pub async fn interactive_get_ms_auth_token(
 #[derive(Debug, Error)]
 pub enum RefreshMicrosoftAuthTokenError {
     #[error("Http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] crate::HttpError),
     #[error("Error parsing JSON: {0}")]
     Json(#[from] serde_json::Error),
 }
 
 pub async fn refresh_ms_auth_token(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     refresh_token: &str,
     client_id: Option<&str>,
     scope: Option<&str>,
@@ -386,13 +403,13 @@ pub async fn refresh_ms_auth_token(
 #[derive(Debug, Error)]
 pub enum XboxLiveAuthError {
     #[error("Http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] crate::HttpError),
     #[error("Invalid expiry date: {0}")]
     InvalidExpiryDate(String),
 }
 
 async fn auth_with_xbox_live(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     access_token: &str,
 ) -> Result<ExpiringValue<XboxLiveAuth>, XboxLiveAuthError> {
     let auth_json = json!({
@@ -405,7 +422,7 @@ async fn auth_with_xbox_live(
         "TokenType": "JWT"
     });
     let payload = auth_json.to_string();
-    trace!("auth_json: {:#?}", auth_json);
+    trace!("sending the Xbox Live auth request");
     let res = client
         .post("https://user.auth.xboxlive.com/user/authenticate")
         .header("Content-Type", "application/json")
@@ -434,11 +451,11 @@ async fn auth_with_xbox_live(
 #[derive(Debug, Error)]
 pub enum MinecraftXstsAuthError {
     #[error("Http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] crate::HttpError),
 }
 
 async fn obtain_xsts_for_minecraft(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     xbl_auth_token: &str,
 ) -> Result<String, MinecraftXstsAuthError> {
     let res = client
@@ -464,11 +481,11 @@ async fn obtain_xsts_for_minecraft(
 #[derive(Debug, Error)]
 pub enum MinecraftAuthError {
     #[error("Http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] crate::HttpError),
 }
 
 async fn auth_with_minecraft(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     user_hash: &str,
     xsts_token: &str,
 ) -> Result<ExpiringValue<MinecraftAuthResponse>, MinecraftAuthError> {
@@ -494,11 +511,11 @@ async fn auth_with_minecraft(
 #[derive(Debug, Error)]
 pub enum CheckOwnershipError {
     #[error("Http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] crate::HttpError),
 }
 
 pub async fn check_ownership(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     minecraft_access_token: &str,
 ) -> Result<bool, CheckOwnershipError> {
     let res = client
@@ -516,11 +533,11 @@ pub async fn check_ownership(
 #[derive(Debug, Error)]
 pub enum GetProfileError {
     #[error("Http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] crate::HttpError),
 }
 
 pub async fn get_profile(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     minecraft_access_token: &str,
 ) -> Result<ProfileResponse, GetProfileError> {
     let res = client

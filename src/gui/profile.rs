@@ -7,23 +7,24 @@ use crate::gui::multiplayer::{
 use crate::gui::painter::Painter;
 use crate::gui::widgets::{self, Button, TextBox, WIDGET_HEIGHT, WIDGET_WIDTH_BIG};
 use crate::gui::{GuiState, Screen, ScreenCtx, menu};
+use crate::lang::Key;
 use crate::platform::cli::valid_username;
 use crate::text::{AQUA, GREEN};
 
-const TITLE: &str = "Accounts";
-const SELECT: &str = "Select Account";
-const ADD: &str = "Add Account";
-const ADD_TITLE: &str = "Add Account";
-const EDIT_TITLE: &str = "Edit Account";
-const USERNAME_LABEL: &str = "Username";
-const EDIT: &str = "Edit";
-const DELETE: &str = "Delete";
-const BACK: &str = "Back";
-const DONE: &str = "Done";
-const CANCEL: &str = "Cancel";
-const IN_USE: &str = "Selected";
-const EMPTY: &str = "No accounts yet. Add one to choose a name to join under.";
-const DELETE_QUESTION: &str = "Are you sure you want to remove this account?";
+const TITLE: Key = Key::of("profile.title");
+const SELECT: Key = Key::of("profile.select");
+const ADD: Key = Key::of("profile.add");
+const ADD_TITLE: Key = Key::of("profile.add_title");
+const EDIT_TITLE: Key = Key::of("profile.edit_title");
+const USERNAME_LABEL: Key = Key::of("profile.username");
+const EDIT: Key = Key::of("profile.edit");
+const DELETE: Key = Key::of("profile.delete");
+const BACK: Key = Key::of("profile.back");
+const DONE: Key = Key::of("profile.done");
+const CANCEL: Key = Key::of("profile.cancel");
+const IN_USE: Key = Key::of("profile.in_use");
+const EMPTY: Key = Key::of("profile.empty");
+const DELETE_QUESTION: Key = Key::of("profile.delete_question");
 
 const USERNAME_MAX_LEN: usize = 16;
 
@@ -189,7 +190,7 @@ pub fn entry_screen() -> Screen {
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     state.profile.ensure_loaded();
     menu::background(p, ctx.vw, ctx.vh);
-    p.text_centered(TITLE, ctx.vw / 2.0, LAYOUT.title_y(), 0xFFFFFF, true);
+    p.text_centered(TITLE.get(), ctx.vw / 2.0, LAYOUT.title_y(), 0xFFFFFF, true);
 
     let (lx, ly, lw, lh) = LAYOUT.content_rect(ctx.vw, ctx.vh);
     menu::list_background(p, lx, ly, lw, lh, state.profile.scroll);
@@ -215,7 +216,7 @@ fn draw_rows(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locked: boo
 
     if st.accounts.entries.is_empty() {
         p.text_centered(
-            EMPTY,
+            EMPTY.get(),
             ctx.vw / 2.0,
             (ly + lh / 2.0 - 4.0).floor(),
             GREY,
@@ -282,8 +283,9 @@ fn draw_row_content(p: &mut Painter, account: &Account, active: bool, cx: f32, c
     p.text_plain(account.kind.label(), text_x, cy + 18.0, color, true);
 
     if active {
-        let w = p.atlas.font.width_str(IN_USE);
-        p.text_plain(IN_USE, cx + cw - w, cy + 6.0, GREEN, true);
+        let in_use = IN_USE.get();
+        let w = p.atlas.font.width_str(in_use);
+        p.text_plain(in_use, cx + cw - w, cy + 6.0, GREEN, true);
     }
 }
 
@@ -339,24 +341,24 @@ fn draw_footer(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locked: b
         .draw(p, ctx)
     };
 
-    let select_clicked = button(p, bar_x, top, TOP_ROW_BUTTON_W, SELECT, can_select);
+    let select_clicked = button(p, bar_x, top, TOP_ROW_BUTTON_W, SELECT.get(), can_select);
     let add = button(
         p,
         bar_x + TOP_ROW_BUTTON_W + BUTTON_GAP,
         top,
         TOP_ROW_BUTTON_W,
-        ADD,
+        ADD.get(),
         true,
     );
 
     let step = LOWER_ROW_BUTTON_W + BUTTON_GAP;
-    let edit = button(p, bar_x, bottom, LOWER_ROW_BUTTON_W, EDIT, can_edit);
+    let edit = button(p, bar_x, bottom, LOWER_ROW_BUTTON_W, EDIT.get(), can_edit);
     let delete = button(
         p,
         bar_x + step,
         bottom,
         LOWER_ROW_BUTTON_W,
-        DELETE,
+        DELETE.get(),
         selected.is_some(),
     );
     let back = button(
@@ -364,7 +366,7 @@ fn draw_footer(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locked: b
         bar_x + 2.0 * step,
         bottom,
         LOWER_ROW_BUTTON_W,
-        BACK,
+        BACK.get(),
         true,
     );
 
@@ -428,12 +430,18 @@ fn draw_delete_confirm(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     p.fill(0.0, 0.0, ctx.vw, ctx.vh, 0xC0_000000);
 
     let cy = (ctx.vh / 2.0).floor();
-    p.text_centered(DELETE_QUESTION, ctx.vw / 2.0, cy - 40.0, 0xFFFFFF, true);
-    let warning = format!("'{name}' will be removed from this client.");
+    p.text_centered(
+        DELETE_QUESTION.get(),
+        ctx.vw / 2.0,
+        cy - 40.0,
+        0xFFFFFF,
+        true,
+    );
+    let warning = crate::lang::trf!("profile.delete_warning", name);
     p.text_centered(&warning, ctx.vw / 2.0, cy - 25.0, GREY, true);
 
     let x = widgets::centered_x(ctx.vw);
-    if Button::new(x, cy, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, DELETE).draw(p, ctx) {
+    if Button::new(x, cy, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, DELETE.get()).draw(p, ctx) {
         state.profile.accounts.remove(index);
         if state.profile.accounts.active.is_none() && !state.profile.accounts.entries.is_empty() {
             state.profile.accounts.activate(0);
@@ -448,7 +456,7 @@ fn draw_delete_confirm(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             state.nav = Some(entry_screen());
         }
     }
-    if Button::new(x, cy + 24.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, CANCEL).draw(p, ctx)
+    if Button::new(x, cy + 24.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, CANCEL.get()).draw(p, ctx)
         || ctx.input.escape
     {
         state.profile.confirm_delete = None;
@@ -457,25 +465,43 @@ fn draw_delete_confirm(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
 #[cfg(feature = "online_mode")]
 pub fn draw_add(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
-    const QUESTION: &str = "Do you want to add a Microsoft account or play offline?";
-    const REASSURANCE: &str = "(This option can be changed later)";
-    const MICROSOFT: &str = "Microsoft Account";
-    const OFFLINE: &str = "Play Offline";
+    const QUESTION: Key = Key::of("profile.add_question");
+    const REASSURANCE: Key = Key::of("profile.add_reassurance");
+    const MICROSOFT: Key = Key::of("profile.kind.microsoft");
+    const OFFLINE: Key = Key::of("profile.play_offline");
 
     state.profile.ensure_loaded();
     menu::background(p, ctx.vw, ctx.vh);
-    p.text_centered(ADD_TITLE, ctx.vw / 2.0, LAYOUT.title_y(), 0xFFFFFF, true);
+    p.text_centered(
+        ADD_TITLE.get(),
+        ctx.vw / 2.0,
+        LAYOUT.title_y(),
+        0xFFFFFF,
+        true,
+    );
 
     let first_run = state.profile.first_run;
     let base = (ctx.vh / 4.0).floor();
-    p.text_centered(QUESTION, ctx.vw / 2.0, base + 20.0, 0xFFFFFF, true);
+    p.text_centered(QUESTION.get(), ctx.vw / 2.0, base + 20.0, 0xFFFFFF, true);
     if first_run {
-        p.text_centered(REASSURANCE, ctx.vw / 2.0, base + 34.0, GREY, true);
+        p.text_centered(REASSURANCE.get(), ctx.vw / 2.0, base + 34.0, GREY, true);
     }
 
     let x = widgets::centered_x(ctx.vw);
-    let microsoft = Button::new(x, base + 60.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, MICROSOFT);
-    let offline = Button::new(x, base + 84.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, OFFLINE);
+    let microsoft = Button::new(
+        x,
+        base + 60.0,
+        WIDGET_WIDTH_BIG,
+        WIDGET_HEIGHT,
+        MICROSOFT.get(),
+    );
+    let offline = Button::new(
+        x,
+        base + 84.0,
+        WIDGET_WIDTH_BIG,
+        WIDGET_HEIGHT,
+        OFFLINE.get(),
+    );
 
     if microsoft.draw(p, ctx) {
         state.profile.copied_link = false;
@@ -488,7 +514,13 @@ pub fn draw_add(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     }
 
     if !first_run {
-        let cancel = Button::new(x, base + 114.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, CANCEL);
+        let cancel = Button::new(
+            x,
+            base + 114.0,
+            WIDGET_WIDTH_BIG,
+            WIDGET_HEIGHT,
+            CANCEL.get(),
+        );
         if cancel.draw(p, ctx) || ctx.input.escape {
             state.nav = Some(Screen::Accounts);
         }
@@ -499,19 +531,25 @@ pub fn draw_add(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 pub fn draw_microsoft(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     use crate::client::auth::{self, Auth};
 
-    const MS_TITLE: &str = "Sign in with Microsoft";
-    const STARTING: &str = "Contacting Microsoft...";
-    const INSTRUCTION: &str = "Open the link below and enter this code:";
-    const ELSEWHERE: &str = "You can do this on another device, such as a phone.";
-    const OPEN: &str = "Open Link";
-    const COPY: &str = "Copy Link";
-    const COPIED: &str = "Copied";
-    const RETRY: &str = "Try Again";
+    const MS_TITLE: Key = Key::of("profile.microsoft.title");
+    const STARTING: Key = Key::of("profile.microsoft.starting");
+    const INSTRUCTION: Key = Key::of("profile.microsoft.instruction");
+    const ELSEWHERE: Key = Key::of("profile.microsoft.elsewhere");
+    const OPEN: Key = Key::of("profile.microsoft.open");
+    const COPY: Key = Key::of("profile.microsoft.copy");
+    const COPIED: Key = Key::of("profile.microsoft.copied");
+    const RETRY: Key = Key::of("profile.microsoft.retry");
     use crate::text::{RED, YELLOW};
 
     state.profile.ensure_loaded();
     menu::background(p, ctx.vw, ctx.vh);
-    p.text_centered(MS_TITLE, ctx.vw / 2.0, LAYOUT.title_y(), 0xFFFFFF, true);
+    p.text_centered(
+        MS_TITLE.get(),
+        ctx.vw / 2.0,
+        LAYOUT.title_y(),
+        0xFFFFFF,
+        true,
+    );
 
     let x = widgets::centered_x(ctx.vw);
     let base = (ctx.vh / 4.0).floor();
@@ -521,18 +559,19 @@ pub fn draw_microsoft(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     match auth::state() {
         None | Some(Auth::Starting) => {
-            centered(p, STARTING, base + 30.0, 0xFFFFFF);
+            centered(p, STARTING.get(), base + 30.0, 0xFFFFFF);
         }
         Some(Auth::Prompt { url, code }) => {
-            centered(p, INSTRUCTION, base + 14.0, 0xFFFFFF);
+            centered(p, INSTRUCTION.get(), base + 14.0, 0xFFFFFF);
             centered(p, &code, base + 30.0, YELLOW);
-            centered(p, ELSEWHERE, base + 46.0, GREY);
+            centered(p, ELSEWHERE.get(), base + 46.0, GREY);
 
-            if Button::new(x, base + 64.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, OPEN).draw(p, ctx) {
+            if Button::new(x, base + 64.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, OPEN.get()).draw(p, ctx)
+            {
                 crate::platform::url::open(&url);
             }
             let copied = state.profile.copied_link;
-            let copy_label = if copied { COPIED } else { COPY };
+            let copy_label = if copied { COPIED.get() } else { COPY.get() };
             if Button::new(x, base + 88.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, copy_label).draw(p, ctx)
             {
                 crate::platform::clipboard::set(&url);
@@ -564,14 +603,22 @@ pub fn draw_microsoft(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         }
         Some(Auth::Failed(message)) => {
             centered(p, &message, base + 30.0, RED);
-            if Button::new(x, base + 64.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, RETRY).draw(p, ctx) {
+            if Button::new(x, base + 64.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, RETRY.get())
+                .draw(p, ctx)
+            {
                 state.profile.copied_link = false;
                 auth::begin();
             }
         }
     }
 
-    let cancel = Button::new(x, base + 122.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, CANCEL);
+    let cancel = Button::new(
+        x,
+        base + 122.0,
+        WIDGET_WIDTH_BIG,
+        WIDGET_HEIGHT,
+        CANCEL.get(),
+    );
     if cancel.draw(p, ctx) || ctx.input.escape {
         auth::cancel();
         state.profile.copied_link = false;
@@ -584,7 +631,11 @@ pub fn draw_edit(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     menu::background(p, ctx.vw, ctx.vh);
 
     let editing = state.profile.editing.is_some();
-    let title = if editing { EDIT_TITLE } else { ADD_TITLE };
+    let title = if editing {
+        EDIT_TITLE.get()
+    } else {
+        ADD_TITLE.get()
+    };
     let x = widgets::centered_x(ctx.vw);
     p.text_centered(title, ctx.vw / 2.0, 17.0, 0xFFFFFF, true);
     #[cfg(eagler_skins)]
@@ -601,7 +652,7 @@ pub fn draw_edit(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         );
         (x, buttons, bottom)
     };
-    p.text_plain(USERNAME_LABEL, x + 1.0, 53.0, 0xA0A0A0, true);
+    p.text_plain(USERNAME_LABEL.get(), x + 1.0, 53.0, 0xA0A0A0, true);
 
     let field = &mut state.profile.username;
     field.update(p, ctx, x, 66.0, WIDGET_WIDTH_BIG, WIDGET_HEIGHT);
@@ -647,7 +698,7 @@ pub fn draw_edit(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         y: done_at[1],
         w: done_at[2],
         h: WIDGET_HEIGHT,
-        label: DONE,
+        label: DONE.get(),
         active: valid,
     };
 
@@ -658,9 +709,9 @@ pub fn draw_edit(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     if let Some(back) = back {
         let label = if state.profile.first_run {
-            BACK
+            BACK.get()
         } else {
-            CANCEL
+            CANCEL.get()
         };
         let [cx, cy, cw] = cancel_at;
         let cancel = Button::new(cx, cy, cw, WIDGET_HEIGHT, label);

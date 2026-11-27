@@ -1,16 +1,21 @@
+use std::io;
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
-    io,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, AsyncWriteExt},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use tracing::{debug, trace};
+#[cfg(target_arch = "wasm32")]
+use web_time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Error)]
 pub enum CacheError {
@@ -67,6 +72,7 @@ impl<T: Clone> Clone for ExpiringValue<T> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn get_entire_cache(cache_file: &Path) -> Result<Vec<CachedAccount>, CacheError> {
     let mut cache: Vec<CachedAccount> = Vec::new();
     if cache_file.exists() {
@@ -80,6 +86,7 @@ async fn get_entire_cache(cache_file: &Path) -> Result<Vec<CachedAccount>, Cache
     }
     Ok(cache)
 }
+#[cfg(not(target_arch = "wasm32"))]
 async fn set_entire_cache(cache_file: &Path, cache: Vec<CachedAccount>) -> Result<(), CacheError> {
     trace!("saving cache: {:?}", cache);
 
@@ -105,6 +112,7 @@ async fn set_entire_cache(cache_file: &Path, cache: Vec<CachedAccount>) -> Resul
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn get_account_in_cache(cache_file: &Path, cache_key: &str) -> Option<CachedAccount> {
     let cache = get_entire_cache(cache_file).await.unwrap_or_default();
     cache
@@ -112,6 +120,7 @@ pub async fn get_account_in_cache(cache_file: &Path, cache_key: &str) -> Option<
         .find(|account| account.cache_key == cache_key)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn set_account_in_cache(
     cache_file: &Path,
     cache_key: &str,

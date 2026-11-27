@@ -46,12 +46,12 @@ impl Part {
 
     pub(crate) fn caption(self) -> &'static str {
         match self {
-            Part::Jar => "Jar Assets",
-            Part::Panorama => "Panorama",
-            Part::Unifont => "Unifont",
-            Part::Sounds => "Sound subset",
-            Part::Languages => "Languages table",
-            Part::Language => "Current language",
+            Part::Jar => crate::lang::tr!("asset_export.part.jar"),
+            Part::Panorama => crate::lang::tr!("asset_export.part.panorama"),
+            Part::Unifont => crate::lang::tr!("asset_export.part.unifont"),
+            Part::Sounds => crate::lang::tr!("asset_export.part.sounds"),
+            Part::Languages => crate::lang::tr!("asset_export.part.languages"),
+            Part::Language => crate::lang::tr!("asset_export.part.language"),
         }
     }
 
@@ -201,27 +201,29 @@ pub(crate) enum Refused {
 impl Refused {
     pub(crate) fn short(&self) -> String {
         match self {
-            Refused::NotOurs => "Failed. Not a Torch assets file".to_owned(),
+            Refused::NotOurs => crate::lang::tr!("install.refused.not_ours").to_owned(),
             Refused::Version(v) => {
                 let v: String = v
                     .chars()
                     .filter(|c| c.is_ascii_alphanumeric() || *c == '.')
                     .collect();
                 if v.is_empty() {
-                    format!("Failed. Not made for {}", crate::ASSET_VERSION)
+                    crate::lang::trf!("install.refused.not_for", crate::ASSET_VERSION)
                 } else {
-                    format!("Failed. Made for {v} not {}", crate::ASSET_VERSION)
+                    crate::lang::trf!("install.refused.made_for", v, crate::ASSET_VERSION)
                 }
             }
-            Refused::Empty => "Failed. The file holds nothing".to_owned(),
+            Refused::Empty => crate::lang::tr!("install.refused.empty").to_owned(),
         }
     }
 
     pub(crate) fn long(&self) -> String {
         match self {
-            Refused::NotOurs => "not a Torch assets file".to_owned(),
-            Refused::Version(v) => format!("made for {v}, this needs {}", crate::ASSET_VERSION),
-            Refused::Empty => "the file holds nothing to import".to_owned(),
+            Refused::NotOurs => crate::lang::tr!("asset_export.refused.not_ours").to_owned(),
+            Refused::Version(v) => {
+                crate::lang::trf!("asset_export.refused.version", v, crate::ASSET_VERSION)
+            }
+            Refused::Empty => crate::lang::tr!("asset_export.refused.empty").to_owned(),
         }
     }
 }
@@ -390,10 +392,16 @@ pub(crate) fn import_into_running(bytes: &[u8]) -> Result<String, Refused> {
     }
     super::MISSING.store(0, Ordering::Relaxed);
 
-    let mut line = format!("Imported: {}", words(parts, ", "));
-    if reload {
-        line.push_str(". Reload the page to use them");
-    }
-    log_info!("assets", "{line}");
-    Ok(line)
+    let key = if reload {
+        const { crate::lang::Key::of("asset_export.imported_reload") }
+    } else {
+        const { crate::lang::Key::of("asset_export.imported") }
+    };
+    let args = [words(parts, ", ")];
+    log_info!(
+        "assets",
+        "{}",
+        crate::util::placeholders::substitute(key.english(), &args)
+    );
+    Ok(crate::util::placeholders::substitute(key.get(), &args))
 }

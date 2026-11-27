@@ -186,7 +186,8 @@ impl ClickGuiState {
             return;
         }
         if !t.swiping {
-            if (m.y - at.y).abs() <= TAP_SLOP {
+            let (dx, dy) = ((m.x - at.x).abs(), (m.y - at.y).abs());
+            if dy <= TAP_SLOP || dx > dy {
                 return;
             }
             t.swiping = true;
@@ -270,6 +271,7 @@ impl ClickGuiState {
                     if on { look.accent() } else { look.row_hover() },
                 );
             }
+            let name = name.get();
             let lw = p.atlas.font.width_str(name);
             p.text_plain(
                 name,
@@ -336,8 +338,8 @@ impl ClickGuiState {
         self.record(Focus::On(Window::Overlay), fx, y, fw, h);
         self.band = (fy, fy + fh);
 
-        const DONE: &str = "Done";
-        let bw = (p.atlas.font.width_str(DONE) + 2.0 * TAB_PAD).floor();
+        let done = crate::lang::tr!("clickgui.done");
+        let bw = (p.atlas.font.width_str(done) + 2.0 * TAB_PAD).floor();
         let (bx, by) = (fx + PAD, y + ((HEAD_H - BUTTON_H) * 0.5).floor());
         let lit = self.lit(ui, bx, by, bw, BUTTON_H, active);
         p.rounded_rect(
@@ -349,7 +351,7 @@ impl ClickGuiState {
             if lit { look.accent_hi() } else { look.accent() },
         );
         p.text_plain(
-            DONE,
+            done,
             bx + TAB_PAD,
             text_y(by, BUTTON_H),
             theme::TEXT_ON,
@@ -409,7 +411,7 @@ impl ClickGuiState {
             y + PAD,
             sw,
             FIELD_H,
-            "Search modules",
+            crate::lang::tr!("clickgui.panel.search_hint"),
         );
         self.close_button(p, ui, active);
 
@@ -498,7 +500,7 @@ impl ClickGuiState {
                 p.text_plain(&self.scratch, bx + bw - 5.0 - nw, ty, dim, look.shadow);
             }
             let text = if on { theme::TEXT_ON } else { look.text() };
-            self.label(p, cat.name(), bx + 5.0, ty, bw - 14.0 - nw, text);
+            self.label(p, cat.label(), bx + 5.0, ty, bw - 14.0 - nw, text);
             if self.press(ui, bx, by, bw, bh, active) {
                 self.pick_category(i);
             }
@@ -545,9 +547,9 @@ impl ClickGuiState {
         self.matches = matches;
         if n == 0 {
             let line = if searching {
-                "No match"
+                crate::lang::tr!("clickgui.no_match")
             } else {
-                "Nothing the profile allows"
+                crate::lang::tr!("clickgui.panel.nothing_allowed")
             };
             self.label(p, line, x + 8.0, y + PAD + 2.0, w - 16.0, look.text_dim());
         }
@@ -597,11 +599,12 @@ impl ClickGuiState {
             p.outline(x, y, w, CARD_H, look.accent_hi());
         }
         let (tx, tw) = (x + PAD + 2.0, bw - PAD - 4.0);
-        self.label(p, m.name, tx, y + PAD + 2.0, tw, look.text_title());
-        self.wrap(p, m.desc, tw);
+        self.label(p, m.label(), tx, y + PAD + 2.0, tw, look.text_title());
+        let desc = m.about();
+        self.wrap(p, desc, tw);
         let mut ly = y + PAD + 14.0;
         for &(a, b) in self.tip_lines.iter().take(DESC_LINES) {
-            p.text_plain(&m.desc[a..b], tx, ly, look.text_dim(), look.shadow);
+            p.text_plain(&desc[a..b], tx, ly, look.text_dim(), look.shadow);
             ly += DESC_LINE;
         }
 
@@ -644,14 +647,14 @@ impl ClickGuiState {
         self.band = (y, y + h);
         let top = y - scroll;
 
-        const BACK: &str = "Back";
+        let back = crate::lang::tr!("clickgui.back");
         let (bx, by) = (x + PAD, top + ((HEAD_H - BUTTON_H) * 0.5).floor());
-        let bw = (p.atlas.font.width_str(BACK) + 2.0 * TAB_PAD).floor();
+        let bw = (p.atlas.font.width_str(back) + 2.0 * TAB_PAD).floor();
         let lit = self.lit(ui, bx, by, bw, BUTTON_H, active);
         let fill = if lit { look.nest_hi() } else { look.header() };
         p.rounded_rect(bx, by, bw, BUTTON_H, TAB_RADIUS, fill);
         p.text_plain(
-            BACK,
+            back,
             bx + TAB_PAD,
             text_y(by, BUTTON_H),
             look.text(),
@@ -664,7 +667,7 @@ impl ClickGuiState {
         let nx = bx + bw + 6.0;
         self.label(
             p,
-            module(id).name,
+            module(id).label(),
             nx,
             text_y(top, HEAD_H),
             sx - 6.0 - nx,

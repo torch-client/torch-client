@@ -1,5 +1,7 @@
 pub mod basic;
 pub mod parkour;
+pub mod place;
+pub mod swim;
 pub mod uncommon;
 
 use std::{
@@ -29,7 +31,8 @@ use super::{
     custom_state::CustomPathfinderStateRef,
     mining::MiningCache,
     positions::RelBlockPos,
-    world::{CachedWorld, is_block_state_passable},
+    placing::PlaceRules,
+    world::{CachedWorld, is_block_state_passable, is_block_state_standable},
 };
 use crate::{
     auto_tool::best_tool_in_hotbar_for_block,
@@ -47,6 +50,7 @@ pub fn default_move(ctx: &mut MovesCtx, node: RelBlockPos) {
     basic::basic_move(ctx, node);
     parkour::parkour_move(ctx, node);
     uncommon::uncommon_move(ctx, node);
+    place::place_move(ctx, node);
 }
 
 #[derive(Clone)]
@@ -89,11 +93,17 @@ pub struct ExecutorIntent {
     pub jump: bool,
     pub sneak: bool,
     pub mine: Option<BlockPos>,
+    pub place: Option<BlockPos>,
     walk: WalkDirection,
+    walk_world: Option<(f64, f64)>,
 }
 
 impl ExecutorIntent {
     pub fn resolve(&mut self, position: Vec3, look: Option<&LookDirection>) {
+        if let Some(dir) = self.walk_world {
+            self.world_dir = Some(dir);
+            return;
+        }
         let offset = match self.walk {
             WalkDirection::None => {
                 self.world_dir = None;
@@ -157,6 +167,7 @@ impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
         if let Some(intent) = self.intent.as_deref_mut() {
             intent.walk = WalkDirection::from(direction);
             intent.sprint = true;
+            intent.walk_world = None;
             return;
         }
         self.sprint_events.write(StartSprintEvent {
@@ -169,12 +180,45 @@ impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
         if let Some(intent) = self.intent.as_deref_mut() {
             intent.walk = direction;
             intent.sprint = false;
+            intent.walk_world = None;
             return;
         }
         self.walk_events.write(StartWalkEvent {
             entity: self.entity,
             direction,
         });
+    }
+
+    pub fn walk_world(&mut self, dx: f64, dz: f64) {
+        let len = (dx * dx + dz * dz).sqrt();
+        if len < 1e-6 {
+            self.walk(WalkDirection::None);
+            return;
+        }
+        let dir = (dx / len, dz / len);
+        if let Some(intent) = self.intent.as_deref_mut() {
+            intent.walk = WalkDirection::None;
+            intent.sprint = false;
+            intent.walk_world = Some(dir);
+            return;
+        }
+        let ahead = self.position + Vec3::new(dir.0, 0., dir.1);
+        self.look_at(ahead);
+        self.walk(WalkDirection::Forward);
+    }
+
+    pub fn place(&mut self, cell: BlockPos) -> bool {
+        if self.intent.is_none() {
+            return false;
+        }
+        let state = self.world.read().get_block_state(cell).unwrap_or_default();
+        if is_block_state_standable(state) {
+            return false;
+        }
+        if let Some(intent) = self.intent.as_deref_mut() {
+            intent.place = Some(cell);
+        }
+        true
     }
 
     pub fn jump(&mut self) {
@@ -323,4 +367,5 @@ pub struct MovesCtx<'a> {
     pub world: &'a CachedWorld,
     pub mining_cache: &'a MiningCache,
     pub custom_state: &'a CustomPathfinderStateRef,
+    pub placing: Option<&'a dyn PlaceRules>,
 }

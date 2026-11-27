@@ -2,9 +2,12 @@ use bevy::asset::RenderAssetUsages;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
+use std::sync::Arc;
+
 use crate::client::tracking::{MAP_BYTES, MAP_EDGE};
-use crate::session::MapDecoration;
-use crate::util::map_color::rgba_from_packed_id;
+use crate::session::{MapDecoration, SideMutex};
+use crate::util::global;
+use crate::util::map_color::PACKED_RGBA;
 use crate::util::mth::DEG_TO_RAD;
 
 pub const MAP_TEXTURE_PREFIX: &str = "map/";
@@ -73,31 +76,51 @@ const DECORATION_Z_OFFSET: f32 = -0.001;
 
 const DECORATION_SCALE: [f32; 3] = [4.0, 4.0, 3.0];
 
+pub fn marker_pose(decoration: &MapDecoration) -> bevy::math::Affine2 {
+    use bevy::math::{Affine2, Vec2};
+    let turn = decoration.rot as f32 * 360.0 / 16.0;
+    Affine2::from_translation(Vec2::new(
+        decoration.x as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0,
+        decoration.y as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0,
+    )) * Affine2::from_angle(turn * DEG_TO_RAD)
+        * Affine2::from_scale(Vec2::new(DECORATION_SCALE[0], DECORATION_SCALE[1]))
+        * Affine2::from_translation(Vec2::new(-0.125, 0.125))
+}
+
 struct MapEntry {
     image: Handle<Image>,
-    decorations: std::sync::Arc<Vec<MapDecoration>>,
+    decorations: Arc<Vec<MapDecoration>>,
+    markers: u32,
     revision: u32,
+}
+
+global! {
+fn entries() -> SideMutex<HashMap<i32, MapEntry>>
 }
 
 #[derive(Resource, Default)]
 pub struct MapTextures {
-    by_id: HashMap<i32, MapEntry>,
     sheet: Option<Handle<Image>>,
 }
 
 impl MapTextures {
     pub fn get(&self, texture: &str) -> Option<Handle<Image>> {
         let id: i32 = texture.strip_prefix(MAP_TEXTURE_PREFIX)?.parse().ok()?;
-        self.by_id.get(&id).map(|entry| entry.image.clone())
+        self.image(id)
     }
 
     pub fn image(&self, id: i32) -> Option<Handle<Image>> {
-        self.by_id.get(&id).map(|entry| entry.image.clone())
+        entries()
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|entry| entry.image.clone())
     }
 
-    pub fn decorations(&self, id: i32) -> Option<(&[MapDecoration], u32)> {
-        let entry = self.by_id.get(&id)?;
-        Some((&entry.decorations, entry.revision))
+    pub fn decorations(&self, id: i32) -> Option<(Arc<Vec<MapDecoration>>, u32)> {
+        let entries = entries().lock().unwrap();
+        let entry = entries.get(&id)?;
+        Some((entry.decorations.clone(), entry.markers))
     }
 
     pub fn decoration_sheet(&mut self, images: &mut Assets<Image>) -> Handle<Image> {
@@ -111,23 +134,45 @@ impl MapTextures {
     }
 }
 
+pub fn gui_map(id: i32) -> Option<(Arc<Vec<MapDecoration>>, u32)> {
+    let entries = entries().lock().unwrap();
+    let entry = entries.get(&id)?;
+    Some((entry.decorations.clone(), entry.revision))
+}
+
+pub fn image_id(id: i32) -> Option<AssetId<Image>> {
+    entries()
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map(|entry| entry.image.id())
+}
+
+pub fn revision(id: i32) -> u32 {
+    entries()
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map_or(0, |entry| entry.revision)
+}
+
 fn build_decoration_sheet(images: &mut Assets<Image>) -> Handle<Image> {
-    let sheet = decoration_pixels();
+    let sheet = decoration_pixels(crate::assets_root());
     let handle = images.add(crate::renderer::rgba_image(
         sheet.width(),
         sheet.height(),
         sheet.into_raw(),
         RenderAssetUsages::RENDER_WORLD,
     ));
-    crate::renderer::reload::track(&handle, || Some(decoration_pixels()));
+    crate::renderer::reload::track(&handle, || Some(decoration_pixels(crate::assets_root())));
     handle
 }
 
-fn decoration_pixels() -> image::RgbaImage {
+pub(crate) fn decoration_pixels(assets: &std::path::Path) -> image::RgbaImage {
     let count = DECORATION_TYPES.len() as u32;
     let width = count * DECORATION_PX;
     let mut pixels = vec![0u8; (width * DECORATION_PX * 4) as usize];
-    let dir = crate::assets_root().join("textures/map/decorations");
+    let dir = assets.join("textures/map/decorations");
     for (index, name) in DECORATION_TYPES.iter().map(|t| t.sprite).enumerate() {
         let path = dir.join(format!("{name}.png"));
         let decoded = match crate::platform::assets::open_gui_image(&path) {
@@ -169,16 +214,12 @@ pub fn decoration_mesh(decorations: &[MapDecoration]) -> Mesh {
         let Some((u0, u1)) = decoration_uv(decoration.kind) else {
             continue;
         };
-        let turn = decoration.rot as f32 * 360.0 / 16.0;
-        let pose = Mat4::from_translation(Vec3::new(
-            decoration.x as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0,
-            decoration.y as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0,
-            DECORATION_Z,
-        )) * Mat4::from_rotation_z(turn * DEG_TO_RAD)
-            * Mat4::from_scale(Vec3::from(DECORATION_SCALE))
-            * Mat4::from_translation(Vec3::new(-0.125, 0.125, 0.0));
-        let z = count as f32 * DECORATION_Z_OFFSET;
-        let corner = |x: f32, y: f32| pose.transform_point3(Vec3::new(x, y, z)).to_array();
+        let pose = marker_pose(decoration);
+        let z = DECORATION_Z + DECORATION_SCALE[2] * count as f32 * DECORATION_Z_OFFSET;
+        let corner = |x: f32, y: f32| {
+            let p = pose.transform_point2(Vec2::new(x, y));
+            [p.x, p.y, z]
+        };
         out.quad(
             [
                 corner(-1.0, 1.0),
@@ -199,6 +240,23 @@ const LABEL_BACKGROUND: u32 = 0x8000_0000;
 const LABEL_MAX_SCALE: f32 = 6.0 / 9.0;
 const LABEL_DROP: f32 = 4.0;
 
+pub fn label_place(decoration: &MapDecoration, width: f32) -> (f32, f32, f32) {
+    let scale = (25.0 / width).clamp(0.0, LABEL_MAX_SCALE);
+    let x = decoration.x as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0 - width * scale / 2.0;
+    let y = decoration.y as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0 + LABEL_DROP;
+    (x, y, scale)
+}
+
+pub fn paint_label_plate(painter: &mut crate::gui::painter::Painter, width: f32) {
+    painter.fill(
+        -1.0,
+        -1.0,
+        width + 1.0,
+        crate::text::LINE_HEIGHT + 1.0,
+        LABEL_BACKGROUND,
+    );
+}
+
 pub fn paint_labels(
     painter: &mut crate::gui::painter::Painter,
     decorations: &[MapDecoration],
@@ -209,17 +267,9 @@ pub fn paint_labels(
             continue;
         };
         let width = painter.atlas.font.width(name);
-        let scale = (25.0 / width).clamp(0.0, LABEL_MAX_SCALE);
-        let x = decoration.x as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0 - width * scale / 2.0;
-        let y = decoration.y as f32 / 2.0 + MAP_EDGE_PIXELS / 2.0 + LABEL_DROP;
+        let (x, y, scale) = label_place(decoration, width);
         let plate = painter.positions.len();
-        painter.fill(
-            -1.0,
-            -1.0,
-            width + 1.0,
-            crate::text::LINE_HEIGHT + 1.0,
-            LABEL_BACKGROUND,
-        );
+        paint_label_plate(painter, width);
         let glyphs = painter.positions.len();
         painter.text(name, 0.0, 0.0, false);
         for (i, position) in painter.positions[plate..].iter_mut().enumerate() {
@@ -253,48 +303,65 @@ pub fn upload_maps(
         )
     };
     if cleared {
-        maps.by_id.clear();
+        entries().lock().unwrap().clear();
     }
     for update in updates {
-        if update.colors.len() != MAP_BYTES {
-            continue;
-        }
-        let mut pixels = Vec::with_capacity(MAP_BYTES * 4);
-        for packed in update.colors.iter() {
-            pixels.extend_from_slice(&rgba_from_packed_id(*packed));
-        }
-        let existing = maps.by_id.get(&update.id).map(|entry| entry.image.clone());
-        match existing.filter(|h| images.contains(h)) {
-            Some(handle) => {
-                if let Some(mut image) = images.get_mut(&handle) {
-                    image.data = Some(pixels);
+        let existing = entries()
+            .lock()
+            .unwrap()
+            .get(&update.id)
+            .map(|entry| entry.image.clone())
+            .filter(|h| images.contains(h));
+        if existing.is_none() || !update.dirty.is_empty() {
+            let Some(pixels) = crate::client::tracking::with_map_colors(update.id, map_pixels)
+            else {
+                continue;
+            };
+            match existing {
+                Some(handle) => {
+                    if let Some(mut image) = images.get_mut(&handle) {
+                        image.data = Some(pixels);
+                    }
+                }
+                None => {
+                    let handle = images.add(crate::renderer::rgba_image(
+                        MAP_EDGE as u32,
+                        MAP_EDGE as u32,
+                        pixels,
+                        RenderAssetUsages::RENDER_WORLD,
+                    ));
+                    entries()
+                        .lock()
+                        .unwrap()
+                        .entry(update.id)
+                        .and_modify(|entry| entry.image = handle.clone())
+                        .or_insert_with(|| MapEntry {
+                            image: handle,
+                            decorations: Arc::default(),
+                            markers: 0,
+                            revision: 0,
+                        });
                 }
             }
-            None => {
-                let usage = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
-                let handle = images.add(crate::renderer::rgba_image(
-                    MAP_EDGE as u32,
-                    MAP_EDGE as u32,
-                    pixels,
-                    usage,
-                ));
-                maps.by_id.insert(
-                    update.id,
-                    MapEntry {
-                        image: handle,
-                        decorations: std::sync::Arc::default(),
-                        revision: 0,
-                    },
-                );
-            }
         }
-        if let Some(decorations) = update.decorations
-            && let Some(entry) = maps.by_id.get_mut(&update.id)
-        {
+        let mut entries = entries().lock().unwrap();
+        let Some(entry) = entries.get_mut(&update.id) else {
+            continue;
+        };
+        entry.revision = entry.revision.wrapping_add(1);
+        if let Some(decorations) = update.decorations {
             entry.decorations = decorations;
-            entry.revision = entry.revision.wrapping_add(1);
+            entry.markers = entry.markers.wrapping_add(1);
         }
     }
+}
+
+fn map_pixels(colors: &[u8; MAP_BYTES]) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(MAP_BYTES * 4);
+    for &packed in colors.iter() {
+        pixels.extend_from_slice(&PACKED_RGBA[packed as usize]);
+    }
+    pixels
 }
 
 #[cfg(test)]

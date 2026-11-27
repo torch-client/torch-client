@@ -113,6 +113,7 @@ pub enum SystemId {
     ChunkLoadFailure,
     ChunkSaveFailure,
     UnsecureServerWarning,
+    HiddenHashedSeed,
 }
 
 pub enum ToastEvent {

@@ -71,6 +71,21 @@ impl Problem {
     }
 }
 
+const SUMMARY_SHOWN: usize = 3;
+
+pub(crate) fn summary(problems: &[Problem]) -> String {
+    let mut text = problems
+        .iter()
+        .take(SUMMARY_SHOWN)
+        .map(Problem::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    if problems.len() > SUMMARY_SHOWN {
+        text.push_str(&format!("; and {} more", problems.len() - SUMMARY_SHOWN));
+    }
+    text
+}
+
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (self.file.is_empty(), self.at) {
@@ -105,5 +120,12 @@ mod tests {
         let p = Problem::at("a.wgsl", "x\ny", 2, "bad").hint("fix");
         assert_eq!(p.to_string(), "a.wgsl:2:1: bad (fix)");
         assert_eq!(Problem::package("too big").to_string(), "too big");
+    }
+
+    #[test]
+    fn a_summary_names_three_and_counts_the_rest() {
+        let problems: Vec<Problem> = (0..5).map(|n| Problem::package(format!("p{n}"))).collect();
+        assert_eq!(summary(&problems), "p0; p1; p2; and 2 more");
+        assert_eq!(summary(&problems[..1]), "p0");
     }
 }

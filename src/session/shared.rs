@@ -9,6 +9,16 @@ pub struct VehicleLook {
 
 pub static SESSION_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+pub struct Transfer {
+    pub host: String,
+    pub port: u16,
+    pub cookies: std::collections::HashMap<azalea_registry::identifier::Identifier, Vec<u8>>,
+    pub server_packs: crate::client::server_packs::ServerPacks,
+    pub pack_address: Option<String>,
+    pub ready: bool,
+    pub claimed: bool,
+}
+
 #[derive(Default)]
 pub struct SharedState {
     pub camera_yaw: f32,
@@ -19,6 +29,8 @@ pub struct SharedState {
     pub hand_move_keys: u8,
     pub screen_open: bool,
     pub pause_screen: bool,
+    pub chat_screen: bool,
+    pub slot_screen: bool,
     pub profiling: ChunkProfiling,
     pub quit_requested: bool,
     pub disconnect_requested: bool,
@@ -27,6 +39,8 @@ pub struct SharedState {
     pub session_epoch: u64,
     pub end_notice: Option<String>,
     pub disconnect_reason: Option<Vec<crate::text::Span>>,
+    pub transfer: Option<Box<Transfer>>,
+    pub transfer_unseen: bool,
     pub reload_chunks_requested: bool,
     pub remesh_chunks_requested: bool,
     pub leave_bed_requested: bool,
@@ -49,7 +63,7 @@ impl SharedState {
                 Some(spans) if !spans.is_empty() => {
                     spans.iter().map(|span| span.text.as_str()).collect()
                 }
-                _ => "Connection lost".to_string(),
+                _ => crate::lang::tr!("client.status.connection_lost").to_string(),
             });
             self.disconnect_reason = reason;
         }

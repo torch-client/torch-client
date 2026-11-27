@@ -52,10 +52,10 @@ impl EndClock {
     }
 
     pub(crate) fn tick(&mut self, game_time: i64) -> i64 {
-        let next =
-            f64::from(self.partial) + (game_time - self.game_time) as f64 * f64::from(self.rate);
+        let passed = game_time.wrapping_sub(self.game_time) as f64;
+        let next = f64::from(self.partial) + passed * f64::from(self.rate);
         self.partial = (next - next.floor()) as f32;
-        self.ticks += next.floor() as i64;
+        self.ticks = self.ticks.wrapping_add(next.floor() as i64);
         self.game_time = game_time;
         self.ticks
     }
@@ -101,7 +101,7 @@ pub(crate) fn intensity(clock_time: i64) -> f32 {
 pub(crate) fn at(clock_ticks: f64) -> EndFlash {
     let tick = clock_ticks.floor() as i64;
     let partial = (clock_ticks - clock_ticks.floor()) as f32;
-    let (old, new) = (intensity(tick - 1), intensity(tick));
+    let (old, new) = (intensity(tick.wrapping_sub(1)), intensity(tick));
     let flash = flash(tick);
     EndFlash {
         intensity: old + (new - old) * partial,

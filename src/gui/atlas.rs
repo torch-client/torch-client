@@ -982,6 +982,13 @@ pub fn build_gui_atlas(assets: &Path) -> GuiAtlas {
 
     entries.extend(bake_banner_layers(assets));
 
+    entries.push(Entry {
+        kind: Kind::Sheet,
+        key: crate::renderer::maps::DECORATION_ATLAS.to_string(),
+        image: crate::renderer::maps::decoration_pixels(assets),
+        scaling: Scaling::Stretch,
+    });
+
     if let Some(sga) = load_sga(assets) {
         entries.push(sga);
     }

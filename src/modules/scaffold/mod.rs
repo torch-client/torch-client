@@ -1,4 +1,4 @@
-mod aim;
+pub(in crate::modules) mod aim;
 mod legit;
 mod target;
 mod tower;
@@ -356,10 +356,7 @@ fn snapshot(bot: &Client, camera: Look, flags: u8) -> Option<Snap> {
 }
 
 fn block_of(stack: &ItemStack) -> Option<BlockKind> {
-    let ItemStack::Present(item) = stack else {
-        return None;
-    };
-    BlockKind::from_str(item.kind.to_str())
+    BlockKind::from_str(stack.known_kind()?.to_str())
         .ok()
         .filter(|&k| k != BlockKind::Air)
 }

@@ -119,6 +119,7 @@ fn swar_word(
 #[derive(Default)]
 pub struct Scratch {
     rows: Vec<u16>,
+    seam: HashMap<[i32; 3], u16>,
 }
 
 pub fn scan(
@@ -135,6 +136,7 @@ pub fn scan(
 ) -> bool {
     crate::prof_span!("modules:esp_scan");
     out.clear();
+    scratch.seam.clear();
     let range = table.max_range;
     let mut full = false;
     let mut pending: Vec<(usize, u8)> = Vec::new();
@@ -293,17 +295,41 @@ pub fn scan(
         neighbours(&mut out[column_start..], &scratch.rows, min_y, sections);
         for f in &out[column_start..] {
             let (lx, lz) = ((f.x - bx) as usize, (f.z - bz) as usize);
-            let gy = (f.y - min_y) as usize;
-            scratch.rows[gy * 256 + lz * 16 + lx] = NO_ROW;
+            let at = (f.y - min_y) as usize * 256 + lz * 16 + lx;
+            if lx == 0 || lx == 15 || lz == 0 || lz == 15 {
+                scratch.seam.insert([f.x, f.y, f.z], scratch.rows[at]);
+            }
+            scratch.rows[at] = NO_ROW;
         }
         if full {
             break;
         }
     }
     if !pending.is_empty() {
-        settle_pending(chunks, min_y, &pending, out);
+        settle_pending(chunks, min_y, &pending, out, &mut scratch.seam);
     }
+    join_seams(out, &scratch.seam);
     full
+}
+
+fn join_seams(found: &mut [Found], seam: &HashMap<[i32; 3], u16>) {
+    if seam.is_empty() {
+        return;
+    }
+    for f in found.iter_mut() {
+        let Some(&mine) = seam.get(&[f.x, f.y, f.z]) else {
+            continue;
+        };
+        let (lx, lz) = (f.x.rem_euclid(16), f.z.rem_euclid(16));
+        for &(bit, dx, dy, dz) in &NEIGHBOURS {
+            if (0..16).contains(&(lx + dx)) && (0..16).contains(&(lz + dz)) {
+                continue;
+            }
+            if seam.get(&[f.x + dx, f.y + dy, f.z + dz]) == Some(&mine) {
+                f.neigh |= bit;
+            }
+        }
+    }
 }
 
 const FACES: [[i32; 3]; 6] = [
@@ -346,6 +372,7 @@ fn settle_pending(
     min_y: i32,
     pending: &[(usize, u8)],
     out: &mut Vec<Found>,
+    seam: &mut HashMap<[i32; 3], u16>,
 ) {
     let index: HashMap<ChunkPos, usize> = chunks
         .iter()
@@ -371,6 +398,7 @@ fn settle_pending(
             });
         if !open {
             dropped.push(i);
+            seam.remove(&[f.x, f.y, f.z]);
         }
     }
     if dropped.is_empty() {
@@ -402,26 +430,7 @@ fn neighbours(found: &mut [Found], rows: &[u16], min_y: i32, sections: usize) {
             rows[(y * 256 + z * 16 + x) as usize] == mine
         };
         let mut n = 0;
-        for (bit, dx, dy, dz) in [
-            (FO, 0, 0, 1),
-            (BA, 0, 0, -1),
-            (RI, 1, 0, 0),
-            (LE, -1, 0, 0),
-            (TO, 0, 1, 0),
-            (BO, 0, -1, 0),
-            (FO_RI, 1, 0, 1),
-            (FO_LE, -1, 0, 1),
-            (BA_RI, 1, 0, -1),
-            (BA_LE, -1, 0, -1),
-            (TO_FO, 0, 1, 1),
-            (TO_BA, 0, 1, -1),
-            (TO_RI, 1, 1, 0),
-            (TO_LE, -1, 1, 0),
-            (BO_FO, 0, -1, 1),
-            (BO_BA, 0, -1, -1),
-            (BO_RI, 1, -1, 0),
-            (BO_LE, -1, -1, 0),
-        ] {
+        for &(bit, dx, dy, dz) in &NEIGHBOURS {
             if same(dx, dy, dz) {
                 n |= bit;
             }
@@ -429,6 +438,27 @@ fn neighbours(found: &mut [Found], rows: &[u16], min_y: i32, sections: usize) {
         f.neigh = n;
     }
 }
+
+const NEIGHBOURS: [(u32, i32, i32, i32); 18] = [
+    (FO, 0, 0, 1),
+    (BA, 0, 0, -1),
+    (RI, 1, 0, 0),
+    (LE, -1, 0, 0),
+    (TO, 0, 1, 0),
+    (BO, 0, -1, 0),
+    (FO_RI, 1, 0, 1),
+    (FO_LE, -1, 0, 1),
+    (BA_RI, 1, 0, -1),
+    (BA_LE, -1, 0, -1),
+    (TO_FO, 0, 1, 1),
+    (TO_BA, 0, 1, -1),
+    (TO_RI, 1, 1, 0),
+    (TO_LE, -1, 1, 0),
+    (BO_FO, 0, -1, 1),
+    (BO_BA, 0, -1, -1),
+    (BO_RI, 1, -1, 0),
+    (BO_LE, -1, -1, 0),
+];
 
 #[cfg(test)]
 mod tests {
@@ -524,6 +554,20 @@ mod tests {
         neighbours(&mut two, &rows, -64, 16);
         assert_eq!(two[0].neigh, TO);
         assert_eq!(two[1].neigh, BO);
+    }
+
+    #[test]
+    fn a_chunk_border_is_not_a_seam() {
+        let mut seam = HashMap::new();
+        seam.insert([15, 5, 3], 4u16);
+        seam.insert([16, 5, 3], 4);
+        seam.insert([16, 5, 4], 4);
+        seam.insert([-1, 5, 3], 9);
+        let mut blocks = [found(15, 5, 3), found(16, 5, 3), found(0, 5, 3)];
+        join_seams(&mut blocks, &seam);
+        assert_eq!(blocks[0].neigh, RI | FO_RI);
+        assert_eq!(blocks[1].neigh, LE);
+        assert_eq!(blocks[2].neigh, 0, "not in seam, nothing to look up");
     }
 
     #[test]

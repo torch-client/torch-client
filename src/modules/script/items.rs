@@ -1,12 +1,13 @@
-use std::io::Cursor;
 use std::str::FromStr;
 
 use azalea::Client;
 use azalea_core::registry_holder::RegistryHolder;
-use azalea_inventory::components::{self as comp, DataComponentUnion};
+use azalea_inventory::components as comp;
 use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::builtin::DataComponentKind;
 use mlua::{Error, Lua, Table, Value};
+
+use crate::play::item_components::{TYPED, checked_enchantments, key, raw_union};
 
 #[derive(Clone, Copy)]
 pub(super) enum Slot {
@@ -60,15 +61,6 @@ pub(super) fn with_registries<R>(bot: &Client, f: impl FnOnce(Option<&RegistryHo
     match bot.world() {
         Ok(w) => f(Some(&w.read().registries)),
         Err(_) => f(None),
-    }
-}
-
-fn key(kind: DataComponentKind) -> String {
-    let s = kind.to_string();
-    if s.contains(':') {
-        s
-    } else {
-        format!("minecraft:{s}")
     }
 }
 
@@ -176,24 +168,6 @@ pub(super) fn read(lua: &Lua, bot: &Client, slot: Slot, raw: bool) -> mlua::Resu
     })
 }
 
-const TYPED: [&str; 15] = [
-    "custom_name",
-    "item_name",
-    "lore",
-    "custom_data",
-    "block_entity_data",
-    "entity_data",
-    "damage",
-    "max_damage",
-    "max_stack_size",
-    "repair_cost",
-    "unbreakable",
-    "enchantment_glint_override",
-    "enchantments",
-    "stored_enchantments",
-    "dyed_color",
-];
-
 fn text(v: &Value, path: &str) -> Result<azalea_chat::FormattedText, String> {
     match v {
         Value::String(s) => Ok(azalea_chat::FormattedText::from(s.to_string_lossy())),
@@ -248,29 +222,10 @@ fn enchantments(
     for pair in t.pairs::<String, Value>() {
         let (name, lvl) = pair.map_err(|_| format!("{path} is a table of name = level"))?;
         let lvl = int(&lvl, &format!("{path}.{name}"))?;
-        if !(1..=255).contains(&lvl) {
-            return Err(format!("{path}.{name}: a level is 1 to 255"));
-        }
         let bare = name.strip_prefix("minecraft:").unwrap_or(&name).to_string();
         pairs.push((bare, lvl));
     }
-    let out = crate::play::inventory_bridge::resolve_enchantments(registries, &pairs);
-    if out.len() != pairs.len() {
-        let known: Vec<String> = out
-            .keys()
-            .map(|e| crate::play::inventory_bridge::enchantment_name(registries, e))
-            .collect();
-        let missing: Vec<&str> = pairs
-            .iter()
-            .map(|(n, _)| n.as_str())
-            .filter(|n| !known.iter().any(|k| k == n))
-            .collect();
-        return Err(format!(
-            "{path}: the server has no enchantment {}",
-            missing.join(", ")
-        ));
-    }
-    Ok(out)
+    checked_enchantments(&pairs, path, registries)
 }
 
 fn typed(
@@ -355,25 +310,6 @@ fn typed(
     })
 }
 
-fn raw_union(
-    kind: DataComponentKind,
-    bytes: &[u8],
-    path: &str,
-) -> Result<DataComponentUnion, String> {
-    let mut cursor = Cursor::new(bytes);
-    let union = DataComponentUnion::azalea_read_as(kind, &mut cursor)
-        .map_err(|e| format!("{path}.raw did not parse as {}: {e}", key(kind)))?;
-    let left = bytes.len() - cursor.position() as usize;
-    if left != 0 {
-        let mut union = union;
-        unsafe { union.drop_as(kind) };
-        return Err(format!(
-            "{path}.raw has {left} bytes past the component's end"
-        ));
-    }
-    Ok(union)
-}
-
 pub(super) fn apply(
     mut stack: ItemStack,
     spec: &Table,
@@ -401,7 +337,7 @@ pub(super) fn apply(
             return Ok(stack);
         };
         if let Some(bytes) = raw {
-            let union = raw_union(kind, &bytes, &path).map_err(fail)?;
+            let union = raw_union(kind, &bytes, &format!("{path}.raw")).map_err(fail)?;
             unsafe {
                 data.component_patch
                     .unchecked_insert_component(kind, Some(union))

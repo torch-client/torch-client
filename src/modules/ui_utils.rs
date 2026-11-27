@@ -21,6 +21,7 @@ use crate::gui::painter::Painter;
 use crate::gui::render::GuiInput;
 use crate::gui::widgets::{Button, TextBox, WIDGET_HEIGHT};
 use crate::gui::{GuiState, Screen, ScreenCtx};
+use crate::lang::{Key, tr, trf};
 use crate::session::{SESSION_EPOCH, SessionState, SharedMutex};
 
 static SEND: AtomicBool = AtomicBool::new(true);
@@ -233,32 +234,23 @@ fn flush(bot: &Client, shared: &SharedMutex) {
         for packet in packets {
             send_bypass(bot, packet);
         }
-        say(shared, &format!("Sent {n} packets."), GREEN);
+        say(shared, &trf!("modmsg.ui_utils.sent", n), GREEN);
     } else {
-        say(
-            shared,
-            &format!("Dropped {n} packets (Send packets is off)."),
-            RED,
-        );
+        say(shared, &trf!("modmsg.ui_utils.dropped", n), RED);
     }
 }
 
 fn disconnect(shared: &SharedMutex) {
     let mut s = shared.lock().unwrap();
-    s.end_session(
-        "Disconnected".to_string(),
-        Some(crate::text::parse_formatted("Disconnecting (UI-UTILS)")),
-    );
+    let status = tr!("modmsg.ui_utils.status_disconnected").to_string();
+    let reason = crate::text::parse_formatted(tr!("modmsg.ui_utils.disconnect_reason"));
+    s.end_session(status, Some(reason));
     s.disconnect_requested = true;
 }
 
 fn save(bot: &Client, shared: &SharedMutex, horse: bool) {
     if horse {
-        say(
-            shared,
-            "UI Utils: a mount's inventory cannot be saved.",
-            RED,
-        );
+        say(shared, tr!("modmsg.ui_utils.mount_no_save"), RED);
         return;
     }
     let saved = bot.component::<Inventory>().ok().and_then(|inv| {
@@ -274,13 +266,9 @@ fn save(bot: &Client, shared: &SharedMutex, horse: bool) {
     match saved {
         Some(saved) => {
             *SAVED.lock() = Some(saved);
-            say(shared, "UI Utils: GUI saved.", GREEN);
+            say(shared, tr!("modmsg.ui_utils.saved"), GREEN);
         }
-        None => say(
-            shared,
-            "UI Utils: no server container is open to save.",
-            RED,
-        ),
+        None => say(shared, tr!("modmsg.ui_utils.nothing_to_save"), RED),
     }
 }
 
@@ -304,7 +292,7 @@ fn restore(bot: &Client, shared: &SharedMutex) {
         })
     };
     let Some((id, menu, title, state_id, crafter)) = saved else {
-        say(shared, "UI Utils: no saved GUI.", RED);
+        say(shared, tr!("modmsg.ui_utils.no_saved"), RED);
         return;
     };
     let live = bot
@@ -546,6 +534,7 @@ fn rects(set: Set) -> &'static [(f32, f32, f32, f32)] {
 #[derive(Default)]
 pub struct Overlay {
     chat: Option<TextBox>,
+    chat_lang: u32,
     form: Option<Form>,
     skip_close_packet: bool,
     skip_sign_update: bool,
@@ -676,18 +665,32 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Sha
                 row_y(0),
                 COL_W,
                 WIDGET_HEIGHT,
-                "Close without packet",
+                tr!("modmsg.ui_utils.close_without_packet"),
             );
             if close.draw(p, ctx) {
                 state.ui_utils.skip_sign_update = true;
                 state.nav = Some(Screen::None);
             }
-            if Button::new(COL_X, row_y(1), COL_W, WIDGET_HEIGHT, "Disconnect").draw(p, ctx) {
+            let disconnect = Button::new(
+                COL_X,
+                row_y(1),
+                COL_W,
+                WIDGET_HEIGHT,
+                tr!("modmsg.ui_utils.disconnect"),
+            );
+            if disconnect.draw(p, ctx) {
                 push(shared, Action::Disconnect);
             }
         }
         Set::Sleep => {
-            if Button::new(COL_X, row_y(0), COL_W, WIDGET_HEIGHT, "Client wake up").draw(p, ctx) {
+            let wake = Button::new(
+                COL_X,
+                row_y(0),
+                COL_W,
+                WIDGET_HEIGHT,
+                tr!("modmsg.ui_utils.wake_up"),
+            );
+            if wake.draw(p, ctx) {
                 push(shared, Action::WakeUp);
             }
         }
@@ -717,15 +720,14 @@ fn draw_full(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Sh
         )
     };
 
-    if Button::new(
+    let close = Button::new(
         COL_X,
         row_y(0),
         COL_W,
         WIDGET_HEIGHT,
-        "Close without packet",
-    )
-    .draw(p, &bctx)
-    {
+        tr!("modmsg.ui_utils.close_without_packet"),
+    );
+    if close.draw(p, &bctx) {
         if screen.is_modal() {
             state.ui_utils.skip_close_packet = true;
         }
@@ -735,23 +737,31 @@ fn draw_full(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Sh
         }
         state.nav = Some(Screen::None);
     }
-    if Button::new(COL_X, row_y(1), COL_W, WIDGET_HEIGHT, "De-sync").draw(p, &bctx) {
+    if Button::new(
+        COL_X,
+        row_y(1),
+        COL_W,
+        WIDGET_HEIGHT,
+        tr!("modmsg.ui_utils.desync"),
+    )
+    .draw(p, &bctx)
+    {
         push(shared, Action::Desync);
     }
     let send = SEND.load(Relaxed);
     let label = if send {
-        "Send packets: true"
+        tr!("modmsg.ui_utils.send_packets_on")
     } else {
-        "Send packets: false"
+        tr!("modmsg.ui_utils.send_packets_off")
     };
     if Button::new(COL_X, row_y(2), COL_W, WIDGET_HEIGHT, label).draw(p, &bctx) {
         SEND.store(!send, Relaxed);
     }
     let delay = DELAY.load(Relaxed);
     let label = if delay {
-        "Delay packets: true"
+        tr!("modmsg.ui_utils.delay_packets_on")
     } else {
-        "Delay packets: false"
+        tr!("modmsg.ui_utils.delay_packets_off")
     };
     if Button::new(COL_X, row_y(3), COL_W, WIDGET_HEIGHT, label).draw(p, &bctx) {
         if delay {
@@ -760,38 +770,55 @@ fn draw_full(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared: &Sh
             DELAY.store(true, Relaxed);
         }
     }
-    if Button::new(COL_X, row_y(4), COL_W, WIDGET_HEIGHT, "Save GUI").draw(p, &bctx) {
-        push(shared, Action::Save);
-    }
     if Button::new(
         COL_X,
-        row_y(5),
-        WIDE_W,
+        row_y(4),
+        COL_W,
         WIDGET_HEIGHT,
-        "Disconnect and send packets",
+        tr!("modmsg.ui_utils.save_gui"),
     )
     .draw(p, &bctx)
     {
+        push(shared, Action::Save);
+    }
+    let label = tr!("modmsg.ui_utils.disconnect_and_send");
+    if Button::new(COL_X, row_y(5), WIDE_W, WIDGET_HEIGHT, label).draw(p, &bctx) {
         push(shared, Action::DisconnectAndSend);
     }
-    if Button::new(COL_X, row_y(6), COL_W, WIDGET_HEIGHT, "Fabricate packet").draw(p, &bctx) {
+    if Button::new(
+        COL_X,
+        row_y(6),
+        COL_W,
+        WIDGET_HEIGHT,
+        tr!("modmsg.ui_utils.fabricate"),
+    )
+    .draw(p, &bctx)
+    {
         state.ui_utils.form = Some(Form::choose());
     }
-    if Button::new(COL_X, row_y(7), COL_W, WIDGET_HEIGHT, "Copy GUI Title JSON").draw(p, &bctx) {
+    if Button::new(
+        COL_X,
+        row_y(7),
+        COL_W,
+        WIDGET_HEIGHT,
+        tr!("modmsg.ui_utils.copy_title"),
+    )
+    .draw(p, &bctx)
+    {
         let json = title_json(screen, &shared.lock().unwrap().session);
         crate::platform::clipboard::set(&json);
     }
 
     if screen.is_modal() {
         p.text_plain(
-            &format!("Sync Id: {sync_id}"),
+            &trf!("modmsg.ui_utils.readout.sync_id", sync_id),
             READOUT_X,
             5.0,
             0xFFFFFF,
             false,
         );
         p.text_plain(
-            &format!("Revision: {state_id}"),
+            &trf!("modmsg.ui_utils.readout.revision", state_id),
             READOUT_X,
             35.0,
             0xFFFFFF,
@@ -826,12 +853,22 @@ fn title_json(screen: Screen, session: &SessionState) -> String {
 }
 
 fn draw_chat(p: &mut Painter, ui: &mut Overlay, ctx: &ScreenCtx, shared: &SharedMutex) {
-    let chat = ui
-        .chat
-        .get_or_insert_with(|| TextBox::bordered(256, "Chat ..."));
+    let lang = crate::lang::epoch();
+    if ui.chat_lang != lang {
+        if let Some(old) = ui.chat.take() {
+            let mut chat = chat_box();
+            chat.set_text(&old.text);
+            ui.chat = Some(chat);
+        }
+        ui.chat_lang = lang;
+    }
+    let chat = ui.chat.get_or_insert_with(chat_box);
     if ctx.input.left_click && !ctx.hovering(COL_X, CHAT_Y, WIDE_W, WIDGET_HEIGHT) && chat.focused {
         chat.focused = false;
         crate::gui::focus::clear();
+    }
+    if chat.focused {
+        crate::platform::keyboard::enter_is_text();
     }
     let enter = chat.focused && ctx.input.enter;
     chat.update(p, ctx, COL_X, CHAT_Y, WIDE_W, WIDGET_HEIGHT);
@@ -840,6 +877,10 @@ fn draw_chat(p: &mut Painter, ui: &mut Overlay, ctx: &ScreenCtx, shared: &Shared
         chat.clear();
         crate::renderer::input::send_typed(shared, line);
     }
+}
+
+fn chat_box() -> TextBox {
+    TextBox::bordered(256, tr!("modmsg.ui_utils.chat_hint"))
 }
 
 const CLICK_KINDS: [(&str, ClickType); 7] = [
@@ -861,10 +902,10 @@ enum FormKind {
 
 struct Form {
     kind: FormKind,
-    fields: Vec<(&'static str, TextBox)>,
+    fields: Vec<(Key, TextBox)>,
     click_kind: usize,
     delay: bool,
-    status: Option<(&'static str, u32, f32)>,
+    status: Option<(Key, u32, f32)>,
 }
 
 const STATUS_SECS: f32 = 1.5;
@@ -893,16 +934,28 @@ impl Form {
     fn open(kind: FormKind, sync_id: i32, state_id: u32) -> Form {
         let fields = match kind {
             FormKind::Click => vec![
-                ("Sync Id:", field(&sync_id.to_string())),
-                ("Revision:", field(&state_id.to_string())),
-                ("Slot:", field("")),
-                ("Button:", field("")),
-                ("Times to send:", field("1")),
+                (
+                    const { Key::of("modmsg.ui_utils.field.sync_id") },
+                    field(&sync_id.to_string()),
+                ),
+                (
+                    const { Key::of("modmsg.ui_utils.field.revision") },
+                    field(&state_id.to_string()),
+                ),
+                (const { Key::of("modmsg.ui_utils.field.slot") }, field("")),
+                (const { Key::of("modmsg.ui_utils.field.button") }, field("")),
+                (const { Key::of("modmsg.ui_utils.field.times") }, field("1")),
             ],
             FormKind::Button => vec![
-                ("Sync Id:", field(&sync_id.to_string())),
-                ("Button Id:", field("")),
-                ("Times to send:", field("1")),
+                (
+                    const { Key::of("modmsg.ui_utils.field.sync_id") },
+                    field(&sync_id.to_string()),
+                ),
+                (
+                    const { Key::of("modmsg.ui_utils.field.button_id") },
+                    field(""),
+                ),
+                (const { Key::of("modmsg.ui_utils.field.times") }, field("1")),
             ],
             FormKind::Choose => Vec::new(),
         };
@@ -939,29 +992,42 @@ impl Form {
         p.fill(x, y, FORM_W, h, 0xE010_1010);
         p.outline(x, y, FORM_W, h, 0xFFA0_A0A0);
         let title = match self.kind {
-            FormKind::Choose => "Choose Packet",
-            FormKind::Click => "Click Slot Packet",
-            FormKind::Button => "Button Click Packet",
+            FormKind::Choose => tr!("modmsg.ui_utils.form.choose"),
+            FormKind::Click => tr!("modmsg.ui_utils.form.click"),
+            FormKind::Button => tr!("modmsg.ui_utils.form.button"),
         };
         p.text_centered(title, x + FORM_W / 2.0, y + 8.0, 0xFFFFFF, true);
 
+        let label = tr!("modmsg.ui_utils.form.close");
         let close = Button::new(
             x + FORM_W - 60.0,
             y + h - 26.0 - 16.0,
             50.0,
             WIDGET_HEIGHT,
-            "Close",
+            label,
         );
         if close.draw(p, ctx) {
             return false;
         }
 
         if self.kind == FormKind::Choose {
-            if Button::new(x + 15.0, y + 30.0, 105.0, WIDGET_HEIGHT, "Click Slot").draw(p, ctx) {
+            let click = Button::new(
+                x + 15.0,
+                y + 30.0,
+                105.0,
+                WIDGET_HEIGHT,
+                tr!("modmsg.ui_utils.form.click_slot"),
+            );
+            let button = Button::new(
+                x + 130.0,
+                y + 30.0,
+                105.0,
+                WIDGET_HEIGHT,
+                tr!("modmsg.ui_utils.form.button_click"),
+            );
+            if click.draw(p, ctx) {
                 *self = Form::open(FormKind::Click, sync_id, state_id);
-            } else if Button::new(x + 130.0, y + 30.0, 105.0, WIDGET_HEIGHT, "Button Click")
-                .draw(p, ctx)
-            {
+            } else if button.draw(p, ctx) {
                 *self = Form::open(FormKind::Button, sync_id, state_id);
             }
             return true;
@@ -977,7 +1043,13 @@ impl Form {
         let mut fields = self.fields.iter_mut().enumerate();
         for row in 0..rows {
             if action_row == Some(row) {
-                p.text_plain("Action:", x + 10.0, row_at + 6.0, 0xFFFFFF, false);
+                p.text_plain(
+                    tr!("modmsg.ui_utils.form.action"),
+                    x + 10.0,
+                    row_at + 6.0,
+                    0xFFFFFF,
+                    false,
+                );
                 let name = CLICK_KINDS[self.click_kind].0;
                 if Button::new(x + 10.0 + LABEL_W, row_at, FIELD_W, WIDGET_HEIGHT, name)
                     .draw(p, ctx)
@@ -985,7 +1057,7 @@ impl Form {
                     self.click_kind = (self.click_kind + 1) % CLICK_KINDS.len();
                 }
             } else if let Some((_, (label, b))) = fields.next() {
-                p.text_plain(label, x + 10.0, row_at + 6.0, 0xFFFFFF, false);
+                p.text_plain(label.get(), x + 10.0, row_at + 6.0, 0xFFFFFF, false);
                 b.update(p, ctx, x + 10.0 + LABEL_W, row_at, FIELD_W, WIDGET_HEIGHT);
             }
             row_at += LINE;
@@ -993,27 +1065,35 @@ impl Form {
 
         let buttons_y = y + h - 26.0 - 16.0;
         let delay_label = if self.delay {
-            "Delay: on"
+            tr!("modmsg.ui_utils.form.delay_on")
         } else {
-            "Delay: off"
+            tr!("modmsg.ui_utils.form.delay_off")
         };
         if Button::new(x + 70.0, buttons_y, 75.0, WIDGET_HEIGHT, delay_label).draw(p, ctx) {
             self.delay = !self.delay;
         }
-        if Button::new(x + 10.0, buttons_y, 55.0, WIDGET_HEIGHT, "Send").draw(p, ctx) {
+        if Button::new(
+            x + 10.0,
+            buttons_y,
+            55.0,
+            WIDGET_HEIGHT,
+            tr!("modmsg.ui_utils.form.send"),
+        )
+        .draw(p, ctx)
+        {
             self.status = Some(self.send(shared, in_world, ctx.input.time));
         }
         if let Some((text, color, until)) = self.status {
             if ctx.input.time >= until {
                 self.status = None;
             } else {
-                p.text_plain(text, x + 10.0, y + h - 14.0, color, false);
+                p.text_plain(text.get(), x + 10.0, y + h - 14.0, color, false);
             }
         }
         true
     }
 
-    fn send(&self, shared: &SharedMutex, in_world: bool, now: f32) -> (&'static str, u32, f32) {
+    fn send(&self, shared: &SharedMutex, in_world: bool, now: f32) -> (Key, u32, f32) {
         let until = now + STATUS_SECS;
         const BAD: u32 = 0xAA_0000;
         const GOOD: u32 = 0x00AA_00;
@@ -1044,12 +1124,20 @@ impl Form {
             FormKind::Choose => None,
         };
         let Some(forged) = forged else {
-            return ("Invalid arguments!", BAD, until);
+            return (
+                const { Key::of("modmsg.ui_utils.form.invalid") },
+                BAD,
+                until,
+            );
         };
         if !in_world {
-            return ("You must be connected to a server!", BAD, until);
+            return (
+                const { Key::of("modmsg.ui_utils.form.not_connected") },
+                BAD,
+                until,
+            );
         }
         push(shared, Action::Forge(forged));
-        ("Sent successfully!", GOOD, until)
+        (const { Key::of("modmsg.ui_utils.form.sent") }, GOOD, until)
     }
 }

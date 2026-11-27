@@ -7,9 +7,9 @@ Use the Bug, Crash or Suggestion form on the issues page. Search existing issues
 ## Building
 
 ```sh
-cargo build --release          # desktop
-tools/build_web.sh             # browser
-tools/build_android.sh         # Android APK
+cargo build --release --features desktop             # desktop
+tools/build_web.sh --harden --features web           # browser
+tools/build_android.sh --features android            # Android APK
 ```
 
 ## Building from source
@@ -45,22 +45,42 @@ tools/build_web.sh --features webgpu
 | `full_font` | on | Draws every Unicode character instead of a missing-glyph box. |
 | `skins` | on | Player skins and capes. Without it, everyone gets one of the built-in default skins. |
 | `online_mode` | on | Microsoft account sign-in, for servers that require it. |
-| `resourcepacks` | on | Vanilla resource packs from folders and zips. Desktop only. |
-| `update_checker` | on | Checks GitHub once a day for a newer release and shows an update line on the title screen. Desktop only. |
+| `resourcepacks` | on | Vanilla resource packs from folders and zips. Not on Android. |
+| `update_checker` | off | Checks GitHub once a day for a newer release and shows an update line on the title screen. Desktop only. |
 | `self_update` | off | Offers that release on a full screen, then downloads, verifies and installs it and restarts. Pulls in `update_checker` and `asset_download`. x86_64 Windows and Linux only. |
 | `builtin_shaders` | off | Built-in shaders: sun shadows, reflective water, waving foliage, height fog and bloom. |
 | `shader_support` | off | Loads Iris/OptiFine-style shader packs from a `shaders/` folder. |
-| `audio` | off | Sound. Desktop only; downloads about 332 MB of sounds. |
+| `audio` | off | Sound. Downloads about 332 MB of sounds. Desktop only by itself; the browser and Android take `small_audio`. |
 | `eagler` | off | Joins Eaglercraft servers over `wss://`. |
 | `webgpu` | off | Browser build only. Uses WebGPU instead of WebGL2, with no fallback. |
 | `mobile_ui` | off | On-screen touch controls. The Android build turns this on itself. |
 | `click_gui` | off | A Right Shift menu with a switch and settings for every module. |
-| `lua_mods` | off | Modules written in Luau, loaded from a `mods/` folder and switched from the click GUI, with a Mods tab to reload them. Desktop only. Turns on `click_gui`. |
+| `lua_mods` | off | Modules written in Luau, loaded from a `mods/` folder and switched from the click GUI, with a Mods tab to reload them. Not on Android. Turns on `click_gui`. |
 | `hud_editor` | on | A screen for dragging, scaling and hiding HUD elements, saved to `hud.json`. |
-| `tutorial` | off | Adds an introductory tutorial. |
+| `tutorial` | on | Adds an introductory tutorial. |
+| `render_scale` | on | A Render Scale slider for drawing the world below the window's resolution. |
+| `microsoft_web` | on | The sign-in transport for the browser build. Turns on `online_mode`; adds nothing elsewhere. |
+| `explore_modrinth` | off | Searches Modrinth for resource packs and downloads them. Not on Android. Turns on `resourcepacks`. |
+| `benchmark_feature` | off | A Benchmark button on Options > Game. |
+| `screen_record` | off | A Record button on the pause menu. Browser only. |
+| `small_audio` | off | Browser and Android only. A 236 file sound set. The Android build turns this on itself. |
+| `native_shaders` | off | The client's own shader pack format. Turns on `shader_support`. |
+| `seed_cracker` | off | Recovers a world's seed. Turns on `click_gui`. |
+| `ui_utils` | off | UI Utils' container buttons. Turns on `click_gui`. |
+| `module_panel` | off | The module list as one window sized for touch. Turns on `click_gui`. |
 | `profiling` | off | Span profiler. Press F9 in game to save a flamegraph. |
 | `deadlock-detection` | off | Names the threads involved when the client freezes on a lock. |
 | `alloc_diag` | off | Heap usage rows on the F3 screen. |
 | `budget` | off | Per-frame timing breakdown. |
+
+Each release build is one preset, on top of the default features:
+
+| Preset | Build |
+| --- | --- |
+| `desktop` | Windows and Linux |
+| `desktop_clickgui` | Windows and Linux with the click GUI |
+| `web` | Browser |
+| `web_mobile` | Browser on a phone |
+| `android` | Android |
 
 To build without the default features, add `--no-default-features` and list the ones you want.

@@ -188,6 +188,18 @@ impl Default for Display {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RailPose {
+    pub offset: [f32; 3],
+    pub turn: Option<(f32, f32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NewCartPose {
+    pub y_rot: f32,
+    pub x_rot: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Extras {
     pub swell: f32,
@@ -201,6 +213,8 @@ pub struct Extras {
     pub bubble_angle: f32,
     pub vehicle_hurt: f32,
     pub vehicle_damage: f32,
+    pub rail: Option<RailPose>,
+    pub cart_new: Option<NewCartPose>,
 
     pub head_eat_position_scale: f32,
     pub head_eat_angle_scale: f32,
@@ -283,6 +297,8 @@ pub struct ExtrasShared {
     pub attach_face: Direction,
     pub color: u8,
     pub item: HeldItem,
+    pub item_label: std::sync::Arc<[crate::text::Span]>,
+    pub item_count: i32,
     pub item_rotation: i32,
     pub map_markers: Option<std::sync::Arc<crate::session::FrameMarkers>>,
     pub hanging_direction: Direction,
@@ -436,6 +452,8 @@ impl Extras {
             bubble_angle: 0.0,
             vehicle_hurt: 0.0,
             vehicle_damage: 0.0,
+            rail: None,
+            cart_new: None,
             head_eat_position_scale: 0.0,
             head_eat_angle_scale: 0.0,
             flap: 0.0,
@@ -528,6 +546,8 @@ impl Default for ExtrasShared {
             attach_face: Direction::Down,
             color: 16,
             item: HeldItem::default(),
+            item_label: std::sync::Arc::default(),
+            item_count: 0,
             item_rotation: 0,
             map_markers: None,
             hanging_direction: Direction::South,

@@ -11,6 +11,8 @@ mod values;
 
 pub(crate) use builtins::resolve_input;
 use builtins::{Builtin, Value, builtin};
+#[cfg(feature = "native_shaders")]
+pub(crate) use values::celestial_position;
 pub(crate) use values::{FrameValues, History};
 
 #[repr(C)]

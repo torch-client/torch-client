@@ -37,8 +37,12 @@ pub struct Config {
     pub gamemode: bool,
     pub distance: bool,
     pub armor: bool,
+    pub held: bool,
     pub durability: Durability,
     pub enchants: bool,
+    pub items: bool,
+    pub item_count: bool,
+    pub item_distance: bool,
 }
 
 pub fn config() -> Option<Config> {
@@ -53,8 +57,12 @@ pub fn config() -> Option<Config> {
         gamemode: s.flag(setting::GAMEMODE),
         distance: s.flag(setting::DISTANCE),
         armor: s.flag(setting::ARMOR),
+        held: s.flag(setting::HELD),
         durability: s.choice(setting::DURABILITY),
         enchants: s.flag(setting::ENCHANTS),
+        items: s.flag(setting::ITEMS),
+        item_count: s.flag(setting::ITEM_COUNT),
+        item_distance: s.flag(setting::ITEM_DISTANCE),
     })
 }
 
@@ -75,7 +83,8 @@ mod tests {
         assert_eq!(cfg.health, Health::Number);
         assert!(cfg.health.number() && !cfg.health.bar());
         assert!(cfg.gamemode && cfg.distance);
-        assert!(cfg.armor && cfg.enchants);
+        assert!(cfg.armor && cfg.held && cfg.enchants);
+        assert!(!cfg.items && cfg.item_count && !cfg.item_distance);
         assert_eq!(cfg.durability, Durability::Percent);
         s.set_enabled(Id::Nametags, false);
     }

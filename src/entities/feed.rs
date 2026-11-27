@@ -3,12 +3,15 @@ use azalea_registry::builtin::EntityKind;
 use super::living::{LivingCore, MAX_HEAD_ROTATION, SwimAmount};
 use super::physics::{Body, Level, Motion, RestMemo, Shape, Void};
 use super::state::{
-    AnimationState, Direction, EntityState, Extras, ExtrasShared, Pose, TargetBody, anim_slot,
+    AnimationState, Direction, EntityState, Extras, ExtrasShared, NewCartPose, Pose, RailPose,
+    TargetBody, anim_slot,
 };
 use crate::util::interp::Interpolation;
 use crate::util::javarandom::JavaRandom;
+use crate::util::minecart_lerp::{CartRide, LerpView};
 use crate::util::mth::ease::in_out_sine as ease_in_out_sine;
 pub use crate::util::mth::{lerp, rot_lerp, rot_lerp_capped, wrap_degrees};
+use crate::util::rail::{self, RailShape};
 
 const BINARY_ANIMATOR_LENGTH: i32 = 10;
 
@@ -61,6 +64,8 @@ pub struct TickInput {
     pub playing_dead: bool,
     pub open_mouth: bool,
     pub head_targets: [Option<[f64; 3]>; 2],
+    pub attached_to: Option<u32>,
+    pub attach: Option<Attachment>,
     pub attack_target: Option<TargetBody>,
     pub shared: std::sync::Arc<ExtrasShared>,
     pub eating: bool,
@@ -79,6 +84,12 @@ pub struct CrystalBody {
     pub pos: [f64; 3],
     pub width: f32,
     pub height: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Attachment {
+    pub pos: [f64; 3],
+    pub velocity: [f64; 3],
 }
 
 impl TickInput {
@@ -125,6 +136,8 @@ impl TickInput {
             playing_dead: false,
             open_mouth: false,
             head_targets: [None; 2],
+            attached_to: None,
+            attach: None,
             attack_target: None,
             shared: std::sync::Arc::new(ExtrasShared::default()),
             eating: false,
@@ -332,24 +345,44 @@ impl DragonAnim {
 
 const SHULKER_TELEPORT_TICKS: i32 = 6;
 
+fn vehicle_synced(k: &mut KindAnim, old: &ExtrasShared, new: &ExtrasShared) {
+    if new.hurt_time != old.hurt_time {
+        k.vehicle_hurt = new.hurt_time as i32;
+    }
+    if new.damage != old.damage {
+        k.vehicle_damage = new.damage;
+    }
+}
+
+fn fuse_synced(k: &mut KindAnim, input: &TickInput) {
+    if input.max_fuse != k.cube_max_fuse {
+        k.cube_max_fuse = input.max_fuse;
+        k.cube_fuse = input.max_fuse;
+    }
+}
+
+fn dash_synced(k: &mut KindAnim, input: &TickInput) {
+    if input.shared.dash != k.dash_old && k.dash_cooldown == 0 {
+        k.dash_cooldown = CAMEL_DASH_COOLDOWN;
+    }
+    k.dash_old = input.shared.dash;
+}
+
+fn in_ground_synced(k: &mut KindAnim, input: &TickInput) {
+    if input.shared.in_ground && !k.was_in_ground && k.shake_time <= 0 {
+        k.shake_time = ARROW_SHAKE_TICKS;
+    }
+    k.was_in_ground = input.shared.in_ground;
+}
+
 pub(crate) fn interpolation_for(kind: EntityKind, is_living: bool) -> Option<Interpolation> {
     if matches!(kind, EntityKind::Shulker) {
         return None;
     }
     let interpolated = is_living
         || crate::play::riding::Hull::of(kind).is_some()
-        || matches!(
-            kind,
-            EntityKind::Minecart
-                | EntityKind::ChestMinecart
-                | EntityKind::CommandBlockMinecart
-                | EntityKind::FurnaceMinecart
-                | EntityKind::HopperMinecart
-                | EntityKind::SpawnerMinecart
-                | EntityKind::TntMinecart
-                | EntityKind::ExperienceOrb
-                | EntityKind::FishingBobber
-        );
+        || (is_minecart(kind) && !crate::client::tracking::minecart_improvements())
+        || matches!(kind, EntityKind::ExperienceOrb | EntityKind::FishingBobber);
     interpolated.then(Interpolation::new)
 }
 
@@ -364,6 +397,124 @@ fn block_pos(pos: [f64; 3]) -> [i32; 3] {
 impl Default for TickInput {
     fn default() -> Self {
         TickInput::new()
+    }
+}
+
+pub(crate) fn is_minecart(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Minecart
+            | EntityKind::ChestMinecart
+            | EntityKind::CommandBlockMinecart
+            | EntityKind::FurnaceMinecart
+            | EntityKind::HopperMinecart
+            | EntityKind::SpawnerMinecart
+            | EntityKind::TntMinecart
+    )
+}
+
+const RAIL_PATCH_CELLS: usize = 512;
+
+#[derive(Clone, Copy, Debug)]
+struct RailPatch {
+    origin: [i32; 3],
+    size: [u8; 3],
+    cells: [u8; RAIL_PATCH_CELLS],
+}
+
+impl RailPatch {
+    fn capture(level: &dyn Level, old: [f64; 3], new: [f64; 3]) -> Option<RailPatch> {
+        let cell = |p: [f64; 3]| p.map(|v| v.floor() as i32);
+        let to = cell(new);
+        let cells = |from: [i32; 3]| {
+            let span = |i: usize| (i64::from(from[i]) - i64::from(to[i])).abs();
+            (span(0) + 3) * (span(1) + 4) * (span(2) + 3)
+        };
+        let from = Some(cell(old))
+            .filter(|from| cells(*from) <= RAIL_PATCH_CELLS as i64)
+            .unwrap_or(to);
+        let lo: [i32; 3] = std::array::from_fn(|i| from[i].min(to[i]));
+        let hi: [i32; 3] = std::array::from_fn(|i| from[i].max(to[i]));
+
+        let on_rail = (lo[0]..=hi[0]).any(|x| {
+            (lo[2]..=hi[2]).any(|z| (lo[1] - 1..=hi[1]).any(|y| level.rail([x, y, z]).is_some()))
+        });
+        if !on_rail {
+            return None;
+        }
+
+        let origin = [lo[0] - 1, lo[1] - 2, lo[2] - 1];
+        let size = [
+            (hi[0] - lo[0] + 3) as u8,
+            (hi[1] - lo[1] + 4) as u8,
+            (hi[2] - lo[2] + 3) as u8,
+        ];
+        let mut patch = RailPatch {
+            origin,
+            size,
+            cells: [0; RAIL_PATCH_CELLS],
+        };
+        for y in 0..i32::from(size[1]) {
+            for z in 0..i32::from(size[2]) {
+                for x in 0..i32::from(size[0]) {
+                    let at = [origin[0] + x, origin[1] + y, origin[2] + z];
+                    if let (Some(shape), Some(i)) = (level.rail(at), patch.index(at)) {
+                        patch.cells[i] = shape as u8;
+                    }
+                }
+            }
+        }
+        Some(patch)
+    }
+
+    fn index(&self, at: [i32; 3]) -> Option<usize> {
+        let mut rel = [0usize; 3];
+        for i in 0..3 {
+            let d = at[i].checked_sub(self.origin[i])?;
+            if d < 0 || d >= i32::from(self.size[i]) {
+                return None;
+            }
+            rel[i] = d as usize;
+        }
+        let [sx, _, sz] = self.size.map(usize::from);
+        Some((rel[1] * sz + rel[2]) * sx + rel[0])
+    }
+
+    fn pose(&self, at: [f64; 3]) -> Option<RailPose> {
+        let missed = std::cell::Cell::new(false);
+        let rail_at = |block: [i32; 3]| match self.index(block) {
+            Some(i) => RailShape::from_u8(self.cells[i]),
+            None => {
+                missed.set(true);
+                None
+            }
+        };
+        let [x, y, z] = at;
+        let half_length = f64::from(0.3f32);
+        let on = rail::pos(&rail_at, x, y, z);
+        let front = rail::pos_offs(&rail_at, x, y, z, half_length);
+        let back = rail::pos_offs(&rail_at, x, y, z, -half_length);
+        if missed.get() {
+            return None;
+        }
+        let on = on?;
+        let front = front.unwrap_or(on);
+        let back = back.unwrap_or(on);
+        let dir = [back[0] - front[0], back[1] - front[1], back[2] - front[2]];
+        let length = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        let turn = (length != 0.0).then(|| {
+            let yaw = dir[2].atan2(dir[0]).to_degrees();
+            let pitch = (dir[1] / length).atan() * 73.0;
+            (yaw as f32, pitch as f32)
+        });
+        Some(RailPose {
+            offset: [
+                (on[0] - x) as f32,
+                ((front[1] + back[1]) / 2.0 - y) as f32,
+                (on[2] - z) as f32,
+            ],
+            turn,
+        })
     }
 }
 
@@ -873,6 +1024,11 @@ pub struct EntityAnim {
     sampled: Sampled,
     started: bool,
     kind_state: Option<Box<KindAnim>>,
+    rails: Option<Box<RailPatch>>,
+    new_cart: bool,
+    cart_lerp: Option<Box<LerpView>>,
+    cart_ride: Option<Box<CartRide>>,
+    frozen: bool,
 }
 
 impl EntityAnim {
@@ -937,7 +1093,24 @@ impl EntityAnim {
                     ..KindAnim::EMPTY
                 })
             }),
+            rails: None,
+            new_cart: false,
+            cart_lerp: None,
+            cart_ride: None,
+            frozen: false,
         }
+    }
+
+    pub fn set_frozen(&mut self, frozen: bool) {
+        self.frozen = frozen;
+    }
+
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+
+    fn own_partial(&self, partial: f32) -> f32 {
+        if self.frozen { 1.0 } else { partial }
     }
 
     pub fn body_rot_pair(&self) -> (f32, f32) {
@@ -970,6 +1143,11 @@ impl EntityAnim {
             sampled,
             started,
             kind_state,
+            rails,
+            new_cart,
+            cart_lerp,
+            cart_ride,
+            frozen,
         } = src;
         self.id = *id;
         self.kind = *kind;
@@ -986,6 +1164,31 @@ impl EntityAnim {
         self.sampled.clone_from(sampled);
         self.started = *started;
         self.kind_state.clone_from(kind_state);
+        self.rails.clone_from(rails);
+        self.new_cart = *new_cart;
+        self.cart_lerp.clone_from(cart_lerp);
+        self.cart_ride.clone_from(cart_ride);
+        self.frozen = *frozen;
+    }
+
+    pub(crate) fn set_cart_lerp(&mut self, view: Option<&LerpView>) {
+        match (view, &mut self.cart_lerp) {
+            (Some(view), Some(held)) => **held = view.clone(),
+            (view, slot) => *slot = view.map(|v| Box::new(v.clone())),
+        }
+    }
+
+    pub(crate) fn cart_ride(&self) -> Option<CartRide> {
+        let view = self.cart_lerp.as_deref()?;
+        Some(CartRide {
+            view: view.clone(),
+            pos_old: self.core.pos_old,
+            pos: self.core.pos,
+        })
+    }
+
+    pub(crate) fn set_cart_ride(&mut self, ride: Option<CartRide>) {
+        self.cart_ride = ride.map(Box::new);
     }
 
     fn solve_body_rot(&self, head_rot: f32, partial: f32) -> f32 {
@@ -1055,6 +1258,92 @@ impl EntityAnim {
     }
 
     pub fn tick_in(&mut self, input: &TickInput, level: &dyn Level) {
+        self.start(input);
+        self.cart_ride = None;
+        let cart_step = self.cart_lerp.as_deref().and_then(|view| view.sample(1.0));
+
+        self.synced_data_updated(input);
+
+        let correction = if input.driven {
+            if let Some(interp) = self.core.interp.as_mut() {
+                interp.cancel();
+            }
+            None
+        } else {
+            self.handle_movement_packets(input)
+        };
+        let correction = correction.filter(|_| cart_step.is_none());
+
+        self.correct(correction, input);
+        self.take_velocity(input);
+
+        self.tick_started(input, level, cart_step);
+    }
+
+    pub fn tick_frozen(&mut self, input: &TickInput, level: &dyn Level) {
+        self.start(input);
+        if !input.is_passenger {
+            self.cart_ride = None;
+        }
+        self.synced_data_updated(input);
+        let correction = self.handle_movement_packets(input);
+        self.correct(correction, input);
+        self.take_velocity(input);
+        if let Some(k) = self.kind_state.as_deref_mut() {
+            vehicle_synced(k, &self.sampled.shared, &input.shared);
+            fuse_synced(k, input);
+            dash_synced(k, input);
+            if input.shared.in_ground {
+                self.body.in_ground = true;
+            } else if k.was_in_ground {
+                self.body.in_ground = false;
+            }
+            in_ground_synced(k, input);
+        }
+        self.square_to_yaw();
+        self.capture_rails(level);
+        self.sampled = Sampled::from_input(input);
+    }
+
+    fn correct(&mut self, correction: Option<([f64; 3], f32, f32)>, input: &TickInput) {
+        if let Some((pos, y_rot, x_rot)) = correction {
+            self.set_pos(pos, input.is_passenger);
+            self.core.y_rot = y_rot;
+            self.core.x_rot = x_rot;
+        }
+    }
+
+    fn take_velocity(&mut self, input: &TickInput) {
+        if let Some((velocity, seq)) = input.velocity
+            && seq != self.velocity_seq
+        {
+            self.velocity_seq = seq;
+            self.body.velocity = velocity;
+        }
+    }
+
+    fn square_to_yaw(&mut self) {
+        if !self.is_living {
+            self.core.body_rot = self.core.y_rot;
+            self.core.head_rot = self.core.y_rot;
+        }
+    }
+
+    fn capture_rails(&mut self, level: &dyn Level) {
+        if self.new_cart {
+            self.rails = None;
+        } else if is_minecart(self.kind) {
+            match (
+                RailPatch::capture(level, self.core.pos_old, self.core.pos),
+                &mut self.rails,
+            ) {
+                (Some(patch), Some(held)) => **held = patch,
+                (patch, slot) => *slot = patch.map(Box::new),
+            }
+        }
+    }
+
+    fn start(&mut self, input: &TickInput) {
         if !self.started {
             self.is_living = input.is_living;
             self.core.start(
@@ -1073,33 +1362,29 @@ impl EntityAnim {
             if let Some(k) = self.kind_state.as_deref_mut() {
                 k.peek = input.peek_target;
             }
+            self.new_cart =
+                is_minecart(self.kind) && crate::client::tracking::minecart_improvements();
             self.started = true;
         }
 
-        self.synced_data_updated(input);
-
-        let correction = if input.driven {
-            if let Some(interp) = self.core.interp.as_mut() {
-                interp.cancel();
+        if is_minecart(self.kind) {
+            let new_cart = crate::client::tracking::minecart_improvements();
+            if new_cart != self.new_cart {
+                self.new_cart = new_cart;
+                self.core.interp = interpolation_for(self.kind, self.is_living);
             }
-            None
-        } else {
-            self.handle_movement_packets(input)
-        };
-
-        if let Some((pos, y_rot, x_rot)) = correction {
-            self.set_pos(pos, input.is_passenger);
-            self.core.y_rot = y_rot;
-            self.core.x_rot = x_rot;
+            if !new_cart {
+                self.cart_lerp = None;
+            }
         }
+    }
 
-        if let Some((velocity, seq)) = input.velocity
-            && seq != self.velocity_seq
-        {
-            self.velocity_seq = seq;
-            self.body.velocity = velocity;
-        }
-
+    fn tick_started(
+        &mut self,
+        input: &TickInput,
+        level: &dyn Level,
+        cart_step: Option<crate::util::minecart_lerp::Step>,
+    ) {
         self.core.latch();
         if let Some(k) = self.kind_state.as_deref_mut() {
             k.swell_old = k.swell;
@@ -1119,6 +1404,12 @@ impl EntityAnim {
             }
         }
 
+        if let Some(step) = cart_step {
+            self.set_pos(step.pos, input.is_passenger);
+            self.core.y_rot = step.y_rot;
+            self.core.x_rot = step.x_rot.clamp(-90.0, 90.0);
+        }
+
         if self.motion != Motion::Server && input.simulate {
             if input.shared.in_ground {
                 self.body.in_ground = true;
@@ -1133,20 +1424,29 @@ impl EntityAnim {
                 ticks: self.ticks,
                 id: self.id,
             };
-            self.core.pos = super::physics::step(
-                self.motion,
-                self.core.pos,
-                &mut self.body,
-                &mut self.rest_memo,
-                &shape,
-                level,
-            );
+            self.body.shot_at_angle = input.shared.shot_at_angle;
+            if self.motion == Motion::Rocket && input.attached_to.is_some() {
+                if let Some(attach) = input.attach {
+                    self.core.pos = attach.pos;
+                    self.body.velocity = attach.velocity;
+                }
+            } else {
+                self.core.pos = super::physics::step(
+                    self.motion,
+                    self.core.pos,
+                    &mut self.body,
+                    &mut self.rest_memo,
+                    &shape,
+                    level,
+                );
+            }
+            if self.motion == Motion::Rocket {
+                self.rocket_rotation();
+            }
         }
 
-        if !self.is_living {
-            self.core.body_rot = self.core.y_rot;
-            self.core.head_rot = self.core.y_rot;
-        }
+        self.square_to_yaw();
+        self.capture_rails(level);
 
         if let Some(k) = self.kind_state.as_deref_mut() {
             if k.teleport_interp > 0 {
@@ -1188,12 +1488,7 @@ impl EntityAnim {
                 };
             }
 
-            if input.shared.hurt_time != self.sampled.shared.hurt_time {
-                k.vehicle_hurt = input.shared.hurt_time as i32;
-            }
-            if input.shared.damage != self.sampled.shared.damage {
-                k.vehicle_damage = input.shared.damage;
-            }
+            vehicle_synced(k, &self.sampled.shared, &input.shared);
             if k.vehicle_hurt > 0 {
                 k.vehicle_hurt -= 1;
             }
@@ -1366,10 +1661,7 @@ impl EntityAnim {
                 k.squid_x_rot += (-90.0 - k.squid_x_rot) * 0.02;
             }
 
-            if input.max_fuse != k.cube_max_fuse {
-                k.cube_max_fuse = input.max_fuse;
-                k.cube_fuse = input.max_fuse;
-            }
+            fuse_synced(k, input);
             if k.cube_fuse > 0 {
                 k.cube_fuse -= 1;
             }
@@ -1540,16 +1832,9 @@ impl EntityAnim {
                 k.spinning = false;
             }
 
-            if self.started && input.shared.dash != k.dash_old && k.dash_cooldown == 0 {
-                k.dash_cooldown = CAMEL_DASH_COOLDOWN;
-            }
-            k.dash_old = input.shared.dash;
+            dash_synced(k, input);
             k.dash_cooldown = (k.dash_cooldown - 1).max(0);
-
-            if input.shared.in_ground && !k.was_in_ground && self.started && k.shake_time <= 0 {
-                k.shake_time = ARROW_SHAKE_TICKS;
-            }
-            k.was_in_ground = input.shared.in_ground;
+            in_ground_synced(k, input);
             k.shake_time = (k.shake_time - 1).max(0);
 
             if k.fangs_started {
@@ -1814,10 +2099,37 @@ impl EntityAnim {
     }
 
     pub fn position(&self, partial: f32) -> [f64; 3] {
-        self.core.position(partial)
+        self.core.position(self.own_partial(partial))
+    }
+
+    pub fn velocity(&self) -> [f64; 3] {
+        self.body.velocity
+    }
+
+    fn rocket_rotation(&mut self) {
+        fn lerp_rotation(mut old: f32, new: f32) -> f32 {
+            while new - old < -180.0 {
+                old -= 360.0;
+            }
+            while new - old >= 180.0 {
+                old += 360.0;
+            }
+            lerp(0.2, old, new)
+        }
+        let [x, y, z] = self.body.velocity;
+        let horizontal = x.hypot(z);
+        self.core.x_rot = lerp_rotation(
+            self.core.x_rot_old,
+            (y.atan2(horizontal) * 57.295_776_367_187_5) as f32,
+        );
+        self.core.y_rot = lerp_rotation(
+            self.core.y_rot_old,
+            (x.atan2(z) * 57.295_776_367_187_5) as f32,
+        );
     }
 
     pub fn look(&self, partial: f32) -> (f32, f32) {
+        let partial = self.own_partial(partial);
         (
             rot_lerp(partial, self.core.y_rot_old, self.core.y_rot),
             lerp(partial, self.core.x_rot_old, self.core.x_rot),
@@ -1923,9 +2235,9 @@ impl EntityAnim {
         &self.sampled.shared
     }
 
-    fn render_offset(&self, partial: f32) -> [f32; 3] {
+    fn render_offset(&self, partial: f32, frame: f32) -> [f32; 3] {
         if self.kind == EntityKind::Enderman && self.sampled.shared.creepy {
-            return self.creepy_jitter(partial);
+            return self.creepy_jitter(frame);
         }
         let k = self.k();
         let Some(old) = k.attach_pos.filter(|_| k.teleport_interp > 0) else {
@@ -1951,7 +2263,8 @@ impl EntityAnim {
         [x as f32, 0.0, z as f32]
     }
 
-    pub fn sample(&self, partial: f32) -> EntityState {
+    pub fn sample(&self, frame: f32) -> EntityState {
+        let partial = self.own_partial(frame);
         let head_rot = rot_lerp(partial, self.core.head_rot_old, self.core.head_rot);
         let body_rot = self.solve_body_rot(head_rot, partial);
         let x_rot = lerp(partial, self.core.x_rot_old, self.core.x_rot);
@@ -1962,6 +2275,10 @@ impl EntityAnim {
             .map_or(0.0, |at| self.ticks.wrapping_sub(at) as f32 + partial);
         extras.vehicle_hurt = self.k().vehicle_hurt as f32 - partial;
         extras.vehicle_damage = (self.k().vehicle_damage - partial).max(0.0);
+        extras.rail = self
+            .rails
+            .as_deref()
+            .and_then(|r| r.pose(self.core.position(partial)));
         extras.parrot_pose = if self.sampled.shared.sitting {
             2
         } else if self.sampled.on_ground {
@@ -1988,7 +2305,7 @@ impl EntityAnim {
             };
             extras.bubble_angle = lerp(partial, k.bubble_angle_old, k.bubble_angle);
             extras.eating |= k.eat_ticks > 0;
-            extras.render_offset = self.render_offset(partial);
+            extras.render_offset = self.render_offset(partial, frame);
 
             let eat = k.eat_ticks as f32;
             extras.head_eat_position_scale = if k.eat_ticks <= 0 {
@@ -2176,6 +2493,40 @@ impl EntityAnim {
             }
         }
 
+        if self.new_cart {
+            let pose = match self
+                .cart_lerp
+                .as_deref()
+                .and_then(|view| view.sample(partial))
+            {
+                Some(step) => {
+                    let at = self.core.position(partial);
+                    for i in 0..3 {
+                        extras.render_offset[i] += (step.pos[i] - at[i]) as f32;
+                    }
+                    NewCartPose {
+                        y_rot: step.y_rot,
+                        x_rot: step.x_rot,
+                    }
+                }
+                None => NewCartPose {
+                    y_rot: self.core.y_rot,
+                    x_rot: self.core.x_rot,
+                },
+            };
+            extras.cart_new = Some(pose);
+        }
+        if self.kind != EntityKind::Shulker
+            && let Some(offset) = self
+                .cart_ride
+                .as_deref()
+                .and_then(|ride| ride.passenger_offset(partial))
+        {
+            for i in 0..3 {
+                extras.render_offset[i] += offset[i] as f32;
+            }
+        }
+
         let (death_time, has_red_overlay) = match self.k().dragon.as_deref() {
             Some(d) if d.death_time > 0 => (d.death_time as f32 + partial, false),
             Some(_) => (0.0, self.core.hurt_time(0.0) > 0.0),
@@ -2236,6 +2587,24 @@ mod tests {
         assert!((anim.position(1.0)[0] - 2.0).abs() < 1e-5);
         anim.tick(input);
         assert!((anim.position(1.0)[0] - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_frozen_mob_waits_with_its_target() {
+        let mut anim = EntityAnim::new(1, EntityKind::Zombie);
+        let mut input = TickInput::new();
+        anim.tick(input.clone());
+        input.pos = [3.0, 0.0, 0.0];
+        anim.tick(input.clone());
+        anim.set_frozen(true);
+        for _ in 0..3 {
+            anim.tick_frozen(&input, &Void);
+            assert!((anim.position(0.25)[0] - 1.0).abs() < 1e-5);
+        }
+        anim.set_frozen(false);
+        anim.tick(input);
+        assert!((anim.position(0.0)[0] - 1.0).abs() < 1e-5);
+        assert!((anim.position(1.0)[0] - 2.0).abs() < 1e-5);
     }
 
     #[test]

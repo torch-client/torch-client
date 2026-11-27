@@ -15,7 +15,7 @@ use azalea_world::World;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use bevy_tasks::{IoTaskPool, Task, futures_lite::future};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -23,6 +23,7 @@ use crate::{
     LocalPlayerBundle,
     account::Account,
     connection::RawConnection,
+    cookies::ServerCookies,
     local_player::WorldHolder,
     packet::login::{InLoginState, SendLoginPacketEvent},
 };
@@ -103,9 +104,17 @@ pub fn handle_start_join_server_event(
             let _ = start_join_callback.send(entity);
         }
 
+        let transferred = NEXT_TRANSFER.lock().take();
+        let intention = if transferred.is_some() {
+            ClientIntention::Transfer
+        } else {
+            ClientIntention::Login
+        };
+
         let mut entity_mut = commands.entity(entity);
 
         entity_mut.insert((
+            transferred.unwrap_or_default(),
             event.account.to_owned(),
             LocalEntity,
             ClientInformation::default(),
@@ -116,6 +125,8 @@ pub fn handle_start_join_server_event(
         let connect_opts = event.connect_opts.clone();
         let task = task_pool.spawn(crate::compat(create_conn_and_send_intention_packet(
             connect_opts,
+            intention,
+            USE_TRANSPORT.load(atomic::Ordering::SeqCst),
         )));
 
         entity_mut.insert(CreateConnectionTask(task));
@@ -124,29 +135,34 @@ pub fn handle_start_join_server_event(
 
 pub static HANDSHAKE_PROTOCOL: atomic::AtomicI32 = atomic::AtomicI32::new(PROTOCOL_VERSION);
 
+pub static NEXT_TRANSFER: Mutex<Option<ServerCookies>> = Mutex::new(None);
+
+pub static USE_TRANSPORT: atomic::AtomicBool = atomic::AtomicBool::new(false);
+
 async fn create_conn_and_send_intention_packet(
     opts: ConnectOpts,
+    intention: ClientIntention,
+    use_transport: bool,
 ) -> Result<LoginConn, ConnectionError> {
-    let mut conn = if azalea_protocol::connect::transport::has_opener() {
+    #[cfg(target_arch = "wasm32")]
+    let mut conn = {
+        let _ = use_transport;
         azalea_protocol::connect::transport::open(opts.address.clone()).await?
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut conn = if use_transport {
+        azalea_protocol::connect::transport::open(opts.address.clone()).await?
+    } else if let Some(proxy) = opts.server_proxy {
+        Connection::new_with_proxy(&opts.address.socket, proxy).await?
     } else {
-        #[cfg(target_arch = "wasm32")]
-        {
-            azalea_protocol::connect::transport::open(opts.address.clone()).await?
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(proxy) = opts.server_proxy {
-            Connection::new_with_proxy(&opts.address.socket, proxy).await?
-        } else {
-            Connection::new(&opts.address.socket).await?
-        }
+        Connection::new(&opts.address.socket).await?
     };
 
     conn.write(ServerboundIntention {
         protocol_version: HANDSHAKE_PROTOCOL.load(atomic::Ordering::Relaxed),
         hostname: opts.address.server.host.clone(),
         port: opts.address.server.port,
-        intention: ClientIntention::Login,
+        intention,
     })
     .await?;
 

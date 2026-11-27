@@ -70,7 +70,7 @@ pub(super) async fn run(
 
     send(socket, request_login(username, eagler)?).await?;
 
-    let mut allow = expect(socket, SERVER_ALLOW_LOGIN, "accept the login request").await?;
+    let mut allow = expect(socket, SERVER_ALLOW_LOGIN, LOGIN_STEP).await?;
     let name = allow.str()?;
     let uuid = uuid::Uuid::from_u64_pair(allow.u64()?, allow.u64()?);
 
@@ -132,30 +132,46 @@ async fn send(socket: &mut Socket, packet: Vec<u8>) -> eyre::Result<()> {
     socket.send_binary(packet).await
 }
 
-async fn expect(socket: &mut Socket, opcode: u8, step: &str) -> eyre::Result<Reader> {
+async fn expect(socket: &mut Socket, opcode: u8, step: &'static str) -> eyre::Result<Reader> {
     match crate::platform::time::timeout(STEP_TIMEOUT, reply(socket, opcode, step)).await {
         Ok(reply) => reply,
-        Err(()) => eyre::bail!(
-            "the server did not {step} within {} seconds. Its proxy took the packet and went \
-             silent, which is what a login plugin or an anti-bot check holding the backend login \
-             looks like from here.",
-            STEP_TIMEOUT.as_secs()
-        ),
+        Err(()) => Err(Silent::at(
+            step,
+            format!(
+                "the server did not {step} within {} seconds. Its proxy took the packet and went \
+                 silent, which is what a login plugin or an anti-bot check holding the backend \
+                 login looks like from here.",
+                STEP_TIMEOUT.as_secs()
+            ),
+        )),
     }
 }
 
-async fn reply(socket: &mut Socket, opcode: u8, step: &str) -> eyre::Result<Reader> {
+async fn reply(socket: &mut Socket, opcode: u8, step: &'static str) -> eyre::Result<Reader> {
     loop {
-        let Some(message) = socket.recv().await? else {
-            eyre::bail!("the server closed the connection before it would {step}");
+        let message = match socket.recv().await {
+            Ok(Some(message)) => message,
+            Ok(None) => {
+                return Err(Silent::at(
+                    step,
+                    format!("the server closed the connection before it would {step}"),
+                ));
+            }
+            Err(e) => return Err(Silent::at(step, format!("{e:#}"))),
         };
         let payload = match message {
             Frame::Binary(payload) => payload,
             Frame::Close(Some(reason)) => {
-                eyre::bail!("the server closed the connection: {reason}")
+                return Err(Silent::at(
+                    step,
+                    format!("the server closed the connection: {reason}"),
+                ));
             }
             Frame::Close(None) => {
-                eyre::bail!("the server closed the connection before it would {step}")
+                return Err(Silent::at(
+                    step,
+                    format!("the server closed the connection before it would {step}"),
+                ));
             }
             Frame::Text(_) | Frame::Other => continue,
         };
@@ -166,6 +182,34 @@ async fn reply(socket: &mut Socket, opcode: u8, step: &str) -> eyre::Result<Read
         }
         return Err(describe(got, &mut reader));
     }
+}
+
+const LOGIN_STEP: &str = "accept the login request";
+
+#[derive(Debug)]
+struct Silent {
+    step: &'static str,
+    message: String,
+}
+
+impl Silent {
+    fn at(step: &'static str, message: String) -> eyre::Report {
+        Self { step, message }.into()
+    }
+}
+
+impl std::fmt::Display for Silent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Silent {}
+
+pub(super) fn login_stalled(error: &eyre::Report) -> bool {
+    error
+        .downcast_ref::<Silent>()
+        .is_some_and(|silent| silent.step == LOGIN_STEP)
 }
 
 #[derive(Debug)]

@@ -119,7 +119,13 @@ pub async fn auth_with_account(
 
         let mut attempts: usize = 1;
 
+        #[cfg(not(target_arch = "wasm32"))]
         let proxy = proxy.map(Proxy::into);
+        #[cfg(target_arch = "wasm32")]
+        let proxy: Option<azalea_auth::HttpProxy> = {
+            let _ = proxy;
+            None
+        };
 
         while let Err(err) = {
             let proxy = proxy.clone();

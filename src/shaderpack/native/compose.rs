@@ -43,14 +43,25 @@ pub(crate) struct Composed {
     text: String,
     parts: Vec<Part>,
     files: Vec<File>,
+    owner: String,
     entries_start: usize,
     entry_points: Vec<String>,
     bindings: Vec<api::Binding>,
 }
 
+#[cfg(test)]
 pub(crate) fn compose(
     pack: &PackInterface,
     file: &str,
+    kind: &ModuleKind,
+    read: &import::Read<'_>,
+) -> Result<Composed, Vec<Problem>> {
+    compose_files(pack, &[file.to_owned()], kind, read)
+}
+
+pub(crate) fn compose_files(
+    pack: &PackInterface,
+    roots: &[String],
     kind: &ModuleKind,
     read: &import::Read<'_>,
 ) -> Result<Composed, Vec<Problem>> {
@@ -64,7 +75,27 @@ pub(crate) fn compose(
             ),
         )]);
     }
-    let files = import::resolve(file, read)?;
+    let mut files: Vec<File> = Vec::new();
+    let mut problems = Vec::new();
+    for root in roots {
+        match import::resolve(root, read) {
+            Ok(found) => {
+                for file in found {
+                    if !files.iter().any(|f| f.path == file.path) {
+                        files.push(file);
+                    }
+                }
+            }
+            Err(found) => problems.extend(found),
+        }
+    }
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    let owner = roots
+        .last()
+        .map_or(manifest::FILE, String::as_str)
+        .to_owned();
     let bindings = api::bindings(pack, kind);
     let prelude = api::prelude(pack, &bindings);
     let entries = api::entries(pack, kind);
@@ -98,6 +129,7 @@ pub(crate) fn compose(
         text,
         parts,
         files,
+        owner,
         entries_start,
         entry_points: entries.names,
         bindings,
@@ -129,7 +161,7 @@ impl Composed {
     }
 
     pub(crate) fn file(&self) -> &str {
-        &self.files[self.files.len() - 1].path
+        &self.owner
     }
 
     pub(crate) fn files(&self) -> impl Iterator<Item = &str> {

@@ -47,10 +47,6 @@ pub(crate) fn is_plain_path(path: &str) -> bool {
         })
 }
 
-#[allow(
-    dead_code,
-    reason = "phase 2 of docs/SHADER_FORMAT.md: the pack list recognises pack.toml"
-)]
 pub(crate) fn is_native(path: &Path) -> bool {
     Source::open(path, "").is_ok_and(|source| source.contains(&format!("/{}", manifest::FILE)))
 }

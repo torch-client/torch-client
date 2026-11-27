@@ -317,6 +317,8 @@ pub fn draw_cartography(
     snap: &Snapshot,
     out: &mut Vec<InvAction>,
 ) -> Option<SlotStack> {
+    use crate::gui::map_view;
+
     let (left, top) = open_window(p, ctx, Layout::Cartography, "container/cartography_table");
 
     let (scaling, duplicating, locking) = match item_in(snap, 1) {
@@ -325,32 +327,38 @@ pub fn draw_cartography(
         "glass_pane" => (false, false, true),
         _ => (false, false, false),
     };
-    let has_result = filled(snap, 2);
-
-    if (locking && !has_result) || (scaling && !has_result) {
-        error_icon(
-            p,
-            "container/cartography_table/error",
-            left + 35.0,
-            top + 31.0,
-        );
+    let id = snap.menu_slots.first().and_then(|s| s.map_id);
+    let data = id.and_then(map_view::meta);
+    let mut locked = false;
+    if let Some(data) = data {
+        if data.locked {
+            locked = true;
+            if scaling || locking {
+                error_icon(
+                    p,
+                    "container/cartography_table/error",
+                    left + 35.0,
+                    top + 31.0,
+                );
+            }
+        }
+        if scaling && data.scale >= 4 {
+            locked = true;
+            error_icon(
+                p,
+                "container/cartography_table/error",
+                left + 35.0,
+                top + 31.0,
+            );
+        }
     }
-    if duplicating {
-        p.sprite(
-            "container/cartography_table/duplicated_map",
-            left + 67.0,
-            top + 13.0,
-            50.0,
-            66.0,
-        );
-        p.sprite(
-            "container/cartography_table/duplicated_map",
-            left + 117.0,
-            top + 13.0,
-            50.0,
-            66.0,
-        );
-    } else if scaling {
+
+    let map = |p: &mut Painter, x: f32, y: f32, scale: f32| {
+        if let (Some(id), Some(_)) = (id, data) {
+            map_view::draw(p, id, left + x, top + y, 128.0 * scale);
+        }
+    };
+    if scaling && !locked {
         p.sprite(
             "container/cartography_table/scaled_map",
             left + 67.0,
@@ -358,6 +366,24 @@ pub fn draw_cartography(
             66.0,
             66.0,
         );
+        map(p, 85.0, 31.0, 0.226);
+    } else if duplicating {
+        p.sprite(
+            "container/cartography_table/duplicated_map",
+            left + 83.0,
+            top + 13.0,
+            50.0,
+            66.0,
+        );
+        map(p, 86.0, 16.0, 0.34);
+        p.sprite(
+            "container/cartography_table/duplicated_map",
+            left + 67.0,
+            top + 29.0,
+            50.0,
+            66.0,
+        );
+        map(p, 70.0, 32.0, 0.34);
     } else {
         p.sprite(
             "container/cartography_table/map",
@@ -366,6 +392,7 @@ pub fn draw_cartography(
             66.0,
             66.0,
         );
+        map(p, 71.0, 17.0, 0.45);
         if locking {
             p.sprite(
                 "container/cartography_table/locked",

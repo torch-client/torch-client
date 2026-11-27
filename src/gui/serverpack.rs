@@ -16,7 +16,7 @@ pub(crate) fn draw(
         let s = shared.lock().unwrap();
         (
             s.session.server_packs.prompt.clone(),
-            s.session.current_address.clone(),
+            s.session.pack_address.clone(),
         )
     };
     let Some(prompt) = prompt else {

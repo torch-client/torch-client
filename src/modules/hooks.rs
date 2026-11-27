@@ -2,8 +2,8 @@ use azalea::Client;
 
 use super::turn::{self, Shape};
 use super::{
-    aim_assist, auto_mace, auto_mine, auto_walk, crystal_aura, ore_miner, pathfinder, safe_anchor,
-    scaffold, sneak,
+    aim_assist, auto_mace, auto_mine, auto_walk, builder, crystal_aura, farmer, ore_miner,
+    pathfinder, safe_anchor, scaffold, sneak,
 };
 use crate::session::{SharedMutex, SharedState};
 
@@ -14,6 +14,8 @@ pub fn shapes_look() -> bool {
         || safe_anchor::drives_camera()
         || pathfinder::drives_camera()
         || ore_miner::drives_camera()
+        || builder::drives_camera()
+        || farmer::drives_camera()
 }
 
 pub fn drives_look() -> bool {
@@ -22,6 +24,8 @@ pub fn drives_look() -> bool {
         || safe_anchor::drives_camera()
         || pathfinder::drives_camera()
         || ore_miner::drives_camera()
+        || builder::drives_camera()
+        || farmer::drives_camera()
         || aim_assist::pulls()
 }
 
@@ -57,6 +61,12 @@ pub fn look_delta(s: &SharedState, yaw: f32, pitch: f32, dt: f32, hand: (f32, f3
             s.session.ore_miner_look,
             Shape::Eased,
         ),
+        (
+            builder::drives_camera(),
+            s.session.builder_look,
+            Shape::Capped,
+        ),
+        (farmer::drives_camera(), s.session.farmer_look, Shape::Eased),
     ];
     aims.into_iter().fold(d, |d, (on, aim, shape)| match aim {
         Some(a) if on => turn::look_toward_by(s, yaw, pitch, dt, d, a.aim, a.turn, shape),
@@ -65,7 +75,7 @@ pub fn look_delta(s: &SharedState, yaw: f32, pitch: f32, dt: f32, hand: (f32, f3
 }
 
 pub fn shapes_movement() -> bool {
-    sneak::enabled() || auto_mine::enabled() || auto_walk::enabled()
+    sneak::enabled() || auto_mine::enabled() || auto_walk::enabled() || builder::fly_keys() != 0
 }
 
 pub fn move_flags(s: &SharedState, keys: u8) -> u8 {
@@ -79,6 +89,7 @@ pub fn move_flags(s: &SharedState, keys: u8) -> u8 {
     if auto_walk::enabled() {
         flags |= auto_walk::flags(s);
     }
+    flags |= builder::fly_keys();
     flags
 }
 

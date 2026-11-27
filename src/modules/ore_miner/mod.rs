@@ -10,8 +10,8 @@ use azalea_core::hit_result::{BlockHitResult, HitResult};
 use azalea_core::position::BlockPos;
 
 use super::auto_mine::shared::{
-    self, EYE, MAX_STALLS, REACH, STALL_TICKS, TRAVEL_PROGRESS, TRAVEL_TICKS, aim_at, best_tool,
-    exposes_fluid, harvests, inventory_full, present, select_tool, solid, state_at,
+    self, EYE, MAX_STALLS, REACH, STALL_TICKS, aim_at, best_tool, exposes_fluid, harvests,
+    inventory_full, present, select_tool, solid, state_at,
 };
 use super::auto_mine::{FluidRule, InvFull, LowHealth};
 use super::list::BitList;
@@ -37,7 +37,7 @@ options! {
 
 pub static ORES: BitList = BitList::new(
     "ore_miner",
-    "Ores",
+    super::seed_xray::TITLE,
     214.0,
     &super::seed_xray::GROUPS,
     false,
@@ -50,6 +50,8 @@ const CAP: usize = 32;
 const VEIN_CAP: usize = 64;
 
 const REVEAL_TICKS: i64 = 10;
+
+const TRAVEL_IDLE: i64 = 300;
 
 const NO_ROUTE_TRIES: u32 = 3;
 
@@ -133,7 +135,7 @@ pub fn button(key: &str, now: f32) -> ButtonAction {
 pub fn button_text(key: &str, text: &'static str, now: f32) -> &'static str {
     let at = f32::from_bits(HOME_PRESSED_AT.load(Relaxed));
     if key == "set_home" && (0.0..HOME_LABEL_SECS).contains(&(now - at)) {
-        "Home set"
+        crate::lang::tr!("ore_miner.home_set")
     } else {
         text
     }
@@ -161,17 +163,17 @@ fn take_home_ask(bot: &Client, shared: &SharedMutex) {
     *HOME.lock().unwrap_or_else(PoisonError::into_inner) = Some(Home { pos: at, world });
     say(
         shared,
-        &format!("OreMiner: home set at {} {} {}", at.x, at.y, at.z),
+        &crate::lang::trf!("ore_miner.home_set_at", at.x, at.y, at.z),
     );
 }
 
-fn home_for(s: &Store, world: &Option<azalea_world::WorldName>) -> Result<BlockPos, &'static str> {
+fn home_for(s: &Store, world: &Option<azalea_world::WorldName>) -> Result<BlockPos, HomeNote> {
     if !s.flag(setting::HOME) {
-        return Err("");
+        return Err(HomeNote::Off);
     }
     match HOME.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
-        None => Err(", no home set"),
-        Some(h) if h.world != *world => Err(", home is in another world"),
+        None => Err(HomeNote::NoHome),
+        Some(h) if h.world != *world => Err(HomeNote::OtherWorld),
         Some(h) => Ok(h.pos),
     }
 }
@@ -198,8 +200,8 @@ enum Stage {
         arrived: bool,
     },
     Travel {
-        until: i64,
-        from: BlockPos,
+        idle_at: i64,
+        at: BlockPos,
     },
     Reveal {
         pos: BlockPos,
@@ -250,7 +252,7 @@ impl Run {
 }
 
 enum Halt {
-    Done(&'static str),
+    Done(HomeNote),
     NoOre,
     NoBlocks(String),
     NoKinds,
@@ -260,6 +262,15 @@ enum Halt {
     Full,
     NeedEsp,
     NeedSeed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HomeNote {
+    Off,
+    NoHome,
+    OtherWorld,
+    Back,
+    Failed,
 }
 
 enum Next {
@@ -287,17 +298,19 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
             end_run(bot);
             if s.enabled(Id::AutoMine) {
                 s.set_enabled(Id::AutoMine, false);
-                say(
-                    shared,
-                    "OreMiner: switched AutoMine off, the two cannot run together",
-                );
+                say(shared, crate::lang::tr!("ore_miner.switched_auto_mine_off"));
             }
         }
         Phase::Running => {}
     }
 
     if s.choice(setting::LOW_HEALTH) == LowHealth::Disconnect
-        && shared::low_health(shared, true, s.num(setting::HEALTH), "OreMiner")
+        && shared::low_health(
+            shared,
+            true,
+            s.num(setting::HEALTH),
+            super::registry::module(Id::OreMiner).label(),
+        )
     {
         end_run(bot);
         s.set_enabled(Id::OreMiner, false);
@@ -332,7 +345,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
         return false;
     }
 
-    let now = crate::client::tracking::game_time();
+    let now = crate::client::tracking::client_ticks();
     let feet = player_pos_to_block_pos(pos);
     let eye = [pos.x, pos.y + EYE, pos.z];
     let mut guard = RUN.lock().unwrap_or_else(PoisonError::into_inner);
@@ -352,8 +365,8 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
                 Next::Travel => {
                     pathfinder::goto_quiet(bot, QuietGoal::Near(run.list.clone()), opts(s));
                     run.stage = Stage::Travel {
-                        until: now + TRAVEL_TICKS,
-                        from: feet,
+                        idle_at: now + TRAVEL_IDLE,
+                        at: feet,
                     };
                     break;
                 }
@@ -363,7 +376,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
                     break;
                 }
             },
-            Stage::Travel { until, from } => {
+            Stage::Travel { idle_at, at } => {
                 match pathfinder::travel_status() {
                     Travel::Arrived => {
                         run.failed_trips = 0;
@@ -381,23 +394,18 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
                             run.stage = Stage::Choose { arrived: false };
                         }
                     }
-                    Travel::Going | Travel::Idle => match timed_out(bot, now, until, from, feet) {
-                        None => {}
-                        Some(true) => {
-                            pathfinder::goto_quiet(bot, QuietGoal::Near(run.list.clone()), opts(s));
-                            run.stage = Stage::Travel {
-                                until: now + TRAVEL_TICKS,
-                                from: feet,
-                            };
-                        }
-                        Some(false) => {
-                            if let Some(n) = nearest(&run.list, feet) {
-                                run.drop_block(n);
-                                run.unreachable += 1;
+                    Travel::Going | Travel::Idle => {
+                        match route_watch(bot, now, idle_at, at, feet) {
+                            Some((idle_at, at)) => run.stage = Stage::Travel { idle_at, at },
+                            None => {
+                                if let Some(n) = nearest(&run.list, feet) {
+                                    run.drop_block(n);
+                                    run.unreachable += 1;
+                                }
+                                run.stage = Stage::Choose { arrived: false };
                             }
-                            run.stage = Stage::Choose { arrived: false };
                         }
-                    },
+                    }
                 }
                 break;
             }
@@ -439,7 +447,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
                     run.list.retain(|p| *p != t);
                     let amount = limit(s);
                     if amount > 0 && run.mined >= amount {
-                        halt = Some(Halt::Done(""));
+                        halt = Some(Halt::Done(HomeNote::Off));
                         break;
                     }
                     run.list = if s.flag(setting::VEIN) {
@@ -486,7 +494,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
             }
         }
     }
-    if matches!(halt, Some(Halt::Done(""))) {
+    if matches!(halt, Some(Halt::Done(HomeNote::Off))) {
         halt = match home_for(s, &run.world) {
             Ok(home) => {
                 look = None;
@@ -585,7 +593,7 @@ fn choose(
             })
         };
         if amount > 0 && run.mined >= amount {
-            return Next::Halt(Halt::Done(""));
+            return Next::Halt(Halt::Done(HomeNote::Off));
         }
         if let Some((t, state, aim)) = pick {
             let Some(group) = run.want.group(state) else {
@@ -616,10 +624,7 @@ fn choose(
                 run.unreachable += 1;
                 if !run.tool_said {
                     run.tool_said = true;
-                    say(
-                        shared,
-                        "OreMiner: no tool in the hotbar gets drops from some of these ores, so they are left",
-                    );
+                    say(shared, crate::lang::tr!("ore_miner.no_tool"));
                 }
                 continue;
             }
@@ -662,13 +667,21 @@ fn mine_stage(
     }
 }
 
-fn timed_out(bot: &Client, now: i64, until: i64, from: BlockPos, feet: BlockPos) -> Option<bool> {
-    if now < until {
-        return None;
+fn route_watch(
+    bot: &Client,
+    now: i64,
+    idle_at: i64,
+    at: BlockPos,
+    feet: BlockPos,
+) -> Option<(i64, BlockPos)> {
+    if feet != at || pathfinder::mining() {
+        return Some((now + TRAVEL_IDLE, feet));
     }
-    let moved = (feet.x - from.x).abs() + (feet.y - from.y).abs() + (feet.z - from.z).abs();
+    if now < idle_at {
+        return Some((idle_at, at));
+    }
     pathfinder::cancel_quiet(bot);
-    Some(moved >= TRAVEL_PROGRESS)
+    None
 }
 
 fn home_step(
@@ -680,25 +693,24 @@ fn home_step(
     feet: BlockPos,
     now: i64,
 ) -> Option<Halt> {
-    let resend = match leg {
-        None => true,
-        Some((until, from)) => match pathfinder::travel_status() {
-            Travel::Arrived => return Some(Halt::Done(", back home")),
-            Travel::Failed => return Some(Halt::Done(", could not get home")),
-            Travel::Going | Travel::Idle => match timed_out(bot, now, until, from, feet) {
-                None => false,
-                Some(true) => true,
-                Some(false) => return Some(Halt::Done(", could not get home")),
+    let leg = match leg {
+        None => {
+            pathfinder::goto_quiet(bot, QuietGoal::Block(home), opts(s));
+            (now + TRAVEL_IDLE, feet)
+        }
+        Some((idle_at, at)) => match pathfinder::travel_status() {
+            Travel::Arrived => return Some(Halt::Done(HomeNote::Back)),
+            Travel::Failed => return Some(Halt::Done(HomeNote::Failed)),
+            Travel::Going | Travel::Idle => match route_watch(bot, now, idle_at, at, feet) {
+                Some(leg) => leg,
+                None => return Some(Halt::Done(HomeNote::Failed)),
             },
         },
     };
-    if resend {
-        pathfinder::goto_quiet(bot, QuietGoal::Block(home), opts(s));
-        run.stage = Stage::Home {
-            pos: home,
-            leg: Some((now + TRAVEL_TICKS, feet)),
-        };
-    }
+    run.stage = Stage::Home {
+        pos: home,
+        leg: Some(leg),
+    };
     None
 }
 
@@ -706,6 +718,7 @@ fn opts(s: &Store) -> QuietOpts {
     QuietOpts {
         parkour: false,
         mining: s.flag(setting::DIG),
+        placing: None,
     }
 }
 
@@ -828,29 +841,47 @@ fn stop(
     end_run(bot);
     store().set_enabled(Id::OreMiner, false);
     clear_draw();
-    let no_blocks;
-    let mut note = "";
-    let what = match why {
-        Halt::Done(n) => {
-            note = n;
-            "done"
+    let t = (mined, not_ore, unreachable);
+    let text = match why {
+        Halt::Done(HomeNote::Off) => crate::lang::trf!("ore_miner.end.done", t.0, t.1, t.2),
+        Halt::Done(HomeNote::NoHome) => {
+            crate::lang::trf!("ore_miner.end.done.no_home", t.0, t.1, t.2)
         }
-        Halt::NoOre => "no ore in range",
+        Halt::Done(HomeNote::OtherWorld) => {
+            crate::lang::trf!("ore_miner.end.done.home_elsewhere", t.0, t.1, t.2)
+        }
+        Halt::Done(HomeNote::Back) => {
+            crate::lang::trf!("ore_miner.end.done.back", t.0, t.1, t.2)
+        }
+        Halt::Done(HomeNote::Failed) => {
+            crate::lang::trf!("ore_miner.end.done.failed", t.0, t.1, t.2)
+        }
+        Halt::NoOre => crate::lang::trf!("ore_miner.end.no_ore", t.0, t.1, t.2),
         Halt::NoBlocks(name) => {
-            no_blocks = format!("stopped, no {name} in render distance");
-            no_blocks.as_str()
+            crate::lang::trf!("ore_miner.end.no_blocks", name, t.0, t.1, t.2)
         }
-        Halt::NoKinds => "stopped, no ore family is switched on in Ores",
-        Halt::NoRoute => "stopped, no route reaches the ores",
-        Halt::Stalled => "stopped, blocks are not breaking",
-        Halt::Hazard => "stopped, there is a fluid behind the next ore",
-        Halt::Full => "stopped, the inventory is full",
-        Halt::NeedEsp => "stopped, switch Xray or OreESP on, or set Source to Seed Xray",
-        Halt::NeedSeed => "stopped, Seed Xray has to be on with a seed for this Source",
+        Halt::NoKinds => {
+            crate::lang::trf!("ore_miner.end.no_kinds", t.0, t.1, t.2)
+        }
+        Halt::NoRoute => {
+            crate::lang::trf!("ore_miner.end.no_route", t.0, t.1, t.2)
+        }
+        Halt::Stalled => {
+            crate::lang::trf!("ore_miner.end.stalled", t.0, t.1, t.2)
+        }
+        Halt::Hazard => {
+            crate::lang::trf!("ore_miner.end.hazard", t.0, t.1, t.2)
+        }
+        Halt::Full => {
+            crate::lang::trf!("ore_miner.end.full", t.0, t.1, t.2)
+        }
+        Halt::NeedEsp => {
+            crate::lang::trf!("ore_miner.end.need_esp", t.0, t.1, t.2)
+        }
+        Halt::NeedSeed => {
+            crate::lang::trf!("ore_miner.end.need_seed", t.0, t.1, t.2)
+        }
     };
-    let text = format!(
-        "OreMiner: {what}; mined {mined}, not ore {not_ore}, unreachable {unreachable}{note}"
-    );
     LOOK_OUT.store(false, Relaxed);
     let mut st = shared.lock().unwrap();
     st.session.ore_miner_look = None;

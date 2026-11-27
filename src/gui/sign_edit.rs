@@ -169,6 +169,7 @@ impl SignEditState {
         if input.left_click {
             crate::platform::keyboard::note_tap(true);
         }
+        crate::platform::keyboard::enter_is_text();
         let SignEditState {
             field, lines, line, ..
         } = self;

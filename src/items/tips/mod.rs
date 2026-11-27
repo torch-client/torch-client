@@ -28,15 +28,26 @@ pub(crate) struct Ctx<'a> {
     pub advanced: bool,
     pub attack_speed_base: Option<f64>,
     pub peaceful: bool,
+    pub containers: ContainerRows,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContainerRows {
+    Vanilla,
+    Compact,
+    Hidden,
 }
 
 pub(crate) fn shows(data: &ItemStackData, kind: DataComponentKind) -> bool {
-    crate::items::component::<TooltipDisplay>(data)
-        .is_none_or(|display| !display.hidden_components.contains(&kind))
+    crate::modules::better_tooltips::reveals_components()
+        || crate::items::component::<TooltipDisplay>(data)
+            .is_none_or(|display| !display.hidden_components.contains(&kind))
 }
 
 pub(crate) fn hides_tooltip(data: &ItemStackData) -> bool {
-    crate::items::component::<TooltipDisplay>(data).is_some_and(|display| display.hide_tooltip)
+    !crate::modules::better_tooltips::reveals_tooltip()
+        && crate::items::component::<TooltipDisplay>(data)
+            .is_some_and(|display| display.hide_tooltip)
 }
 
 pub(crate) fn shows_component<T: DataComponentTrait>(data: &ItemStackData) -> bool {

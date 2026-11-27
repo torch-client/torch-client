@@ -13,7 +13,8 @@ enum Tail {
 }
 
 fn cat_tag(cat: &'static str) -> &'static str {
-    &cat[..3.min(cat.len())]
+    let end = cat.char_indices().nth(3).map_or(cat.len(), |(i, _)| i);
+    &cat[..end]
 }
 
 fn cat_w(p: &Painter, cat: &str) -> f32 {
@@ -50,7 +51,7 @@ impl ClickGuiState {
 
         p.rounded_rect(x, y, w, HEADER_H + view_h, look.radius, look.panel());
         self.record(Focus::On(window), x, y, w, HEADER_H + view_h);
-        self.title_bar(p, ui, window, x, y, w, cat.name(), collapsed, active);
+        self.title_bar(p, ui, window, x, y, w, cat.label(), collapsed, active);
         if collapsed {
             return;
         }
@@ -128,18 +129,18 @@ impl ClickGuiState {
         let dim = if on { theme::TEXT_ON } else { look.text_dim() };
         match tail {
             Tail::Dots => {
-                self.label(p, m.name, x + 8.0, ty, w - 21.0, name);
+                self.label(p, m.label(), x + 8.0, ty, w - 21.0, name);
                 theme::dots(p, x + w - 10.0, (y + look.row_h * 0.5).floor() - 2.0, dim);
             }
             Tail::Category => {
-                let cat = cat_tag(m.category.name());
+                let cat = cat_tag(m.category.label());
                 let cw = cat_w(p, cat);
-                self.label(p, m.name, x + 8.0, ty, w - 22.0 - cw, name);
+                self.label(p, m.label(), x + 8.0, ty, w - 22.0 - cw, name);
                 p.text_plain(cat, x + w - 8.0 - cw, ty, dim, look.shadow);
             }
         }
         if hovered && let Some(cursor) = ui.mouse() {
-            self.tip = Some((m.desc, cursor.x, cursor.y));
+            self.tip = Some((m.about(), cursor.x, cursor.y));
         }
         hovered
     }
@@ -179,7 +180,8 @@ impl ClickGuiState {
         let h = if collapsed { HEADER_H } else { self.search_h() };
         p.rounded_rect(x, y, w, h, look.radius, look.solid());
         self.record(Focus::On(Window::Search), x, y, w, h);
-        self.title_bar(p, ui, Window::Search, x, y, w, "Search", collapsed, active);
+        let title = crate::lang::tr!("clickgui.search.title");
+        self.title_bar(p, ui, Window::Search, x, y, w, title, collapsed, active);
         if collapsed {
             return;
         }
@@ -196,7 +198,7 @@ impl ClickGuiState {
             fy,
             w - 10.0,
             FIELD_H,
-            "Type to search",
+            crate::lang::tr!("clickgui.search.hint"),
         );
 
         let mut ry = fy + FIELD_H + 3.0;
@@ -223,9 +225,9 @@ impl ClickGuiState {
         }
         if self.matches.is_empty() {
             let line = if self.field.text.is_empty() {
-                "Enter toggles"
+                crate::lang::tr!("clickgui.search.enter_toggles")
             } else {
-                "No match"
+                crate::lang::tr!("clickgui.no_match")
             };
             self.label(p, line, x + 8.0, ry + 2.0, w - 16.0, look.text_dim());
         }

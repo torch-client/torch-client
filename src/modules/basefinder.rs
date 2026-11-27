@@ -287,6 +287,10 @@ static SESSION: AtomicU32 = AtomicU32::new(0);
 static ARRIVED: AtomicBool = AtomicBool::new(false);
 static LEVEL: Mutex<String> = Mutex::new(String::new());
 
+pub(super) fn session() -> u32 {
+    SESSION.load(Relaxed)
+}
+
 #[inline]
 pub fn chunk_arrived() {
     ARRIVED.store(true, Relaxed);

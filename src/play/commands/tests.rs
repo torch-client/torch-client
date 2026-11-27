@@ -457,12 +457,11 @@ fn plain_chat_completes_player_names() {
 fn requests_are_not_repeated() {
     let mut client = SuggestionClient::default();
     let first = client.request("/team join re").unwrap();
-    assert_eq!(first.0, 1);
     assert!(client.request("/team join re").is_none());
     let second = client.request("/team join red").unwrap();
-    assert_eq!(second.0, 2);
+    assert_ne!(first.0, second.0);
 
-    client.accept(2, Suggestions::default());
+    client.accept(second.0, Suggestions::default());
     assert!(client.request("/team join red").is_none());
     assert!(client.request("/team join re").is_some());
 }
@@ -470,8 +469,8 @@ fn requests_are_not_repeated() {
 #[test]
 fn stale_replies_are_discarded() {
     let mut client = SuggestionClient::default();
-    client.request("/team join r");
-    client.request("/team join re");
+    let (stale, _) = client.request("/team join r").unwrap();
+    let (current, _) = client.request("/team join re").unwrap();
     let answer = Suggestions::create(
         &chars("/team join re"),
         vec![Suggestion {
@@ -481,11 +480,11 @@ fn stale_replies_are_discarded() {
         }],
     );
     assert!(
-        !client.accept(1, answer.clone()),
-        "the id 1 request was superseded"
+        !client.accept(stale, answer.clone()),
+        "the first request was superseded"
     );
     assert!(client.reply_for("/team join re").is_none());
-    assert!(client.accept(2, answer));
+    assert!(client.accept(current, answer));
     assert_eq!(
         client.reply_for("/team join re").map(texts),
         Some(vec!["red".to_string()])

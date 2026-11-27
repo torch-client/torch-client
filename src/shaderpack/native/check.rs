@@ -3,7 +3,7 @@ use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
-use super::api::{self, Binding, BindingKind, ModuleKind, PackInterface};
+use super::api::{self, Binding, BindingKind, ModuleKind, PackInterface, Resource, TerrainTier};
 use super::caps::{self, Needs, TierName};
 use super::compose::{self, Composed};
 use super::graph::{self, Reads};
@@ -19,6 +19,7 @@ pub(crate) struct Report {
     pub(crate) problems: Vec<Problem>,
     pub(crate) skipped: Vec<String>,
     pub(crate) tiers: Vec<TierName>,
+    pub(crate) needs: Needs,
     pub(crate) modules: Vec<ModuleReport>,
 }
 
@@ -164,16 +165,21 @@ pub(crate) fn run_cli(path: &str, json: bool) -> i32 {
 }
 
 pub(crate) fn check(path: &Path) -> Report {
+    check_and_open(path).0
+}
+
+pub(crate) fn check_and_open(path: &Path) -> (Report, Option<Package>) {
     let mut report = Report {
         pack: path.display().to_string(),
         problems: Vec::new(),
         skipped: Vec::new(),
         tiers: Vec::new(),
+        needs: Needs::default(),
         modules: Vec::new(),
     };
     let opened = package::open(path);
     report.add(opened.problems);
-    match opened.package {
+    match &opened.package {
         None => report.skip(
             "the module and pack-wide checks: the pack could not be read as far as its manifest"
                 .to_owned(),
@@ -184,12 +190,19 @@ pub(crate) fn check(path: &Path) -> Report {
                 manifest::FILE
             ));
         }
-        Some(package) => check_package(&package, &mut report),
+        Some(package) => check_package(package, &mut report),
     }
     report
         .problems
         .sort_by(|a, b| (a.file.as_str(), a.at).cmp(&(b.file.as_str(), b.at)));
-    report
+    (report, opened.package)
+}
+
+pub(super) fn naga_tier(needs: &Needs) -> TierName {
+    caps::tiers_for(needs)
+        .first()
+        .copied()
+        .unwrap_or(TierName::Desktop)
 }
 
 struct Checked {
@@ -204,10 +217,7 @@ struct Checked {
 fn check_package(package: &Package, report: &mut Report) {
     let manifest = &package.manifest;
     let mut needs = manifest.needs();
-    let tier = caps::tiers_for(&needs)
-        .first()
-        .copied()
-        .unwrap_or(TierName::Desktop);
+    let tier = naga_tier(&needs);
     let read = |path: &str| package.wgsl(path);
 
     let mut checked: Vec<Checked> = Vec::new();
@@ -215,12 +225,12 @@ fn check_package(package: &Package, report: &mut Report) {
     let mut layouts: Vec<(Layout<'_>, Option<Reads>)> = Vec::new();
     for layout in manifest.layouts() {
         let layout_name = layout.dimension.unwrap_or(TOP_LEVEL).to_owned();
-        let pack = interface::pack_interface(manifest, layout);
-        let (specs, problems) = interface::modules(layout, &pack);
+        let pack = interface::pack_interface(manifest, layout, &[]);
+        let (specs, problems) = interface::modules(layout, &pack, TerrainTier::Indirect);
         report.add(problems);
         let mut reads = Some(Reads::new());
         for spec in specs {
-            let composed = match compose::compose(&pack, &spec.file, &spec.kind, &read) {
+            let composed = match compose::compose_files(&pack, &spec.roots, &spec.kind, &read) {
                 Ok(composed) => composed,
                 Err(problems) => {
                     report.add(problems);
@@ -256,6 +266,32 @@ fn check_package(package: &Package, report: &mut Report) {
             }
         }
         layouts.push((layout, reads));
+
+        let (specs, _) = interface::modules(layout, &pack, TerrainTier::Direct);
+        for spec in specs
+            .into_iter()
+            .filter(|spec| spec.kind.terrain().is_some())
+        {
+            match compose::compose_files(&pack, &spec.roots, &spec.kind, &read) {
+                Ok(composed) => {
+                    check_module(&pack, &spec, &composed, tier, report);
+                }
+                Err(problems) => report.add(problems),
+            }
+        }
+
+        for chosen in last_entries(layout) {
+            let pack = interface::pack_interface(manifest, layout, &chosen);
+            let (specs, _) = interface::modules(layout, &pack, TerrainTier::Indirect);
+            for spec in specs {
+                match compose::compose_files(&pack, &spec.roots, &spec.kind, &read) {
+                    Ok(composed) => {
+                        check_module(&pack, &spec, &composed, tier, report);
+                    }
+                    Err(problems) => report.add(problems),
+                }
+            }
+        }
     }
 
     if composed_all {
@@ -312,11 +348,26 @@ fn check_package(package: &Package, report: &mut Report) {
             Problem::package("no tier that loads packs can run this pack").hint(describe(&needs)),
         ]);
     }
+    report.needs = needs;
     report.modules = checked.into_iter().map(|c| c.report).collect();
 }
 
+fn last_entries(layout: Layout<'_>) -> Vec<Vec<usize>> {
+    layout
+        .targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| target.formats.len() > 1)
+        .map(|(i, target)| {
+            let mut chosen = vec![0; layout.targets.len()];
+            chosen[i] = target.formats.len() - 1;
+            chosen
+        })
+        .collect()
+}
+
 fn unused_options(manifest: &Manifest, checked: &[Checked]) -> Vec<Problem> {
-    let mut used: BTreeSet<&str> = manifest.condition_options();
+    let mut used: BTreeSet<&str> = manifest.manifest_options();
     for decl in checked
         .iter()
         .flat_map(|c| c.options.iter().flatten())
@@ -357,8 +408,18 @@ fn value_sets(manifest: &Manifest) -> Vec<Values> {
     sets
 }
 
-fn describe(needs: &Needs) -> String {
-    let formats: Vec<&str> = needs.formats.iter().map(|f| f.name()).collect();
+pub(crate) fn describe(needs: &Needs) -> String {
+    let formats: Vec<String> = needs
+        .format_lists
+        .iter()
+        .filter(|list| !list.iter().any(|f| f.info().baseline))
+        .map(|list| {
+            list.iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        })
+        .collect();
     format!(
         "it needs {} outputs from one pass, {} sampled textures in one module, compute {}, storage textures {}, formats [{}]",
         needs.outputs,
@@ -395,11 +456,11 @@ fn panicked(composed: &Composed, doing: &str, message: &str) -> Problem {
 }
 
 #[derive(Default)]
-struct Analysis {
-    problems: Vec<Problem>,
-    skipped: Option<&'static str>,
-    options: Option<Vec<usize>>,
-    used: Option<Vec<Binding>>,
+pub(super) struct Analysis {
+    pub(super) problems: Vec<Problem>,
+    pub(super) skipped: Option<&'static str>,
+    pub(super) options: Option<Vec<usize>>,
+    pub(super) used: Option<Vec<Binding>>,
 }
 
 fn check_module(
@@ -441,7 +502,7 @@ fn check_module(
     }
 }
 
-fn analyse(
+pub(super) fn analyse(
     pack: &PackInterface,
     kind: &ModuleKind,
     composed: &Composed,
@@ -497,6 +558,17 @@ fn analyse(
     } else {
         api::used_globals(&module, &info, composed, &entries)
     };
+    if matches!(kind, ModuleKind::Shadow { .. }) {
+        for binding in used
+            .iter()
+            .filter(|b| matches!(b.resource, Resource::ShadowDepth | Resource::ShadowColor))
+        {
+            out.problems.push(
+                Problem::file(composed.file(), format!("the shadow pass reads `{}`, which it draws into", binding.name))
+                    .hint("call shadow_light and shadow_cascade from a geometry stage or a pass, not from `shadow` or `displace`"),
+            );
+        }
+    }
     out.used = Some(used.into_iter().cloned().collect());
     out
 }
@@ -614,6 +686,7 @@ mod tests {
             [
                 "[geometry.opaque]",
                 "[geometry.translucent]",
+                "[shadow]",
                 "deferred pass `lighting`",
                 "final pass `tonemap`"
             ]
@@ -625,12 +698,123 @@ mod tests {
                 .all(|m| m.layouts == [TOP_LEVEL, "minecraft:the_nether"]),
             "{report}"
         );
-        assert!(report.modules[0].entry_points.is_empty());
+        assert!(report.modules.iter().all(|m| m.valid), "{report}");
+        assert_eq!(
+            report.modules[0].entry_points,
+            [
+                "torch_sky_vertex",
+                "torch_terrain_vertex",
+                "torch_entity_vertex",
+                "torch_hand_vertex",
+                "torch_sky_fragment",
+                "torch_terrain_fragment",
+                "torch_terrain_cutout_fragment",
+                "torch_entity_fragment",
+                "torch_entity_cutout_fragment",
+                "torch_block_entity_fragment",
+                "torch_block_entity_cutout_fragment",
+                "torch_hand_fragment",
+                "torch_hand_cutout_fragment",
+            ]
+        );
+        assert_eq!(
+            report.modules[1].entry_points,
+            [
+                "torch_terrain_vertex",
+                "torch_entity_vertex",
+                "torch_cloud_vertex",
+                "torch_weather_vertex",
+                "torch_water_fragment",
+                "torch_particle_fragment",
+                "torch_particle_cutout_fragment",
+                "torch_clouds_fragment",
+                "torch_weather_fragment",
+            ]
+        );
+        assert_eq!(
+            report.modules[2].entry_points,
+            [
+                api::SHADOW_TERRAIN_VERTEX,
+                api::SHADOW_ENTITY_VERTEX,
+                api::SHADOW_TERRAIN_CUTOUT,
+                api::SHADOW_ENTITY_CUTOUT,
+            ]
+        );
+        assert_eq!(report.modules[2].file, manifest::FILE);
+        let geometry = [
+            "frame",
+            "linear_clamp",
+            "nearest_clamp",
+            "block_atlas",
+            "lightmap",
+            "entity_texture",
+        ];
+        assert_eq!(names(&report.modules[0]), geometry);
+        assert_eq!(names(&report.modules[1]), geometry);
         assert_eq!(
             names(&report.modules[2]),
-            ["frame", "albedo", "normal", "lit_prev"]
+            ["frame", "nearest_clamp", "block_atlas", "entity_texture"]
         );
-        assert_eq!(names(&report.modules[3]), ["frame", "lit"]);
+        assert_eq!(
+            names(&report.modules[3]),
+            [
+                "frame",
+                "shadow_compare",
+                "scene_depth",
+                "shadow_depth",
+                "albedo",
+                "normal",
+                "lit_prev"
+            ]
+        );
+        assert_eq!(names(&report.modules[4]), ["frame", "lit"]);
+    }
+
+    #[test]
+    fn the_deferred_geometry_validates_in_both_tiers() {
+        let opened = package::open(&example("deferred"));
+        let package = opened.package.expect("the example opens");
+        let manifest = &package.manifest;
+        let layout = manifest.layouts().next().expect("the top level");
+        let pack = interface::pack_interface(manifest, layout, &[]);
+        let read = |path: &str| package.wgsl(path);
+        for terrain in TerrainTier::ALL {
+            let (specs, problems) = interface::modules(layout, &pack, terrain);
+            assert!(problems.is_empty(), "{problems:#?}");
+            let geometry: Vec<ModuleSpec> = specs
+                .into_iter()
+                .filter(|s| s.kind.terrain() == Some(terrain))
+                .collect();
+            let roles: Vec<&str> = geometry.iter().map(|s| s.role.as_str()).collect();
+            assert_eq!(
+                roles,
+                ["[geometry.opaque]", "[geometry.translucent]", "[shadow]"]
+            );
+            for spec in geometry {
+                let composed = compose::compose_files(&pack, &spec.roots, &spec.kind, &read)
+                    .unwrap_or_else(|p| panic!("{p:#?}"));
+                assert!(!composed.entry_points().is_empty(), "{}", spec.role);
+                let tier = if terrain == TerrainTier::Direct {
+                    TierName::WebGl2
+                } else {
+                    TierName::Desktop
+                };
+                let analysis = analyse(&pack, &spec.kind, &composed, tier);
+                assert!(
+                    analysis.problems.is_empty(),
+                    "{} {terrain:?}: {:#?}",
+                    spec.role,
+                    analysis.problems
+                );
+                assert!(
+                    analysis.used.is_some(),
+                    "{} {terrain:?} did not validate",
+                    spec.role
+                );
+                let direct = !composed.text().contains("var<storage");
+                assert_eq!(direct, terrain == TerrainTier::Direct);
+            }
+        }
     }
 
     #[test]
@@ -678,6 +862,50 @@ mod tests {
             "{report}"
         );
         assert_eq!(report.json()["problems"][0]["line"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn a_format_list_is_checked_at_its_last_entry() {
+        let dir = std::env::temp_dir().join(format!("native_format_branch_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = "format = 1\napi = \"1.0\"\nid = \"branch\"\nname = \"Branch\"\nversion = \"1\"\n\n\
+                        [[target]]\nid = \"lit\"\nformat = [\"rgba16float\", \"rgba8unorm\"]\n\n\
+                        [[pass]]\nid = \"fill\"\nat = \"composite\"\nfile = \"fill.wgsl\"\nwrites = [\"lit\"]\n\n\
+                        [[pass]]\nid = \"show\"\nat = \"final\"\nfile = \"show.wgsl\"\n";
+        let fill = "const SCALE: u32 = 1u / (1u - FORMAT_LIT);\n\
+                    fn fill(in: ScreenInput) -> vec4<f32> {\n    return vec4<f32>(f32(SCALE));\n}\n";
+        let show = "fn show(in: ScreenInput) -> vec4<f32> {\n    return textureSampleLevel(lit, linear_clamp, in.uv, 0.0);\n}\n";
+        for (name, text) in [
+            ("pack.toml", manifest),
+            ("fill.wgsl", fill),
+            ("show.wgsl", show),
+        ] {
+            std::fs::write(dir.join(name), text).unwrap();
+        }
+        let report = check(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(report.problems.len(), 1, "{report}");
+        assert_eq!(report.problems[0].file, "fill.wgsl", "{report}");
+        assert_eq!(
+            roles(&report),
+            ["composite pass `fill`", "final pass `show`"]
+        );
+        assert!(
+            report
+                .modules
+                .iter()
+                .all(|m| m.text.contains("const FORMAT_LIT: u32 = 0u;")),
+            "{report}"
+        );
+        assert_eq!(
+            report.tiers,
+            [
+                TierName::Desktop,
+                TierName::WebGpu,
+                TierName::WebGl2,
+                TierName::Android
+            ]
+        );
     }
 
     #[test]

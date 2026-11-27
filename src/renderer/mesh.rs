@@ -85,6 +85,7 @@ pub struct MeshBuf {
     pub min: [i16; 3],
     pub max: [i16; 3],
     pub faces: [[u16; FACE_GROUPS]; 2],
+    pub hidden: u32,
     #[cfg(feature = "shader_support")]
     pub pack: Vec<super::packvertex::PackQuad>,
     #[cfg(feature = "shader_support")]
@@ -354,8 +355,10 @@ impl MeshBuf {
         let col = pack_tint([tint[0], tint[1], tint[2], 1.0]);
         #[cfg(feature = "shader_support")]
         let col = match &self.pack_block {
-            Some(block) => pack_color(block.fluid_color(block.tint, fluid_face(corners))),
-            None => col,
+            Some(block) if block.colors == super::packvertex::VertexColors::Iris => {
+                pack_color(block.fluid_color(block.tint, fluid_face(corners)))
+            }
+            _ => col,
         };
         for i in [0, 3, 2, 1] {
             self.push_vertex(corners[i], pack_uv(face_uvs[i]), light, col);
@@ -403,11 +406,11 @@ impl MeshBuf {
             let color = pack_tint([ao * tint[0], ao * tint[1], ao * tint[2], shade]);
             #[cfg(feature = "shader_support")]
             let color = match &self.pack_block {
-                Some(block) => {
+                Some(block) if block.colors == super::packvertex::VertexColors::Iris => {
                     let quad_tint = if quad.tint >= 0 { block.tint } else { [1.0; 3] };
                     pack_color(block.color(quad_tint, lit.face_shade, lit.shade[i]))
                 }
-                None => color,
+                _ => color,
             };
             let light = pack_light(lit.light[i], material, p[1]);
             self.push_vertex(
@@ -522,7 +525,6 @@ pub fn build_section_mesh<'a>(
 ) -> (MeshBuf, MeshBuf) {
     let mut buf = MeshBuf::new();
     let mut water = MeshBuf::new();
-    let cardinal = super::dimension::current().cardinal();
     let MeshTiles {
         grid,
         water_still,
@@ -532,6 +534,12 @@ pub fn build_section_mesh<'a>(
 
     #[cfg(feature = "shader_support")]
     let pack_ids = super::packvertex::current();
+
+    #[cfg(feature = "shader_support")]
+    let unlit = !lighting_enabled() && pack_ids.is_none();
+    #[cfg(not(feature = "shader_support"))]
+    let unlit = !lighting_enabled();
+    let cardinal = super::dimension::current().cardinal();
     #[cfg(feature = "shader_support")]
     let water_pack_id = pack_ids.as_ref().map(|ids| {
         ids.of(
@@ -554,6 +562,7 @@ pub fn build_section_mesh<'a>(
                 tint: [1.0; 3],
                 shades: *cardinal,
                 lighting: ids.lighting(),
+                colors: ids.colors(),
             };
             buf.pack_block = Some(block);
             water.pack_block = Some(block);
@@ -562,7 +571,9 @@ pub fn build_section_mesh<'a>(
         match &rb.geom {
             BlockGeom::Model(baked) => {
                 let target = if rb.translucent { &mut water } else { &mut buf };
-                emit_baked(wx, wy, wz, rb, baked, occ, bx, by, bz, cardinal, target);
+                emit_baked(
+                    wx, wy, wz, rb, baked, occ, bx, by, bz, cardinal, unlit, target,
+                );
             }
             BlockGeom::Fluid {
                 amount,
@@ -642,6 +653,7 @@ fn emit_baked(
     by: i32,
     bz: i32,
     cardinal: &[f32; 6],
+    unlit: bool,
     buf: &mut MeshBuf,
 ) {
     let mut random = baked
@@ -651,7 +663,7 @@ fn emit_baked(
     let [ox, oy, oz] = rb.offset.at(bx, bz);
     let (wx, wy, wz) = (wx + ox, wy + oy, wz + oz);
 
-    let smooth = smooth_lighting_enabled() && baked.ambient_occlusion && rb.emission == 0;
+    let smooth = !unlit && smooth_lighting_enabled() && baked.ambient_occlusion && rb.emission == 0;
     let collision_full = occ.is_full_cube(bx, by, bz);
 
     let tint = match rb.tint_kind {
@@ -694,6 +706,7 @@ fn emit_baked(
     };
 
     let leaves = rb.cull_group == crate::util::block_model::LEAVES_CULL_GROUP;
+    let roots = rb.cull_group == crate::util::block_model::MANGROVE_ROOTS_CULL_GROUP;
     let force_opaque = leaves && !cutout_leaves_enabled();
 
     for part in &baked.parts {
@@ -708,7 +721,13 @@ fn emit_baked(
                 if occ.is_solid(nx, ny, nz) {
                     continue;
                 }
-                let skip_same = if leaves { force_opaque } else { true };
+                let skip_same = if leaves {
+                    force_opaque
+                } else if roots {
+                    dy != 0
+                } else {
+                    true
+                };
                 if skip_same && occ.same_cull_group(nx, ny, nz, rb.cull_group) {
                     continue;
                 }

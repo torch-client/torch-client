@@ -10,6 +10,9 @@ pub fn parkour_move(ctx: &mut MovesCtx, node: RelBlockPos) {
     if !ctx.world.is_block_solid(node.down(1)) {
         return;
     }
+    if ctx.world.is_block_water(node) {
+        return;
+    }
 
     parkour_forward_1_move(ctx, node);
     parkour_forward_2_move(ctx, node);
@@ -25,6 +28,9 @@ fn parkour_forward_1_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
             continue;
         }
         if !ctx.world.is_passable(pos + gap_offset) {
+            continue;
+        }
+        if ctx.world.lands_in_danger(pos + gap_offset, true) {
             continue;
         }
 
@@ -94,6 +100,9 @@ fn parkour_forward_2_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
             if !ctx.world.is_block_passable((pos + offset).up(2)) {
                 continue 'dir;
             }
+            if ctx.world.lands_in_danger(pos + offset, true) {
+                continue 'dir;
+            }
         }
         if !ctx.world.is_block_passable(pos.up(2)) {
             continue;
@@ -138,6 +147,9 @@ fn parkour_forward_3_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
                 continue 'dir;
             }
             if !ctx.world.is_block_passable((pos + offset).up(2)) {
+                continue 'dir;
+            }
+            if ctx.world.lands_in_danger(pos + offset, true) {
                 continue 'dir;
             }
         }

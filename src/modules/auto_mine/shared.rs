@@ -50,12 +50,10 @@ pub(in crate::modules) fn low_health(
     {
         return false;
     }
-    let text = format!(
-        "{label}: health {:.0} fell below {:.0}",
-        st.session.health, limit
-    );
+    let (health, limit) = (format!("{:.0}", st.session.health), format!("{limit:.0}"));
+    let text = crate::lang::trf!("auto_mine.low_health", label, health, limit);
     st.end_session(
-        "Disconnected".to_string(),
+        crate::lang::tr!("auto_mine.disconnected").to_string(),
         Some(crate::text::parse_formatted(&text)),
     );
     st.disconnect_requested = true;

@@ -117,6 +117,10 @@ impl BlockStatePredictionHandler {
         }
     }
 
+    pub fn is_predicting(&self, pos: BlockPos) -> bool {
+        self.server_state.contains_key(&pos)
+    }
+
     pub fn end_prediction_up_to(&mut self, seq: u32, world: &World) {
         let mut to_remove = Vec::new();
         for (pos, state) in &self.server_state {

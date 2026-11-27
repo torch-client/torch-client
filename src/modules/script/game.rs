@@ -42,6 +42,7 @@ pub(super) struct Item {
     pub count: u8,
     pub damage: u16,
     pub max_damage: u16,
+    pub modded: bool,
 }
 
 impl Item {
@@ -54,6 +55,7 @@ impl Item {
             count: s.count,
             damage: s.damage,
             max_damage: s.max_damage,
+            modded: s.modded.is_some(),
         }
     }
 }
@@ -1012,7 +1014,7 @@ fn item(lua: &Lua, it: Item) -> mlua::Result<Value> {
     t.raw_set("count", it.count)?;
     t.raw_set("damage", it.damage)?;
     t.raw_set("maxdamage", it.max_damage)?;
-    if let Some(b) = crate::items::placed::placed_block(it.id) {
+    if let Some(b) = crate::items::placed::placed_block(it.id).filter(|_| !it.modded) {
         t.raw_set("block", b.to_str())?;
     }
     Ok(Value::Table(t))
@@ -1226,9 +1228,6 @@ pub(super) fn tables(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Tables> {
             ctx,
             "torch.inventory.swap",
             |_, ctx, (slot, hotbar): (f64, f64)| {
-                use azalea::entity::inventory::Inventory;
-                use azalea::inventory::ContainerClickEvent;
-                use azalea_inventory::operations::SwapClick;
                 let what = "torch.inventory.swap";
                 let source = menu_slot(slot, what)?;
                 let hotbar = whole(hotbar, what)?;
@@ -1238,20 +1237,11 @@ pub(super) fn tables(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Tables> {
                     )));
                 }
                 let bot = ctx.bot(what)?;
-                let window_id = match bot.component::<Inventory>() {
-                    Ok(inv) if inv.container_menu.is_none() => inv.id,
-                    _ => return Ok(false),
-                };
-                bot.ecs.write().trigger(ContainerClickEvent {
-                    entity: bot.entity,
-                    window_id,
-                    operation: SwapClick {
-                        source_slot: source,
-                        target_slot: hotbar as u8 - 1,
-                    }
-                    .into(),
-                });
-                Ok(true)
+                Ok(crate::play::inventory_bridge::swap_with_hotbar(
+                    &bot,
+                    source,
+                    hotbar as u8 - 1,
+                ))
             },
         )?,
     )?;

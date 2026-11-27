@@ -7,10 +7,9 @@ use std::{
 };
 
 #[cfg(feature = "online-mode")]
-use azalea_auth::{
-    game_profile::GameProfile,
-    sessionserver::{ClientSessionServerError, ServerSessionServerError},
-};
+use azalea_auth::sessionserver::ClientSessionServerError;
+#[cfg(all(feature = "online-mode", not(target_arch = "wasm32")))]
+use azalea_auth::{game_profile::GameProfile, sessionserver::ServerSessionServerError};
 use azalea_crypto::{Aes128CfbDec, Aes128CfbEnc};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -115,10 +114,6 @@ pub mod transport {
 
     pub fn set_opener(opener: Opener) {
         let _ = OPENER.set(opener);
-    }
-
-    pub fn has_opener() -> bool {
-        OPENER.get().is_some()
     }
 
     pub async fn open(address: ResolvedAddr) -> Result<HandshakeConn, ConnectionError> {
@@ -460,13 +455,21 @@ impl Connection<ClientboundLoginPacket, ServerboundLoginPacket> {
     ) -> Result<(), ClientSessionServerError> {
         use azalea_auth::sessionserver::{self, SessionServerJoinOpts};
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let proxy = sessionserver_proxy.map(Proxy::into);
+        #[cfg(target_arch = "wasm32")]
+        let proxy: Option<azalea_auth::HttpProxy> = {
+            let _ = sessionserver_proxy;
+            None
+        };
+
         sessionserver::join(SessionServerJoinOpts {
             access_token,
             public_key: &packet.public_key,
             private_key: &private_key,
             uuid,
             server_id: &packet.server_id,
-            proxy: sessionserver_proxy.map(Proxy::into),
+            proxy,
         })
         .await
     }
@@ -506,7 +509,7 @@ impl Connection<ServerboundLoginPacket, ClientboundLoginPacket> {
         Connection::from(self)
     }
 
-    #[cfg(feature = "online-mode")]
+    #[cfg(all(feature = "online-mode", not(target_arch = "wasm32")))]
     pub async fn authenticate(
         &self,
         username: &str,

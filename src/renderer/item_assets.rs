@@ -118,6 +118,7 @@ impl ItemAssets {
             view.compass_spawn,
             view.compass_death,
             crate::renderer::dimension::level_name(),
+            view.world_run.runs,
         );
         self.local = view.in_world.then_some(Owner {
             pos: view.player_lerp,

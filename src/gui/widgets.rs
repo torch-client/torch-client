@@ -27,6 +27,12 @@ pub struct TextBox {
     pub max_width: Option<f32>,
     pub strip_formatting: bool,
     pub raw: bool,
+    #[cfg_attr(
+        not(any(target_arch = "wasm32", target_os = "android")),
+        allow(dead_code, reason = "read by the web bridge only")
+    )]
+    pub(crate) multiline: bool,
+    pub centered: bool,
 }
 
 const BORDER_INSET: f32 = 4.0;
@@ -119,15 +125,6 @@ impl TextBox {
 
     fn delete_selection(&mut self) -> bool {
         self.delete_span(self.cursor, self.anchor)
-    }
-
-    pub(crate) fn insert_raw(&mut self, c: char) -> bool {
-        self.delete_selection();
-        if self.char_count() >= self.max_len {
-            return false;
-        }
-        self.splice_at_cursor(c.encode_utf8(&mut [0; 4]));
-        true
     }
 
     fn splice_at_cursor(&mut self, s: &str) {
@@ -231,11 +228,19 @@ impl TextBox {
         }
 
         if wants && !self.keyboard_active {
-            crate::platform::keyboard::show(&self.text, self.anchor, self.cursor);
+            let (text, anchor, cursor) = self.bridge();
+            crate::platform::keyboard::show(&text, anchor, cursor);
             self.keyboard_active = true;
         } else if !wants && self.keyboard_active {
             crate::platform::keyboard::hide();
             self.keyboard_active = false;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.keyboard_active
+            && self.multiline
+            && let Some((text, cursor, anchor)) = crate::platform::keyboard::poll()
+        {
+            return self.adopt_flat(&text, cursor, anchor);
         }
         #[cfg(target_arch = "wasm32")]
         if self.keyboard_active
@@ -292,8 +297,84 @@ impl TextBox {
     pub fn push_keyboard(&self) {
         #[cfg(target_arch = "wasm32")]
         if self.keyboard_active {
-            crate::platform::keyboard::sync_selection(&self.text, self.anchor, self.cursor);
+            let (text, anchor, cursor) = self.bridge();
+            crate::platform::keyboard::sync_selection(&text, anchor, cursor);
         }
+    }
+
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    fn bridge(&self) -> (std::borrow::Cow<'_, str>, usize, usize) {
+        if !self.multiline {
+            return (
+                std::borrow::Cow::Borrowed(&self.text),
+                self.anchor,
+                self.cursor,
+            );
+        }
+        let flat: String = self.text.chars().filter(|&c| c != '\n').collect();
+        (
+            std::borrow::Cow::Owned(flat),
+            flat_index(&self.text, self.anchor),
+            flat_index(&self.text, self.cursor),
+        )
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn adopt_flat(&mut self, polled: &str, cursor: usize, anchor: usize) -> bool {
+        let (flat, _, _) = self.bridge();
+        let old: Vec<char> = flat.chars().collect();
+        let new: Vec<char> = polled.chars().collect();
+        let mut changed = false;
+        if old != new {
+            let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+            let max_suffix = old.len().min(new.len()) - prefix;
+            let suffix = old
+                .iter()
+                .rev()
+                .zip(new.iter().rev())
+                .take(max_suffix)
+                .take_while(|(a, b)| a == b)
+                .count();
+            let removed = prefix..old.len() - suffix;
+            let room = self
+                .max_len
+                .saturating_sub(self.char_count() - removed.len());
+            let added: String = new[prefix..new.len() - suffix]
+                .iter()
+                .copied()
+                .filter(|&c| allowed_char(c))
+                .take(room)
+                .collect();
+            let start = if removed.is_empty() && flat_index(&self.text, self.cursor) == prefix {
+                self.cursor
+            } else {
+                unflat_index(&self.text, prefix, true)
+            };
+            let end = if removed.is_empty() {
+                start
+            } else {
+                unflat_index(&self.text, removed.end, false)
+            };
+            let (bs, be) = (self.byte_index(start), self.byte_index(end));
+            self.text.replace_range(bs..be, &added);
+            let caret = start + added.chars().count();
+            self.cursor = caret;
+            self.anchor = caret;
+            changed = true;
+        }
+        let here = (
+            flat_index(&self.text, self.cursor),
+            flat_index(&self.text, self.anchor),
+        );
+        if here != (cursor, anchor) {
+            self.cursor = unflat_index(&self.text, cursor, true);
+            self.anchor = unflat_index(&self.text, anchor, true);
+        }
+        let (flat, a, c) = self.bridge();
+        if flat != polled || (a, c) != (anchor, cursor) {
+            crate::platform::keyboard::sync_selection(&flat, a, c);
+        }
+        changed
     }
 
     pub fn handle_input(&mut self, input: &GuiInput) -> bool {
@@ -388,7 +469,10 @@ impl TextBox {
 
     fn push_browser_backspace(&self) {
         #[cfg(target_arch = "wasm32")]
-        crate::platform::keyboard::sync(&self.text, self.cursor);
+        {
+            let (text, _, cursor) = self.bridge();
+            crate::platform::keyboard::sync(&text, cursor);
+        }
     }
 
     fn apply_edit(&mut self, key: EditKey, input: &GuiInput, limit: Limit<'_>) -> bool {
@@ -451,7 +535,24 @@ impl TextBox {
         }
     }
 
-    fn text_origin(&self, x: f32, y: f32, h: f32) -> (f32, f32) {
+    fn text_origin(&self, font: &Font, x: f32, y: f32, w: f32, h: f32) -> (f32, f32) {
+        if self.centered {
+            let tw = self.text_width(w);
+            let mut shown = 0.0f32;
+            for c in self.text.chars().skip(self.scroll) {
+                let a = font.advance(c, false);
+                if shown + a > tw {
+                    break;
+                }
+                shown += a;
+            }
+            let y = if self.bordered {
+                y + (h - 8.0) / 2.0
+            } else {
+                y
+            };
+            return (x + ((w - shown) / 2.0).floor(), y);
+        }
         if self.bordered {
             (x + BORDER_INSET, y + (h - 8.0) / 2.0)
         } else {
@@ -489,7 +590,7 @@ impl TextBox {
             self.dragging = false;
         }
 
-        let (tx, _ty) = self.text_origin(x, y, h);
+        let (tx, _ty) = self.text_origin(font, x, y, w, h);
 
         let tw = self.text_width(w);
 
@@ -567,12 +668,13 @@ impl TextBox {
         } else if took {
             self.focused = true;
         }
-        #[cfg(target_os = "android")]
-        if ctx.input.left_click && !took && self.focused {
+        #[cfg(any(target_os = "android", target_arch = "wasm32"))]
+        if crate::platform::keyboard::soft() && ctx.input.left_click && !took && self.focused {
             self.focused = false;
             if ring {
                 focus::clear();
             }
+            crate::platform::keyboard::tap_gave_up();
         }
         #[cfg(feature = "mobile_ui")]
         if self.focused {
@@ -598,9 +700,41 @@ impl TextBox {
         start
     }
 
+    pub(in crate::gui) fn handle_read_only(&mut self, input: &GuiInput) {
+        if !self.focused {
+            return;
+        }
+        if input.select_all {
+            self.select_all();
+        } else if input.copy {
+            clipboard_set(&self.selected_text());
+        }
+    }
+
     pub fn draw(&mut self, p: &mut Painter, x: f32, y: f32, w: f32, h: f32) {
+        self.draw_formatted(p, x, y, w, h, &[]);
+    }
+
+    pub(in crate::gui) fn draw_formatted(
+        &mut self,
+        p: &mut Painter,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        spans: &[Span],
+    ) {
         if self.browser_keyboard {
-            crate::platform::keyboard::arm();
+            #[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
+            {
+                let (s, ox, oy) = p.xform();
+                crate::platform::keyboard::arm_at(
+                    (x * s + ox) * p.scale,
+                    (y * s + oy) * p.scale,
+                    w * s * p.scale,
+                    h * s * p.scale,
+                );
+            }
         }
         if self.bordered {
             let frame_color = if self.focused {
@@ -612,7 +746,7 @@ impl TextBox {
             p.fill(x, y, w, h, 0xFF00_0000);
         }
         let font = &p.atlas.font;
-        let (tx, text_y) = self.text_origin(x, y, h);
+        let (tx, text_y) = self.text_origin(font, x, y, w, h);
         let w = self.text_width(w);
 
         let start = self.scroll_to_caret(font, w);
@@ -634,7 +768,14 @@ impl TextBox {
         if self.text.is_empty() && !self.focused {
             p.text_plain(&self.placeholder, tx, text_y, 0x707070, shadow);
         } else {
-            p.text_plain(shown, tx, text_y, self.color, shadow);
+            let styled: usize = spans.iter().map(|s| s.text.chars().count()).sum();
+            if styled > 0 && styled == self.char_count() {
+                let end = self.scroll + shown.chars().count();
+                let visible = crate::gui::chat::slice_spans(spans, self.scroll, end);
+                p.text(&visible, tx, text_y, shadow);
+            } else {
+                p.text_plain(shown, tx, text_y, self.color, shadow);
+            }
             let (sa, sb) = self.selection_range();
             if sa != sb {
                 let a = at(sa.max(self.scroll) - self.scroll);
@@ -678,10 +819,78 @@ pub struct MultiLineTextBox {
     pub line_limit: usize,
 }
 
+const LINE_SEEK_PIXEL_BIAS: f32 = 2.0;
+const TEXT_AREA_PADDING: f32 = 4.0;
+
+pub(crate) fn vanilla_lines(
+    font: &Font,
+    text: &str,
+    max_width: f32,
+    out: &mut Vec<std::ops::Range<usize>>,
+) {
+    out.clear();
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let max_width = max_width.max(1.0);
+    let mut start = 0usize;
+    while start < len {
+        let mut width = 0.0f32;
+        let mut last_space: Option<usize> = None;
+        let mut had_width = false;
+        let mut split: Option<usize> = None;
+        for (i, &c) in chars.iter().enumerate().skip(start) {
+            if c == '\n' {
+                split = Some(i);
+                break;
+            }
+            if c == ' ' {
+                last_space = Some(i);
+            }
+            let w = font.advance(c, false);
+            width += w;
+            if had_width && width > max_width {
+                split = Some(last_space.unwrap_or(i));
+                break;
+            }
+            had_width |= w != 0.0;
+        }
+        let Some(split) = split else {
+            out.push(start..len);
+            break;
+        };
+        out.push(start..split);
+        start = if matches!(chars.get(split), Some(' ' | '\n')) {
+            split + 1
+        } else {
+            split
+        };
+    }
+    if text.is_empty() {
+        out.push(0..0);
+    } else if text.ends_with('\n') {
+        out.push(len..len);
+    }
+}
+
+fn plain_index_at_width(font: &Font, s: &str, width: f32) -> usize {
+    let mut acc = 0.0f32;
+    let mut n = 0;
+    for c in s.chars() {
+        acc += font.advance(c, false);
+        if acc > width {
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
 impl MultiLineTextBox {
     pub fn new(max_len: usize, line_limit: usize) -> MultiLineTextBox {
+        let mut inner = TextBox::new(max_len, "");
+        inner.multiline = true;
         MultiLineTextBox {
-            inner: TextBox::new(max_len, ""),
+            inner,
             lines: Vec::new(),
             width: 0.0,
             stale: true,
@@ -715,13 +924,14 @@ impl MultiLineTextBox {
         self.inner
             .replace_text(s.chars().take(self.inner.max_len).collect());
         self.stale = true;
+        self.inner.push_keyboard();
     }
 
     fn relayout(&mut self, font: &Font, width: f32) {
         if !self.stale && self.width == width {
             return;
         }
-        font.wrap_ranges(&self.inner.text, width, &mut self.lines);
+        vanilla_lines(font, &self.inner.text, width, &mut self.lines);
         self.width = width;
         self.stale = false;
     }
@@ -732,123 +942,332 @@ impl MultiLineTextBox {
     }
 
     fn line_at(lines: &[std::ops::Range<usize>], cursor: usize) -> usize {
-        lines.iter().rposition(|r| r.start <= cursor).unwrap_or(0)
+        lines
+            .iter()
+            .position(|r| r.start <= cursor && cursor <= r.end)
+            .unwrap_or(lines.len().saturating_sub(1))
+    }
+
+    fn len(&self) -> usize {
+        self.inner.char_count()
+    }
+
+    fn seek(&mut self, pos: usize, selecting: bool) {
+        self.inner.move_cursor_to(pos.min(self.len()), selecting);
+    }
+
+    fn insert(&mut self, s: &str, font: &Font, width: f32) -> bool {
+        let (lo, hi) = self.inner.selection_range();
+        if s.is_empty() && lo == hi {
+            return false;
+        }
+        let raw = self.inner.raw;
+        let room = self.inner.max_len.saturating_sub(self.len());
+        let add: String = s
+            .chars()
+            .filter(|&c| {
+                if raw {
+                    code_char(c)
+                } else {
+                    allowed_char(c) || c == '\n'
+                }
+            })
+            .take(room)
+            .collect();
+        let (bl, bh) = (self.inner.byte_index(lo), self.inner.byte_index(hi));
+        let mut candidate = String::with_capacity(self.inner.text.len() + add.len());
+        candidate.push_str(&self.inner.text[..bl]);
+        candidate.push_str(&add);
+        candidate.push_str(&self.inner.text[bh..]);
+        if self.line_limit > 0 {
+            vanilla_lines(font, &candidate, width, &mut self.lines);
+            self.stale = true;
+            if self.lines.len() > self.line_limit {
+                return false;
+            }
+        }
+        self.inner.text = candidate;
+        self.inner.cursor = lo + add.chars().count();
+        self.inner.anchor = self.inner.cursor;
+        self.stale = true;
+        true
+    }
+
+    fn delete(&mut self, dir: isize, font: &Font, width: f32) -> bool {
+        if self.inner.cursor == self.inner.anchor {
+            self.inner.anchor = self.inner.cursor.saturating_add_signed(dir).min(self.len());
+        }
+        self.insert("", font, width)
+    }
+
+    fn previous_word(&self) -> std::ops::Range<usize> {
+        let chars: Vec<char> = self.inner.text.chars().collect();
+        if chars.is_empty() {
+            return 0..0;
+        }
+        let mut start = self.inner.cursor.min(chars.len() - 1);
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        start..Self::word_end(&chars, start)
+    }
+
+    fn next_word(&self) -> std::ops::Range<usize> {
+        let chars: Vec<char> = self.inner.text.chars().collect();
+        if chars.is_empty() {
+            return 0..0;
+        }
+        let mut start = self.inner.cursor.min(chars.len() - 1);
+        while start < chars.len() && !chars[start].is_whitespace() {
+            start += 1;
+        }
+        while start < chars.len() && chars[start].is_whitespace() {
+            start += 1;
+        }
+        start..Self::word_end(&chars, start)
+    }
+
+    fn word_end(chars: &[char], from: usize) -> usize {
+        let mut end = from;
+        while end < chars.len() && !chars[end].is_whitespace() {
+            end += 1;
+        }
+        end
+    }
+
+    fn seek_line(&mut self, offset: isize, selecting: bool, font: &Font, width: f32) {
+        self.relayout(font, width);
+        let row = Self::line_at(&self.lines, self.inner.cursor);
+        let line = self.lines[row].clone();
+        let x = font.width_str(char_slice(&self.inner.text, line.start..self.inner.cursor))
+            + LINE_SEEK_PIXEL_BIAS;
+        let target = row.saturating_add_signed(offset).min(self.lines.len() - 1);
+        let target = self.lines[target].clone();
+        let column = plain_index_at_width(font, char_slice(&self.inner.text, target.clone()), x);
+        self.seek(target.start + column, selecting);
+    }
+
+    fn key(&mut self, key: EditKey, input: &GuiInput, font: &Font, width: f32) -> bool {
+        let selecting = input.shift;
+        let ctrl = input.ctrl;
+        match key {
+            EditKey::Char(c) => {
+                if ctrl && !input.alt {
+                    return false;
+                }
+                let mut buf = [0u8; 4];
+                let ok = if self.inner.raw {
+                    code_char(c)
+                } else {
+                    allowed_char(c)
+                };
+                ok && self.insert(c.encode_utf8(&mut buf), font, width)
+            }
+            EditKey::Enter => self.insert("\n", font, width),
+            EditKey::Backspace => {
+                let dir = if ctrl {
+                    self.previous_word().start as isize - self.inner.cursor as isize
+                } else {
+                    -1
+                };
+                self.delete(dir, font, width)
+            }
+            EditKey::Delete => {
+                let dir = if ctrl {
+                    self.next_word().start as isize - self.inner.cursor as isize
+                } else {
+                    1
+                };
+                self.delete(dir, font, width)
+            }
+            EditKey::Right => {
+                let pos = if ctrl {
+                    self.next_word().start
+                } else {
+                    self.inner.cursor + 1
+                };
+                self.seek(pos, selecting);
+                false
+            }
+            EditKey::Left => {
+                let pos = if ctrl {
+                    self.previous_word().start
+                } else {
+                    self.inner.cursor.saturating_sub(1)
+                };
+                self.seek(pos, selecting);
+                false
+            }
+            EditKey::Down | EditKey::Up => {
+                if !ctrl {
+                    let offset = if key == EditKey::Down { 1 } else { -1 };
+                    self.seek_line(offset, selecting, font, width);
+                }
+                false
+            }
+            EditKey::Home | EditKey::End => {
+                self.relayout(font, width);
+                let line = self.lines[Self::line_at(&self.lines, self.inner.cursor)].clone();
+                let pos = match (key == EditKey::Home, ctrl) {
+                    (true, true) => 0,
+                    (true, false) => line.start,
+                    (false, true) => self.len(),
+                    (false, false) => line.end,
+                };
+                self.seek(pos, selecting);
+                false
+            }
+        }
     }
 
     pub fn handle_input(&mut self, input: &GuiInput, font: &Font, width: f32) -> bool {
         self.relayout(font, width);
         if !self.inner.focused {
-            return self.inner.handle_input(input);
+            let changed = self.inner.handle_input(input);
+            self.stale |= changed;
+            return changed;
         }
+        crate::platform::keyboard::enter_is_text();
 
-        let mutating = self.line_limit > 0
-            && (input.paste
-                || input.cut
-                || input.edits.iter().any(|k| {
-                    matches!(
-                        k,
-                        EditKey::Char(_) | EditKey::Backspace | EditKey::Delete | EditKey::Enter
-                    )
-                }));
-        let undo = mutating.then(|| {
+        #[cfg(target_arch = "wasm32")]
+        let before = (self.line_limit > 0).then(|| {
             (
                 self.inner.text.clone(),
                 self.inner.cursor,
                 self.inner.anchor,
             )
         });
-
-        let Self { inner, lines, .. } = self;
-        let mut fresh = false;
-        let mut entered = false;
-        let mut changed = inner.handle_edits(input, None, |field, key| {
-            match key {
-                EditKey::Enter => {
-                    entered |= field.insert_raw('\n');
-                    fresh = false;
-                    return true;
-                }
-                EditKey::Up | EditKey::Down | EditKey::Home | EditKey::End => {}
-                EditKey::Left | EditKey::Right => return false,
-                EditKey::Char(_) | EditKey::Backspace | EditKey::Delete => {
-                    fresh = false;
-                    return false;
-                }
-            }
-            if !fresh {
-                font.wrap_ranges(&field.text, width, lines);
-                fresh = true;
-            }
-            let line = Self::line_at(lines, field.cursor);
-            let column = field.cursor - lines[line].start;
-            let same_column =
-                |target: &std::ops::Range<usize>| (target.start + column).min(target.end);
-            let pos = match key {
-                EditKey::Up if line > 0 => same_column(&lines[line - 1]),
-                EditKey::Down if line + 1 < lines.len() => same_column(&lines[line + 1]),
-                EditKey::Home => lines[line].start,
-                EditKey::End => lines[line].end,
-                _ => return true,
-            };
-            field.move_cursor_to(pos, input.shift);
-            true
-        });
-        changed |= entered;
-
-        if changed {
+        let (mut changed, live) = self.inner.frame_input(input, None);
+        self.stale |= changed;
+        #[cfg(target_arch = "wasm32")]
+        if changed && let Some((text, cursor, anchor)) = before {
+            vanilla_lines(font, &self.inner.text, width, &mut self.lines);
             self.stale = true;
-            self.relayout(font, width);
-            if self.line_limit > 0
-                && self.lines.len() > self.line_limit
-                && let Some((text, cursor, anchor)) = undo
-            {
+            if self.lines.len() > self.line_limit {
                 self.inner.text = text;
                 self.inner.cursor = cursor;
                 self.inner.anchor = anchor;
-                self.stale = true;
-                self.relayout(font, width);
+                self.inner.push_keyboard();
                 changed = false;
             }
         }
+        if !live {
+            return changed;
+        }
+        let was = (self.inner.cursor, self.inner.anchor);
+        let mut edited = false;
+        if input.select_all {
+            self.inner.cursor = self.len();
+            self.inner.anchor = 0;
+        } else if input.copy {
+            clipboard_set(&self.inner.selected_text());
+        } else if input.paste {
+            let text = clipboard_get();
+            let text = if self.inner.raw {
+                code_text(&text)
+            } else {
+                text
+            };
+            edited |= self.insert(&text, font, width);
+        } else if input.cut {
+            clipboard_set(&self.inner.selected_text());
+            edited |= self.insert("", font, width);
+        }
+        if self.inner.take_browser_backspace() {
+            edited |= self.key(EditKey::Backspace, input, font, width);
+        }
+        for &key in &input.edits {
+            edited |= self.key(key, input, font, width);
+        }
+        if input.page_up {
+            self.seek(0, input.shift);
+        } else if input.page_down {
+            self.seek(self.len(), input.shift);
+        }
+        if edited || (self.inner.cursor, self.inner.anchor) != was {
+            self.inner.push_keyboard();
+        }
+        changed |= edited;
         changed
     }
 
     pub fn handle_mouse(&mut self, input: &GuiInput, font: &Font, x: f32, y: f32, width: f32) {
-        if !input.left_click {
-            return;
-        }
-        let Some(m) = input.mouse else { return };
-        let page_rows = if self.line_limit > 0 {
+        self.relayout(font, width);
+        let rows = if self.line_limit > 0 {
             self.line_limit
         } else {
             self.lines.len() + 1
         };
-        let on_page =
-            m.x >= x && m.x <= x + width && m.y >= y && m.y <= y + page_rows as f32 * LINE_HEIGHT;
-        if on_page {
-            crate::platform::keyboard::note_tap(true);
-        } else if self.inner.focused {
-            crate::platform::keyboard::note_tap(false);
+        let area = [
+            x - TEXT_AREA_PADDING,
+            y - TEXT_AREA_PADDING,
+            width + 2.0 * TEXT_AREA_PADDING,
+            rows as f32 * LINE_HEIGHT + 2.0 * TEXT_AREA_PADDING,
+        ];
+        self.handle_mouse_in(input, font, x, y, width, area);
+    }
+
+    pub fn handle_mouse_in(
+        &mut self,
+        input: &GuiInput,
+        font: &Font,
+        x: f32,
+        y: f32,
+        width: f32,
+        area: [f32; 4],
+    ) {
+        let was = (self.inner.cursor, self.inner.anchor);
+        if input.left_release {
+            self.inner.dragging = false;
         }
-        self.relayout(font, width);
-        let rows = self.lines.len() as f32;
-        if m.x < x || m.x > x + width || m.y < y || m.y > y + rows * LINE_HEIGHT {
-            return;
-        }
-        let row = (((m.y - y) / LINE_HEIGHT) as usize).min(self.lines.len() - 1);
-        let range = self.lines[row].clone();
-        let mut pos = range.start;
-        let mut w = 0.0f32;
-        for c in char_slice(&self.inner.text, range).chars() {
-            let adv = font.advance(c, false);
-            if x + w + adv / 2.0 > m.x {
-                break;
+        let Some(m) = input.mouse else { return };
+        let [ax, ay, aw, ah] = area;
+        let inside = m.x >= ax && m.x < ax + aw && m.y >= ay && m.y < ay + ah;
+        if input.left_click {
+            if inside {
+                crate::platform::keyboard::note_tap(true);
+            } else if self.inner.focused {
+                crate::platform::keyboard::note_tap(false);
             }
-            w += adv;
-            pos += 1;
+            if !inside {
+                return;
+            }
+            if input.double_click || input.triple_click {
+                let word = self.previous_word();
+                self.seek(word.start, false);
+                self.seek(word.end, true);
+            } else {
+                self.seek_point(font, x, y, width, m.x, m.y, input.shift);
+            }
+            self.inner.dragging = true;
+        } else if self.inner.dragging && input.left_down {
+            self.seek_point(font, x, y, width, m.x, m.y, true);
         }
-        self.inner.cursor = pos;
-        self.inner.anchor = pos;
+        if (self.inner.cursor, self.inner.anchor) != was {
+            self.inner.push_keyboard();
+        }
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "a point against a text column")]
+    fn seek_point(
+        &mut self,
+        font: &Font,
+        x: f32,
+        y: f32,
+        width: f32,
+        mx: f32,
+        my: f32,
+        selecting: bool,
+    ) {
+        self.relayout(font, width);
+        let left = (mx - x).floor();
+        let row = ((my - y) / LINE_HEIGHT).floor().max(0.0) as usize;
+        let line = self.lines[row.min(self.lines.len() - 1)].clone();
+        let column = plain_index_at_width(font, char_slice(&self.inner.text, line.clone()), left);
+        self.seek(line.start + column, selecting);
     }
 
     pub fn draw(&mut self, p: &mut Painter, x: f32, y: f32, width: f32, color: u32) {
@@ -873,39 +1292,36 @@ impl MultiLineTextBox {
         }
         let (sa, sb) = self.inner.selection_range();
         let cursor = self.inner.cursor;
+        let len = self.len();
         let caret_row = Self::line_at(&self.lines, cursor);
+        let shadow = false;
         let text = self.inner.text.as_str();
-        let (mut at, mut byte) = (0usize, 0usize);
-        let mut seek = |to: usize| {
-            for c in text[byte..].chars().take(to - at) {
-                byte += c.len_utf8();
-            }
-            at = to;
-            byte
-        };
         for row in first..end {
             let range = self.lines[row].clone();
-            let b0 = seek(range.start);
-            let b1 = seek(range.end);
-            let line = &text[b0..b1];
+            let line = char_slice(text, range.clone());
             let ly = y + (row - first) as f32 * LINE_HEIGHT;
-            p.text_plain(line, x, ly, color, false);
-            let (a, b) = (
-                sa.clamp(range.start, range.end),
-                sb.clamp(range.start, range.end),
-            );
-            if a != b {
-                let pre = char_slice(line, 0..a - range.start);
-                let mid = char_slice(line, a - range.start..b - range.start);
-                let x0 = x + p.atlas.font.width_str(pre);
-                let x1 = x0 + p.atlas.font.width_str(mid);
-                draw_selection(p, mid, x0, x1, ly, ly - 1.0, ly + 10.0);
+            p.text_plain(line, x, ly, color, shadow);
+            if sa != sb && sa <= range.end && range.start <= sb {
+                let a = sa.max(range.start);
+                let x0 = x + p.atlas.font.width_str(char_slice(text, range.start..a));
+                let x1 = if sb > range.end {
+                    x + width + TEXT_AREA_PADDING
+                } else {
+                    x + p.atlas.font.width_str(char_slice(text, range.start..sb))
+                };
+                let mid = char_slice(text, a..sb.min(range.end));
+                draw_selection(p, mid, x0, x1, ly, ly, ly + LINE_HEIGHT);
             }
             if row == caret_row && self.inner.focused && blink_on(p.frame) {
-                let pre = char_slice(line, 0..cursor - range.start);
-                let cx = x + p.atlas.font.width_str(pre);
-                let at_end = row + 1 == self.lines.len() && cursor == range.end;
-                draw_caret(p, cx, ly, at_end, color, false, (-1.0, 10.0));
+                let cx = x + p
+                    .atlas
+                    .font
+                    .width_str(char_slice(text, range.start..cursor));
+                if cursor < len {
+                    draw_insert_caret(p, cx, ly, LINE_HEIGHT + 1.0, color);
+                } else {
+                    draw_append_caret(p, cx, ly, color, shadow);
+                }
             }
         }
     }
@@ -931,6 +1347,25 @@ pub(crate) fn code_text(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+fn flat_index(text: &str, i: usize) -> usize {
+    text.chars().take(i).filter(|&c| c != '\n').count()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unflat_index(text: &str, k: usize, after_breaks: bool) -> usize {
+    let mut seen = 0usize;
+    for (i, c) in text.chars().enumerate() {
+        if seen == k && (!after_breaks || c != '\n') {
+            return i;
+        }
+        if c != '\n' {
+            seen += 1;
+        }
+    }
+    text.chars().count()
 }
 
 pub(crate) fn byte_at(s: &str, n: usize) -> usize {
@@ -1186,11 +1621,20 @@ pub(in crate::gui) fn draw_label_spans(
 ) {
     let lw = p.atlas.font.width(label);
     let (left, right) = (x + TEXT_MARGIN, x + w - TEXT_MARGIN);
-    let mut cx = x + w / 2.0;
-    if lw <= right - left {
-        cx = cx.clamp(left + lw / 2.0, right - lw / 2.0);
-    }
     let top = ((y + y + h - LINE_HEIGHT) / 2.0 + 1.0).floor();
+    let room = right - left;
+    if lw > room {
+        use std::f64::consts::{FRAC_PI_2, TAU};
+        let hidden = f64::from(lw - room);
+        let time = crate::platform::time::epoch().elapsed().as_secs_f64();
+        let period = (hidden * 0.5).max(3.0);
+        let alpha = (FRAC_PI_2 * (TAU * time / period).cos()).sin() / 2.0 + 0.5;
+        let clip = p.push_clip(left, y, room, h);
+        p.text(label, left - (alpha * hidden).trunc() as f32, top, true);
+        p.pop_clip(clip);
+        return;
+    }
+    let cx = (x + w / 2.0).clamp(left + lw / 2.0, right - lw / 2.0);
     p.text(label, (cx - lw / 2.0).floor(), top, true);
 }
 

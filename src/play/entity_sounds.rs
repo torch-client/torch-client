@@ -6,7 +6,7 @@ use azalea::ecs::world::{World, WorldId};
 use azalea::entity::dimensions::EntityDimensions;
 use azalea::entity::metadata::{
     AbstractAgeableBaby, AttackTarget, BeeAngerEndTime, ClientAngerLevel, CopperGolemState, Creepy,
-    FireworksItem, Health, Invisible, NoAi, Phase, Silent, SnifferState, StaredAt, WeatherState,
+    Health, Invisible, NoAi, Phase, Silent, SnifferState, StaredAt, WeatherState,
 };
 use azalea::entity::{
     CopperGolemStateKind, EntityKindComponent, LookDirection, Physics, Position, SnifferStateKind,
@@ -19,14 +19,15 @@ use azalea_core::aabb::Aabb;
 use azalea_core::direction::Direction;
 use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::position::BlockPos;
-use azalea_inventory::components::{FireworkExplosionShape, Fireworks};
 use azalea_registry::builtin::{BlockKind, EntityKind};
 use azalea_world::{World as Level, WorldName};
 use bevy::platform::collections::HashMap;
 
 use crate::audio::{self, Placed, SoundCategory, Tracked};
 use crate::blocks::{sound_types, state_is_air};
+use crate::client::tick_rate::WorldTick;
 use crate::play::riding::{Hull, hull_under_water};
+use crate::play::rockets;
 use crate::renderer::dimension::{self, Dimension};
 use crate::session::SideMutex;
 use crate::util::global;
@@ -38,6 +39,7 @@ const LOOP_RANGE: f64 = 16.0;
 const MAX_LOOPS: usize = 8;
 const MAX_BOUND: usize = 16;
 const MAX_TWINKLES: usize = 32;
+const MAX_HELD: usize = 32;
 const CART_PITCH_DELTA: f32 = 0.0025;
 const STARE_TICKS: u64 = 400;
 const WARDEN_ANGRY: f32 = 80.0;
@@ -107,10 +109,55 @@ struct Flash {
     voice: Option<Tracked>,
 }
 
-struct Rocket {
-    at: [f64; 3],
-    large: bool,
-    twinkle: Option<u32>,
+enum Held {
+    Blast { at: [f64; 3], large: bool },
+    Thunder { bolt: i32, at: [f64; 3] },
+}
+
+impl Held {
+    fn play(&self) {
+        match *self {
+            Held::Blast { at, large } => {
+                let event = match (large, far_from_ears(at)) {
+                    (true, true) => "entity.firework_rocket.large_blast_far",
+                    (true, false) => "entity.firework_rocket.large_blast",
+                    (false, true) => "entity.firework_rocket.blast_far",
+                    (false, false) => "entity.firework_rocket.blast",
+                };
+                let pitch = 0.95 + audio::random_f32() * 0.1;
+                audio::play_at_delayed(event, SoundCategory::Ambient, at, 20.0, pitch);
+            }
+            Held::Thunder { at, .. } => {
+                let thunder = 0.8 + audio::random_f32() * 0.2;
+                audio::play_at(
+                    "entity.lightning_bolt.thunder",
+                    SoundCategory::Weather,
+                    at,
+                    10000.0,
+                    thunder,
+                );
+                let impact = 0.5 + audio::random_f32() * 0.2;
+                audio::play_at(
+                    "entity.lightning_bolt.impact",
+                    SoundCategory::Weather,
+                    at,
+                    2.0,
+                    impact,
+                );
+            }
+        }
+    }
+
+    fn play_or_hold(self, runs: bool) {
+        if runs {
+            self.play();
+            return;
+        }
+        let mut inbox = inbox().lock().unwrap();
+        if inbox.held.len() < MAX_HELD {
+            inbox.held.push(self);
+        }
+    }
 }
 
 struct Twinkle {
@@ -136,11 +183,11 @@ pub(crate) struct Sound<'a> {
 
 #[derive(Default)]
 struct Inbox {
-    rockets: HashMap<i32, Rocket>,
     twinkles: Vec<Twinkle>,
     bound: Vec<Bound>,
     attacks: Vec<i32>,
     hurts: Vec<i32>,
+    held: Vec<Held>,
 }
 
 global! {
@@ -171,44 +218,44 @@ fn far_from_ears(at: [f64; 3]) -> bool {
     x * x + y * y + z * z >= 256.0
 }
 
-pub(crate) fn firework_blast(id: i32) {
-    let mut inbox = inbox().lock().unwrap();
-    let Some(rocket) = inbox.rockets.remove(&id) else {
+pub(crate) fn firework_blast(id: i32, runs: bool) {
+    let Some(rocket) = rockets::get(id) else {
         return;
     };
-    if let Some(ticks) = rocket.twinkle
-        && inbox.twinkles.len() < MAX_TWINKLES
-    {
-        inbox.twinkles.push(Twinkle {
-            at: rocket.at,
-            ticks,
-        });
+    if rocket.explosions.is_empty() {
+        return;
     }
-    let event = match (rocket.large, far_from_ears(rocket.at)) {
-        (true, true) => "entity.firework_rocket.large_blast_far",
-        (true, false) => "entity.firework_rocket.large_blast",
-        (false, true) => "entity.firework_rocket.blast_far",
-        (false, false) => "entity.firework_rocket.blast",
-    };
-    let pitch = 0.95 + audio::random_f32() * 0.1;
-    audio::play_at_delayed(event, SoundCategory::Ambient, rocket.at, 20.0, pitch);
+    if let Some(ticks) = rocket.twinkle_ticks() {
+        let mut inbox = inbox().lock().unwrap();
+        if inbox.twinkles.len() < MAX_TWINKLES {
+            inbox.twinkles.push(Twinkle {
+                at: rocket.at,
+                ticks,
+            });
+        }
+    }
+    Held::Blast {
+        at: rocket.at,
+        large: rocket.large(),
+    }
+    .play_or_hold(runs);
 }
 
-fn read_rocket(ecs: &World, entity: Entity, at: [f64; 3]) -> Option<Rocket> {
-    let fireworks = ecs
-        .get::<FireworksItem>(entity)?
-        .0
-        .get_component::<Fireworks>()?;
-    let explosions = &fireworks.explosions;
-    let large = explosions.len() >= 3
-        || explosions
-            .iter()
-            .any(|e| matches!(e.shape, FireworkExplosionShape::LargeBall));
-    let twinkle = explosions
-        .iter()
-        .any(|e| e.has_twinkle)
-        .then_some(explosions.len() as u32 * 2 + 14);
-    (!explosions.is_empty()).then_some(Rocket { at, large, twinkle })
+pub(crate) fn lightning(bolt: i32, at: [f64; 3], runs: bool) {
+    Held::Thunder { bolt, at }.play_or_hold(runs);
+}
+
+pub(crate) fn removed(ids: &[MinecraftEntityId]) {
+    let mut inbox = inbox().lock().unwrap();
+    inbox.held.retain(
+        |held| !matches!(held, Held::Thunder { bolt, .. } if ids.iter().any(|id| id.0 == *bolt)),
+    );
+}
+
+pub(crate) fn new_level() {
+    let mut inbox = inbox().lock().unwrap();
+    inbox.held.clear();
+    inbox.twinkles.clear();
 }
 
 fn bind(bound: &mut Vec<Bound>, entity: Entity, at: [f64; 3], sound: Sound<'_>, dig: bool) {
@@ -259,13 +306,13 @@ fn wing(tick: i64) -> f64 {
     (tick as f64 * 7.448451 * 0.017453292 + std::f64::consts::PI).cos()
 }
 
-fn mob_of(mobs: &mut HashMap<i32, Mob>, id: i32, now: u64) -> &mut Mob {
+fn mob_of(mobs: &mut HashMap<i32, Mob>, id: i32, now: u64, ticks: bool) -> &mut Mob {
     let mob = mobs.entry(id).or_insert_with(|| Mob {
         growl: 100,
         ..Mob::default()
     });
     mob.seen = now;
-    mob.age += 1;
+    mob.age += i32::from(ticks);
     mob
 }
 
@@ -395,15 +442,20 @@ fn drive(
     }
 }
 
-pub(crate) fn tick(bot: &Client, end_clock: i64) {
+pub(crate) fn tick(bot: &Client, end_clock: i64, world_tick: &WorldTick) {
     let mut splashes = Vec::new();
-    tick_sounds(bot, end_clock, &mut splashes);
+    tick_sounds(bot, end_clock, world_tick, &mut splashes);
     if let Some(shared) = crate::SHARED.get() {
         crate::play::emit::queue(shared, splashes, crate::session::ParticleEmit::Level);
     }
 }
 
-fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::LevelParticle>) {
+fn tick_sounds(
+    bot: &Client,
+    end_clock: i64,
+    world_tick: &WorldTick,
+    splashes: &mut Vec<crate::session::LevelParticle>,
+) {
     use EntityKind as K;
     let Ok(origin) = bot.position() else { return };
     let world_name = {
@@ -434,7 +486,11 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
     let level = level.read();
     let mut inbox = inbox().lock().unwrap();
     let inbox = &mut *inbox;
-    inbox.rockets.clear();
+    if world_tick.runs() {
+        for held in inbox.held.drain(..) {
+            held.play();
+        }
+    }
     for (entity, kind, name, id, pos) in query.iter(&ecs) {
         let minecart = matches!(
             kind.0,
@@ -448,8 +504,7 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
         );
         let sounding = matches!(
             kind.0,
-            K::FireworkRocket
-                | K::Blaze
+            K::Blaze
                 | K::Enderman
                 | K::Warden
                 | K::EnderDragon
@@ -467,15 +522,31 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
             continue;
         }
         let id = id.0;
+        let ticks = world_tick.entity_ticks(id);
+        let own_tick = matches!(
+            kind.0,
+            K::Blaze
+                | K::Warden
+                | K::EnderDragon
+                | K::Phantom
+                | K::Breeze
+                | K::CopperGolem
+                | K::Sniffer
+                | K::Illusioner
+        );
+        if !ticks && (own_tick || boat) {
+            if kind.0 == K::Illusioner && inbox.hurts.contains(&id) {
+                mob_of(mobs, id, now, false).hurt = 10;
+            }
+            if let Some(mob) = mobs.get_mut(&id) {
+                mob.seen = now;
+            }
+            continue;
+        }
         let at = [pos.x, pos.y, pos.z];
         let silent = ecs.get::<Silent>(entity).is_some_and(|s| s.0);
         let in_range = pos.distance_squared_to(origin) < LOOP_RANGE * LOOP_RANGE;
         match kind.0 {
-            K::FireworkRocket => {
-                if let Some(rocket) = read_rocket(&ecs, entity, at) {
-                    inbox.rockets.insert(id, rocket);
-                }
-            }
             K::Blaze => {
                 if rng.next_int(24) == 0 && !silent {
                     let place = at.map(|v| v + 0.5);
@@ -490,7 +561,7 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
                 }
             }
             K::Enderman => {
-                let mob = mob_of(mobs, id, now);
+                let mob = mob_of(mobs, id, now, ticks);
                 let creepy = ecs.get::<Creepy>(entity).is_some_and(|c| c.0);
                 let rising = creepy && !mob.creepy;
                 mob.creepy = creepy;
@@ -528,7 +599,7 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
                 }
             }
             K::EnderDragon => {
-                let mob = mob_of(mobs, id, now);
+                let mob = mob_of(mobs, id, now, ticks);
                 let (flap, old_flap) = (
                     (mob.flap * std::f32::consts::TAU).cos(),
                     (mob.old_flap * std::f32::consts::TAU).cos(),
@@ -572,7 +643,7 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
                 }
             }
             K::Guardian | K::ElderGuardian => {
-                let mob = mob_of(mobs, id, now);
+                let mob = mob_of(mobs, id, now, ticks);
                 let target = ecs.get::<AttackTarget>(entity).map_or(0, |t| t.0);
                 let over = mob.target != 0 && target == 0;
                 if target != mob.target {
@@ -580,7 +651,7 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
                     mob.attack_time = 0;
                 }
                 let duration = if kind.0 == K::Guardian { 80 } else { 60 };
-                if alive(&ecs, entity) {
+                if ticks && alive(&ecs, entity) {
                     if let Some(physics) = ecs.get::<Physics>(entity)
                         && !touching_water(&level, &physics.bounding_box)
                     {
@@ -615,7 +686,7 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
                 drive(loops, id, hum, at, mob.attacking && !silent, now);
             }
             K::Breeze => {
-                let mob = mob_of(mobs, id, now);
+                let mob = mob_of(mobs, id, now, ticks);
                 let bound = &mut inbox.bound;
                 mob.sound_tick = if mob.sound_tick == 0 {
                     1 + rng.next_int(80) as i32
@@ -657,7 +728,7 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
                 }
             }
             K::CopperGolem => {
-                let mob = mob_of(mobs, id, now);
+                let mob = mob_of(mobs, id, now, ticks);
                 if ecs.get::<NoAi>(entity).is_some_and(|n| n.0) {
                     continue;
                 }
@@ -686,7 +757,7 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
                 }
             }
             K::Sniffer => {
-                let mob = mob_of(mobs, id, now);
+                let mob = mob_of(mobs, id, now, ticks);
                 let sniffer = ecs
                     .get::<SnifferState>(entity)
                     .map_or(SnifferStateKind::Idling, |s| s.0);
@@ -729,7 +800,7 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
                 }
             }
             K::Illusioner => {
-                let mob = mob_of(mobs, id, now);
+                let mob = mob_of(mobs, id, now, ticks);
                 if inbox.hurts.contains(&id) {
                     mob.hurt = 10;
                 }
@@ -816,6 +887,8 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
             }
             _ => {
                 let speed = horizontal_speed(&ecs, entity);
+                let off_rail = crate::client::tracking::minecart_improvements()
+                    && !crate::play::riding::cart_lerp::on_rails(&level, at);
                 let volume = mth::lerp(mth::clamp(speed, 0.0, 0.5), 0.0, 0.7);
                 let hum = Hum {
                     event: "entity.minecart.riding",
@@ -824,14 +897,8 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
                     volume,
                     pitch: None,
                 };
-                drive(
-                    loops,
-                    id,
-                    hum,
-                    at,
-                    !silent && in_range && speed >= MIN_SPEED,
-                    now,
-                );
+                let audible = speed >= MIN_SPEED && world_tick.runs() && !off_rail;
+                drive(loops, id, hum, at, !silent && in_range && audible, now);
             }
         }
     }
@@ -871,6 +938,9 @@ fn tick_sounds(bot: &Client, end_clock: i64, splashes: &mut Vec<crate::session::
     });
 
     inbox.twinkles.retain_mut(|twinkle| {
+        if !world_tick.runs() {
+            return true;
+        }
         if twinkle.ticks > 0 {
             twinkle.ticks -= 1;
             return true;

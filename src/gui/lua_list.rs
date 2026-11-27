@@ -76,14 +76,18 @@ fn read_dropped(paths: &[PathBuf]) -> Result<(String, Vec<u8>), String> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     if packfs::kind(path) != Some(Kind::File) {
-        return Err(format!("{name} is not a file"));
+        return Err(crate::lang::trf!("lua_list.file.not_a_file", name));
     }
     if packfs::len(path).unwrap_or(0) > script::FILE_MAX {
-        return Err(format!("{name} is over {} MiB", script::FILE_MAX >> 20));
+        return Err(crate::lang::trf!(
+            "lua_list.file.too_big",
+            name,
+            script::FILE_MAX >> 20
+        ));
     }
     packfs::read(path)
         .map(|bytes| (name.clone(), bytes))
-        .map_err(|e| format!("could not read {name}: {e}"))
+        .map_err(|e| crate::lang::trf!("lua_list.file.unreadable", name, e))
 }
 
 impl LuaListState {
@@ -201,11 +205,21 @@ fn draw_prompt(
         .update(p, ctx, x + PAD, fy, panel_w - 2.0 * PAD, FIELD_H);
     let by = fy + FIELD_H + PAD;
     let right = x + panel_w - PAD;
-    let (done_w, done) = card_button(p, look, ctx, right, by, "Done");
+    let (done_w, done) = card_button(p, look, ctx, right, by, crate::lang::tr!("lua_list.done"));
     if ctx.input.enter || done {
         return Some(Some(st.field.text.clone()));
     }
-    if cancel && card_button(p, look, ctx, right - done_w - BUTTON_GAP, by, "Cancel").1 {
+    if cancel
+        && card_button(
+            p,
+            look,
+            ctx,
+            right - done_w - BUTTON_GAP,
+            by,
+            crate::lang::tr!("lua_list.cancel"),
+        )
+        .1
+    {
         return Some(None);
     }
     None
@@ -260,6 +274,7 @@ fn draw_file(
     list: &UiList,
     ask: &FileAsk,
 ) {
+    use crate::lang::{tr, trf};
     if st.file_for != list.serial {
         st.file_for = list.serial;
         st.file_error = None;
@@ -289,25 +304,23 @@ fn draw_file(
         None => {}
     }
 
+    let accepts = if ask.accept.is_empty() {
+        tr!("lua_list.file.any").to_string()
+    } else {
+        trf!("lua_list.file.takes", ask.accept.join(", "))
+    };
     let lines = [
-        (format!("{} asks for a file", ask.mod_id), look.text_dim()),
-        (
-            if ask.accept.is_empty() {
-                "Any file".to_string()
-            } else {
-                format!("Takes {}", ask.accept.join(", "))
-            },
-            look.text_dim(),
-        ),
+        (trf!("lua_list.file.asks", ask.mod_id), look.text_dim()),
+        (accepts, look.text_dim()),
         match &st.file_error {
             Some(why) => (why.clone(), ERROR),
             #[cfg(target_arch = "wasm32")]
+            None => (tr!("lua_list.file.hint_web").to_string(), look.text_dim()),
+            #[cfg(not(target_arch = "wasm32"))]
             None => (
-                "Choose one, or drop it on the page".to_string(),
+                tr!("lua_list.file.hint_native").to_string(),
                 look.text_dim(),
             ),
-            #[cfg(not(target_arch = "wasm32"))]
-            None => ("Drop it on this window".to_string(), look.text_dim()),
         },
     ];
     let panel_w = PANEL_MAX_W.min(ctx.vw - 2.0 * MARGIN).floor();
@@ -348,7 +361,7 @@ fn draw_file(
     }
     let by = ly + PAD;
     let right = x + panel_w - PAD;
-    let (cancel_w, cancel) = card_button(p, look, ctx, right, by, "Cancel");
+    let (cancel_w, cancel) = card_button(p, look, ctx, right, by, tr!("lua_list.cancel"));
     #[cfg(target_arch = "wasm32")]
     if card_button(
         p,
@@ -356,7 +369,7 @@ fn draw_file(
         ctx,
         right - cancel_w - BUTTON_GAP,
         by,
-        "Choose file",
+        tr!("lua_list.file.choose"),
     )
     .1
     {

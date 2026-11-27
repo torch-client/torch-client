@@ -4,7 +4,9 @@ use crate::session::LevelEventEmit;
 use crate::util::block_centre;
 use crate::util::particles::{Emitter, rel, spawn_block_break};
 use azalea::entity::particle::Particle as P;
-use azalea::entity::particle::{BlockParticle, PowerParticle, SpellParticle};
+use azalea::entity::particle::{BlockParticle, ItemParticle, PowerParticle, SpellParticle};
+use azalea_inventory::ItemStack;
+use azalea_registry::builtin::ItemKind;
 
 #[derive(Clone, Copy)]
 #[cfg_attr(not(feature = "audio"), allow(dead_code))]
@@ -59,9 +61,27 @@ const SOUNDS: &[(u32, &str, Bus, f32, Pitch)] = &[
     (1048, "entity.skeleton.converted_to_stray", Bus::Hostile, 2.0, Pitch::Wobble),
     (1049, "block.crafter.craft", Bus::Blocks, 1.0, Pitch::Fixed(1.0)),
     (1050, "block.crafter.fail", Bus::Blocks, 1.0, Pitch::Fixed(1.0)),
+    (1052, "block.sulfur_spike.land", Bus::Blocks, 2.0, Pitch::Slight),
 ];
 
 const SHRIEKER_TOP_Y: f32 = 0.5;
+
+fn item_shards(ctx: &mut Emitter, cell: [i32; 3], item: ItemKind) {
+    let shard = P::Item(ItemParticle {
+        item: ItemStack::new(item, 1),
+    });
+    for _ in 0..8 {
+        let vx = ctx.rng.next_gaussian() * 0.15;
+        let vy = ctx.rng.next_f64() * 0.2;
+        let vz = ctx.rng.next_gaussian() * 0.15;
+        ctx.emit(
+            &shard,
+            rel(cell, [0.5, 0.0, 0.5]),
+            Vec3::new(vx as f32, vy as f32, vz as f32),
+            false,
+        );
+    }
+}
 
 pub(crate) fn spawn(event: &LevelEventEmit, ctx: &mut Emitter) {
     crate::log_debug!(
@@ -212,6 +232,7 @@ fn effects(event: &LevelEventEmit, ctx: &mut Emitter) {
             destroy_burst(ctx, cell, state);
         }
         2002 | 2007 => {
+            item_shards(ctx, cell, ItemKind::SplashPotion);
             let rgb = [data >> 16, data >> 8, data].map(|c| (c & 255) as f32);
             for _ in 0..100 {
                 let speed = ctx.rng.next_f64() * 4.0;
@@ -244,6 +265,7 @@ fn effects(event: &LevelEventEmit, ctx: &mut Emitter) {
             sound(cell, "entity.splash_potion.break", Bus::Neutral, 1.0, pitch);
         }
         2003 => {
+            item_shards(ctx, cell, ItemKind::EnderEye);
             let mut angle = 0.0f64;
             while angle < std::f64::consts::TAU {
                 let (sin, cos) = angle.sin_cos();
@@ -284,7 +306,7 @@ fn effects(event: &LevelEventEmit, ctx: &mut Emitter) {
                 let vy = 0.01 + ctx.rng.next_f64() as f32 * 0.5;
                 let vz = angle.sin() * speed;
                 ctx.emit(
-                    &P::DragonBreath(PowerParticle::default()),
+                    &P::DragonBreath(PowerParticle { power: speed }),
                     rel(cell, [vx * 0.1, 0.3, vz * 0.1]),
                     Vec3::new(vx, vy, vz),
                     false,

@@ -1,0 +1,12 @@
+{
+  "selfupdate.title": "Доступно обновление",
+  "selfupdate.prompt": "Вышел Torch Client %s, у вас %s.\nСкачать и установить сейчас?\nПосле завершения клиент перезапустится.",
+  "selfupdate.dont_show": "Больше не показывать",
+  "selfupdate.skip_warning": "Кнопка «Больше не показывать» пропускает все выпуски до %s.",
+  "selfupdate.downloading": "Загрузка обновления",
+  "selfupdate.installing": "Установка",
+  "selfupdate.restarting": "Перезапуск",
+  "selfupdate.failed_title": "Не удалось обновить",
+  "selfupdate.try_again": "Попробовать снова",
+  "selfupdate.releases_page": "Страница релизов"
+}

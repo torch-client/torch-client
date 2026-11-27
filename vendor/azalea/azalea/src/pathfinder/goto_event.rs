@@ -6,6 +6,8 @@ use crate::pathfinder::{
     astar::{PathfinderTimeout, YieldFn},
     goals::Goal,
     moves::{self, SuccessorsFn},
+    placing::PlaceRules,
+    safety::MoveSafety,
 };
 
 #[derive(Message)]
@@ -37,6 +39,8 @@ pub struct PathfinderOpts {
     pub(crate) min_timeout: PathfinderTimeout,
     pub(crate) max_timeout: PathfinderTimeout,
     pub(crate) yield_fn: Option<YieldFn>,
+    pub(crate) placing: Option<Arc<dyn PlaceRules>>,
+    pub(crate) safety: MoveSafety,
 }
 
 impl PathfinderOpts {
@@ -48,7 +52,17 @@ impl PathfinderOpts {
             min_timeout: PathfinderTimeout::Time(Duration::from_secs(1)),
             max_timeout: PathfinderTimeout::Time(Duration::from_secs(5)),
             yield_fn: None,
+            placing: None,
+            safety: MoveSafety::new(),
         }
+    }
+    pub fn safety(mut self, safety: MoveSafety) -> Self {
+        self.safety = safety;
+        self
+    }
+    pub fn placing(mut self, rules: Option<Arc<dyn PlaceRules>>) -> Self {
+        self.placing = rules;
+        self
     }
     pub fn yield_fn(mut self, yield_fn: YieldFn) -> Self {
         self.yield_fn = Some(yield_fn);

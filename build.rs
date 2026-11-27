@@ -1,4 +1,9 @@
+#[path = "build/lang.rs"]
+mod lang;
+
 fn main() {
+    lang::run();
+
     println!("cargo::rustc-check-cfg=cfg(packed_assets)");
 
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
@@ -23,6 +28,11 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(lua_mods)");
     if std::env::var_os("CARGO_FEATURE_LUA_MODS").is_some() && os != "android" {
         println!("cargo::rustc-cfg=lua_mods");
+    }
+
+    println!("cargo::rustc-check-cfg=cfg(singleplayer)");
+    if std::env::var_os("CARGO_FEATURE_SINGLEPLAYER").is_some() && arch != "wasm32" {
+        println!("cargo::rustc-cfg=singleplayer");
     }
 
     println!("cargo::rustc-check-cfg=cfg(self_update)");

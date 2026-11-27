@@ -31,7 +31,10 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) @interpolate(flat) edges: u32,
+    @location(3) fade: f32,
 };
+
+const FADE_BLOCKS: f32 = 24.0;
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let cutoff = c <= vec3(0.04045);
@@ -55,6 +58,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     out.uv = vec2(f32(corner & 1u), f32((corner >> 1u) & 1u));
     out.edges = (vertex.packed >> 2u) & 15u;
     let face = (vertex.packed >> 6u) & 7u;
+    out.fade = 1.0;
+    if ((vertex.packed >> 9u) & 1u) != 0u {
+        out.fade = exp(-distance(world_position.xyz, view.world_position) / FADE_BLOCKS);
+    }
 
     out.color = vec4(srgb_to_linear(vertex.color.rgb) * shade_of(face), vertex.color.a);
     return out;
@@ -72,7 +79,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let edge = 1.0 - smoothstep(0.0, w, d);
 
     let bright = min(in.color.rgb * 1.35 + vec3(0.08), vec3(1.0));
-    var color = vec4(mix(in.color.rgb, bright, edge), mix(in.color.a, 1.0, edge));
+    var color = vec4(mix(in.color.rgb, bright, edge), mix(in.color.a, 1.0, edge) * in.fade);
 
     if color.a < 0.004 {
         discard;

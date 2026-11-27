@@ -20,13 +20,26 @@ pub(crate) fn draw_box(
     buttons: &[String],
     button_w: f32,
 ) -> Option<usize> {
-    let max_message = (ctx.vw - MESSAGE_MARGIN).max(1.0);
-    let message_lines: Vec<Vec<Span>> = message
+    let paragraphs: Vec<Vec<Span>> = message
         .split('\n')
-        .flat_map(|paragraph| {
-            let spans = [Span::new(paragraph)];
-            p.atlas.font.wrap(&spans, max_message)
-        })
+        .map(|line| vec![Span::new(line)])
+        .collect();
+    draw_box_spans(p, ctx, title, &paragraphs, extra, buttons, button_w)
+}
+
+pub(crate) fn draw_box_spans(
+    p: &mut Painter,
+    ctx: &ScreenCtx,
+    title: &str,
+    paragraphs: &[Vec<Span>],
+    extra: Option<&str>,
+    buttons: &[String],
+    button_w: f32,
+) -> Option<usize> {
+    let max_message = (ctx.vw - MESSAGE_MARGIN).max(1.0);
+    let message_lines: Vec<Vec<Span>> = paragraphs
+        .iter()
+        .flat_map(|paragraph| p.atlas.font.wrap(paragraph, max_message))
         .take(MAX_MESSAGE_ROWS)
         .collect();
 

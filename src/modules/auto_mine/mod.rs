@@ -128,7 +128,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>) ->
                 let mut st = shared.lock().unwrap();
                 super::chat_math::show_local(
                     &mut st.session,
-                    "AutoMine: switched OreMiner off, the two cannot run together",
+                    crate::lang::tr!("auto_mine.switched_ore_miner_off"),
                 );
             }
         }
@@ -157,7 +157,8 @@ fn low_health(bot: &Client, shared: &SharedMutex, s: &Store) -> bool {
     if s.choice(setting::LOW_HEALTH) != LowHealth::Disconnect {
         return false;
     }
-    if !shared::low_health(shared, true, s.num(setting::HEALTH), "AutoMine") {
+    let label = super::registry::module(Id::AutoMine).label();
+    if !shared::low_health(shared, true, s.num(setting::HEALTH), label) {
         return false;
     }
     *RUN.lock().unwrap() = None;
@@ -187,7 +188,7 @@ fn corridor(bot: &Client, shared: &SharedMutex, hit: Option<&BlockHitResult>, s:
         return false;
     };
 
-    let now = crate::client::tracking::game_time();
+    let now = crate::client::tracking::client_ticks();
     let mut guard = RUN.lock().unwrap();
     let run = guard.get_or_insert_with(|| Run::start(pos.x, pos.y, pos.z, yaw));
 
@@ -400,10 +401,10 @@ fn stop(shared: &SharedMutex, why: Halt) -> bool {
     super::chat_math::show_local(
         &mut st.session,
         match why {
-            Halt::Done => "AutoMine: reached the end of the tunnel",
-            Halt::Unbreakable => "AutoMine: stopped at a block that cannot be broken",
-            Halt::Hazard => "AutoMine: stopped, there is a fluid behind that wall",
-            Halt::Stalled => "AutoMine: stopped, the block is not breaking",
+            Halt::Done => crate::lang::tr!("auto_mine.end.done"),
+            Halt::Unbreakable => crate::lang::tr!("auto_mine.end.unbreakable"),
+            Halt::Hazard => crate::lang::tr!("auto_mine.end.hazard"),
+            Halt::Stalled => crate::lang::tr!("auto_mine.end.stalled"),
         },
     );
     false

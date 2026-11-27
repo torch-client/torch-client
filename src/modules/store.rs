@@ -87,7 +87,7 @@ pub fn store() -> &'static Store {
 
 pub fn save() {
     if let Some(s) = MODULES_STORE.get() {
-        super::persist::save(s);
+        super::persist::flush_changed(s);
         #[cfg(lua_mods)]
         super::script::save_state(s);
     }

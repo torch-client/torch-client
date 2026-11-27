@@ -1,0 +1,12 @@
+{
+  "selfupdate.title": "Update available",
+  "selfupdate.prompt": "Torch Client %s is out, and this is %s.\nDownload and install it now?\nThe client restarts when it finishes.",
+  "selfupdate.dont_show": "Don't show me again",
+  "selfupdate.skip_warning": "Don't show me again skips every release up to %s.",
+  "selfupdate.downloading": "Downloading the update",
+  "selfupdate.installing": "Installing",
+  "selfupdate.restarting": "Restarting",
+  "selfupdate.failed_title": "The update failed",
+  "selfupdate.try_again": "Try Again",
+  "selfupdate.releases_page": "Releases Page"
+}

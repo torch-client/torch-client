@@ -106,7 +106,7 @@ impl StackedContents {
     }
 
     pub fn account(&mut self, s: &SlotStack) {
-        if s.is_empty() {
+        if s.is_empty() || s.modded.is_some() {
             return;
         }
         match self.0.iter_mut().find(|(item, _)| *item == s.item) {

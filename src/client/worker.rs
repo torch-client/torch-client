@@ -10,6 +10,7 @@ use azalea::block::BlockState;
 use azalea_core::position::{ChunkPos as AzChunkPos, ChunkSectionBiomePos, ChunkSectionBlockPos};
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_world::{Chunk, World};
+use bevy::platform::collections::HashSet as FastSet;
 use parking_lot::RwLock;
 
 use crate::blocks::Blocks;
@@ -320,7 +321,12 @@ impl JobQueue {
                 for si in 0..sec_count {
                     let sec_y = min_y + si * 16;
                     let edit = (chunk_x, chunk_z, JobScope::Section(sec_y >> 4));
-                    if inner.keys.contains_key(&edit) && column.get(sec_y).is_some() {
+                    if column.get(sec_y).is_some()
+                        && let Some(state) = inner.keys.get_mut(&edit)
+                    {
+                        if let KeyState::InFlight { dirty_again, .. } = state {
+                            *dirty_again = true;
+                        }
                         continue;
                     }
                     column.set(sec_y, seq);
@@ -707,6 +713,7 @@ fn process_job(
     crate::prof_span!("mesh:process_job");
     let job_start = Instant::now();
     cache.use_registry(crate::blocks::registry());
+    let hidden = crate::client::worldsync::hidden::snapshot();
 
     if let JobScope::Section(sy) = job.scope
         && !queue.is_current(job.chunk_x, job.chunk_z, sy * 16, job.seq)
@@ -773,11 +780,27 @@ fn process_job(
     let win_y0 = min_y + sec_lo * 16 - 1;
     let win_count = (sec_hi - sec_lo) * 16 + 2;
     occ.reset(x_base, z_base, win_y0, win_count);
+    let hidden_cells = hidden.as_ref().map_or_else(FastSet::default, |h| {
+        h.within(
+            [x_base - 1, win_y0, z_base - 1],
+            [x_base + 16, win_y0 + win_count - 1, z_base + 16],
+        )
+    });
 
     let mut kinds: Vec<Decoded> = Vec::with_capacity((sec_hi - sec_lo) as usize);
     {
         let chunk = chunk_arc.read();
         decode_sections(&chunk, sec_lo, sec_hi, states, &mut kinds);
+        for &[x, y, z] in &hidden_cells {
+            let i = (y >> 4) - base_sec - sec_lo;
+            if x >> 4 == job.chunk_x
+                && z >> 4 == job.chunk_z
+                && usize::try_from(i).is_ok_and(|i| kinds.get(i) == Some(&Decoded::Blocks))
+            {
+                let local = cell_index((x & 15) as u8, (y & 15) as u8, (z & 15) as u8);
+                states[i as usize * SECTION_CELLS + local] = BlockState::AIR;
+            }
+        }
         fill_occupancy(
             occ,
             &chunk,
@@ -789,10 +812,13 @@ fn process_job(
             cache,
             &biomes,
             Some((states.as_slice(), sec_lo)),
+            &hidden_cells,
         );
     }
     if crate::renderer::lighting_enabled() {
-        fill_light(occ, &crate::client::worldsync::light_map().read());
+        let light = crate::client::worldsync::light_map().read();
+        fill_light(occ, &light);
+        light_hidden(occ, &light, &hidden_cells);
     } else {
         occ.fill_light_constant(15, 15);
     }
@@ -821,6 +847,7 @@ fn process_job(
             cache,
             &biomes,
             None,
+            &hidden_cells,
         );
     }
 
@@ -880,7 +907,7 @@ fn process_job(
                 }
             }
             let resolved: &BlockCache = cache;
-            let (opaque, water) = build_section_mesh(
+            let (mut opaque, water) = build_section_mesh(
                 blocks
                     .iter()
                     .map(|&(x, y, z, state)| (x, y, z, resolved.resolved(state))),
@@ -890,6 +917,7 @@ fn process_job(
                 tiles,
                 &occ,
             );
+            opaque.hidden = hidden.as_ref().map_or(0, |h| h.version);
             let vis = if kind == Decoded::Empty {
                 crate::renderer::visgraph::VisibilitySet::all()
             } else {
@@ -1013,6 +1041,30 @@ fn fill_light(occ: &mut Occupancy, light: &crate::lighting::LightMap) {
     }
 }
 
+fn light_hidden(
+    occ: &mut Occupancy,
+    light: &crate::lighting::LightMap,
+    hidden: &FastSet<[i32; 3]>,
+) {
+    for &[x, y, z] in hidden {
+        let (mut block, mut sky) = light.at(x, y, z);
+        for (dx, dy, dz) in [
+            (0, 1, 0),
+            (0, -1, 0),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            let (b, s) = light.at(x + dx, y + dy, z + dz);
+            block = block.max(b.saturating_sub(1));
+            let falls = dy == 1 && s == 15;
+            sky = sky.max(if falls { 15 } else { s.saturating_sub(1) });
+        }
+        occ.set_light(x, y, z, block, sky);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 static BIOME_TABLE: RwLock<Option<Arc<Vec<u8>>>> = RwLock::new(None);
 
@@ -1058,6 +1110,7 @@ fn fill_occupancy(
     cache: &mut BlockCache,
     biomes: &[u8],
     decoded: Option<(&[BlockState], i32)>,
+    hidden: &FastSet<[i32; 3]>,
 ) {
     use azalea_registry::DataRegistry;
     for (sec_idx, section) in chunk.sections.iter().enumerate() {
@@ -1083,6 +1136,9 @@ fn fill_occupancy(
                 for lz in lz_range.0..lz_range.1 {
                     let state = match run {
                         Some(run) => run[cell_index(lx, ly, lz)],
+                        None if !hidden.is_empty() && hidden.contains(&[x, y, oz + lz as i32]) => {
+                            BlockState::AIR
+                        }
                         None => section.get_block_state(ChunkSectionBlockPos {
                             x: lx,
                             y: ly,

@@ -9,7 +9,7 @@ pub fn get() -> String {
     }
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     {
-        native::with(|clip| clip.get_text().unwrap_or_default()).unwrap_or_default()
+        native::with("read", |clip| clip.get_text()).unwrap_or_default()
     }
 }
 
@@ -31,9 +31,7 @@ pub fn set(text: &str) {
     }
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     {
-        native::with(|clip| {
-            let _ = clip.set_text(text);
-        });
+        native::with("write", |clip| clip.set_text(text));
     }
 }
 
@@ -43,13 +41,24 @@ mod native {
 
     static CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
 
-    pub(super) fn with<T>(f: impl FnOnce(&mut arboard::Clipboard) -> T) -> Option<T> {
-        let cell = CLIPBOARD.get_or_init(|| Mutex::new(arboard::Clipboard::new().ok()));
+    pub(super) fn with<T>(
+        what: &str,
+        f: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
+    ) -> Option<T> {
+        let cell = CLIPBOARD.get_or_init(|| {
+            Mutex::new(
+                arboard::Clipboard::new()
+                    .inspect_err(|e| crate::log_warn!("clipboard", "open: {e}"))
+                    .ok(),
+            )
+        });
         let mut guard = match cell.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        guard.as_mut().map(f)
+        f(guard.as_mut()?)
+            .inspect_err(|e| crate::log_warn!("clipboard", "{what}: {e}"))
+            .ok()
     }
 }
 

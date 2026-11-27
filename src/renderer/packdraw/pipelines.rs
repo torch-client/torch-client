@@ -24,7 +24,7 @@ use super::targets::DEPTH_FORMAT;
 use super::usage::depth_index;
 use super::{GPU_LABEL, pipeline_label};
 use crate::renderer::terrain_pool::TerrainView;
-use crate::renderer::terrain_pool::draw::{PackTakeover, TerrainPipeline, packed_vertex_layout};
+use crate::renderer::terrain_pool::draw::{TerrainPipeline, packed_vertex_layout};
 use crate::shaderpack::directives::{SampleKind, TargetFormat};
 use crate::shaderpack::pipeline::Binding;
 use crate::shaderpack::programs::Geometry;
@@ -49,14 +49,14 @@ pub(super) enum Building<T> {
 }
 
 impl<T> Building<T> {
-    fn spawn(build: impl FnOnce() -> T + Send + 'static) -> Building<T>
+    pub(super) fn spawn(build: impl FnOnce() -> T + Send + 'static) -> Building<T>
     where
         T: Send + 'static,
     {
         Building::Task(bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { build() }))
     }
 
-    fn poll(&mut self) {
+    pub(super) fn poll(&mut self) {
         if let Building::Task(task) = self
             && let Some(value) = bevy::tasks::futures::check_ready(task)
         {
@@ -345,13 +345,13 @@ fn pack_triangles(topology: PrimitiveTopology, cull: Option<Face>) -> PrimitiveS
     }
 }
 
-struct EntityPassState {
-    blend: Option<BlendState>,
-    depth: Option<(bool, CompareFunction)>,
-    cull: Option<Face>,
+pub(super) struct EntityPassState {
+    pub(super) blend: Option<BlendState>,
+    pub(super) depth: Option<(bool, CompareFunction)>,
+    pub(super) cull: Option<Face>,
 }
 
-fn entity_pass_state(kind: EntityKind, second: bool) -> EntityPassState {
+pub(super) fn entity_pass_state(kind: EntityKind, second: bool) -> EntityPassState {
     let cutout = EntityPassState {
         blend: None,
         depth: Some((true, CompareFunction::Less)),
@@ -411,7 +411,7 @@ fn entity_pass_state(kind: EntityKind, second: bool) -> EntityPassState {
     }
 }
 
-fn entity_topology(kind: EntityKind) -> PrimitiveTopology {
+pub(super) fn entity_topology(kind: EntityKind) -> PrimitiveTopology {
     match kind {
         EntityKind::Line => PrimitiveTopology::LineList,
         _ => PrimitiveTopology::TriangleList,
@@ -463,16 +463,12 @@ pub(crate) fn prepare_pipelines(
     device: Res<RenderDevice>,
     pools: Option<Res<crate::renderer::terrain_pool::pools::TerrainPools>>,
     terrain: Option<Res<TerrainPipeline>>,
-    takeover: Option<ResMut<PackTakeover>>,
     render: Option<ResMut<PackRender>>,
 ) {
-    let (Some(terrain), Some(mut takeover), Some(mut render)) = (terrain, takeover, render) else {
+    let (Some(terrain), Some(mut render)) = (terrain, render) else {
         return;
     };
     let Some(install) = render.install.as_deref_mut() else {
-        if takeover.0 {
-            takeover.0 = false;
-        }
         return;
     };
 

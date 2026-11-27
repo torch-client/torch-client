@@ -14,7 +14,7 @@ use azalea_inventory::{ItemStack, ItemStackData};
 use azalea_registry::builtin::{EntityKind, ItemKind};
 use azalea_registry::{DataRegistry, Holder, HolderSet};
 
-use super::{Ctx, Line, TipAt};
+use super::{ContainerRows, Ctx, Line, TipAt};
 use crate::gui::tooltip::{styled_hover_name, translate};
 use crate::session::SlotStack;
 use crate::text::{Span, Style};
@@ -75,7 +75,7 @@ fn before_book(data: &ItemStackData, ctx: &Ctx, out: &mut Vec<Line>) {
         ));
     }
     if let Some(id) = shown::<comp::MapId>(data) {
-        map_rows(id.id, data, out);
+        map_rows(id.id, crate::gui::map_view::meta(id.id), data, ctx, out);
     }
     if let Some(bees) = shown::<comp::Bees>(data) {
         out.push(gray(translate(
@@ -90,7 +90,12 @@ fn before_book(data: &ItemStackData, ctx: &Ctx, out: &mut Vec<Line>) {
         ))]);
     }
     if let Some(container) = shown::<comp::Container>(data) {
-        container_rows(&container.items, |stack| hover_name(stack, ctx), out);
+        let name = |stack: &ItemStack| hover_name(stack, ctx);
+        match ctx.containers {
+            ContainerRows::Vanilla => container_rows(&container.items, name, out),
+            ContainerRows::Compact => compact_container_rows(&container.items, name, out),
+            ContainerRows::Hidden => {}
+        }
     }
     if let Some(layers) = shown::<comp::BannerPatterns>(data) {
         for layer in layers.patterns.iter().take(6) {
@@ -351,13 +356,37 @@ fn instrument_description(data: &ItemStackData, ctx: &Ctx) -> Option<FormattedTe
     lookup::instrument_description(&name, entry)
 }
 
-fn map_rows(id: i32, data: &ItemStackData, out: &mut Vec<Line>) {
+const MAP_MAX_SCALE: u8 = 4;
+
+fn map_rows(
+    id: i32,
+    map: Option<crate::gui::map_view::MapMeta>,
+    data: &ItemStackData,
+    ctx: &Ctx,
+    out: &mut Vec<Line>,
+) {
+    let Some(map) = map else {
+        out.push(gray(translate("filled_map.unknown", &[])));
+        return;
+    };
     let post = crate::items::component::<comp::MapPostProcessing>(data).map(|p| *p);
     if crate::items::component::<comp::CustomName>(data).is_none() && post.is_none() {
         out.push(gray(translate("filled_map.id", &[id.to_string()])));
     }
-    if post == Some(comp::MapPostProcessing::Lock) {
+    if map.locked || post == Some(comp::MapPostProcessing::Lock) {
         out.push(gray(translate("filled_map.locked", &[])));
+    }
+    if ctx.advanced {
+        let add = u8::from(post == Some(comp::MapPostProcessing::Scale));
+        let scale = map.scale.saturating_add(add).min(MAP_MAX_SCALE);
+        out.push(gray(translate(
+            "filled_map.scale",
+            &[(1u32 << scale).to_string()],
+        )));
+        out.push(gray(translate(
+            "filled_map.level",
+            &[scale.to_string(), MAP_MAX_SCALE.to_string()],
+        )));
     }
 }
 
@@ -379,6 +408,48 @@ fn container_rows(items: &[ItemStack], name: impl Fn(&ItemStack) -> Line, out: &
     if held > lines {
         out.push(vec![Span {
             text: translate("item.container.more_items", &[(held - lines).to_string()]),
+            style: Style {
+                italic: true,
+                ..Style::default()
+            },
+        }]);
+    }
+}
+
+fn compact_container_rows(
+    items: &[ItemStack],
+    name: impl Fn(&ItemStack) -> Line,
+    out: &mut Vec<Line>,
+) {
+    let mut merged: Vec<(ItemKind, Line, u64)> = Vec::new();
+    for stack in items {
+        let ItemStack::Present(data) = stack else {
+            continue;
+        };
+        let line = name(stack);
+        let count = data.count.max(0) as u64;
+        match merged
+            .iter_mut()
+            .find(|(kind, l, _)| *kind == data.kind && *l == line)
+        {
+            Some(entry) => entry.2 += count,
+            None => merged.push((data.kind, line, count)),
+        }
+    }
+    merged.sort_by(|a, b| b.2.cmp(&a.2));
+    for (_, line, count) in merged.iter().take(5) {
+        out.push(translate_with(
+            "item.container.item_count",
+            &[line.clone(), vec![Span::new(count.to_string())]],
+            Style::default(),
+        ));
+    }
+    if merged.len() > 5 {
+        out.push(vec![Span {
+            text: translate(
+                "item.container.more_items",
+                &[(merged.len() - 5).to_string()],
+            ),
             style: Style {
                 italic: true,
                 ..Style::default()
@@ -424,6 +495,7 @@ fn projectile_rows(items: &[ItemStack], ctx: &Ctx, out: &mut Vec<Line>) {
         advanced: false,
         attack_speed_base: None,
         peaceful: ctx.peaceful,
+        containers: ctx.containers,
     };
     for (stack, count) in runs {
         let name = display_name(stack, ctx);

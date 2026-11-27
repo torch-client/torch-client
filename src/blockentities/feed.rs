@@ -115,7 +115,6 @@ pub enum BlockEntityData {
     Campfire(sim::items::Campfire),
     Shelf(sim::items::Shelf),
     Brushable(sim::items::Brushable),
-    Piston(sim::piston::Moving),
     Bounds(sim::bounds::Data),
 }
 
@@ -220,6 +219,7 @@ fn store() -> MutexGuard<'static, Store> {
 }
 
 pub fn on_chunk(chunk_x: i32, chunk_z: i32, entities: &[PacketBlockEntity]) {
+    sim::piston::drop_column(chunk_x, chunk_z);
     let mut store = store();
     for entity in entities {
         let x = chunk_x * 16 + ((entity.packed_xz >> 4) & 15) as i32;
@@ -237,24 +237,24 @@ pub fn on_block_entity_data(packet: &ClientboundBlockEntityData) {
     store().insert(pos, kind, &packet.tag);
 }
 
-pub fn on_block_event(packet: &ClientboundBlockEvent, world: &azalea_world::World) {
+pub fn on_block_event(
+    packet: &ClientboundBlockEvent,
+    world: &parking_lot::RwLock<azalea_world::World>,
+) -> Vec<([i32; 3], u32)> {
     let pos = [packet.pos.x, packet.pos.y, packet.pos.z];
-    let mut store = store();
-    let game_time = store.game_time;
-    if let Some(entry) = store.entries.get_mut(&pos) {
-        entry
-            .anim
-            .event(packet.action_id, packet.action_parameter, game_time);
-        return;
-    }
-    for (pos, moving) in
-        sim::piston::block_event(world, pos, packet.action_id, packet.action_parameter)
     {
-        let data = Arc::new(BlockEntityData::Piston(moving));
-        store
-            .entries
-            .insert(pos, Entry::new(BlockEntityKind::Piston, data));
+        let mut store = store();
+        let game_time = store.game_time;
+        if let Some(entry) = store.entries.get_mut(&pos)
+            && entry.kind != BlockEntityKind::Piston
+        {
+            entry
+                .anim
+                .event(packet.action_id, packet.action_parameter, game_time);
+            return Vec::new();
+        }
     }
+    sim::piston::on_block_event(world, pos, packet.action_id, packet.action_parameter)
 }
 
 pub fn on_block_change(pos: BlockPos, new: BlockState) {
@@ -276,6 +276,7 @@ pub fn on_block_change(pos: BlockPos, new: BlockState) {
 }
 
 pub fn on_forget_chunk(chunk_x: i32, chunk_z: i32) {
+    sim::piston::drop_column(chunk_x, chunk_z);
     let mut store = store();
     store
         .entries
@@ -283,6 +284,7 @@ pub fn on_forget_chunk(chunk_x: i32, chunk_z: i32) {
 }
 
 pub fn reset() {
+    sim::piston::reset();
     let mut store = store();
     store.entries.clear();
     store.published = Default::default();
@@ -515,6 +517,7 @@ pub fn publish(
     world: &azalea_world::World,
     game_time: u64,
     players: &[sim::PlayerSeen],
+    runs: bool,
 ) -> Option<Arc<BlockEntityMap>> {
     let mut store = store();
     let store = &mut *store;
@@ -539,17 +542,19 @@ pub fn publish(
             return false;
         }
         let resolved_state = resolve(states, state);
-        entry.anim.tick(
-            &TickCtx {
-                world,
-                pos: *pos,
-                state: &resolved_state,
-                data: &entry.data,
-                game_time,
-                players,
-            },
-            &mut entry.private,
-        );
+        if runs {
+            entry.anim.tick(
+                &TickCtx {
+                    world,
+                    pos: *pos,
+                    state: &resolved_state,
+                    data: &entry.data,
+                    game_time,
+                    players,
+                },
+                &mut entry.private,
+            );
+        }
         if !changed
             && !published.get(pos).is_some_and(|old| {
                 old.same_parts(

@@ -35,6 +35,7 @@ async fn run_client(
     account: Account,
     address: impl azalea_protocol::address::ResolvableAddr,
     generation: u64,
+    bridged: bool,
 ) -> azalea::app::AppExit {
     ClientBuilder::new_without_plugins()
         .add_plugins({
@@ -56,10 +57,13 @@ async fn run_client(
         })
         .add_plugins(chat_sign::ChatSigningPlugin)
         .add_plugins(crate::client::outbox::OutboxPlugin)
+        .add_plugins(crate::client::tick_rate::TickRatePlugin)
         .add_plugins(flight::FlightPlugin)
         .add_plugins(crate::play::elytra::ElytraPlugin)
         .add_plugins(crate::play::riptide::RiptidePlugin)
         .add_plugins(crate::play::geyser::GeyserPlugin)
+        .add_plugins(crate::play::push::PushPlugin)
+        .add_plugins(crate::play::piston_push::PistonPushPlugin)
         .add_plugins(no_fall::NoFallPlugin)
         .add_plugins(crate::play::vclip::VClipPlugin)
         .add_plugins(crate::play::riding::RidingPlugin)
@@ -78,7 +82,11 @@ async fn run_client(
         .add_plugins(crate::client::server_screens::CodeOfConductPlugin)
         .add_plugins(BotHeartbeatPlugin)
         .set_handler(handle)
-        .set_state(State { generation })
+        .set_state(State {
+            generation,
+            bridged,
+            transferring: Default::default(),
+        })
         .start(account, address)
         .await
 }
@@ -115,6 +123,11 @@ fn close_connection() -> bool {
 }
 
 pub(crate) fn shutdown_connection() {
+    if let Some(shared) = SHARED.get()
+        && let Ok(mut s) = shared.try_lock()
+    {
+        s.transfer = None;
+    }
     close_connection();
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     azalea_protocol::connect::force_close_last_tcp();
@@ -157,6 +170,9 @@ pub struct PacketRelayPlugin;
 impl azalea::app::Plugin for PacketRelayPlugin {
     fn build(&self, app: &mut azalea::app::App) {
         azalea::connection::set_game_packet_observer(relay_packet);
+        app.add_observer(on_transfer);
+        app.add_systems(azalea::app::Last, carry_cookies);
+        app.add_systems(azalea::app::Update, leave_before_game);
         app.add_systems(azalea::app::Update, crate::client::level_load::publish);
         #[cfg(feature = "audio")]
         app.add_systems(
@@ -216,6 +232,10 @@ fn relay_packet(
     let Some(shared) = SHARED.get() else {
         return;
     };
+    if ecs.get::<State>(entity).is_some_and(State::over) {
+        return;
+    }
+    crate::client::server_packs::game_packet(shared, packet);
     let Some(world) = ecs
         .get::<azalea::local_player::WorldHolder>(entity)
         .map(|w| azalea::local_player::WorldHolder {
@@ -228,6 +248,172 @@ fn relay_packet(
     let started = crate::platform::time::Instant::now();
     packets::handle_packet(&world, shared, packet);
     crate::diag::note_event(started.elapsed().as_nanos() as u64, true);
+}
+
+fn on_transfer(
+    event: azalea::ecs::observer::On<azalea::cookies::TransferEvent>,
+    mut commands: azalea::ecs::prelude::Commands,
+    query: azalea::ecs::prelude::Query<(
+        &State,
+        &azalea::connection::RawConnection,
+        azalea::ecs::prelude::Has<azalea::InConfigState>,
+    )>,
+    disconnects: azalea::ecs::prelude::Res<
+        azalea::ecs::message::Messages<azalea::disconnect::DisconnectEvent>,
+    >,
+    mut exits: azalea::ecs::prelude::ResMut<azalea::ecs::message::Messages<azalea::app::AppExit>>,
+) {
+    let Ok((state, connection, in_config)) = query.get(event.entity) else {
+        log_warn!(
+            "net",
+            "a transfer arrived before the connection had its state; ignoring it"
+        );
+        return;
+    };
+    let Some(shared) = SHARED.get() else { return };
+    if state.over() {
+        return;
+    }
+    let ending = !connection.is_alive()
+        || !exits.is_empty()
+        || disconnects
+            .get_cursor()
+            .read(&disconnects)
+            .any(|d| d.entity == event.entity);
+    if ending {
+        log_info!(
+            "net",
+            "a transfer arrived on a connection that is already ending; ignoring it"
+        );
+        return;
+    }
+    let asked: String = event.host.chars().take(255).collect();
+    log_info!(
+        "net",
+        "the server transferred this client to {asked:?} port {}",
+        event.port
+    );
+    let target = if state.bridged {
+        Err(crate::lang::tr!("client.status.transfer_unsupported").to_string())
+    } else {
+        crate::platform::address::transfer_target(&event.host, event.port)
+            .ok_or_else(|| crate::gui::tooltip::translate("connect.failed.transfer", &[]))
+    };
+
+    let replies = {
+        let mut s = shared.lock().unwrap();
+        if stale_generation(state) || s.session_ended || s.quit_requested {
+            return;
+        }
+        state
+            .transferring
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        s.session.server_packs.settle();
+        let target = if s.session.server_packs.left() {
+            Err(crate::client::server_packs::declined_reason())
+        } else {
+            target
+        };
+        let replies = s.session.server_packs.take_replies();
+        match target {
+            Ok((host, port)) => {
+                let server_packs = s.session.server_packs.detach(in_config);
+                let pack_address = s.session.pack_address.take();
+                s.transfer = Some(Box::new(crate::session::Transfer {
+                    host,
+                    port,
+                    cookies: Default::default(),
+                    server_packs,
+                    pack_address,
+                    ready: false,
+                    claimed: false,
+                }));
+                s.session_ended = true;
+                s.clear_session(crate::gui::tooltip::translate("connect.transferring", &[]));
+            }
+            Err(reason) => {
+                log_warn!("net", "the transfer ends here: {reason}");
+                let spans = crate::text::parse_formatted(&reason);
+                s.end_session(reason, Some(spans));
+            }
+        }
+        replies
+    };
+    crate::client::server_packs::send_replies(&mut commands, event.entity, in_config, replies);
+    crate::diag::on_disconnected();
+    reset_session_side_tables(false);
+    exits.write(azalea::app::AppExit::Success);
+}
+
+fn carry_cookies(query: azalea::ecs::prelude::Query<(&State, &azalea::cookies::ServerCookies)>) {
+    for (state, cookies) in &query {
+        if !state.transferring() || stale_generation(state) {
+            continue;
+        }
+        let Some(shared) = SHARED.get() else { return };
+        if let Some(transfer) = shared.lock().unwrap().transfer.as_mut() {
+            transfer.cookies = cookies.map.clone();
+        }
+    }
+}
+
+fn leave_before_game(
+    query: azalea::ecs::prelude::Query<
+        (azalea::ecs::prelude::Entity, &State),
+        azalea::ecs::prelude::Without<azalea::InGameState>,
+    >,
+    mut disconnect: azalea::ecs::prelude::MessageWriter<azalea::disconnect::DisconnectEvent>,
+) {
+    let Ok((entity, state)) = query.single() else {
+        return;
+    };
+    let Some(shared) = SHARED.get() else { return };
+    if state.over() || !std::mem::take(&mut shared.lock().unwrap().disconnect_requested) {
+        return;
+    }
+    disconnect.write(azalea::disconnect::DisconnectEvent {
+        entity,
+        reason: None,
+    });
+}
+
+fn transfer_ready() {
+    let Some(shared) = SHARED.get() else { return };
+    {
+        let mut s = shared.lock().unwrap();
+        let Some(transfer) = s.transfer.as_mut() else {
+            return;
+        };
+        transfer.ready = true;
+    }
+    start_in_background();
+}
+
+pub(crate) fn start_in_background() {
+    let Some(shared) = SHARED.get() else { return };
+    {
+        let mut s = shared.lock().unwrap();
+        if !crate::platform::notify::backgrounded() {
+            return;
+        }
+        match s.transfer.as_mut() {
+            Some(transfer) if transfer.ready && !transfer.claimed => transfer.claimed = true,
+            _ => return,
+        }
+        s.transfer_unseen = true;
+    }
+    crate::renderer::input::save_on_session_end();
+    start_transfer();
+}
+
+pub(crate) fn start_transfer() {
+    let Some(shared) = SHARED.get() else { return };
+    let transfer = shared.lock().unwrap().transfer.take_if(|t| t.ready);
+    let Some(transfer) = transfer else { return };
+    let address = crate::platform::address::transfer_name(&transfer.host, transfer.port);
+    if let Err(reason) = start(address, Some(transfer)) {
+        log_warn!("net", "the transfer was not started: {reason}");
+    }
 }
 
 pub struct BotHeartbeatPlugin;
@@ -284,22 +470,63 @@ pub(crate) fn start_bot(address: String) -> Result<(), String> {
         }
         return Err(reason);
     }
+    start(address, None)
+}
+
+fn start(address: String, transfer: Option<Box<crate::session::Transfer>>) -> Result<(), String> {
     if BOT_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         log_warn!(
             "net",
             "already connected; ignoring a second connection to {address}"
         );
-        return Err("The previous connection is still closing; try again".to_string());
+        if let (Some(transfer), Some(shared)) = (transfer, SHARED.get()) {
+            let s = shared.lock().unwrap();
+            transfer.server_packs.abandon(&s.session.server_packs);
+        }
+        return Err(crate::lang::tr!("client.status.still_closing").to_string());
     }
     log_info!("net", "connecting to {address}");
     let generation = BOT_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    let (dial, carried) = match transfer {
+        Some(transfer) => {
+            let t = *transfer;
+            let server = azalea_protocol::address::ServerAddr {
+                host: t.host,
+                port: t.port,
+            };
+            (
+                Some((server, t.cookies)),
+                Some((t.server_packs, t.pack_address)),
+            )
+        }
+        None => (None, None),
+    };
     if let Some(shared) = SHARED.get() {
         let mut s = shared.lock().unwrap();
-        s.session.status = Some(format!("Connecting to {address}...").into());
+        if carried.is_none() {
+            s.transfer = None;
+            s.transfer_unseen = false;
+        }
+        s.session.status = Some(crate::lang::trf!("client.status.connecting", address).into());
         s.session.current_address = Some(address.clone());
-        s.session
-            .server_packs
-            .begin(crate::gui::serverlist::pack_policy(&address));
+        match carried {
+            Some((server_packs, pack_address)) => {
+                let policy = pack_address
+                    .as_deref()
+                    .map(crate::gui::serverlist::pack_policy)
+                    .unwrap_or_default();
+                s.session.server_packs.resume(server_packs, policy);
+                s.session.pack_address = pack_address;
+                s.session.render_distance_request = s.render_distance_sent;
+                s.session.skin_prefs_request = s.skin_prefs_sent;
+            }
+            None => {
+                s.session
+                    .server_packs
+                    .begin(crate::gui::serverlist::pack_policy(&address));
+                s.session.pack_address = Some(address.clone());
+            }
+        }
         s.disconnect_requested = false;
         s.quit_requested = false;
         s.reload_chunks_requested = false;
@@ -325,7 +552,11 @@ pub(crate) fn start_bot(address: String) -> Result<(), String> {
             false
         }
     };
-    crate::platform::notify::connected(&address);
+    if dial.is_some() {
+        crate::platform::notify::transferred(&address);
+    } else {
+        crate::platform::notify::connected(&address);
+    }
     crate::diag::set_watching(true);
     let spawned = spawn_connection(Box::new(move || {
         struct BotThreadObituary {
@@ -361,18 +592,32 @@ pub(crate) fn start_bot(address: String) -> Result<(), String> {
                     );
                     return;
                 }
-                let (first, notice) = SHARED.get().map_or((false, None), |shared| {
-                    let mut s = shared.lock().unwrap();
-                    let first = s.end_session("Connection lost".to_string(), None);
-                    (first, s.end_notice.take())
-                });
-                if first {
+                let (first, notice, transferring) =
+                    SHARED.get().map_or((false, None, false), |shared| {
+                        let mut s = shared.lock().unwrap();
+                        if std::thread::panicking() && s.transfer.take().is_some() {
+                            s.session_ended = false;
+                        }
+                        let status = if s.transfer.is_some() {
+                            crate::gui::tooltip::translate("connect.transferring", &[])
+                        } else {
+                            crate::lang::tr!("client.status.connection_lost").to_string()
+                        };
+                        let first = s.end_session(status, None);
+                        (first, s.end_notice.take(), s.transfer.is_some())
+                    });
+                if first || transferring {
                     reset_session_side_tables(false);
                 }
                 crate::client::worker::reset_biome_table();
-                crate::platform::notify::disconnected(notice.as_deref());
+                if !transferring {
+                    crate::platform::notify::disconnected(notice.as_deref());
+                }
                 crate::diag::set_watching(false);
                 BOT_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
+                if transferring {
+                    transfer_ready();
+                }
             }
         }
         crate::platform::executor::spawn(async move {
@@ -392,24 +637,34 @@ pub(crate) fn start_bot(address: String) -> Result<(), String> {
             #[cfg(not(feature = "online_mode"))]
             let account = Account::offline(&username());
             #[cfg(feature = "multiversion")]
-            crate::protocol::detect(&address).await;
+            if dial.is_none() {
+                crate::protocol::detect(&address).await;
+            }
             #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
-            let bridged = match crate::eagler::prepare(
-                &crate::platform::address::normalize(&address),
-                account.username(),
-            )
-            .await
-            {
+            let prepared = if dial.is_some() {
+                Ok(None)
+            } else {
+                crate::eagler::prepare(
+                    &crate::platform::address::normalize(&address),
+                    account.username(),
+                )
+                .await
+            };
+            #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
+            let bridged = match prepared {
                 Ok(bridged) => bridged,
                 Err(e) => {
                     let (status, spans) = match e.downcast_ref::<crate::eagler::Refused>() {
                         Some(refused) => {
                             log_warn!("net", "{address} refused the login: {refused}");
-                            (format!("Refused: {refused}"), refused.reason.clone())
+                            (
+                                crate::lang::trf!("client.status.refused", refused),
+                                refused.reason.clone(),
+                            )
                         }
                         None => {
-                            log_error!("net", "could not reach {address}: {e}");
-                            let status = format!("Could not connect: {e}");
+                            log_warn!("net", "could not reach {address}: {e}");
+                            let status = crate::lang::trf!("client.status.could_not_connect", e);
                             let spans = crate::text::parse_formatted(&status);
                             (status, spans)
                         }
@@ -423,9 +678,38 @@ pub(crate) fn start_bot(address: String) -> Result<(), String> {
             #[cfg(not(any(feature = "eagler", target_arch = "wasm32")))]
             let bridged: Option<azalea_protocol::address::ResolvedAddr> = None;
 
-            let result = match &bridged {
-                Some(resolved) => run_client(account, resolved, generation).await,
-                None => run_client(account, address.as_str(), generation).await,
+            let result = if let Some((server, cookies)) = dial {
+                let resolved = match azalea_protocol::address::ResolvedAddr::new(server).await {
+                    Ok(resolved) => resolved,
+                    Err(e) => {
+                        log_warn!("net", "could not resolve {address}: {e}");
+                        let reason = crate::gui::tooltip::translate(
+                            "disconnect.genericReason",
+                            &[crate::gui::tooltip::translate(
+                                "disconnect.unknownHost",
+                                &[],
+                            )],
+                        );
+                        if let Some(shared) = SHARED.get() {
+                            let spans = crate::text::parse_formatted(&reason);
+                            shared.lock().unwrap().end_session(reason, Some(spans));
+                        }
+                        return;
+                    }
+                };
+                let cookies = azalea::cookies::ServerCookies { map: cookies };
+                if !arm_connection(generation, Some(cookies), false) {
+                    return;
+                }
+                run_client(account, &resolved, generation, false).await
+            } else {
+                if !arm_connection(generation, None, bridged.is_some()) {
+                    return;
+                }
+                match &bridged {
+                    Some(resolved) => run_client(account, resolved, generation, true).await,
+                    None => run_client(account, address.as_str(), generation, false).await,
+                }
             };
             match result {
                 azalea::app::AppExit::Success => log_warn!(
@@ -442,7 +726,7 @@ pub(crate) fn start_bot(address: String) -> Result<(), String> {
         crate::diag::set_watching(false);
         BOT_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(shared) = SHARED.get() {
-            let status = "Could not start the connection thread".to_string();
+            let status = crate::lang::tr!("client.status.thread_failed").to_string();
             let spans = crate::text::parse_formatted(&status);
             shared.lock().unwrap().end_session(status, Some(spans));
         }
@@ -450,9 +734,38 @@ pub(crate) fn start_bot(address: String) -> Result<(), String> {
     Ok(())
 }
 
+fn arm_connection(
+    generation: u64,
+    cookies: Option<azalea::cookies::ServerCookies>,
+    use_transport: bool,
+) -> bool {
+    let Some(shared) = SHARED.get() else {
+        return false;
+    };
+    let s = shared.lock().unwrap();
+    if s.session_ended || generation != BOT_GENERATION.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    *azalea::join::NEXT_TRANSFER.lock() = cookies;
+    azalea::join::USE_TRANSPORT.store(use_transport, std::sync::atomic::Ordering::SeqCst);
+    true
+}
+
 #[derive(Clone, Component, Default)]
 pub struct State {
     generation: u64,
+    bridged: bool,
+    transferring: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl State {
+    fn transferring(&self) -> bool {
+        self.transferring.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn over(&self) -> bool {
+        self.transferring() || stale_generation(self)
+    }
 }
 
 fn stale_generation(state: &State) -> bool {
@@ -462,6 +775,9 @@ fn stale_generation(state: &State) -> bool {
 async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
     if stale_generation(&state) {
         bot.exit();
+        return Ok(());
+    }
+    if state.transferring() {
         return Ok(());
     }
     let shared = match SHARED.get() {
@@ -494,7 +810,8 @@ async fn handle_event(
             );
             {
                 let mut s = shared.lock().unwrap();
-                s.session.status = Some("Connected, waiting for chunks...".into());
+                s.session.status =
+                    Some(crate::lang::tr!("client.status.waiting_for_chunks").into());
                 if !s.session_ended {
                     s.in_world = true;
                 }
@@ -514,8 +831,15 @@ async fn handle_event(
             s.in_world = true;
             if let Ok(pos) = bot.position() {
                 s.session.player_pos = [pos.x, pos.y, pos.z];
-                s.session.status =
-                    Some(format!("Spawned at ({:.1},{:.1},{:.1})", pos.x, pos.y, pos.z).into());
+                s.session.status = Some(
+                    crate::lang::trf!(
+                        "client.status.spawned",
+                        format!("{:.1}", pos.x),
+                        format!("{:.1}", pos.y),
+                        format!("{:.1}", pos.z)
+                    )
+                    .into(),
+                );
             }
         }
         Event::Tick => tick::handle_tick(&bot, shared),
@@ -547,8 +871,12 @@ async fn handle_event(
                 );
                 return Ok(());
             };
+            let status = match &reason {
+                Some(_) => crate::lang::trf!("client.status.disconnected_because", msg.as_str()),
+                None => crate::lang::tr!("client.status.connection_lost").to_string(),
+            };
             s.end_session(
-                format!("Disconnected: {}", msg),
+                status,
                 reason.as_ref().map(crate::client::chat_text::to_spans),
             );
             if let Some(FormattedText::Translatable(t)) = &reason
@@ -575,7 +903,7 @@ async fn handle_event(
                 );
                 return Ok(());
             };
-            let status = format!("Connection failed: {}", err);
+            let status = crate::lang::trf!("client.status.connection_failed", err);
             let spans = crate::text::parse_formatted(&status);
             s.end_session(status, Some(spans));
             drop(s);
@@ -628,9 +956,12 @@ fn reset_session_side_tables(blocking: bool) {
             }
         }
         use crate::client::tracking::{
-            add_entity_data, entity_anims, leashes, meta_dirty, meta_index_18, on_grounds,
-            passengers, velocities,
+            add_entity_data, cart_lerps, entity_anims, leashes, meta_dirty, meta_index_18,
+            on_grounds, passengers, velocities,
         };
+        clear(cart_lerps());
+        crate::client::tracking::MINECART_IMPROVEMENTS
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         clear(entity_anims());
         clear(meta_index_18());
         clear(meta_dirty());
@@ -649,7 +980,9 @@ fn reset_session_side_tables(blocking: bool) {
         crate::play::entity_sounds::reset();
     }
     crate::client::tracking::LOCAL_ENTITY_ID.store(i32::MIN, std::sync::atomic::Ordering::Relaxed);
+    crate::client::tracking::set_camera_entity(None);
     crate::play::riding::reset(blocking);
+    crate::play::rockets::reset(blocking);
     crate::play::interaction::reset_session_state();
     tick::reset_session_locals(blocking);
 
@@ -671,7 +1004,13 @@ pub(crate) fn request_disconnect() {
     let mut s = shared.lock().unwrap();
     s.disconnect_requested = true;
     s.session_ended = true;
-    s.clear_session("Disconnected".to_string());
+    s.transfer_unseen = false;
+    let cancelled = s.transfer.take();
+    s.clear_session(crate::lang::tr!("client.status.disconnected").to_string());
+    drop(s);
+    if cancelled.is_some() {
+        crate::platform::notify::disconnected(None);
+    }
 }
 
 pub(crate) fn force_disconnect() -> bool {
@@ -681,10 +1020,16 @@ pub(crate) fn force_disconnect() -> bool {
     let Ok(mut s) = shared.try_lock() else {
         return false;
     };
-    let status = "Disconnected (bot thread stalled)".to_string();
-    let spans = crate::text::parse_formatted(
-        "The connection stopped responding and was closed by the client.",
-    );
+    if !crate::diag::force_disconnect_pending()
+        || !BOT_STARTED.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return true;
+    }
+    if s.transfer.take().is_some() {
+        s.session_ended = false;
+    }
+    let status = crate::lang::tr!("client.status.stalled").to_string();
+    let spans = crate::text::parse_formatted(crate::lang::tr!("client.status.stalled_reason"));
     s.end_session(status, Some(spans));
     let notice = s.end_notice.take();
     drop(s);

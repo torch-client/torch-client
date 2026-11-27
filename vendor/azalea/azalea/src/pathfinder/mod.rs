@@ -7,7 +7,9 @@ pub mod goals;
 mod goto_event;
 pub mod mining;
 pub mod moves;
+pub mod placing;
 pub mod positions;
+pub mod safety;
 pub mod simulation;
 #[cfg(test)]
 mod tests;
@@ -38,7 +40,9 @@ use custom_state::{CustomPathfinderState, CustomPathfinderStateRef};
 use futures_lite::future;
 pub use goto_event::{GotoEvent, PathfinderOpts};
 use parking_lot::RwLock;
+pub use placing::PlaceRules;
 use positions::RelBlockPos;
+pub use safety::MoveSafety;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, info, warn};
 
@@ -127,6 +131,8 @@ pub struct PathFoundEvent {
     pub is_partial: bool,
     pub successors_fn: SuccessorsFn,
     pub allow_mining: bool,
+    pub placing: Option<Arc<dyn PlaceRules>>,
+    pub safety: MoveSafety,
 }
 
 #[allow(clippy::type_complexity)]
@@ -317,7 +323,7 @@ pub fn goto_listener(
                     opts: PathfinderOpts {
                         min_timeout: PathfinderTimeout::Nodes(2_000),
                         max_timeout: PathfinderTimeout::Nodes(2_000),
-                        ..opts
+                        ..opts.clone()
                     },
                 });
 
@@ -434,7 +440,9 @@ pub async fn calculate_path_sliced(ctx: CalculatePathCtx) -> Option<PathFoundEve
     let goto_id = ctx.goto_id_atomic.fetch_add(1, atomic::Ordering::SeqCst) + 1;
 
     let origin = ctx.start;
-    let cached_world = CachedWorld::new(ctx.world_lock, origin);
+    let cached_world = CachedWorld::new(ctx.world_lock, origin)
+        .with_place_rules(ctx.opts.placing.clone())
+        .with_safety(ctx.opts.safety);
     let successors_into = |pos: RelBlockPos, out: &mut Vec<astar::Edge<RelBlockPos, moves::MoveData>>| {
         call_successors_fn_into(
             &cached_world,
@@ -535,6 +543,8 @@ pub async fn calculate_path_sliced(ctx: CalculatePathCtx) -> Option<PathFoundEve
         is_partial,
         successors_fn: ctx.opts.successors_fn,
         allow_mining: ctx.opts.allow_mining,
+        placing: ctx.opts.placing.clone(),
+        safety: ctx.opts.safety,
     })
 }
 
@@ -584,7 +594,9 @@ pub fn path_found_listener(
                         .expect("Entity tried to pathfind but the entity isn't in a valid world");
                     let origin = event.start;
                     let successors_fn: moves::SuccessorsFn = event.successors_fn;
-                    let cached_world = CachedWorld::new(world_lock, origin);
+                    let cached_world = CachedWorld::new(world_lock, origin)
+                        .with_place_rules(event.placing.clone())
+                        .with_safety(event.safety);
                     let mining_cache = MiningCache::new(if event.allow_mining {
                         Some(inventory.inventory_menu.clone())
                     } else {
@@ -761,6 +773,18 @@ pub fn call_successors_fn_into(
         world: cached_world,
         mining_cache,
         custom_state,
+        placing: cached_world.place_rules(),
     };
+    let first = ctx.edges.len();
     successors_fn(&mut ctx, pos);
+    if cached_world.safety().avoid_hazards {
+        let mut kept = first;
+        for i in first..ctx.edges.len() {
+            if cached_world.is_node_safe(ctx.edges[i].movement.target) {
+                ctx.edges.swap(kept, i);
+                kept += 1;
+            }
+        }
+        ctx.edges.truncate(kept);
+    }
 }

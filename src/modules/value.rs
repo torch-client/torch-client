@@ -91,6 +91,7 @@ mod tests {
                 Value::Choice(3),
                 Kind::Enum {
                     options: &[],
+                    keys: &[],
                     index: 0,
                 },
             ),

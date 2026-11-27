@@ -32,7 +32,11 @@ fn texture_dimension(dimension: Dimension) -> TextureDimension {
     }
 }
 
-fn depth_pair(device: &RenderDevice, size: Extent3d, labels: [&str; 2]) -> (Target, Target) {
+pub(super) fn depth_pair(
+    device: &RenderDevice,
+    size: Extent3d,
+    labels: [&str; 2],
+) -> (Target, Target) {
     (
         Target::new(
             device,
@@ -63,7 +67,7 @@ pub(super) struct Target {
 }
 
 impl Target {
-    fn new(
+    pub(super) fn new(
         device: &RenderDevice,
         label: &str,
         size: Extent3d,
@@ -153,7 +157,7 @@ pub(super) struct Statics {
     pub(super) mip_linear: Sampler,
 }
 
-fn fill(queue: &RenderQueue, target: &Target, size: Extent3d, bytes: &[u8], row: u32) {
+pub(super) fn fill(queue: &RenderQueue, target: &Target, size: Extent3d, bytes: &[u8], row: u32) {
     queue.write_texture(
         target.texture.as_image_copy(),
         bytes,
@@ -252,18 +256,7 @@ impl Statics {
         fill(queue, &white_2d, one, &[255; 4], 4);
         fill(queue, &flat_normal, one, &[127, 127, 255, 255], 4);
 
-        let sampler = |filter: FilterMode, address: AddressMode| {
-            device.create_sampler(&SamplerDescriptor {
-                label: Some(gpu_label!("sampler")),
-                address_mode_u: address,
-                address_mode_v: address,
-                address_mode_w: address,
-                mag_filter: filter,
-                min_filter: filter,
-                mipmap_filter: MipmapFilterMode::Nearest,
-                ..default()
-            })
-        };
+        let sampler = |filter: FilterMode, address: AddressMode| sampler(device, filter, address);
         let compare = |filter: FilterMode, function: CompareFunction| {
             device.create_sampler(&SamplerDescriptor {
                 label: Some(gpu_label!("comparison sampler")),
@@ -297,6 +290,19 @@ impl Statics {
             }),
         }
     }
+}
+
+pub(super) fn sampler(device: &RenderDevice, filter: FilterMode, address: AddressMode) -> Sampler {
+    device.create_sampler(&SamplerDescriptor {
+        label: Some(gpu_label!("sampler")),
+        address_mode_u: address,
+        address_mode_v: address,
+        address_mode_w: address,
+        mag_filter: filter,
+        min_filter: filter,
+        mipmap_filter: MipmapFilterMode::Nearest,
+        ..default()
+    })
 }
 
 fn noise_bytes(size: u32) -> Vec<u8> {

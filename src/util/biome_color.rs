@@ -1123,7 +1123,7 @@ pub fn publish(tints: Option<Tints>) {
     TINTS_VERSION.fetch_add(1, Ordering::Release);
 }
 
-fn with_tints<R>(f: impl FnOnce(Option<&Tints>) -> R) -> R {
+pub(crate) fn with_tints<R>(f: impl FnOnce(Option<&Tints>) -> R) -> R {
     let version = TINTS_VERSION.load(Ordering::Acquire);
     LOCAL_TINTS.with_borrow_mut(|(seen, local)| {
         if *seen != version {

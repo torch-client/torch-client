@@ -7,8 +7,6 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::RenderDevice;
 
-use super::compile::EntityKind;
-
 pub(crate) use build::prepare_plan;
 
 #[derive(Clone, Copy, Default)]
@@ -51,7 +49,7 @@ pub(super) struct GeometryPass {
 }
 
 #[derive(Clone)]
-enum Owned {
+pub(super) enum Owned {
     Buffer(Buffer),
     Range(Buffer, u64, u64),
     View(TextureView),
@@ -66,6 +64,21 @@ pub(super) struct BindTemplate {
 }
 
 impl BindTemplate {
+    #[cfg_attr(not(feature = "native_shaders"), allow(dead_code))]
+    pub(super) fn new(
+        label: String,
+        layout: BindGroupLayout,
+        entries: Vec<(u32, Owned)>,
+        entity_textures: Vec<u32>,
+    ) -> BindTemplate {
+        BindTemplate {
+            label,
+            layout,
+            entries,
+            entity_textures,
+        }
+    }
+
     pub(super) fn create(&self, device: &RenderDevice, texture: Option<&TextureView>) -> BindGroup {
         let entries: Vec<BindGroupEntry> = self
             .entries
@@ -141,7 +154,6 @@ pub(super) struct Plan {
     pub(super) stages: [Vec<StepPass>; 4],
     pub(super) shadow: Option<ShadowPass>,
     pub(super) shadowcomp: Vec<ComputePass>,
-    pub(super) entities: [Option<EntityPass>; EntityKind::COUNT],
     pub(super) clears: Vec<Clear>,
     pub(super) full_clears: Vec<Clear>,
     pub(super) opaque: Vec<GeometryPass>,

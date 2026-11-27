@@ -181,6 +181,7 @@ struct Worker {
     min_y: i32,
     max_y: i32,
     steps: u64,
+    lighting: bool,
 }
 
 type SelectKey = (i32, i32, i32, u32, u32, LodQuality);
@@ -209,6 +210,7 @@ impl Worker {
             min_y: -64,
             max_y: 320,
             steps: 0,
+            lighting: crate::renderer::lighting_enabled(),
         }
     }
 
@@ -238,6 +240,15 @@ impl Worker {
             self.render.clear();
             self.ready.clear();
             self.reselect = true;
+        }
+        let lighting = crate::renderer::lighting_enabled();
+        if lighting != self.lighting {
+            self.lighting = lighting;
+            self.ready.clear();
+            self.reselect = true;
+            if !lighting {
+                self.unlit.clear();
+            }
         }
 
         let mut changed = HashSet::new();
@@ -471,7 +482,7 @@ impl Worker {
         };
         let adjacent: [Option<&render_source::RenderSource>; 4] =
             std::array::from_fn(|d| self.render.get(&pos.adjacent(d)));
-        let shade = crate::renderer::dimension::current().cardinal();
+        let shade = crate::renderer::lightmap::cardinal_shades();
         let built = mesh::build(center, adjacent, shade);
         if built.is_empty() {
             if self.displayed.remove(&pos) {

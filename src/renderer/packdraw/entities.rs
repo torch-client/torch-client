@@ -1,21 +1,92 @@
 mod extract;
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
-    BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages, TextureViewDescriptor,
+    Buffer, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureUsages, TextureView, TextureViewDescriptor, TextureViewId,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
 
 use super::GPU_LABEL;
-use super::compile::{EntityKind, Segment};
-use super::frame::{Install, PackRender, Stage};
-use super::pipelines::Building;
+use super::compile::{EntityKind, Segment, ShadowCasters, SkyParts};
+use super::inputs::Inputs;
+use super::install::Installed;
+use super::plan::EntityPass;
+use super::takeover::EntityPacks;
 use super::targets::extent;
 
 pub(crate) use extract::{extract_entity_draws, extract_standard_draws};
+
+pub(super) struct EntityPrograms {
+    pub(super) kinds: [bool; EntityKind::COUNT],
+    pub(super) casters: ShadowCasters,
+    pub(super) sky_parts: SkyParts,
+    pub(super) entity_ids: HashMap<String, i32>,
+    pub(super) caster_reach: f32,
+    pub(super) shadow_usable: bool,
+    pub(super) segments: [Segment; EntityKind::COUNT],
+    pub(super) fallbacks: bool,
+    pub(super) display_copies: bool,
+}
+
+impl EntityPrograms {
+    pub(super) fn glsl(installed: &Installed, shadow_usable: bool) -> EntityPrograms {
+        EntityPrograms {
+            kinds: installed.entities.map(|program| program.is_some()),
+            casters: installed.shadow_casters,
+            sky_parts: installed.sky_parts,
+            entity_ids: installed.entity_ids.clone(),
+            caster_reach: installed.constants.shadow_distance * 1.75,
+            shadow_usable,
+            segments: EntityKind::ALL.map(EntityKind::segment),
+            fallbacks: true,
+            display_copies: true,
+        }
+    }
+
+    pub(super) fn has(&self, kind: EntityKind) -> bool {
+        self.kinds[kind.index()]
+    }
+
+    pub(super) fn segment(&self, kind: EntityKind) -> Segment {
+        self.segments[kind.index()]
+    }
+
+    pub(super) fn pass_of(&self, kind: EntityKind) -> Option<EntityKind> {
+        let fallback = kind.fallback().filter(|_| self.fallbacks);
+        std::iter::once(kind).chain(fallback).find(|k| self.has(*k))
+    }
+
+    pub(super) fn draws_hand(&self) -> bool {
+        EntityKind::ALL.iter().any(|k| k.is_hand() && self.has(*k))
+    }
+}
+
+#[derive(Default)]
+pub(super) struct EntityFrame {
+    pub(super) entity_draws: Vec<EntityDraw>,
+    pub(super) entity_roots: HashMap<Entity, i32>,
+    pub(super) entity_instances: Vec<EntityInstance>,
+    pub(super) entity_batches: Vec<EntityBatch>,
+    pub(super) entity_buffer: Option<Buffer>,
+    pub(super) entity_frame: u32,
+    pub(super) entity_texture_use: HashMap<Option<AssetId<Image>>, u32>,
+    pub(super) entity_textures: HashMap<AssetId<Image>, (TextureViewId, TextureView)>,
+}
+
+pub(super) type EntityPasses = [Option<EntityPass>; EntityKind::COUNT];
+
+pub(super) struct EntityOwner<'a> {
+    pub(super) programs: &'a EntityPrograms,
+    pub(super) frame: &'a mut EntityFrame,
+    pub(super) camera: Vec3,
+    pub(super) inputs: &'a Inputs,
+    pub(super) passes: Option<&'a mut [EntityPasses]>,
+}
 
 pub(crate) struct EntityDraw {
     mesh: AssetId<Mesh>,
@@ -34,12 +105,6 @@ pub(crate) struct EntityDraw {
     flags: u32,
 }
 
-impl EntityDraw {
-    fn segment(&self) -> Segment {
-        self.pass.segment()
-    }
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(super) struct EntityInstance {
@@ -52,6 +117,22 @@ pub(super) struct EntityInstance {
 }
 
 const ENTITY_SHADE_IN_ALPHA: u32 = 1;
+
+pub(super) const SKY_PART_SHIFT: u32 = 8;
+
+pub(crate) const fn sky_part_id(part: crate::renderer::sky::SkyPart) -> u32 {
+    use crate::renderer::sky::SkyPart;
+    match part {
+        SkyPart::SkyDisc => 1,
+        SkyPart::DarkDisc => 2,
+        SkyPart::SunriseFan => 3,
+        SkyPart::Sun => 4,
+        SkyPart::Moon => 5,
+        SkyPart::Stars => 6,
+        SkyPart::EndSky => 7,
+        SkyPart::EndFlash => 8,
+    }
+}
 
 pub(super) const ENTITY_INSTANCE_SIZE: u64 = std::mem::size_of::<EntityInstance>() as u64;
 const _: () = assert!(ENTITY_INSTANCE_SIZE == 96);
@@ -144,41 +225,36 @@ pub(crate) fn prepare_entity_draws(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     images: Res<RenderAssets<GpuImage>>,
-    render: Option<ResMut<PackRender>>,
+    mut packs: EntityPacks,
 ) {
-    let Some(mut render) = render else { return };
-    let Some(install) = render.install.as_deref_mut() else {
-        return;
-    };
-    let Install {
-        stage:
-            Stage::Started {
-                pipelines: Building::Ready(_),
-                sized: Some(sized),
-            },
+    let Some(EntityOwner {
+        programs,
         frame,
-        entity_textures,
+        camera,
+        passes: Some(passes),
         ..
-    } = install
+    }) = packs.entities()
     else {
         return;
     };
     frame.entity_instances.clear();
     frame.entity_batches.clear();
-    if frame.entity_draws.is_empty()
-        || sized
-            .plans
-            .iter()
-            .all(|p| p.entities.iter().all(Option::is_none))
-    {
+    if frame.entity_draws.is_empty() || passes.iter().all(|p| p.iter().all(Option::is_none)) {
         return;
     }
-    frame
-        .entity_draws
-        .sort_unstable_by_key(|d| (d.segment(), d.order, d.pass, d.blend, d.texture, d.mesh));
+    frame.entity_draws.sort_unstable_by_key(|d| {
+        (
+            programs.segment(d.pass),
+            d.order,
+            d.pass,
+            d.blend,
+            d.texture,
+            d.mesh,
+        )
+    });
     frame.entity_frame = frame.entity_frame.wrapping_add(1);
     let now = frame.entity_frame;
-    let camera = frame.camera.as_dvec3();
+    let camera = camera.as_dvec3();
     for draw in &frame.entity_draws {
         let mut model = draw.model;
         if !draw.relative {
@@ -209,7 +285,7 @@ pub(crate) fn prepare_entity_draws(
             }
             _ => {
                 frame.entity_batches.push(EntityBatch {
-                    segment: draw.segment(),
+                    segment: programs.segment(draw.pass),
                     pass: draw.pass,
                     blend: draw.blend,
                     texture: draw.texture,
@@ -243,13 +319,9 @@ pub(crate) fn prepare_entity_draws(
             let keep = now.wrapping_sub(*last) < ENTITY_TEXTURE_FRAMES;
             if !keep {
                 if let Some(id) = texture {
-                    entity_textures.remove(id);
+                    frame.entity_textures.remove(id);
                 }
-                for pass in sized
-                    .plans
-                    .iter_mut()
-                    .flat_map(|p| p.entities.iter_mut().flatten())
-                {
+                for pass in passes.iter_mut().flat_map(|p| p.iter_mut().flatten()) {
                     pass.groups.remove(texture);
                 }
             }
@@ -259,13 +331,18 @@ pub(crate) fn prepare_entity_draws(
 
     let mut encoder: Option<wgpu::CommandEncoder> = None;
     let mut remade: Vec<AssetId<Image>> = Vec::new();
-    for batch in &frame.entity_batches {
+    for batch in frame
+        .entity_batches
+        .iter()
+        .filter(|_| programs.display_copies)
+    {
         let Some(id) = batch.texture else { continue };
         let Some(image) = images.get(id) else {
             continue;
         };
         if image.texture_descriptor.format != TextureFormat::Rgba8UnormSrgb
-            || entity_textures
+            || frame
+                .entity_textures
                 .get(&id)
                 .is_some_and(|(from, _)| *from == image.texture_view.id())
         {
@@ -299,28 +376,30 @@ pub(crate) fn prepare_entity_draws(
         super::glcopy::copy_srgb_bytes(&device, encoder, &image.texture_view, &view);
         #[cfg(not(all(target_arch = "wasm32", not(feature = "webgpu"))))]
         encoder.copy_texture_to_texture(image.texture.as_image_copy(), copy.as_image_copy(), size);
-        entity_textures.insert(id, (image.texture_view.id(), view));
+        frame
+            .entity_textures
+            .insert(id, (image.texture_view.id(), view));
         remade.push(id);
     }
     if let Some(encoder) = encoder {
         queue.submit([encoder.finish()]);
     }
 
-    for plan in &mut sized.plans {
-        for pass in plan.entities.iter_mut().flatten() {
+    for entities in passes.iter_mut() {
+        for pass in entities.iter_mut().flatten() {
             for id in &remade {
                 pass.groups.remove(&Some(*id));
             }
         }
         for batch in &frame.entity_batches {
-            let Some(pass) = plan.entities[batch.pass.index()].as_mut() else {
+            let Some(pass) = entities[batch.pass.index()].as_mut() else {
                 continue;
             };
             if pass.groups.contains_key(&batch.texture) {
                 continue;
             }
             let view = match batch.texture {
-                Some(id) => match (entity_textures.get(&id), images.get(id)) {
+                Some(id) => match (frame.entity_textures.get(&id), images.get(id)) {
                     (Some((_, copy)), _) => Some(copy.clone()),
                     (None, Some(image)) => Some(image.texture_view.clone()),
                     (None, None) => continue,

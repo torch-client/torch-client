@@ -15,12 +15,22 @@ pub struct FrameViewSystems;
 #[derive(Resource, Default)]
 pub struct FrameView {
     pub partial: f32,
+    pub world_partial: f32,
+    pub camera_partial: f32,
+    pub ticks: u64,
+    pub world_ticks: u64,
+    pub world_run: crate::session::WorldRun,
+    pub world_time: f64,
+    pub world_time_prev: f64,
     pub no_render: crate::modules::no_render::Hide,
     pub player_pos: [f64; 3],
     pub descending: bool,
     pub player_lerp: [f64; 3],
     pub eye_height: f32,
     pub camera_eye_height: f32,
+    pub spectate: Option<crate::session::SpectateFrame>,
+    pub cart_ride: Option<crate::util::minecart_lerp::CartRide>,
+    pub cart_camera: bool,
     pub sleeping: bool,
     pub bed_orientation: Option<Direction>,
     pub camera_distance: f32,
@@ -66,7 +76,7 @@ pub struct FrameView {
     pub crosshair_entity: Option<i32>,
     pub main_hand_left: bool,
     pub entities: Arc<Vec<EntityAnim>>,
-    pub item_pickups: Vec<crate::play::item_pickup::ItemPickup>,
+    pub item_pickups: crate::play::item_pickup::ItemPickups,
     pub block_entities: Arc<crate::blockentities::feed::BlockEntityMap>,
     pub block_entities_version: u64,
     pub game_time: u64,
@@ -88,13 +98,28 @@ impl FrameView {
         let session = &s.session;
         let partial = super::systems::partial_ticks(s);
         self.partial = partial;
+        self.world_run = session.world_run;
+        let world_partial = if session.world_run.runs { partial } else { 1.0 };
+        self.world_partial = world_partial;
+        let camera_frozen = session
+            .spectate
+            .as_ref()
+            .is_some_and(|view| view.entity_frozen());
+        self.camera_partial = if camera_frozen { 1.0 } else { partial };
+        self.ticks = session.client_ticks;
+        self.world_ticks = session.world_ticks;
+        self.world_time_prev = self.world_time;
+        self.world_time = session.world_ticks as f64 + f64::from(world_partial);
         let (prev, cur) = (session.player_pos_prev, session.player_pos);
         self.player_pos = cur;
         self.descending = s.move_flags & crate::session::MOVE_SNEAK != 0;
         self.player_lerp =
             std::array::from_fn(|i| prev[i] + (cur[i] - prev[i]) * f64::from(partial));
         self.eye_height = super::systems::session_eye_height(session);
-        self.camera_eye_height = session.camera_eye.sample(partial);
+        self.camera_eye_height = session.camera_eye.sample(self.camera_partial);
+        self.spectate = session.spectate.as_ref().map(|v| v.frame(partial));
+        self.cart_ride = session.cart_ride.as_ref().map(|c| c.ride.clone());
+        self.cart_camera = session.cart_ride.as_ref().is_some_and(|c| c.plain);
         self.sleeping = session.sleeping;
         self.bed_orientation = session.bed_orientation;
         self.camera_distance = session
@@ -106,13 +131,13 @@ impl FrameView {
         {
             use crate::play::mob_effects::{effect_blend_factor, find, has, night_vision_scale};
             let effects = &session.active_effects;
-            self.nausea = effect_blend_factor(effects, "nausea", partial);
-            self.night_vision =
-                find(effects, "night_vision").map(|e| night_vision_scale(e.duration, partial));
+            self.nausea = effect_blend_factor(effects, "nausea", world_partial);
+            self.night_vision = find(effects, "night_vision")
+                .map(|e| night_vision_scale(e.duration, world_partial));
             self.conduit_power = has(effects, "conduit_power");
             self.fire_resistance = has(effects, "fire_resistance");
             self.has_darkness = has(effects, "darkness");
-            self.darkness = effect_blend_factor(effects, "darkness", partial);
+            self.darkness = effect_blend_factor(effects, "darkness", world_partial);
             self.blindness = find(effects, "blindness").map(|e| e.duration);
         }
         self.boss_darken = session.boss_bars.iter().any(|b| b.darken);
@@ -124,17 +149,21 @@ impl FrameView {
             self.boss_music = session.boss_bars.iter().any(|b| b.music);
             self.reconfiguring = session.reconfiguring;
         }
-        self.portal = session.portal_effect.sample(partial);
-        self.spin_degrees = session.spinning_effect.sample(partial);
+        self.portal = session.portal_effect.sample(world_partial);
+        self.spin_degrees = session.spinning_effect.sample(world_partial);
         self.hide_effects();
-        self.day_ticks = session.day_clock.at(partial);
-        self.day_rate = session.day_clock.rate;
-        self.end_ticks = session.end_clock.ticks() as f64 + f64::from(partial);
+        self.day_ticks = session.day_clock.at(world_partial);
+        self.day_rate = if session.world_run.runs {
+            session.day_clock.rate
+        } else {
+            0.0
+        };
+        self.end_ticks = session.end_clock.ticks() as f64 + f64::from(world_partial);
         self.biome = match (session.env_prev, session.env) {
-            (Some(from), Some(now)) => Some(BiomeLayer::lerp(partial, &from, &now)),
+            (Some(from), Some(now)) => Some(BiomeLayer::lerp(world_partial, &from, &now)),
             (_, now) => now,
         };
-        self.fov_modifier = session.fov.sample(partial);
+        self.fov_modifier = session.fov.sample(self.camera_partial);
         self.camera_yaw = s.camera_yaw;
         self.camera_pitch = s.camera_pitch;
         self.in_world = s.in_world;
@@ -149,7 +178,7 @@ impl FrameView {
         self.crosshair_entity = session.crosshair_entity;
         self.main_hand_left = s.skin_prefs.main_hand_left;
         self.entities = session.entities.clone();
-        self.item_pickups.clone_from(&session.item_pickups);
+        self.item_pickups = session.item_pickups.clone();
         self.game_time = session.game_time;
         let here = |at: &Option<azalea_core::position::GlobalPos>| {
             at.as_ref()
@@ -209,6 +238,14 @@ impl FrameView {
         if hide.has(Part::Pumpkin) {
             self.head_camera_overlay = false;
         }
+    }
+
+    pub fn world_delta(&self, frame: f32) -> f32 {
+        if !self.world_run.frozen {
+            return frame;
+        }
+        const MAX_DELTA: f64 = 0.25;
+        ((self.world_time - self.world_time_prev) * 0.05).clamp(0.0, MAX_DELTA) as f32
     }
 
     pub fn tick_eye(&self) -> [f64; 3] {

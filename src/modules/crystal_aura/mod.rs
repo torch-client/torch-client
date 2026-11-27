@@ -160,7 +160,7 @@ pub fn tick(bot: &Client, shared: &SharedMutex) {
         Phase::Running => {}
     }
 
-    let now = crate::client::tracking::game_time();
+    let now = crate::client::tracking::client_ticks();
     let mut run = RUN.lock().unwrap();
     let busy = act(bot, shared, s, &mut run, now);
 

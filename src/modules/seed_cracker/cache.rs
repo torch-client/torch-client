@@ -7,8 +7,10 @@ use seedcrack::{
 };
 use serde_json::{Value, json};
 
+use crate::lang::Key;
 use crate::platform::storage::SEED_CRACKER_CACHE;
 use crate::renderer::dimension::Dimension;
+use crate::util::placeholders::substitute;
 
 const FORMAT: u64 = 1;
 
@@ -73,28 +75,64 @@ impl Cache {
         self.finds.is_empty() && self.seed.is_none()
     }
 
-    pub fn parse(text: &str) -> Result<Cache, String> {
-        let doc: Value =
-            serde_json::from_str(text.trim()).map_err(|e| format!("not JSON ({e})"))?;
+    pub fn parse(text: &str) -> Result<Cache, ParseError> {
+        let doc: Value = serde_json::from_str(text.trim()).map_err(|e| {
+            ParseError::new(const { Key::of("seed_cracker.share.not_json") }, &[&e])
+        })?;
         Cache::from_value(&doc)
     }
 
-    fn from_value(doc: &Value) -> Result<Cache, String> {
+    fn from_value(doc: &Value) -> Result<Cache, ParseError> {
         match doc.get("seedcracker").and_then(Value::as_u64) {
             Some(FORMAT) => {}
-            Some(v) => return Err(format!("format {v}, this client reads {FORMAT}")),
-            None => return Err("no \"seedcracker\" key".into()),
+            Some(v) => {
+                return Err(ParseError::new(
+                    const { Key::of("seed_cracker.share.format") },
+                    &[&v, &FORMAT],
+                ));
+            }
+            None => {
+                return Err(ParseError::new(
+                    const { Key::of("seed_cracker.share.no_format") },
+                    &[],
+                ));
+            }
         }
-        let hash = seed_of(doc.get("hash")).ok_or("no \"hash\"")?;
+        let hash = seed_of(doc.get("hash"))
+            .ok_or_else(|| ParseError::new(const { Key::of("seed_cracker.share.no_hash") }, &[]))?;
         let seed = seed_of(doc.get("seed"));
         let finds = doc
             .get("finds")
             .and_then(Value::as_array)
-            .ok_or("no \"finds\" list")?
+            .ok_or_else(|| ParseError::new(const { Key::of("seed_cracker.share.no_finds") }, &[]))?
             .iter()
             .map(find_from_json)
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, ParseError>>()?;
         Ok(Cache { hash, seed, finds })
+    }
+}
+
+pub(super) struct ParseError {
+    key: Key,
+    args: Vec<String>,
+}
+
+impl ParseError {
+    fn new(key: Key, args: &[&dyn std::fmt::Display]) -> ParseError {
+        ParseError {
+            key,
+            args: args.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    fn english(&self) -> String {
+        substitute(self.key.english(), &self.args)
+    }
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&substitute(self.key.get(), &self.args))
     }
 }
 
@@ -119,6 +157,7 @@ fn find_to_json(o: &Observation, d: &Drawn) -> Option<Value> {
         }
         Observation::Pillars(p) => json!({ "pillars": p.heights }),
         Observation::HashedSeed(_) => return None,
+        Observation::Bedrock(_) => return None,
     };
     v["dim"] = json!(dimension_name(d.dimension));
     v["color"] = json!(d.color);
@@ -131,24 +170,31 @@ fn find_to_json(o: &Observation, d: &Drawn) -> Option<Value> {
     Some(v)
 }
 
-fn ints<const N: usize>(v: Option<&Value>, what: &str) -> Result<[i32; N], String> {
+fn ints<const N: usize>(v: Option<&Value>, what: &str) -> Result<[i32; N], ParseError> {
     let list = v.and_then(Value::as_array).filter(|l| l.len() == N);
-    let list = list.ok_or_else(|| format!("{what} wants {N} numbers"))?;
+    let list = list.ok_or_else(|| {
+        ParseError::new(const { Key::of("seed_cracker.share.count") }, &[&what, &N])
+    })?;
     let mut out = [0; N];
     for (o, v) in out.iter_mut().zip(list) {
+        let whole = || ParseError::new(const { Key::of("seed_cracker.share.whole") }, &[&what]);
         *o = v
             .as_i64()
             .and_then(|n| i32::try_from(n).ok())
-            .ok_or_else(|| format!("{what} wants whole numbers"))?;
+            .ok_or_else(whole)?;
     }
     Ok(out)
 }
 
-fn find_from_json(v: &Value) -> Result<(Observation, Drawn), String> {
+fn find_from_json(v: &Value) -> Result<(Observation, Drawn), ParseError> {
     let (observation, default_dim) = if let Some(name) = v.get("structure").and_then(Value::as_str)
     {
-        let set =
-            StructureSet::from_name(name).ok_or_else(|| format!("unknown structure {name:?}"))?;
+        let set = StructureSet::from_name(name).ok_or_else(|| {
+            ParseError::new(
+                const { Key::of("seed_cracker.share.structure") },
+                &[&format_args!("{name:?}")],
+            )
+        })?;
         let [chunk_x, chunk_z] = ints::<2>(v.get("chunk"), "chunk")?;
         let dim = if set == StructureSet::EndCities {
             Dimension::End
@@ -167,7 +213,12 @@ fn find_from_json(v: &Value) -> Result<(Observation, Drawn), String> {
         let kind = DecoratorKind::ALL
             .into_iter()
             .find(|k| k.name() == name)
-            .ok_or_else(|| format!("unknown decoration {name:?}"))?;
+            .ok_or_else(|| {
+                ParseError::new(
+                    const { Key::of("seed_cracker.share.decoration") },
+                    &[&format_args!("{name:?}")],
+                )
+            })?;
         let [x, y, z] = ints::<3>(v.get("at"), "at")?;
         let height_above_surface = v.get("above").and_then(Value::as_i64).map(|n| n as i32);
         let dim = if kind == DecoratorKind::EndGateway {
@@ -187,7 +238,10 @@ fn find_from_json(v: &Value) -> Result<(Observation, Drawn), String> {
         )
     } else if let Some(list) = v.get("pillars").and_then(Value::as_array) {
         if list.len() != 10 {
-            return Err("pillars wants 10 heights".into());
+            return Err(ParseError::new(
+                const { Key::of("seed_cracker.share.pillars") },
+                &[],
+            ));
         }
         let mut heights = [None; 10];
         for (h, v) in heights.iter_mut().zip(list) {
@@ -198,7 +252,10 @@ fn find_from_json(v: &Value) -> Result<(Observation, Drawn), String> {
             Dimension::End,
         )
     } else {
-        return Err("a find that is not a structure, decoration or pillars".into());
+        return Err(ParseError::new(
+            const { Key::of("seed_cracker.share.kind") },
+            &[],
+        ));
     };
     let dimension = v
         .get("dim")
@@ -261,7 +318,8 @@ pub(super) fn load(hash: i64) -> Option<Cache> {
         Err(e) => {
             crate::log_warn!(
                 "seed_cracker",
-                "ignoring .seedcracker_cache's world {hash}: {e}"
+                "ignoring .seedcracker_cache's world {hash}: {}",
+                e.english()
             );
             None
         }
@@ -317,5 +375,9 @@ pub(crate) fn share_label(text: &'static str, now: f32) -> &'static str {
     if what == 0 || !(0.0..FEEDBACK_SECS).contains(&(now - at)) {
         return text;
     }
-    if what == 1 { "Copied" } else { "Nothing yet" }
+    if what == 1 {
+        crate::lang::tr!("seed_cracker.share.copied")
+    } else {
+        crate::lang::tr!("seed_cracker.share.nothing")
+    }
 }

@@ -6,6 +6,7 @@ use crate::gui::widgets::{
     self, Button, FOOTER_GAP, FOOTER_W, WIDGET_HEIGHT, WIDGET_WIDTH_BIG, centered_row_x,
 };
 use crate::gui::{GuiState, Screen, ScreenCtx};
+use crate::lang::Key;
 use crate::platform::time::Instant;
 use crate::text::LINE_HEIGHT;
 
@@ -104,14 +105,14 @@ impl Benchmark {
     }
 }
 
-const TITLE: &str = "Benchmark";
-const RUNNING: &str = "Running benchmark";
-const MEASURING_CPU: &str = "Measuring CPU";
-const MEASURING_GPU: &str = "Measuring GPU";
-const CANCEL: &str = "Cancel";
-const COPY: &str = "Copy";
-const COPIED: &str = "Copied";
-const DONE: &str = "Done";
+const TITLE: Key = Key::of("benchmark.title");
+const RUNNING: Key = Key::of("benchmark.running");
+const MEASURING_CPU: Key = Key::of("benchmark.measuring_cpu");
+const MEASURING_GPU: Key = Key::of("benchmark.measuring_gpu");
+const CANCEL: Key = Key::of("benchmark.cancel");
+const COPY: Key = Key::of("benchmark.copy");
+const COPIED: Key = Key::of("benchmark.copied");
+const DONE: Key = Key::of("benchmark.done");
 
 const COPIED_FOR: Duration = Duration::from_secs(2);
 
@@ -135,10 +136,10 @@ const WHITE: u32 = 0xFFFFFF;
 const GREY: u32 = 0xA0A0A0;
 const LIGHT: u32 = 0xE0E0E0;
 
-const DROP_ORDER: [&str; 3] = [RUN_TIME, RANGE, ONE_TILE];
-const RUN_TIME: &str = "Run time";
-const RANGE: &str = "Range";
-const ONE_TILE: &str = "One tile";
+const DROP_ORDER: [Key; 3] = [RUN_TIME, RANGE, ONE_TILE];
+const RUN_TIME: Key = Key::of("benchmark.row.run_time");
+const RANGE: Key = Key::of("benchmark.row.range");
+const ONE_TILE: Key = Key::of("benchmark.row.one_tile");
 
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let footer_y = LAYOUT.footer_y(ctx.vh);
@@ -155,28 +156,29 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             STRIP,
         );
     }
-    p.text_centered(TITLE, ctx.vw / 2.0, LAYOUT.title_y(), WHITE, true);
+    p.text_centered(TITLE.get(), ctx.vw / 2.0, LAYOUT.title_y(), WHITE, true);
 
     match state.benchmark.phase {
         Phase::Cpu | Phase::Gpu => {
             let stage = if state.benchmark.phase == Phase::Cpu {
-                MEASURING_CPU
+                MEASURING_CPU.get()
             } else {
-                MEASURING_GPU
+                MEASURING_GPU.get()
             };
             let mut y = if over_terrain {
                 strip_y
             } else {
                 block_top(ctx, block_h)
             };
-            p.text_centered(RUNNING, ctx.vw / 2.0, y, WHITE, true);
+            p.text_centered(RUNNING.get(), ctx.vw / 2.0, y, WHITE, true);
             y += LINE_HEIGHT;
             p.text_centered(stage, ctx.vw / 2.0, y, GREY, true);
             y += LINE_HEIGHT + BAR_GAP;
             bar(p, ctx, y, state.benchmark.progress);
 
             let x = widgets::centered_x(ctx.vw);
-            if Button::new(x, footer_y, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, CANCEL).draw(p, ctx) {
+            if Button::new(x, footer_y, WIDGET_WIDTH_BIG, WIDGET_HEIGHT, CANCEL.get()).draw(p, ctx)
+            {
                 state.benchmark.phase = Phase::Idle;
                 state.nav = Some(Screen::GameSettings);
             }
@@ -191,7 +193,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                 .copied_at
                 .is_some_and(|at| at.elapsed() < COPIED_FOR);
             let x = centered_row_x(ctx.vw, 2.0 * FOOTER_W + FOOTER_GAP);
-            let copy_label = if copied { COPIED } else { COPY };
+            let copy_label = if copied { COPIED.get() } else { COPY.get() };
             if Button::new(x, footer_y, FOOTER_W, WIDGET_HEIGHT, copy_label).draw(p, ctx) {
                 if let Some(result) = state.benchmark.result.as_ref() {
                     crate::platform::clipboard::set(&copy_text(result));
@@ -203,7 +205,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
                 footer_y,
                 FOOTER_W,
                 WIDGET_HEIGHT,
-                DONE,
+                DONE.get(),
             )
             .draw(p, ctx)
             {
@@ -220,10 +222,10 @@ fn draw_result(p: &mut Painter, ctx: &ScreenCtx, r: &BenchResult) {
     let scores = Scores::new(r);
     let (headline, sub) = match (scores.overall, scores.gpu) {
         (Some(overall), Some(gpu)) => (
-            format!("Score {overall}"),
-            Some(format!("CPU {}   GPU {gpu}", scores.cpu)),
+            crate::lang::trf!("benchmark.score", overall),
+            Some(crate::lang::trf!("benchmark.score_parts", scores.cpu, gpu)),
         ),
-        _ => (format!("CPU score {}", scores.cpu), None),
+        _ => (crate::lang::trf!("benchmark.cpu_score", scores.cpu), None),
     };
     let mut rows = table_rows(r);
 
@@ -255,11 +257,11 @@ fn draw_result(p: &mut Painter, ctx: &ScreenCtx, r: &BenchResult) {
     let table_x = ((ctx.vw - table_w) / 2.0).floor();
     let label_w = rows
         .iter()
-        .map(|(label, _)| p.atlas.font.width_str(label))
+        .map(|(label, _)| p.atlas.font.width_str(label.get()))
         .fold(0.0, f32::max);
     let value_room = (table_w - label_w - LABEL_GAP).max(0.0);
     for (label, value) in &rows {
-        p.text_plain(label, table_x, y, GREY, true);
+        p.text_plain(label.get(), table_x, y, GREY, true);
         let value = p.fit(value, value_room);
         let value_x = table_x + table_w - p.atlas.font.width_str(&value);
         p.text_plain(&value, value_x, y, LIGHT, true);
@@ -267,14 +269,31 @@ fn draw_result(p: &mut Painter, ctx: &ScreenCtx, r: &BenchResult) {
     }
 }
 
-fn table_rows(r: &BenchResult) -> Vec<(&'static str, String)> {
+fn table_rows(r: &BenchResult) -> Vec<(Key, String)> {
+    use crate::lang::trf;
     let c = &r.cpu;
     let mut rows = vec![
-        ("Meshing", format!("{:.3} ms per section", c.ms_per_section)),
-        (RANGE, format!("{:.3} to {:.3} ms", c.best_ms, c.worst_ms)),
         (
-            "Throughput",
-            format!("{:.0} sections/s", 1000.0 / c.ms_per_section),
+            const { Key::of("benchmark.row.meshing") },
+            trf!(
+                "benchmark.ms_per_section",
+                format!("{:.3}", c.ms_per_section)
+            ),
+        ),
+        (
+            RANGE,
+            trf!(
+                "benchmark.range_ms",
+                format!("{:.3}", c.best_ms),
+                format!("{:.3}", c.worst_ms)
+            ),
+        ),
+        (
+            const { Key::of("benchmark.row.throughput") },
+            trf!(
+                "benchmark.sections_per_second",
+                format!("{:.0}", 1000.0 / c.ms_per_section)
+            ),
         ),
     ];
     match r.gpu {
@@ -285,27 +304,39 @@ fn table_rows(r: &BenchResult) -> Vec<(&'static str, String)> {
             baseline_ms,
             ..
         } => {
-            let cap = if at_cap { " (at cap)" } else { "" };
-            rows.push(("GPU load", format!("{load:.1} tiles{cap}")));
+            let load = format!("{load:.1}");
+            let tiles = if at_cap {
+                trf!("benchmark.tiles_at_cap", load)
+            } else {
+                trf!("benchmark.tiles", load)
+            };
+            rows.push((const { Key::of("benchmark.row.gpu_load") }, tiles));
             rows.push((
-                "Triangles",
-                format!(
-                    "{:.1}M per frame at {BUDGET_MS:.0} ms",
-                    millions(triangles_per_frame)
+                const { Key::of("benchmark.row.triangles") },
+                trf!(
+                    "benchmark.triangles_per_frame",
+                    format!("{:.1}", millions(triangles_per_frame)),
+                    format!("{BUDGET_MS:.0}")
                 ),
             ));
-            rows.push((ONE_TILE, format!("{baseline_ms:.1} ms per frame")));
+            rows.push((
+                ONE_TILE,
+                trf!("benchmark.ms_per_frame", format!("{baseline_ms:.1}")),
+            ));
         }
         GpuResult::Unmeasurable { baseline_ms } => {
             rows.push((
-                "GPU",
-                format!("not measurable ({baseline_ms:.1} ms with one tile)"),
+                const { Key::of("benchmark.row.gpu") },
+                trf!("benchmark.gpu_unmeasurable", format!("{baseline_ms:.1}")),
             ));
         }
     }
-    rows.push(("Device", r.adapter.clone()));
-    rows.push(("System", system(r.cores)));
-    rows.push((RUN_TIME, format!("{:.0} s", r.seconds)));
+    rows.push((const { Key::of("benchmark.row.device") }, r.adapter.clone()));
+    rows.push((const { Key::of("benchmark.row.system") }, system(r.cores)));
+    rows.push((
+        RUN_TIME,
+        trf!("benchmark.seconds", format!("{:.0}", r.seconds)),
+    ));
     rows
 }
 

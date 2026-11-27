@@ -27,6 +27,7 @@ pub struct Node {
     pub children: Vec<usize>,
     pub redirect: Option<usize>,
     pub executable: bool,
+    pub restricted: bool,
 }
 
 impl Node {
@@ -85,6 +86,7 @@ impl CommandTree {
                     .collect(),
                 redirect: stub.redirect_node.map(|r| r as usize).filter(|r| *r < n),
                 executable: stub.is_executable,
+                restricted: stub.is_restricted,
             })
             .collect();
         let root = (root_index as usize).min(n.saturating_sub(1));

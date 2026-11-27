@@ -45,6 +45,17 @@ pub fn band_floor_def() -> ShaderDefVal {
     )
 }
 
+#[cfg_attr(not(feature = "native_shaders"), allow(dead_code))]
+pub(crate) fn hand_clip_from_view(aspect: f32) -> Mat4 {
+    let f = 1.0 / (HAND_FOV_DEGREES.to_radians() * 0.5).tan();
+    Mat4::from_cols(
+        Vec4::new(f / aspect, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, f, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, -(1.0 - HAND_DEPTH_BAND), -1.0),
+        Vec4::new(0.0, 0.0, HAND_DEPTH_BAND * HAND_NEAR, 0.0),
+    )
+}
+
 pub type HandMaterial = ExtendedMaterial<StandardMaterial, HandProjection>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
@@ -1468,7 +1479,7 @@ fn sync_hands(
     let Some(mut rig) = rig else { return };
 
     let sample = &frame_view.local;
-    let partial = frame_view.partial;
+    let partial = frame_view.camera_partial;
     let slot = frame_view.hotbar_selected;
     let spectator = frame_view.gamemode == Gamemode::Spectator;
     let item_used = frame_view.item_used;
@@ -1733,7 +1744,10 @@ fn bind_map(
         state.map_bound = Some(image);
     }
 
-    let (list, revision) = map_textures.decorations(map_id).unwrap_or((&[], 0));
+    let markers = map_textures.decorations(map_id);
+    let (list, revision) = markers.as_ref().map_or((&[][..], 0), |(list, revision)| {
+        (list.as_slice(), *revision)
+    });
     set_visible(nodes, decorations, !list.is_empty());
     if state.decorations_built != Some((map_id, revision)) {
         if let Ok((mut mesh, _)) = map_nodes.get_mut(decorations) {
@@ -2477,6 +2491,25 @@ mod tests {
         assert!((top.y / top.w - 1.0).abs() < 1e-5, "{top}");
         let side = hand_clip(Vec3::new(2.0 * half.tan(), 0.0, -1.0), 2.0);
         assert!((side.x / side.w - 1.0).abs() < 1e-5, "{side}");
+    }
+
+    #[test]
+    fn hand_matrix_matches_the_shader() {
+        for aspect in [16.0 / 9.0, 1.0, 0.5] {
+            let matrix = hand_clip_from_view(aspect);
+            for p in [
+                Vec3::new(0.3, -0.4, -0.6),
+                Vec3::new(-1.0, 0.2, -HAND_NEAR),
+                Vec3::new(0.0, 0.0, -50.0),
+            ] {
+                let ours = matrix * p.extend(1.0);
+                let shader = hand_clip(p, aspect);
+                assert!(
+                    (ours - shader).abs().max_element() < 1e-5,
+                    "{aspect} {p}: {ours} vs {shader}"
+                );
+            }
+        }
     }
 
     #[test]

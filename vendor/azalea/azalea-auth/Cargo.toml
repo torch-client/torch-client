@@ -12,11 +12,6 @@ azalea-crypto.workspace = true
 base64.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 indexmap.workspace = true
-reqwest = { workspace = true, optional = true, default-features = false, features = [
-    "json",
-    "rustls-no-provider",
-    "form",
-] }
 rsa.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -32,6 +27,16 @@ tokio = { workspace = true, features = ["full"] }
 [features]
 default = ["online-mode"]
 online-mode = ["dep:reqwest"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true, optional = true, default-features = false, features = [
+    "json",
+    "rustls-no-provider",
+    "form",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
 
 [lints]
 workspace = true

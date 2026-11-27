@@ -497,6 +497,7 @@ static WATCHING: parking_lot::Mutex<bool> = parking_lot::Mutex::new(false);
 static WAKE: parking_lot::Condvar = parking_lot::Condvar::new();
 
 pub fn set_watching(on: bool) {
+    clear_force_disconnect();
     *WATCHING.lock() = on;
     WAKE.notify_all();
 }

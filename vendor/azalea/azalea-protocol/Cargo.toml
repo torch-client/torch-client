@@ -42,7 +42,6 @@ tracing.workspace = true
 hickory-resolver = { workspace = true, optional = true, features = ["tokio", "system-config"] }
 uuid.workspace = true
 indexmap.workspace = true
-reqwest = { workspace = true, optional = true, features = ["socks"] }
 
 [features]
 default = ["online-mode", "connecting", "dns"]
@@ -67,3 +66,4 @@ harness = false
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 socks5-impl = { workspace = true, features = ["client"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "time"] }
+reqwest = { workspace = true, optional = true, features = ["socks"] }

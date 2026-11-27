@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 
-use super::systems::{ChunkIndex, WorldCamera};
+use super::systems::{ChunkIndex, LAYER_OPAQUE, LAYER_WATER, SectionSlot, WorldCamera};
 use super::terrain_pool::{TerrainOp, TerrainOps};
 use super::visgraph::{Direction, VisibilitySet};
 
@@ -34,7 +34,7 @@ struct Grid {
     list: Vec<u32>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 struct Window {
     origin: (i32, i32, i32),
     dim_x: usize,
@@ -70,6 +70,7 @@ impl Window {
         Some((y * self.dim_z + z) * self.dim_x + x)
     }
 
+    #[cfg(test)]
     fn pos(&self, i: usize) -> (i32, i32, i32) {
         let x = i % self.dim_x;
         let z = (i / self.dim_x) % self.dim_z;
@@ -202,6 +203,7 @@ impl Grid {
         }
     }
 
+    #[cfg(test)]
     fn visible_sections(&self) -> impl Iterator<Item = (i32, i32, i32)> + '_ {
         self.list.iter().map(|&i| self.window.pos(i as usize))
     }
@@ -211,19 +213,38 @@ impl Grid {
 struct VisSnapshot {
     window: Window,
     cells: Vec<VisibilitySet>,
+    slots: Vec<[u32; 2]>,
+    next_slot: u32,
 }
 
+const NO_SLOT: u32 = u32::MAX;
+
 impl VisSnapshot {
-    fn reload<I>(&mut self, sections: I, here: (i32, i32, i32), radius: i32, y_lo: i32, y_hi: i32)
-    where
-        I: Iterator<Item = ((i32, i32, i32), VisibilitySet)>,
+    fn reload<I>(
+        &mut self,
+        sections: I,
+        next_slot: u32,
+        here: (i32, i32, i32),
+        radius: i32,
+        y_lo: i32,
+        y_hi: i32,
+    ) where
+        I: Iterator<Item = ((i32, i32, i32), SectionSlot)>,
     {
         self.window = Window::new(here, radius, y_lo, y_hi);
+        self.next_slot = next_slot;
+        let cells = self.window.cells();
         self.cells.clear();
-        self.cells.resize(self.window.cells(), VisibilitySet::all());
-        for (pos, vis) in sections {
+        self.cells.resize(cells, VisibilitySet::all());
+        self.slots.clear();
+        self.slots.resize(cells, [NO_SLOT; 2]);
+        for (pos, section) in sections {
             if let Some(i) = self.window.index(pos) {
-                self.cells[i] = vis;
+                self.cells[i] = section.vis;
+                self.slots[i] = [
+                    section.slots[LAYER_OPAQUE].unwrap_or(NO_SLOT),
+                    section.slots[LAYER_WATER].unwrap_or(NO_SLOT),
+                ];
             }
         }
     }
@@ -234,11 +255,33 @@ impl VisSnapshot {
             None => VisibilitySet::all(),
         }
     }
+
+    fn visibility_bits(&self, grid: &Grid) -> Arc<[u32]> {
+        debug_assert!(
+            self.window == grid.window,
+            "snapshot and grid walk different windows"
+        );
+        let next_slot = self.next_slot as usize;
+        let mut bits = vec![0u32; next_slot.div_ceil(32).max(1)];
+        for &i in &grid.list {
+            for slot in self.slots[i as usize] {
+                if slot != NO_SLOT {
+                    bits[slot as usize / 32] |= 1 << (slot % 32);
+                }
+            }
+        }
+        if next_slot % 32 != 0 {
+            bits[next_slot / 32] |= u32::MAX << (next_slot % 32);
+        }
+        Arc::from(bits)
+    }
 }
 
 struct FillResult {
     grid: Grid,
     snapshot: VisSnapshot,
+    bits: Arc<[u32]>,
+    assigned_mark: u64,
     section: (i32, i32, i32),
     generation: u64,
     smart_cull: bool,
@@ -256,6 +299,7 @@ struct FillJob {
     radius: i32,
     y_lo: i32,
     y_hi: i32,
+    assigned_mark: u64,
     generation: u64,
     smart_cull: bool,
 }
@@ -268,6 +312,7 @@ fn run_fill(job: FillJob) -> FillResult {
         radius,
         y_lo,
         y_hi,
+        assigned_mark,
         generation,
         smart_cull,
     } = job;
@@ -276,9 +321,12 @@ fn run_fill(job: FillJob) -> FillResult {
     } else {
         grid.fill(here, radius, y_lo, y_hi, |_| VisibilitySet::all());
     }
+    let bits = snapshot.visibility_bits(&grid);
     FillResult {
         grid,
         snapshot,
+        bits,
+        assigned_mark,
         section: here,
         generation,
         smart_cull,
@@ -299,21 +347,45 @@ fn spawn_fill(job: FillJob) -> FillTask {
 fn install(
     state: &mut OcclusionState,
     result: FillResult,
+    index: &ChunkIndex,
     here: (i32, i32, i32),
     smart_cull: bool,
     now: Instant,
-) -> bool {
+) -> Option<Arc<[u32]>> {
     state.snapshot = result.snapshot;
     if result.section != here || result.smart_cull != smart_cull {
         state.spare = result.grid;
-        return false;
+        return None;
     }
     state.spare = std::mem::replace(&mut state.grid, result.grid);
     state.section = Some(result.section);
     state.generation = result.generation;
     state.smart_cull = result.smart_cull;
     state.filled_at = Some(now);
-    true
+
+    let mut bits = result.bits;
+    match index.assigned_since(result.assigned_mark) {
+        Some([]) => {}
+        Some(slots) => {
+            let force = |words: &mut [u32]| {
+                for &slot in slots {
+                    if let Some(word) = words.get_mut(slot as usize / 32) {
+                        *word |= 1 << (slot % 32);
+                    }
+                }
+            };
+            match Arc::get_mut(&mut bits) {
+                Some(words) => force(words),
+                None => {
+                    let mut words = bits.to_vec();
+                    force(&mut words);
+                    bits = Arc::from(words);
+                }
+            }
+        }
+        None => bits = Arc::from(vec![u32::MAX; bits.len()]),
+    }
+    Some(bits)
 }
 
 fn wants_smart_cull(
@@ -399,9 +471,9 @@ pub fn update_occlusion(
 
     let now = Instant::now();
 
-    let mut refill = false;
+    let mut installed = None;
     if let Some(result) = poll_fill(&mut state.task) {
-        refill = install(&mut state, result, here, smart_cull, now);
+        installed = install(&mut state, result, &index, here, smart_cull, now);
     }
 
     let terrain_changed = state.generation != index.generation();
@@ -416,9 +488,15 @@ pub fn update_occlusion(
         let generation = index.generation();
         let grid = std::mem::take(&mut state.spare);
         let mut snapshot = std::mem::take(&mut state.snapshot);
-        if smart_cull {
-            snapshot.reload(index.sections(), here, radius, y_lo, y_hi);
-        }
+        snapshot.reload(
+            index.sections(),
+            index.next_slot(),
+            here,
+            radius,
+            y_lo,
+            y_hi,
+        );
+        let assigned_mark = index.assigned_mark();
         state.fills += 1;
         state.task = Some(spawn_fill(FillJob {
             grid,
@@ -427,6 +505,7 @@ pub fn update_occlusion(
             radius,
             y_lo,
             y_hi,
+            assigned_mark,
             generation,
             smart_cull,
         }));
@@ -434,29 +513,20 @@ pub fn update_occlusion(
 
     #[cfg(target_arch = "wasm32")]
     if let Some(result) = poll_fill(&mut state.task) {
-        refill |= install(&mut state, result, here, smart_cull, now);
-    }
-
-    if state.section.is_none() || !refill {
-        return;
-    }
-
-    let next_slot = index.next_slot() as usize;
-    let words = next_slot.div_ceil(32).max(1);
-    let mut bits = vec![0u32; words];
-    let mut reached_sections = 0usize;
-    for (cx, sec_y, cz) in state.grid.visible_sections() {
-        reached_sections += 1;
-        let (opaque, water) = index.slots_of(cx, cz, sec_y);
-        for slot in [opaque, water].into_iter().flatten() {
-            bits[slot as usize / 32] |= 1 << (slot % 32);
+        if let Some(bits) = install(&mut state, result, &index, here, smart_cull, now) {
+            installed = Some(bits);
         }
     }
-    ops.push(TerrainOp::Visibility(Arc::from(bits)));
+
+    let Some(bits) = installed else {
+        return;
+    };
+    ops.push(TerrainOp::Visibility(bits));
+    let reached_sections = state.grid.list.len();
 
     crate::log_debug!(
         "render",
-        "occlusion: {} indexed, {reached_sections} reached, refill={refill}, camera {:?}",
+        "occlusion: {} indexed, {reached_sections} reached, camera {:?}",
         index.len(),
         here
     );
@@ -565,5 +635,99 @@ mod tests {
             );
         }
         assert!(!grid.reached.get(grid.index((0, -32, 0)).unwrap()));
+    }
+
+    #[test]
+    fn task_bits_match_slot_lookup() {
+        use std::collections::HashMap;
+
+        let world = surface_world(64);
+        let (radius, y_lo, y_hi) = (3, -64, 320);
+        let mut sections: HashMap<(i32, i32, i32), SectionSlot> = HashMap::new();
+        let mut next_slot = 0u32;
+        let mut take = || {
+            next_slot += 1;
+            Some(next_slot - 1)
+        };
+        let mut n = 0u32;
+        for cx in -radius..=radius {
+            for cz in -radius..=radius {
+                for sec_y in (y_lo..=y_hi).step_by(16) {
+                    let pos = (cx, sec_y, cz);
+                    n += 1;
+                    let opaque = if n % 5 == 0 { None } else { take() };
+                    let water = if n % 3 == 0 && n % 5 != 0 {
+                        take()
+                    } else {
+                        None
+                    };
+                    sections.insert(
+                        pos,
+                        SectionSlot {
+                            slots: [opaque, water],
+                            vis: world(pos),
+                        },
+                    );
+                }
+            }
+        }
+        let _ = take();
+        assert_ne!(
+            next_slot % 32,
+            0,
+            "pick a shape that leaves a partial last word"
+        );
+
+        let here = (0, 80, 0);
+        let mut snapshot = VisSnapshot::default();
+        snapshot.reload(
+            sections.iter().map(|(&p, &s)| (p, s)),
+            next_slot,
+            here,
+            radius,
+            y_lo,
+            y_hi,
+        );
+        let result = run_fill(FillJob {
+            grid: Grid::default(),
+            snapshot,
+            here,
+            radius,
+            y_lo,
+            y_hi,
+            assigned_mark: 0,
+            generation: 0,
+            smart_cull: true,
+        });
+
+        let mut expected = vec![false; next_slot as usize];
+        for pos in result.grid.visible_sections() {
+            if let Some(section) = sections.get(&pos) {
+                for slot in section.slots.into_iter().flatten() {
+                    expected[slot as usize] = true;
+                }
+            }
+        }
+        assert!(
+            expected.iter().any(|&b| b),
+            "the fill reached no slot at all"
+        );
+        assert!(
+            !expected.iter().all(|&b| b),
+            "the fill reached every slot, so nothing is tested"
+        );
+
+        let bits = &result.bits;
+        assert_eq!(bits.len(), (next_slot as usize).div_ceil(32));
+        let bit = |slot: usize| bits[slot / 32] & (1 << (slot % 32)) != 0;
+        for (slot, &want) in expected.iter().enumerate() {
+            assert_eq!(bit(slot), want, "slot {slot}");
+        }
+        for slot in next_slot as usize..bits.len() * 32 {
+            assert!(
+                bit(slot),
+                "tail slot {slot} past next_slot must read as visible"
+            );
+        }
     }
 }

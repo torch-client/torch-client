@@ -24,6 +24,8 @@ pub struct Runtime {
     pub tx_per_sec: f64,
     pub rx_total: u64,
     pub tx_total: u64,
+    pub read_lag_ms: u64,
+    pub rx_queued: usize,
 }
 
 struct RuntimeSampler {
@@ -66,6 +68,8 @@ pub fn runtime() -> Runtime {
                 cores: core_count(),
                 rx_total: rx,
                 tx_total: tx,
+                read_lag_ms: azalea_protocol::traffic::read_lag().as_millis() as u64,
+                rx_queued: azalea_protocol::traffic::rx_queued(),
                 ..Runtime::default()
             },
         };
@@ -78,6 +82,8 @@ pub fn runtime() -> Runtime {
     if elapsed < SAMPLE_WINDOW {
         prev.last.rx_total = rx;
         prev.last.tx_total = tx;
+        prev.last.read_lag_ms = azalea_protocol::traffic::read_lag().as_millis() as u64;
+        prev.last.rx_queued = azalea_protocol::traffic::rx_queued();
         return prev.last;
     }
 
@@ -100,6 +106,8 @@ pub fn runtime() -> Runtime {
         tx_per_sec: tx.saturating_sub(prev.tx) as f64 / secs,
         rx_total: rx,
         tx_total: tx,
+        read_lag_ms: azalea_protocol::traffic::read_lag().as_millis() as u64,
+        rx_queued: azalea_protocol::traffic::rx_queued(),
     };
     prev.at = now;
     prev.cpu_ticks = ticks;

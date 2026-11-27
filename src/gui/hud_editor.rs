@@ -12,6 +12,7 @@ use crate::gui::painter::Painter;
 #[cfg(not(feature = "mobile_ui"))]
 use crate::gui::render::auto_gui_scale;
 use crate::gui::{GuiOptions, Screen, ScreenCtx};
+use crate::lang::Key;
 
 const SNAP: f32 = 4.0;
 const EDGE_MARGIN: f32 = 2.0;
@@ -668,31 +669,33 @@ fn snap(
 
 fn action_bar(st: &EditorState, g: Grab) -> Option<(Rect, Vec<(Rect, &'static str, Act)>)> {
     let r = st.rect_of(g)?;
+    let reset = crate::lang::tr!("hud_editor.reset");
+    let delete = crate::lang::tr!("hud_editor.delete");
     let items: Vec<(&'static str, Act)> = match g {
-        Grab::Element(id) if id.required() => vec![("Reset", Act::Reset), ("...", Act::More)],
+        Grab::Element(id) if id.required() => vec![(reset, Act::Reset), ("...", Act::More)],
         Grab::Element(id) => {
             let hide = if st.layout.get(id).visibility == Visibility::Shown {
-                "Hide"
+                crate::lang::tr!("hud_editor.hide")
             } else {
-                "Show"
+                crate::lang::tr!("hud_editor.show")
             };
             vec![
                 (hide, Act::Hide),
-                ("Reset", Act::Reset),
-                ("Remove", Act::Remove),
+                (reset, Act::Reset),
+                (crate::lang::tr!("hud_editor.remove"), Act::Remove),
                 ("...", Act::More),
             ]
         }
         Grab::Stack(si) => {
             let first = if st.layout.stack(si).is_some_and(|s| s.home.is_some()) {
-                ("Reset", Act::Reset)
+                (reset, Act::Reset)
             } else {
-                ("Split", Act::Split)
+                (crate::lang::tr!("hud_editor.split"), Act::Split)
             };
-            vec![first, ("Delete", Act::Delete), ("...", Act::More)]
+            vec![first, (delete, Act::Delete), ("...", Act::More)]
         }
         #[cfg(feature = "mobile_ui")]
-        Grab::Area(_) => vec![("Delete", Act::Delete)],
+        Grab::Area(_) => vec![(delete, Act::Delete)],
     };
     const W: f32 = 40.0;
     const H: f32 = 18.0;
@@ -767,25 +770,33 @@ fn tag(p: &mut Painter, text: &str, x: f32, y: f32, vw: f32, color: u32) {
     p.text_plain(text, x + 1.0, y + 1.0, color, false);
 }
 
-fn hints(layer: Layer) -> &'static [&'static str] {
+fn hints(layer: Layer) -> &'static [Key] {
     #[cfg(feature = "mobile_ui")]
-    return match layer {
-        Layer::Areas => &["Drag: move. Drag an edge: resize. Touches here only turn the camera."],
-        _ => &["Tap: select. Drag: move. Pinch: scale. Hold: options."],
-    };
+    {
+        const AREAS: &[Key] = &[Key::of("hud_editor.hint.touch_areas")];
+        const OTHER: &[Key] = &[Key::of("hud_editor.hint.touch")];
+        return match layer {
+            Layer::Areas => AREAS,
+            _ => OTHER,
+        };
+    }
     #[cfg(not(feature = "mobile_ui"))]
-    match layer {
-        Layer::Extras => &[
-            "Drag: move. Drop on a stack or line: stack. Shift: free.",
-            "Scroll/corner: scale. Right-click: options. Bar: move stack.",
-            "H: hide. Del: remove/delete (Add restores). R: reset.",
-            "Ctrl+Z: undo. Ctrl+Y: redo.",
-        ],
-        _ => &[
-            "Drag: move. Shift: free. Scroll/corner: scale. Right-click: options.",
-            "H: hide. Del: remove (Add restores). R: reset.",
-            "Ctrl+Z: undo. Ctrl+Y: redo.",
-        ],
+    {
+        const EXTRAS: &[Key] = &[
+            Key::of("hud_editor.hint.extras_drag"),
+            Key::of("hud_editor.hint.extras_scale"),
+            Key::of("hud_editor.hint.extras_keys"),
+            Key::of("hud_editor.hint.undo_redo"),
+        ];
+        const OTHER: &[Key] = &[
+            Key::of("hud_editor.hint.drag_scale"),
+            Key::of("hud_editor.hint.keys"),
+            Key::of("hud_editor.hint.undo_redo"),
+        ];
+        match layer {
+            Layer::Extras => EXTRAS,
+            _ => OTHER,
+        }
     }
 }
 
@@ -830,7 +841,8 @@ impl Toolbar {
         let cols = (((w + 2.0) / (BUTTON_MIN + 2.0)).floor() as usize).max(1);
         let rows = |n: usize| n.div_ceil(cols.min(n).max(1));
         let hints = if show_hints {
-            crate::gui::widgets::wrap(p, hints(layer), w)
+            let lines: Vec<&str> = hints(layer).iter().map(|k| k.get()).collect();
+            crate::gui::widgets::wrap(p, &lines, w)
         } else {
             Vec::new()
         };
@@ -1301,9 +1313,17 @@ fn draw_areas(p: &mut Painter, st: &EditorState, hot: Option<Grab>) {
         };
         let lit = hot == Some(Grab::Area(i)) || st.selected == Some(Grab::Area(i));
         let (fill, line, label) = if st.layout.areas[i].zoom {
-            (ZOOM_FILL, ZOOM_LINE, "Zoom")
+            (
+                ZOOM_FILL,
+                ZOOM_LINE,
+                crate::lang::tr!("hud_editor.area.zoom"),
+            )
         } else {
-            (AREA_FILL, AREA_LINE, "Look only")
+            (
+                AREA_FILL,
+                AREA_LINE,
+                crate::lang::tr!("hud_editor.area.look"),
+            )
         };
         #[cfg(feature = "tutorial")]
         crate::gui::tutorial::mark(
@@ -1368,7 +1388,7 @@ fn draw_boxes(p: &mut Painter, st: &EditorState, hot: Option<Grab>, now: f32, vw
         let bar = bar_rect(r, st.vh);
         p.fill(bar.x, bar.y, bar.w, bar.h, STACK_BAR);
         p.outline(bar.x, bar.y, bar.w, bar.h, STACK);
-        let label = format!("Stack upwards ({})", st.layout.members(si).len());
+        let label = crate::lang::trf!("hud_editor.stack_count", st.layout.members(si).len());
         p.text_plain(&label, bar.x + 2.0, bar.y + 1.0, 0xFFFFFF, false);
         if !TOUCH {
             let hr = handle_rect(r);
@@ -1397,8 +1417,11 @@ fn draw_boxes(p: &mut Painter, st: &EditorState, hot: Option<Grab>, now: f32, vw
             p.fill(hr.x, hr.y, hr.w, hr.h, OUTLINE_HOT);
         }
         if !st.frames.placeholder[id.index()] {
-            let hidden = if shown { "" } else { " (hidden)" };
-            let name = format!("{}{hidden}", id.name());
+            let name = if shown {
+                id.name().to_owned()
+            } else {
+                crate::lang::trf!("hud_editor.name_hidden", id.name())
+            };
             let (tx, ty) = match stack {
                 Some(si) => {
                     let right = st.layout.stack(si).is_some_and(|s| s.anchor.col() == 2);
@@ -1449,11 +1472,15 @@ fn draw_status(p: &mut Painter, st: &EditorState, vw: f32) {
             (DragKind::Resize(_), _) => st
                 .rect_of(d.grab)
                 .map(|r| format!("{:.0} x {:.0}", r.w, r.h)),
-            (_, Some(Landing::Into { .. })) => Some("Into stack".to_owned()),
-            (_, Some(Landing::Pair { target, .. })) => {
-                Some(format!("New stack with {}", target.name()))
+            (_, Some(Landing::Into { .. })) => {
+                Some(crate::lang::tr!("hud_editor.drop.into").to_owned())
             }
-            _ if st.guides.iter().any(Option::is_some) => Some("Snapped".to_owned()),
+            (_, Some(Landing::Pair { target, .. })) => {
+                Some(crate::lang::trf!("hud_editor.drop.pair", target.name()))
+            }
+            _ if st.guides.iter().any(Option::is_some) => {
+                Some(crate::lang::tr!("hud_editor.drop.snapped").to_owned())
+            }
             _ => None,
         }
     } else {
@@ -1472,9 +1499,9 @@ fn draw_menu(p: &mut Painter, st: &mut EditorState, ctx: &ScreenCtx, menu: Menu,
     let row = |i: f32| Rect::new(r.x + 1.0, r.y + 1.0 + i * MENU_ROW, r.w - 2.0, MENU_ROW);
     let title = match menu.grab {
         Grab::Element(id) => id.name().to_owned(),
-        Grab::Stack(si) => format!("Stack upwards ({})", st.layout.members(si).len()),
+        Grab::Stack(si) => crate::lang::trf!("hud_editor.stack_count", st.layout.members(si).len()),
         #[cfg(feature = "mobile_ui")]
-        Grab::Area(_) => "Look-only area".to_owned(),
+        Grab::Area(_) => crate::lang::tr!("hud_editor.area.title").to_owned(),
     };
     p.text_plain(&title, r.x + 3.0, r.y + 3.0, 0xFFFF55, true);
 
@@ -1482,7 +1509,12 @@ fn draw_menu(p: &mut Painter, st: &mut EditorState, ctx: &ScreenCtx, menu: Menu,
         && !id.required()
     {
         let shown = st.layout.get(id).visibility == Visibility::Shown;
-        if button(p, ctx, row(1.0), if shown { "Hide" } else { "Show" }) {
+        let text = if shown {
+            crate::lang::tr!("hud_editor.hide")
+        } else {
+            crate::lang::tr!("hud_editor.show")
+        };
+        if button(p, ctx, row(1.0), text) {
             st.push_undo();
             st.layout.get_mut(id).toggle_hidden();
         }
@@ -1495,7 +1527,7 @@ fn draw_menu(p: &mut Painter, st: &mut EditorState, ctx: &ScreenCtx, menu: Menu,
         let plus = Rect::new(sr.x + sr.w - 16.0, sr.y, 16.0, sr.h);
         let scale = st.scale_of(target);
         let label = if matches!((menu.grab, target), (Grab::Element(_), Grab::Stack(_))) {
-            format!("Stack {scale:.1}x")
+            crate::lang::trf!("hud_editor.stack_scale", format_args!("{scale:.1}"))
         } else {
             format!("{scale:.1}x")
         };
@@ -1510,7 +1542,7 @@ fn draw_menu(p: &mut Painter, st: &mut EditorState, ctx: &ScreenCtx, menu: Menu,
 
     match menu.grab {
         Grab::Element(id) => {
-            if button(p, ctx, row(3.0), "Reset") {
+            if button(p, ctx, row(3.0), crate::lang::tr!("hud_editor.reset")) {
                 st.push_undo();
                 st.layout.reset(id);
                 st.layout.get_mut(id).visibility = match id.default_visibility() {
@@ -1519,27 +1551,34 @@ fn draw_menu(p: &mut Painter, st: &mut EditorState, ctx: &ScreenCtx, menu: Menu,
                 };
                 st.menu = None;
             }
-            if !id.required() && button(p, ctx, row(4.0), "Remove") {
+            if !id.required() && button(p, ctx, row(4.0), crate::lang::tr!("hud_editor.remove")) {
                 st.remove(menu.grab);
             }
         }
         Grab::Stack(si) => {
             let home = st.layout.stack(si).is_some_and(|s| s.home.is_some());
-            if home && button(p, ctx, row(3.0), "Reset position") {
+            if home
+                && button(
+                    p,
+                    ctx,
+                    row(3.0),
+                    crate::lang::tr!("hud_editor.reset_position"),
+                )
+            {
                 st.reset(menu.grab);
                 st.menu = None;
             }
-            if !home && button(p, ctx, row(3.0), "Split") {
+            if !home && button(p, ctx, row(3.0), crate::lang::tr!("hud_editor.split")) {
                 st.split(si);
                 st.menu = None;
             }
-            if button(p, ctx, row(4.0), "Delete") {
+            if button(p, ctx, row(4.0), crate::lang::tr!("hud_editor.delete")) {
                 st.remove(menu.grab);
             }
         }
         #[cfg(feature = "mobile_ui")]
         Grab::Area(_) => {
-            if button(p, ctx, row(1.0), "Delete") {
+            if button(p, ctx, row(1.0), crate::lang::tr!("hud_editor.delete")) {
                 st.remove(menu.grab);
             }
         }
@@ -1726,25 +1765,25 @@ pub fn draw(
         }
         match tool {
             Tool::Done => {
-                if button(p, ctx, r, "Done") {
+                if button(p, ctx, r, crate::lang::tr!("hud_editor.tool.done")) {
                     nav = Some(st.parent);
                 }
             }
             Tool::Undo => {
-                if button(p, ctx, r, "Undo") {
+                if button(p, ctx, r, crate::lang::tr!("hud_editor.tool.undo")) {
                     st.undo();
                 }
             }
             Tool::Redo => {
-                if button(p, ctx, r, "Redo") {
+                if button(p, ctx, r, crate::lang::tr!("hud_editor.tool.redo")) {
                     st.redo();
                 }
             }
             Tool::Grid => {
                 let label = if grid > 0.0 {
-                    format!("Grid: {grid:.0}")
+                    crate::lang::trf!("hud_editor.tool.grid", format_args!("{grid:.0}"))
                 } else {
-                    "Grid: off".to_owned()
+                    crate::lang::tr!("hud_editor.tool.grid_off").to_owned()
                 };
                 if button(p, ctx, r, &label) {
                     st.push_undo();
@@ -1752,22 +1791,33 @@ pub fn draw(
                 }
             }
             Tool::Hint => {
-                if button_on(p, ctx, r, "Hint", st.layout.hints) {
+                if button_on(
+                    p,
+                    ctx,
+                    r,
+                    crate::lang::tr!("hud_editor.tool.hint"),
+                    st.layout.hints,
+                ) {
                     st.push_undo();
                     st.layout.hints = !st.layout.hints;
                 }
             }
             #[cfg(feature = "mobile_ui")]
             Tool::Snap => {
-                if button(p, ctx, r, if st.free { "Snap: off" } else { "Snap: on" }) {
+                let label = if st.free {
+                    crate::lang::tr!("hud_editor.tool.snap_off")
+                } else {
+                    crate::lang::tr!("hud_editor.tool.snap_on")
+                };
+                if button(p, ctx, r, label) {
                     st.free = !st.free;
                 }
             }
             #[cfg(not(feature = "mobile_ui"))]
             Tool::Gui => {
                 let label = match st.gui_scale {
-                    0 => "GUI: Auto".to_owned(),
-                    n => format!("GUI: {n}"),
+                    0 => crate::lang::tr!("hud_editor.tool.gui_auto").to_owned(),
+                    n => crate::lang::trf!("hud_editor.tool.gui", n),
                 };
                 let right = inside(Some(r)) && input.right_click;
                 let left = button(p, ctx, r, &label);
@@ -1778,8 +1828,8 @@ pub fn draw(
             }
             Tool::Add => {
                 let label = match removed.len() {
-                    0 => "Add".to_owned(),
-                    n => format!("Add ({n})"),
+                    0 => crate::lang::tr!("hud_editor.tool.add").to_owned(),
+                    n => crate::lang::trf!("hud_editor.tool.add_count", n),
                 };
                 if button(p, ctx, r, &label) {
                     st.adding = !st.adding;
@@ -1788,7 +1838,7 @@ pub fn draw(
             }
             #[cfg(feature = "mobile_ui")]
             Tool::NewArea => {
-                if button(p, ctx, r, "New area") {
+                if button(p, ctx, r, crate::lang::tr!("hud_editor.tool.new_area")) {
                     st.push_undo();
                     let size = Vec2::new(80.0, 60.0);
                     let pos = ((Vec2::new(vw, vh) - size) / 2.0).floor();
@@ -1799,7 +1849,7 @@ pub fn draw(
                 }
             }
             Tool::Reset => {
-                if button(p, ctx, r, "Reset") {
+                if button(p, ctx, r, crate::lang::tr!("hud_editor.reset")) {
                     st.push_undo();
                     st.layout.reset_layer(layer);
                     st.layout.panel = None;
@@ -1847,10 +1897,16 @@ pub fn draw(
     if let Some(r) = add_box {
         p.fill(r.x, r.y, r.w, r.h, PANEL);
         p.outline(r.x, r.y, r.w, r.h, OUTLINE_HOT);
-        p.text_plain("Add back", r.x + 3.0, r.y + 3.0, 0xFFFF55, true);
+        p.text_plain(
+            crate::lang::tr!("hud_editor.add_back"),
+            r.x + 3.0,
+            r.y + 3.0,
+            0xFFFF55,
+            true,
+        );
         if removed.is_empty() {
             p.text_plain(
-                "Nothing removed",
+                crate::lang::tr!("hud_editor.nothing_removed"),
                 r.x + 3.0,
                 r.y + 3.0 + MENU_ROW,
                 HINT,

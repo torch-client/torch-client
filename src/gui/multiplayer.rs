@@ -351,8 +351,8 @@ fn draw_proxy_menu(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locke
     use crate::eagler::proxy;
 
     let name = proxy::selected().name;
-    let full = format!("Java proxy: {name}");
-    let short = format!("Proxy: {name}");
+    let full = crate::lang::trf!("gui.multiplayer.proxy_full", name);
+    let short = crate::lang::trf!("gui.multiplayer.proxy_short", name);
     let font = &p.atlas.font;
     let width = |label: &str| (font.width_str(label) + PROXY_PAD).max(PROXY_MIN_W);
     let title_left = (ctx.vw - font.width_str(tr::title())) / 2.0;
@@ -372,7 +372,7 @@ fn draw_proxy_menu(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locke
         proxy::ALL
             .iter()
             .map(|proxy| proxy.name)
-            .chain(std::iter::once(CUSTOM_ENTRY)),
+            .chain(std::iter::once(CUSTOM_ENTRY.get())),
         &mut state.menu.proxy_open,
         locked,
     );
@@ -395,10 +395,10 @@ fn draw_proxy_menu(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, locke
 }
 
 #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
-const CUSTOM_ENTRY: &str = "Custom...";
+const CUSTOM_ENTRY: crate::lang::Key = crate::lang::Key::of("gui.multiplayer.custom_proxy_entry");
 
 #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
-const WISP_HINT: &str = "Must be a Wisp protocol proxy: wss://host/";
+const WISP_HINT: crate::lang::Key = crate::lang::Key::of("gui.multiplayer.wisp_hint");
 
 #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
 pub fn draw_custom_proxy(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
@@ -416,19 +416,31 @@ pub fn draw_custom_proxy(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx)
     let ok_y = (quarter + 96.0).max(hint_y + 22.0);
 
     let form = Form {
-        title: "Custom Java Proxy",
+        title: crate::lang::tr!("gui.multiplayer.custom_proxy_title"),
         title_y: 17.0,
         ok_label: tr::done(),
         button_y: ok_y - quarter,
     };
     let (confirmed, cancelled) = draw_form(p, state, ctx, &form, |p, menu, ctx, x| {
-        p.text_plain("Proxy name", x + 1.0, name_label, 0xA0A0A0, true);
-        p.text_plain("Proxy URL", x + 1.0, url_label, 0xA0A0A0, true);
+        p.text_plain(
+            crate::lang::tr!("gui.multiplayer.proxy_name"),
+            x + 1.0,
+            name_label,
+            0xA0A0A0,
+            true,
+        );
+        p.text_plain(
+            crate::lang::tr!("gui.multiplayer.proxy_url"),
+            x + 1.0,
+            url_label,
+            0xA0A0A0,
+            true,
+        );
         menu.custom_name
             .update(p, ctx, x, name_y, WIDGET_WIDTH_BIG, WIDGET_HEIGHT);
         menu.custom_url
             .update(p, ctx, x, url_y, WIDGET_WIDTH_BIG, WIDGET_HEIGHT);
-        p.text_centered(WISP_HINT, ctx.vw / 2.0, hint_y, 0xA0A0A0, true);
+        p.text_centered(WISP_HINT.get(), ctx.vw / 2.0, hint_y, 0xA0A0A0, true);
         proxy::wisp_url(&menu.custom_url.text).is_some()
     });
 
@@ -1004,7 +1016,7 @@ fn draw_form(
     ((clicked || ctx.input.enter) && valid, cancelled)
 }
 
-const JAVA_HINT: &str = "Join java servers using: java://[server-ip]";
+const JAVA_HINT: crate::lang::Key = crate::lang::Key::of("gui.multiplayer.java_hint");
 const JAVA_HINT_H: f32 = 13.0;
 
 pub fn draw_manage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
@@ -1040,7 +1052,7 @@ pub fn draw_manage(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             .update(p, ctx, x, address_y, WIDGET_WIDTH_BIG, WIDGET_HEIGHT);
 
         if address::EAGLER {
-            p.text_centered(JAVA_HINT, ctx.vw / 2.0, hint_y, 0xA0A0A0, true);
+            p.text_centered(JAVA_HINT.get(), ctx.vw / 2.0, hint_y, 0xA0A0A0, true);
         }
 
         let label = format!(

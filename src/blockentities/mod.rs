@@ -229,10 +229,10 @@ impl BeSpec {
     }
 
     fn light_mode(&self) -> LightMode {
-        self.light.unwrap_or(match &self.geom {
+        crate::entities::unlit_light_mode(self.light.unwrap_or(match &self.geom {
             BeGeom::Model(_) => LightMode::Cardinal,
             BeGeom::Built(_) => LightMode::Flat,
-        })
+        }))
     }
 }
 
@@ -667,7 +667,7 @@ fn sync_block_entities(
     let origin = *origin;
     let camera = CameraView::of(&view);
 
-    let (partial, game_time) = (view.partial, view.game_time);
+    let (partial, game_time) = (view.world_partial, view.game_time);
     let snapshot = &*view.block_entities;
 
     let rigs = &mut *rigs;
@@ -875,6 +875,30 @@ fn sync_block_entities(
             }
 
             apply_layer(layer, &(spec.transform)(&st), *pos, origin, &mut nodes);
+        }
+    }
+
+    let copies = sim::piston::drawn();
+    if !copies.all.is_empty() {
+        let withheld = crate::client::worldsync::hidden::withheld();
+        for (pos, copy) in copies.all.iter() {
+            if withheld.contains(pos) || !render::piston::in_range(*pos, &camera) {
+                continue;
+            }
+            let progress = copies.progress(copy, view.ticks).at(partial);
+            render::piston::submit_copy(
+                *pos,
+                copy,
+                progress,
+                &mut Submit {
+                    pos: *pos,
+                    light: 0,
+                    slot: 128,
+                    light_map: &light_map,
+                    cache: submits,
+                    states: carried,
+                },
+            );
         }
     }
 

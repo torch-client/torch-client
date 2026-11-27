@@ -7,9 +7,10 @@ use azalea_core::{
     position::{BlockPos, Vec3},
 };
 
-use super::{Edge, ExecuteCtx, IsReachedCtx, MoveData, MovesCtx, default_is_reached};
+use super::{Edge, ExecuteCtx, IsReachedCtx, MoveData, MovesCtx, default_is_reached, swim};
 use crate::pathfinder::{
     astar, costs::*, moves::BARITONE_COMPAT, player_pos_to_block_pos, positions::RelBlockPos,
+    safety::WATER_FALL_CAP,
 };
 
 pub fn basic_move(ctx: &mut MovesCtx, node: RelBlockPos) {
@@ -18,35 +19,21 @@ pub fn basic_move(ctx: &mut MovesCtx, node: RelBlockPos) {
     descend_move(ctx, node);
     diagonal_move(ctx, node);
     downward_move(ctx, node);
+    swim::swim_move(ctx, node);
 }
 
 fn forward_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
-    let mut base_cost = SPRINT_ONE_BLOCK_COST;
-    let currently_in_water = ctx.world.is_block_water(pos);
-    if currently_in_water {
-        if BARITONE_COMPAT {
-            base_cost = WALK_ONE_BLOCK_COST;
-        } else {
-            base_cost = WALK_ONE_IN_WATER_COST;
-        }
+    if ctx.world.is_block_water(pos) {
+        return;
     }
+    let base_cost = SPRINT_ONE_BLOCK_COST;
 
     for dir in CardinalDirection::iter() {
         let offset = RelBlockPos::new(dir.x(), 0, dir.z());
 
         let new_pos = pos + offset;
 
-        let break_cost = if currently_in_water {
-            let dest_in_water = ctx.world.is_block_water(new_pos);
-            if !dest_in_water {
-                continue;
-            }
-
-            ctx.world
-                .cost_for_breaking_block(new_pos.up(1), ctx.mining_cache)
-        } else {
-            ctx.world.cost_for_standing(new_pos, ctx.mining_cache)
-        };
+        let break_cost = ctx.world.cost_for_standing(new_pos, ctx.mining_cache);
         if break_cost == f32::INFINITY {
             continue;
         }
@@ -231,6 +218,10 @@ fn cardinal_direction_to_facing_property(dir: CardinalDirection) -> properties::
 }
 
 fn descend_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
+    if ctx.world.is_block_water(pos) && !ctx.world.is_block_passable(pos.up(1)) {
+        return;
+    }
+    let safety = ctx.world.safety();
     for dir in CardinalDirection::iter() {
         let dir_delta = RelBlockPos::new(dir.x(), 0, dir.z());
         let new_horizontal_position = pos + dir_delta;
@@ -243,32 +234,55 @@ fn descend_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
         }
 
         let mut fall_distance = ctx.world.fall_distance(new_horizontal_position);
-        if fall_distance > 3 {
+        if fall_distance == u32::MAX {
             continue;
         }
 
-        let mut into_water = false;
-        if fall_distance == 0 {
-            if ctx.world.is_block_water(new_horizontal_position.down(1)) {
-                fall_distance = 1;
-                into_water = true;
-            } else {
+        let below = new_horizontal_position.down(fall_distance as i32 + 1);
+        if ctx.world.is_block_water(below) {
+            let drop = fall_distance + 1;
+            if drop > WATER_FALL_CAP {
                 continue;
             }
+            let depth = ctx.world.water_depth(below, 4);
+            let floor_ok = drop + depth.saturating_sub(1) <= safety.max_fall;
+            if !floor_ok
+                && !water_landing_is_safe(drop, depth, !ctx.world.is_block_flowing(below))
+            {
+                continue;
+            }
+            let fall = FALL_N_BLOCKS_COST
+                .get(drop as usize)
+                .copied()
+                .unwrap_or(f32::INFINITY);
+            let cost = WALK_OFF_BLOCK_COST
+                + f32::max(fall, CENTER_AFTER_FALL_COST)
+                + break_cost_1
+                + ENTER_WATER_PENALTY;
+            ctx.edges.push(Edge {
+                movement: astar::Movement {
+                    target: below,
+                    data: MoveData {
+                        execute: &execute_descend_move,
+                        is_reached: &descend_is_reached,
+                    },
+                },
+                cost,
+            });
+            continue;
+        }
+
+        if fall_distance == 0 {
+            continue;
+        }
+        if fall_distance > safety.max_fall {
+            continue;
         }
 
         let new_position = new_horizontal_position.down(fall_distance as i32);
 
-        let mut break_cost_2;
-        if into_water {
-            break_cost_2 = ctx
-                .world
-                .cost_for_breaking_block(new_position.up(1), ctx.mining_cache);
-            if break_cost_2 == f32::INFINITY {
-                continue;
-            }
-            break_cost_2 += ENTER_WATER_PENALTY;
-        } else if fall_distance == 1 {
+        let break_cost_2;
+        if fall_distance == 1 {
             break_cost_2 = ctx.world.cost_for_standing(new_position, ctx.mining_cache);
             if break_cost_2 == f32::INFINITY {
                 continue;
@@ -284,13 +298,11 @@ fn descend_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
             fall_distance += 1;
         }
 
+        let Some(&fall_cost) = FALL_N_BLOCKS_COST.get(fall_distance as usize) else {
+            continue;
+        };
         let cost = WALK_OFF_BLOCK_COST
-            + f32::max(
-                *FALL_N_BLOCKS_COST
-                    .get(fall_distance as usize)
-                    .expect("already checked bounds on fall distance"),
-                CENTER_AFTER_FALL_COST,
-            )
+            + f32::max(fall_cost, CENTER_AFTER_FALL_COST)
             + break_cost_1
             + break_cost_2;
 
@@ -377,18 +389,10 @@ pub fn descend_is_reached(
 }
 
 fn diagonal_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
-    let mut base_cost = SPRINT_ONE_BLOCK_COST;
-
-    let currently_in_water = ctx.world.is_block_water(pos);
-    if currently_in_water {
-        if BARITONE_COMPAT {
-            base_cost = WALK_ONE_BLOCK_COST;
-        } else {
-            base_cost = WALK_ONE_IN_WATER_COST;
-        }
+    if ctx.world.is_block_water(pos) {
+        return;
     }
-
-    base_cost = base_cost.mul_add(SQRT_2, 0.001);
+    let base_cost = SPRINT_ONE_BLOCK_COST.mul_add(SQRT_2, 0.001);
 
     for dir in CardinalDirection::iter() {
         let right = dir.right();
@@ -398,36 +402,20 @@ fn diagonal_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
 
         let mut cost = base_cost;
 
-        let left_passable;
-        let right_passable;
-
-        if currently_in_water {
-            left_passable =
-                ctx.world.is_block_water(left_pos) && ctx.world.is_block_passable(left_pos.up(1));
-            if !left_passable {
-                continue;
-            }
-            right_passable =
-                ctx.world.is_block_water(right_pos) && ctx.world.is_block_passable(right_pos.up(1));
-            if !right_passable {
-                continue;
-            }
-        } else {
-            left_passable = ctx.world.is_passable(left_pos);
-            right_passable = ctx.world.is_passable(right_pos);
-            if !left_passable && !right_passable {
-                continue;
-            }
+        let left_passable = ctx.world.is_passable(left_pos);
+        let right_passable = ctx.world.is_passable(right_pos);
+        if !left_passable && !right_passable {
+            continue;
+        }
+        if [left_pos, left_pos.up(1), right_pos, right_pos.up(1)]
+            .into_iter()
+            .any(|p| ctx.world.is_block_danger(p))
+        {
+            continue;
         }
 
         let new_position = pos + offset;
-        if currently_in_water {
-            if !ctx.world.is_block_water(new_position)
-                || !ctx.world.is_block_passable(new_position.up(1))
-            {
-                continue;
-            }
-        } else if !ctx.world.is_standable(new_position) {
+        if !ctx.world.is_standable(new_position) {
             continue;
         }
 
@@ -461,6 +449,9 @@ fn execute_diagonal_move(mut ctx: ExecuteCtx) {
 }
 
 fn downward_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
+    if ctx.world.is_block_water(pos) {
+        return;
+    }
     if !ctx.world.is_block_solid(pos.down(2)) {
         return;
     }

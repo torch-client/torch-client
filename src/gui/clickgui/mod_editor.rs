@@ -2,6 +2,7 @@ use super::mods::{ERROR, OK, PENDING, Style};
 use super::{BIND_H, ClickGuiState, FIELD_H, Focus, INDENT, TIP_LINE, Ui, Window, text_y};
 use crate::gui::painter::Painter;
 use crate::gui::widgets::{MultiLineTextBox, TextBox, code_text};
+use crate::lang::{tr, trf};
 use crate::modules::script::{self, SyntaxError};
 use crate::text::LINE_HEIGHT;
 
@@ -40,7 +41,7 @@ impl ClickGuiState {
                 Err(why) => return script::set_install_note(why),
             },
         };
-        let mut name_box = TextBox::pinned(NAME_MAX, "name, e.g. autogg");
+        let mut name_box = TextBox::pinned(NAME_MAX, tr!("clickgui.mod_editor.name_hint"));
         name_box.set_text(&name);
         let mut code_box = MultiLineTextBox::code(script::SOURCE_MAX);
         code_box.set_text(&code_text(&code));
@@ -62,6 +63,15 @@ impl ClickGuiState {
         });
     }
 
+    pub(super) fn relabel_mod_editor(&mut self) {
+        if let Some(e) = self.mod_editor.as_mut() {
+            e.name.placeholder.clear();
+            e.name
+                .placeholder
+                .push_str(tr!("clickgui.mod_editor.name_hint"));
+        }
+    }
+
     pub(super) fn cancel_mod_editor(&mut self) {
         if let Some(e) = self.mod_editor.as_mut()
             && (e.name.text != e.opened_name || e.code.text() != e.opened_code)
@@ -80,8 +90,8 @@ impl ClickGuiState {
         let look = self.look;
         let active = self.focus == Focus::On(Window::Config) && self.drag.is_none();
         let title = match &e.original {
-            None => "New mod".to_string(),
-            Some(f) => format!("Edit {f}"),
+            None => tr!("clickgui.mods.new").to_string(),
+            Some(f) => trf!("clickgui.mod_editor.title_edit", f),
         };
         let shell = self.config_shell(p, ui, &title, 1.0e5, active, EDIT_W);
         self.config.scroll = 0.0;
@@ -161,7 +171,14 @@ impl ClickGuiState {
                     .any(|m| &m.id == id && original != Some(m.file.as_str()))
             })
         });
-        self.label(p, "Name", ix, top + 4.0, iw, look.text_dim());
+        self.label(
+            p,
+            tr!("clickgui.mod_editor.name"),
+            ix,
+            top + 4.0,
+            iw,
+            look.text_dim(),
+        );
         p.rounded_rect(ix, name_y, iw, FIELD_H, 3.0, look.nest());
         if !e.on_code {
             p.fill(
@@ -188,12 +205,13 @@ impl ClickGuiState {
         p.pop_clip(name_clip);
         let (line, ink) = match &id {
             Err(why) => (why.clone(), ERROR),
-            Ok(id) if taken => (format!("`{id}` is already a mod; pick another name"), ERROR),
+            Ok(id) if taken => (trf!("clickgui.mod_editor.taken", id), ERROR),
             Ok(id) => match original {
-                Some(f) if f.strip_suffix(".lua") != Some(id.as_str()) => {
-                    (format!("Saved as {id}.lua, replacing {f}"), PENDING)
-                }
-                _ => (format!("Saved as {id}.lua"), look.text_dim()),
+                Some(f) if f.strip_suffix(".lua") != Some(id.as_str()) => (
+                    trf!("clickgui.mod_editor.saved_as_replacing", id, f),
+                    PENDING,
+                ),
+                _ => (trf!("clickgui.mod_editor.saved_as", id), look.text_dim()),
             },
         };
         self.label(p, &line, ix, name_y + FIELD_H + 2.0, iw, ink);
@@ -226,12 +244,20 @@ impl ClickGuiState {
         let mut cy = box_y + box_h + 3.0;
 
         let (line, ink, jump): (std::borrow::Cow<str>, u32, _) = match &e.syntax {
-            _ if e.pending => ("Checking...".into(), look.text_dim(), None),
-            Ok(()) => ("No syntax errors".into(), OK, None),
+            _ if e.pending => (
+                tr!("clickgui.mod_editor.checking").into(),
+                look.text_dim(),
+                None,
+            ),
+            Ok(()) => (tr!("clickgui.mod_editor.no_syntax_errors").into(), OK, None),
             Err(SyntaxError {
                 line: Some(n),
                 message,
-            }) => (format!("Line {n}: {message}").into(), ERROR, Some(*n)),
+            }) => (
+                trf!("clickgui.mod_editor.line_error", n, message).into(),
+                ERROR,
+                Some(*n),
+            ),
             Err(err) => (err.message.as_str().into(), ERROR, None),
         };
         self.label(p, &line, ix, cy, iw, ink);
@@ -254,12 +280,9 @@ impl ClickGuiState {
 
         let notice = match &e.error {
             Some(why) => Some((why.as_str(), ERROR)),
-            None if e.discard_armed => Some((
-                "Unsaved changes: Cancel or Escape again to discard them",
-                PENDING,
-            )),
+            None if e.discard_armed => Some((tr!("clickgui.mod_editor.unsaved"), PENDING)),
             None if cfg!(target_arch = "wasm32") => {
-                Some(("Saved mods last as long as this tab", look.text_dim()))
+                Some((tr!("clickgui.mod_editor.web_note"), look.text_dim()))
             }
             None => None,
         };
@@ -271,13 +294,18 @@ impl ClickGuiState {
         let busy = script::busy();
         let can_save = id.is_ok() && !taken && !e.code.text().trim().is_empty() && !busy;
         let half = ((iw - 4.0) * 0.5).floor();
-        let label = if busy { "Reloading..." } else { "Save" };
+        let label = if busy {
+            tr!("clickgui.mods.reloading")
+        } else {
+            tr!("clickgui.mod_editor.save")
+        };
         let style = if can_save {
             Style::Primary
         } else {
             Style::Idle
         };
         let save = self.button(p, ui, ix, cy, half, bh, label, style, active) && can_save;
+        let cancel_label = tr!("clickgui.cancel");
         let cancel = self.button(
             p,
             ui,
@@ -285,7 +313,7 @@ impl ClickGuiState {
             cy,
             iw - half - 4.0,
             bh,
-            "Cancel",
+            cancel_label,
             Style::Plain,
             active,
         );

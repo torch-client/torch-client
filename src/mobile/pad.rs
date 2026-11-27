@@ -36,15 +36,15 @@ impl Cell {
 
     pub fn label(self) -> &'static str {
         match self {
-            Cell::SneakToggle => "SNK",
+            Cell::SneakToggle => crate::lang::tr!("mobile.pad.sneak"),
             Cell::Forward => "^",
-            Cell::SprintToggle => "SPR",
+            Cell::SprintToggle => crate::lang::tr!("mobile.pad.sprint"),
             Cell::Left => "<",
-            Cell::Jump => "JMP",
+            Cell::Jump => crate::lang::tr!("mobile.pad.jump"),
             Cell::Right => ">",
-            Cell::Inventory => "INV",
+            Cell::Inventory => crate::lang::tr!("mobile.pad.inventory"),
             Cell::Back => "v",
-            Cell::Pause => "ESC",
+            Cell::Pause => crate::lang::tr!("mobile.pad.pause"),
         }
     }
 }

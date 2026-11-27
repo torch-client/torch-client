@@ -385,7 +385,7 @@ pub(crate) fn sync_beams(
                 material.texture = Some(texture.clone());
                 node.texture = texture.id();
             }
-            EntityMaterial::relight(&mut materials, &node.material, lit);
+            super::relight_unlit(&mut materials, &node.material, lit, LightMode::Cardinal);
             if let Ok(mut vis) = nodes.get_mut(node.entity) {
                 vis.set_if_neq(Visibility::Inherited);
             }
@@ -393,7 +393,7 @@ pub(crate) fn sync_beams(
             let mesh = meshes.add(mesh);
             let material = materials.add(EntityMaterial::new(
                 Some(texture.clone()),
-                LightMode::Cardinal,
+                super::unlit_light_mode(LightMode::Cardinal),
                 alpha_mode,
                 cutoff,
                 lit,

@@ -1,5 +1,7 @@
 use super::args::{Arg, ArgKind, ArgValue, Tok, bind, rest, tokens};
+use super::builtin::{norm, pick, remapped};
 use super::table::{Decl, ScriptCommand, Table};
+use super::tree::{Names, for_line};
 use super::*;
 use crate::modules::registry::ModuleIx;
 use crate::play::commands::{Options, Source, update_command_info};
@@ -126,7 +128,7 @@ fn built_ins_win_and_every_mod_command_keeps_its_qualified_name() {
 }
 
 fn complete(t: &Table, line: &str) -> Vec<String> {
-    let tree = super::tree::build(t);
+    let tree = super::tree::build(t, Names::English);
     let options = Options {
         lead: '.',
         ..Options::CHAT
@@ -171,7 +173,7 @@ fn the_tree_completes_commands_modules_settings_and_options() {
 #[test]
 fn mine_parses_a_name_off_the_list() {
     let (t, _) = Table::with_scripts(Vec::new());
-    let tree = super::tree::build(&t);
+    let tree = super::tree::build(&t, Names::English);
     let options = Options {
         lead: '.',
         ..Options::CHAT
@@ -223,7 +225,7 @@ fn mine_count_is_a_whole_number_from_one() {
 #[test]
 fn follow_completes_tab_list_names_and_parses_bare() {
     let (t, _) = Table::with_scripts(Vec::new());
-    let tree = super::tree::build(&t);
+    let tree = super::tree::build(&t, Names::English);
     let options = Options {
         lead: '.',
         ..Options::CHAT
@@ -272,7 +274,7 @@ fn a_mod_commands_suggest_list_completes_and_any_value_parses() {
     ];
     let (t, _) = Table::with_scripts(vec![s]);
     assert_eq!(complete(&t, ".wp a"), ["add"]);
-    let tree = super::tree::build(&t);
+    let tree = super::tree::build(&t, Names::English);
     let options = Options {
         lead: '.',
         ..Options::CHAT
@@ -289,4 +291,90 @@ fn a_mod_commands_suggest_list_completes_and_any_value_parses() {
         let red = info.usage.iter().any(|(_, error)| *error);
         assert!(!red, "{line}: {:?}", info.usage);
     }
+}
+
+static ROWS: [(&str, &[&str], &str); 3] = [
+    ("KillAura", &["ka"], "Убийца"),
+    ("Reach", &[], "Дальность"),
+    ("Speed", &[], "Reach"),
+];
+
+fn find_row(typed: &str) -> Option<&'static str> {
+    pick(
+        || ROWS.iter(),
+        &norm(typed),
+        |r| std::iter::once(r.0).chain(r.1.iter().copied()),
+        |r| r.2,
+    )
+    .map(|r| r.0)
+}
+
+#[test]
+fn names_match_in_english_aliases_and_as_drawn() {
+    assert_eq!(find_row("killaura"), Some("KillAura"));
+    assert_eq!(find_row("Kill Aura"), Some("KillAura"));
+    assert_eq!(find_row("KA"), Some("KillAura"));
+    assert_eq!(norm("Убийца Плюс"), "убийцаплюс");
+    assert_eq!(find_row("УБИЙЦА"), Some("KillAura"));
+    assert_eq!(find_row("дальность"), Some("Reach"));
+    assert_eq!(find_row("reach"), Some("Reach"));
+    assert_eq!(find_row("nothing"), None);
+}
+
+#[test]
+fn the_russian_layout_rescue_reads_back_the_keys() {
+    let (t, _) = Table::with_scripts(Vec::new());
+    let command = |n: &str| t.find(n).map(|c| c.name());
+    assert_eq!(remapped("ещппду", command), Some("toggle"));
+    assert_eq!(remapped("ыуе", command), Some("set"));
+    assert_eq!(
+        remapped("tgogle", |n: &str| (n == "tgogle").then_some(())),
+        None
+    );
+    assert_eq!(remapped("лшддфгкф", find_row), Some("KillAura"));
+    assert_eq!(remapped("лшдд", find_row), None);
+}
+
+#[test]
+fn a_tree_spells_each_row_once_or_twice() {
+    assert_eq!(Names::English.spell("Kill Aura", "Убийца"), ["killaura"]);
+    assert_eq!(Names::Drawn.spell("Kill Aura", "Убийца"), ["убийца"]);
+    assert_eq!(
+        Names::Both.spell("Kill Aura", "Убийца"),
+        ["killaura", "убийца"]
+    );
+    assert_eq!(Names::Both.spell("ESP", "esp"), ["esp"]);
+}
+
+#[test]
+fn the_popup_tree_follows_the_typed_script() {
+    assert_eq!(for_line(".to"), Names::Both);
+    assert_eq!(for_line(".toggle ki"), Names::Both);
+    assert_eq!(for_line(".toggle уб"), Names::Both);
+    assert_eq!(for_line(".toggle "), Names::Drawn);
+    assert_eq!(for_line(".set killaura "), Names::English);
+    assert_eq!(for_line(".set убийца "), Names::Drawn);
+    assert_eq!(for_line(".set killaura дальность "), Names::Both);
+    assert_eq!(for_line(".mine diamond 4 "), Names::English);
+}
+
+#[test]
+fn the_both_tree_completes_english_input_as_the_english_tree() {
+    let (t, _) = Table::with_scripts(Vec::new());
+    let both = super::tree::build(&t, Names::Both);
+    let options = Options {
+        lead: '.',
+        ..Options::CHAT
+    };
+    let line = ".toggle aim";
+    let info = update_command_info(
+        Some(&both),
+        line,
+        line.chars().count(),
+        &Source::default(),
+        options,
+        None,
+    );
+    let names: Vec<String> = info.suggestions.list.into_iter().map(|s| s.text).collect();
+    assert_eq!(names, complete(&t, line));
 }

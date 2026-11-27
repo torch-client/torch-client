@@ -104,14 +104,14 @@ pub fn update_player_faces(
         let Some(image) = images.get(handle) else {
             continue;
         };
-        let slot = faces.claim(uuid);
-        let Some((face, hat)) = assets.atlas.player_face(slot) else {
-            continue;
-        };
         let Some(face_px) = cut(image, SKIN_HEAD_U, SKIN_HEAD_V) else {
             continue;
         };
         let Some(hat_px) = cut(image, SKIN_HAT_U, SKIN_HEAD_V) else {
+            continue;
+        };
+        let slot = faces.claim(uuid);
+        let Some((face, hat)) = assets.atlas.player_face(slot) else {
             continue;
         };
         writes.push(face, face_px);

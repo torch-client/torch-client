@@ -8,12 +8,16 @@ pub enum Followup {
     Suggest(String),
     Link(String),
     Dialog(Arc<Dialog>),
+    Confirm(crate::gui::confirmcommand::CommandPrompt),
 }
 
 pub fn dispatch(click: Click, shared: &SharedMutex) -> Followup {
     match click {
         Click::RunCommand(command) => {
             let command = command.strip_prefix('/').unwrap_or(&command).to_string();
+            if let Some(prompt) = crate::gui::confirmcommand::check(&command, shared) {
+                return Followup::Confirm(prompt);
+            }
             crate::play::dialog::queue_submit(shared, Submit::RunCommand(command));
             Followup::None
         }

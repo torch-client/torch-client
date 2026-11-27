@@ -232,6 +232,7 @@ pub fn register(commands: &mut Dispatcher) {
                 world: &cached_world,
                 mining_cache: &mining_cache,
                 custom_state: &custom_state,
+                placing: None,
             },
             RelBlockPos::from_origin(position, position),
         );

@@ -2,6 +2,7 @@ use crate::gui::packdrop::{self, Drops, Search};
 use crate::gui::painter::Painter;
 use crate::gui::widgets::{Button, Slider, TextBox};
 use crate::gui::{GuiState, Screen, ScreenCtx};
+use crate::lang::Key;
 use crate::platform::{packfs, storage};
 use crate::session::SharedMutex;
 use crate::shaderpack::lang::{self, Lang};
@@ -16,24 +17,25 @@ use super::options::{
 };
 use super::widgets::{FOOTER_GAP, WIDGET_HEIGHT};
 
-const PACKS_TITLE: &str = "Shader Packs";
-pub(in crate::gui) const SHADER_PACKS: &str = "Shader Packs...";
+const PACKS_TITLE: Key = Key::of("shaderpacks.title");
+pub(in crate::gui) const SHADER_PACKS: Key = Key::of("shaderpacks.open_button");
 const NONE_ROW: &str = "(none)";
+const NONE_ROW_LABEL: Key = Key::of("shaderpacks.none_row");
 #[cfg(not(target_arch = "wasm32"))]
-const NO_PACKS: &str = "No packs in the shaders folder";
+const NO_PACKS: Key = Key::of("shaderpacks.no_packs");
 #[cfg(target_arch = "wasm32")]
-const NO_PACKS: &str = "Drop a pack on the page, or choose one below";
+const NO_PACKS: Key = Key::of("shaderpacks.no_packs_web");
 const SETTINGS_ICON: char = '🛠';
 const SETTINGS_ICON_STR: &str = "🛠";
 const SETTINGS_FALLBACK: &str = "...";
 const SETTINGS_GAP: f32 = 2.0;
-const RESET: &str = "Reset";
-const DONE: &str = "Done";
-const OPEN_FOLDER: &str = "Open Shader Pack Folder";
-const PROFILE: &str = "Profile";
+const RESET: Key = Key::of("shaderpacks.reset");
+const DONE: Key = Key::of("shaderpacks.done");
+const OPEN_FOLDER: Key = Key::of("shaderpacks.open_folder");
 const CUSTOM: &str = "Custom";
-const ON: &str = "ON";
-const OFF: &str = "OFF";
+const CUSTOM_LABEL: Key = Key::of("shaderpacks.custom");
+const ON: Key = Key::of("shaderpacks.on");
+const OFF: Key = Key::of("shaderpacks.off");
 
 const LIST_ROW_H: f32 = 20.0;
 
@@ -49,6 +51,8 @@ pub struct Loaded {
     profile: Option<usize>,
     menu: Menu,
     unmet: Vec<String>,
+    #[cfg(feature = "native_shaders")]
+    pub native: bool,
 }
 
 #[derive(Default)]
@@ -176,6 +180,10 @@ impl State {
 }
 
 fn load(name: &str) -> Result<Loaded, String> {
+    #[cfg(feature = "native_shaders")]
+    if crate::shaderpack::native::package::is_native(&discover::dir().join(name)) {
+        return load_native(name);
+    }
     let source = Source::open(&discover::dir().join(name), crate::shaderpack::ROOT)?;
 
     let texts: Vec<String> = crate::shaderpack::include::option_texts(&source);
@@ -208,10 +216,34 @@ fn load(name: &str) -> Result<Loaded, String> {
         profile: None,
         menu: Menu::default(),
         unmet,
+        #[cfg(feature = "native_shaders")]
+        native: false,
     };
     loaded.menu = Menu::of(&loaded.options, &loaded.props);
     loaded.profile = matching_profile(&loaded);
     Ok(loaded)
+}
+
+#[cfg(feature = "native_shaders")]
+fn load_native(name: &str) -> Result<Loaded, String> {
+    let report = crate::shaderpack::native::check::check(&discover::dir().join(name));
+    if !report.problems.is_empty() {
+        return Err(crate::shaderpack::native::problem::summary(
+            &report.problems,
+        ));
+    }
+    Ok(Loaded {
+        name: name.to_owned(),
+        options: Options::default(),
+        values: Values::default(),
+        props: Properties::default(),
+        properties_text: None,
+        lang: Lang::default(),
+        profile: None,
+        menu: Menu::default(),
+        unmet: Vec::new(),
+        native: true,
+    })
 }
 
 fn parse_properties(
@@ -234,7 +266,7 @@ fn parse_properties(
     props
 }
 
-fn values_path(name: &str) -> std::path::PathBuf {
+pub(crate) fn values_path(name: &str) -> std::path::PathBuf {
     discover::dir().join(format!("{name}.txt"))
 }
 
@@ -332,7 +364,7 @@ pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared
         }
         return;
     }
-    packdrop::header(p, ctx, PACKS_TITLE, &mut packs.search);
+    packdrop::header(p, ctx, PACKS_TITLE.get(), &mut packs.search);
 
     let (list_x, list_y, list_w, full_h) = packdrop::LAYOUT.content_rect(ctx.vw, ctx.vh);
     let left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
@@ -354,7 +386,11 @@ pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared
             packdrop::failed_message(&failed).map(|m| (m, packdrop::MESSAGE_ERROR))
         }
         (None, Some(loaded)) if !loaded.unmet.is_empty() => Some((
-            format!("{}: runs without {}", loaded.name, loaded.unmet.join(", ")),
+            crate::lang::trf!(
+                "shaderpacks.runs_without",
+                loaded.name,
+                loaded.unmet.join(", ")
+            ),
             packdrop::MESSAGE_WARNING,
         )),
         _ => None,
@@ -371,7 +407,8 @@ pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared
     );
 
     let search = Search::of(&state.shaderpacks.search);
-    let show_none = search.matches(NONE_ROW);
+    let none_label = NONE_ROW_LABEL.get();
+    let show_none = search.matches(NONE_ROW) || search.matches(&none_label.to_lowercase());
     let shown: Vec<&Pack> = state
         .shaderpacks
         .packs
@@ -413,7 +450,7 @@ pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared
             left,
             top,
             0,
-            NONE_ROW,
+            none_label,
             loaded_name.is_none(),
             None,
         )
@@ -434,7 +471,7 @@ pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared
     }
     if state.shaderpacks.packs.is_empty() {
         p.text_centered(
-            NO_PACKS,
+            NO_PACKS.get(),
             ctx.vw / 2.0,
             top + LIST_ROW_H + 6.0,
             0xA0_A0A0,
@@ -486,9 +523,10 @@ pub fn draw_packs(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, shared
             ),
         );
     }
-    let folder_hovered = packdrop::open_folder(p, ctx, &footer, x, OPEN_FOLDER, &discover::dir());
+    let folder_hovered =
+        packdrop::open_folder(p, ctx, &footer, x, OPEN_FOLDER.get(), &discover::dir());
     x += footer.w + FOOTER_GAP;
-    if Button::new(x, footer.y, footer.w, WIDGET_HEIGHT, DONE).draw(p, ctx) {
+    if Button::new(x, footer.y, footer.w, WIDGET_HEIGHT, DONE.get()).draw(p, ctx) {
         state.nav = Some(Screen::VideoSettings);
     }
     if folder_hovered {
@@ -611,7 +649,7 @@ pub fn draw_options(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 
     let footer_y = LAYOUT.footer_y(ctx.vh);
     let footer_left = (ctx.vw / 2.0 - GRID_LEFT_OFFSET).floor();
-    if Button::new(footer_left, footer_y, COLUMN_W, WIDGET_HEIGHT, RESET).draw(p, ctx) {
+    if Button::new(footer_left, footer_y, COLUMN_W, WIDGET_HEIGHT, RESET.get()).draw(p, ctx) {
         action = Some(Action::ResetAll);
     }
     if Button::new(
@@ -619,7 +657,7 @@ pub fn draw_options(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         footer_y,
         COLUMN_W,
         WIDGET_HEIGHT,
-        DONE,
+        DONE.get(),
     )
     .draw(p, ctx)
     {
@@ -731,15 +769,20 @@ fn element_widget(
                 .then(|| Action::Enter(id.clone()))
         }
         Element::Profile => {
-            let name = match loaded.profile {
-                Some(at) => loaded.props.profiles[at].0.as_str(),
-                None => CUSTOM,
+            let named = match loaded.profile {
+                Some(at) => {
+                    let name = loaded.props.profiles[at].0.as_str();
+                    loaded
+                        .lang
+                        .profile(name)
+                        .map_or_else(|| lang::humanise(name), str::to_owned)
+                }
+                None => loaded
+                    .lang
+                    .profile(CUSTOM)
+                    .map_or_else(|| CUSTOM_LABEL.get().to_owned(), str::to_owned),
             };
-            let named = loaded
-                .lang
-                .profile(name)
-                .map_or_else(|| lang::humanise(name), str::to_owned);
-            let label = format!("{PROFILE}: {named}");
+            let label = crate::lang::trf!("shaderpacks.profile", named);
             if loaded.props.profiles.is_empty() {
                 return None;
             }
@@ -780,10 +823,11 @@ fn option_widget(
     match &opt.kind {
         Kind::Boolean { .. } => {
             let on = current == ON_VALUE;
-            let state = loaded
-                .lang
-                .value(&opt.name, current)
-                .unwrap_or(if on { ON } else { OFF });
+            let state = loaded.lang.value(&opt.name, current).unwrap_or(if on {
+                ON.get()
+            } else {
+                OFF.get()
+            });
             let caption = tag(&label, state, changed);
             Button::new(x, y, w, WIDGET_HEIGHT, &caption)
                 .draw(p, ctx)

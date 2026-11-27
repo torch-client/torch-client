@@ -1,0 +1,15 @@
+{
+  "better_tooltips.axolotl.blue": "Blue",
+  "better_tooltips.axolotl.cyan": "Cyan",
+  "better_tooltips.axolotl.gold": "Gold",
+  "better_tooltips.axolotl.lucy": "Lucy",
+  "better_tooltips.axolotl.wild": "Wild",
+  "better_tooltips.bucket.baby": "Baby",
+  "better_tooltips.bucket.health": "Health: %s",
+  "better_tooltips.bucket.size": "Size: %s",
+  "better_tooltips.bucket.variant": "Variant: %s",
+  "better_tooltips.hold_to_preview": "Hold %s to preview",
+  "better_tooltips.salmon.large": "Large",
+  "better_tooltips.salmon.medium": "Medium",
+  "better_tooltips.salmon.small": "Small"
+}

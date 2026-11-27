@@ -12,6 +12,7 @@ use super::super::registry::{
 use super::super::{Value as Setting, store};
 use super::{OUTBOX, WANTS, kinds};
 use crate::gui::keybinds::Bound;
+use crate::lang::Key;
 use crate::platform::time::Instant;
 
 pub(super) const BUDGET: Duration = Duration::from_millis(20);
@@ -825,6 +826,7 @@ impl Api {
         torch.raw_set("nbt", super::nbt::table(&lua, &ctx)?)?;
         torch.raw_set("net", super::packets::table(&lua, &ctx)?)?;
         torch.raw_set("ghost", super::ghost::table(&lua, &ctx)?)?;
+        torch.raw_set("build", super::build::table(&lua, &ctx)?)?;
         let (blocks, items) = super::blocks::tables(&lua, &ctx)?;
         torch.raw_set("blocks", blocks)?;
         torch.raw_set("items", items)?;
@@ -1486,16 +1488,24 @@ fn module_fn(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Function> {
                 }
                 SpecKind::Text { max_len, default, hint } => {
                     values.raw_set(key.as_str(), default.as_str())?;
-                    Kind::Text { max_len, default: intern(default), expand: false, hint: intern(hint) }
+                    Kind::Text {
+                        max_len,
+                        default: intern(default),
+                        expand: false,
+                        hint: intern(hint),
+                        hint_key: Key::NONE,
+                    }
                 }
                 SpecKind::Key(default) => {
                     values.raw_set(key.as_str(), default.serialized_name())?;
                     Kind::Key { default }
                 }
-                SpecKind::Button(text) => Kind::Button { text: intern(text), key: intern(key.clone()) },
+                SpecKind::Button(text) => {
+                    Kind::Button { text: intern(text), text_key: Key::NONE, key: intern(key.clone()) }
+                }
                 SpecKind::Choice { options, index } => {
                     values.raw_set(key.as_str(), options[index as usize].as_str())?;
-                    Kind::Enum { options: kinds::intern_options(options), index }
+                    Kind::Enum { options: kinds::intern_options(options), keys: &[], index }
                 }
                 SpecKind::Blocks { title, default } => {
                     let list = kinds::block_list(mod_id, &key, intern(title), &default);
@@ -1504,7 +1514,14 @@ fn module_fn(lua: &Lua, ctx: &Arc<Ctx>) -> mlua::Result<Function> {
                 }
             };
             let label = intern(spec.label.unwrap_or_else(|| key.clone()));
-            let def = SettingDef { name: label, tip: intern(spec.tip), kind, show: Show::Always };
+            let def = SettingDef {
+                name: label,
+                name_key: Key::NONE,
+                tip: intern(spec.tip),
+                tip_key: Key::NONE,
+                kind,
+                show: Show::Always,
+            };
             defs.push((intern(key), def));
         }
         let keys: Vec<(&str, Kind)> = defs.iter().map(|(k, d)| (*k, d.kind)).collect();

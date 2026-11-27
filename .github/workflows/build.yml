@@ -24,11 +24,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  DESKTOP_PLAIN: shader_support,audio,explore_modrinth,tutorial,render_scale
-  DESKTOP_CLICKGUI: click_gui,shader_support,audio,explore_modrinth,lua_mods,tutorial,seed_cracker,render_scale
-  WEB: asset_download,multiversion,full_font,skins,resourcepacks,hud_editor,click_gui,explore_modrinth,tutorial,lua_mods,seed_cracker,small_audio,render_scale
-  WEB_MOBILE: asset_download,multiversion,full_font,skins,resourcepacks,hud_editor,click_gui,explore_modrinth,tutorial,lua_mods,mobile_ui,module_panel,seed_cracker,small_audio
-  ANDROID_FEATURES: module_panel,small_audio
 
 jobs:
   version:
@@ -68,8 +63,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libudev-dev libx11-dev libxkbcommon-dev libwayland-dev
 
-      - run: tools/build_desktop.sh --features "$DESKTOP_PLAIN"
-      - run: tools/build_desktop.sh --features "$DESKTOP_CLICKGUI"
+      - run: tools/build_desktop.sh --features desktop
+      - run: tools/build_desktop.sh --features desktop_clickgui
 
       - uses: actions/upload-artifact@v4
         with:
@@ -92,8 +87,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends mingw-w64
 
-      - run: tools/build_desktop.sh --windows --features "$DESKTOP_PLAIN"
-      - run: tools/build_desktop.sh --windows --features "$DESKTOP_CLICKGUI"
+      - run: tools/build_desktop.sh --windows --features desktop
+      - run: tools/build_desktop.sh --windows --features desktop_clickgui
 
       - uses: actions/upload-artifact@v4
         with:
@@ -107,36 +102,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: web
-            features: WEB
-          - name: web-mobile
-            features: WEB_MOBILE
+        preset: [web, web_mobile]
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup
         with:
-          cache-key: ${{ matrix.name }}
+          cache-key: ${{ matrix.preset }}
           target: wasm32-unknown-unknown
 
       - run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libc++-dev
+          sudo apt-get install -y --no-install-recommends clang llvm libc++-dev
 
       - run: |
           version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
           cargo install wasm-bindgen-cli --version "$version" --locked
 
       - env:
-          FEATURES: ${{ matrix.features }}
+          NAME: ${{ matrix.preset }}
         run: |
-          tools/build_web.sh --harden --no-default-features --features "${!FEATURES}"
-          python3 tools/pack_single_html.py web-output/hardened/site
+          tools/build_web.sh --harden --features "$NAME"
+          python3 tools/pack_single_html.py "web-output/$NAME/site"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
+          name: ${{ matrix.preset }}
           path: dist/*.html
           if-no-files-found: error
 
@@ -150,13 +141,20 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - uses: ./.github/actions/setup
         with:
           cache-key: android
           target: aarch64-linux-android
           free-disk: "false"
+
+      - run: |
+          ndk="$(sed -n 's/^NDK_VERSION=//p' tools/build_android.sh)"
+          build_tools="$(sed -n 's/^BUILD_TOOLS_VERSION=//p' tools/build_android.sh)"
+          platform="$(sed -n 's/^PLATFORM_VERSION=//p' tools/build_android.sh)"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$ndk" "build-tools;$build_tools" "platforms;$platform"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ndk" >> "$GITHUB_ENV"
 
       - env:
           KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -169,7 +167,7 @@ jobs:
             exit 1
           fi
           echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.keystore"
-          ANDROID_DEBUG_KEYSTORE="$RUNNER_TEMP/release.keystore" tools/build_android.sh --features "$ANDROID_FEATURES"
+          RELEASE=1 ANDROID_DEBUG_KEYSTORE="$RUNNER_TEMP/release.keystore" tools/build_android.sh --features android
 
       - uses: actions/upload-artifact@v4
         with:

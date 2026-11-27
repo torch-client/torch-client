@@ -1,3 +1,9 @@
+mod leaves;
+mod magic;
+mod sculk;
+mod terrain;
+mod water;
+
 use std::collections::HashMap;
 
 use bevy::asset::RenderAssetUsages;
@@ -25,10 +31,16 @@ impl Plugin for ParticlePlugin {
         app.init_resource::<ParticleMaterialCache>()
             .init_resource::<ParticleRng>()
             .init_resource::<LiveParticles>()
+            .init_resource::<HeldParticles>()
+            .init_resource::<FireworkSparks>()
+            .init_resource::<FireworkShows>()
             .init_resource::<ParticleAtlas>()
             .init_resource::<ParticleBatches>()
             .init_resource::<AmbientClock>()
-            .add_systems(OnEnter(AppState::InGame), load_particle_atlas)
+            .add_systems(
+                OnEnter(AppState::InGame),
+                (load_particle_atlas, drop_held_particles),
+            )
             .add_systems(
                 Update,
                 (
@@ -127,6 +139,40 @@ impl Default for ParticleRng {
 struct LiveParticles(Vec<Particle>);
 
 #[derive(Resource, Default)]
+struct HeldParticles {
+    list: LiveParticles,
+    world_ticks: u64,
+    level: u32,
+}
+
+impl HeldParticles {
+    fn release(&mut self, level: u32, view: &crate::renderer::FrameView, live: &mut LiveParticles) {
+        if self.list.0.is_empty() {
+            return;
+        }
+        if self.level != level {
+            self.list.0.clear();
+        } else if view.world_run.runs || view.world_ticks != self.world_ticks {
+            let mut list = std::mem::take(&mut self.list.0);
+            list.truncate(MAX_LIVE_PARTICLES.saturating_sub(live.0.len()));
+            live.0.append(&mut list);
+        }
+    }
+
+    fn sparks(&self) -> u32 {
+        self.list
+            .0
+            .iter()
+            .filter(|particle| particle.flags & FIREWORK_SPARK != 0)
+            .count() as u32
+    }
+}
+
+fn drop_held_particles(mut held: ResMut<HeldParticles>) {
+    *held = HeldParticles::default();
+}
+
+#[derive(Resource, Default)]
 pub(crate) struct ParticleAtlas(Option<Atlas>);
 
 impl ParticleAtlas {
@@ -155,14 +201,17 @@ pub(crate) struct Atlas {
     sheets: Vec<Vec<u32>>,
     by_name: HashMap<String, u16>,
     crit: Option<[f32; 4]>,
+    frametimes: Vec<u32>,
     items: Option<std::sync::Arc<crate::gui::atlas::GuiAtlas>>,
 }
 
 impl Atlas {
     fn from_data(built: particle_assets::ParticleAtlasData) -> (Image, Atlas) {
         let mut sheets = Vec::with_capacity(built.sheets.len());
+        let mut frametimes = Vec::with_capacity(built.sheets.len());
         let mut by_name = HashMap::with_capacity(built.sheets.len());
         for (name, tiles) in built.sheets {
+            frametimes.push(built.frametimes.get(&name).copied().unwrap_or(0));
             by_name.insert(name, sheets.len() as u16);
             sheets.push(tiles);
         }
@@ -175,9 +224,14 @@ impl Atlas {
             sheets,
             by_name,
             crit,
+            frametimes,
             items: None,
         };
         (built.image, atlas)
+    }
+
+    fn frametime(&self, sheet: u16) -> u32 {
+        self.frametimes.get(sheet as usize).copied().unwrap_or(0)
     }
 
     fn item_uv(&self, id: &str) -> Option<[f32; 4]> {
@@ -251,19 +305,248 @@ pub(crate) struct Particle {
     pos: DVec3,
     velocity: Vec3,
     gravity: f32,
-    friction: f32,
+    friction: Vec3,
     tick_acc: f32,
     age: u32,
     lifetime: u32,
+    dead: bool,
+    stopped: bool,
+    on_ground: bool,
     tint: [f32; 4],
     size: f32,
     grow: Grow,
     sprite: Sprite,
-    flags: u8,
+    flags: u32,
     drip: Option<(Drip, DripStage)>,
     origin: DVec3,
     motion: Motion,
     light: Light,
+    roll: f32,
+    prev_roll: f32,
+    roll_speed: f32,
+    roll_accel: f32,
+    facing: Facing,
+    behavior: Option<&'static Behavior>,
+    data: [f32; 8],
+    target: DVec3,
+}
+
+impl Particle {
+    fn remove(&mut self) {
+        self.dead = true;
+    }
+
+    fn from_recipe(recipe: Recipe, at: DVec3, phase: f32) -> Particle {
+        let origin = at + recipe.nudge;
+        let pos = match recipe.motion {
+            Motion::FlyTowards { .. } => origin + recipe.velocity.as_dvec3(),
+            _ => origin,
+        } + recipe.start_offset;
+        Particle {
+            prev: if recipe.pre_ticked { origin } else { pos },
+            pos,
+            velocity: recipe.velocity,
+            gravity: recipe.gravity,
+            friction: recipe.friction,
+            tick_acc: phase - recipe.delay_ticks as f32 * TICK,
+            age: recipe.start_age,
+            lifetime: recipe.lifetime,
+            dead: false,
+            stopped: false,
+            on_ground: false,
+            tint: recipe.tint,
+            size: recipe.size,
+            grow: recipe.grow,
+            sprite: recipe.sprite,
+            flags: recipe.flags,
+            drip: recipe.drip,
+            origin,
+            motion: recipe.motion,
+            light: recipe.light,
+            roll: recipe.roll,
+            prev_roll: recipe.roll,
+            roll_speed: recipe.roll_speed,
+            roll_accel: recipe.roll_accel,
+            facing: recipe.facing,
+            behavior: recipe.behavior,
+            data: recipe.data,
+            target: recipe.target,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn to_recipe(&self) -> Recipe {
+        Recipe {
+            velocity: self.velocity,
+            gravity: self.gravity,
+            friction: self.friction,
+            lifetime: self.lifetime,
+            size: self.size,
+            tint: self.tint,
+            grow: self.grow,
+            sprite: self.sprite,
+            flags: self.flags,
+            drip: None,
+            motion: self.motion,
+            light: self.light,
+            nudge: DVec3::ZERO,
+            start_offset: DVec3::ZERO,
+            pre_ticked: false,
+            start_age: 0,
+            delay_ticks: 0,
+            roll: self.roll,
+            roll_speed: self.roll_speed,
+            roll_accel: self.roll_accel,
+            facing: self.facing,
+            behavior: self.behavior,
+            data: self.data,
+            target: self.target,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Behavior {
+    tick: Option<fn(&mut Particle, &mut TickCtx<'_>)>,
+    size: Option<fn(&Particle, f32) -> f32>,
+    tint: Option<fn(&Particle, f32) -> [f32; 4]>,
+    orient: Option<fn(&Particle, f32) -> Quat>,
+    light: Option<fn(&Particle, f32, u8, u8) -> (u8, u8)>,
+}
+
+impl Behavior {
+    #[allow(dead_code)]
+    const NONE: Behavior = Behavior {
+        tick: None,
+        size: None,
+        tint: None,
+        orient: None,
+        light: None,
+    };
+}
+
+#[derive(Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+enum Facing {
+    Camera,
+    CameraY,
+    Fixed(Quat),
+}
+
+#[derive(Clone, Copy, Default)]
+#[allow(dead_code)]
+struct MoveResult {
+    on_ground: bool,
+    x_blocked: bool,
+    y_blocked: bool,
+    z_blocked: bool,
+}
+
+enum Child {
+    Kind { kind: P, pos: DVec3, arg: Vec3 },
+    Recipe { recipe: Recipe, pos: DVec3 },
+}
+
+struct TickCtx<'a> {
+    world: Option<&'a azalea_world::World>,
+    rng: &'a mut JavaRandom,
+    atlas: Option<&'a Atlas>,
+    status: ParticleStatus,
+    eye: DVec3,
+    players: &'a [(DVec3, Vec3)],
+    entities: &'a [crate::entities::feed::EntityAnim],
+    children: Vec<Child>,
+}
+
+#[allow(dead_code)]
+impl<'a> TickCtx<'a> {
+    fn world(&self) -> Option<&'a azalea_world::World> {
+        self.world
+    }
+
+    fn rng(&mut self) -> &mut JavaRandom {
+        &mut *self.rng
+    }
+
+    fn atlas(&self) -> Option<&'a Atlas> {
+        self.atlas
+    }
+
+    fn default_tick(&mut self, p: &mut Particle) -> MoveResult {
+        integrate(p, self.world)
+    }
+
+    fn move_by(&mut self, p: &mut Particle, delta: Vec3) -> MoveResult {
+        move_particle(p, self.world, delta)
+    }
+
+    fn block(&self, pos: DVec3) -> Option<azalea::block::BlockState> {
+        let world = self.world?;
+        let cell = pos.floor();
+        block_at(world, [cell.x as i32, cell.y as i32, cell.z as i32])
+    }
+
+    fn is_air(&self, pos: DVec3) -> bool {
+        self.block(pos).is_none_or(|state| state.is_air())
+    }
+
+    fn fluid(&self, pos: DVec3) -> Option<azalea::block::fluid_state::FluidState> {
+        self.block(pos)
+            .map(azalea::block::fluid_state::FluidState::from)
+    }
+
+    fn in_water(&self, pos: DVec3) -> bool {
+        self.fluid(pos)
+            .is_some_and(|f| f.kind == azalea::block::fluid_state::FluidKind::Water)
+    }
+
+    fn in_water_source(&self, pos: DVec3) -> bool {
+        self.fluid(pos).is_some_and(|f| {
+            f.kind == azalea::block::fluid_state::FluidKind::Water && f.is_source()
+        })
+    }
+
+    fn spawn(&mut self, kind: P, pos: DVec3, arg: Vec3) {
+        self.children.push(Child::Kind { kind, pos, arg });
+    }
+
+    fn spawn_recipe(&mut self, recipe: Recipe, pos: DVec3) {
+        self.children.push(Child::Recipe { recipe, pos });
+    }
+
+    fn nearest_player(&self, pos: DVec3, radius: f64) -> Option<(DVec3, Vec3)> {
+        self.players
+            .iter()
+            .map(|&(at, velocity)| (at.distance_squared(pos), at, velocity))
+            .filter(|&(d, ..)| d < radius * radius)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, at, velocity)| (at, velocity))
+    }
+
+    fn entity_pos(&self, id: i32) -> Option<DVec3> {
+        self.entities
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| DVec3::from_array(e.position(1.0)))
+    }
+}
+
+struct SpawnCtx<'a> {
+    pos: DVec3,
+    world: Option<&'a azalea_world::World>,
+    eye: DVec3,
+}
+
+#[allow(dead_code)]
+impl SpawnCtx<'_> {
+    fn cell(&self) -> [i32; 3] {
+        let c = self.pos.floor();
+        [c.x as i32, c.y as i32, c.z as i32]
+    }
+
+    fn block(&self, cell: [i32; 3]) -> Option<azalea::block::BlockState> {
+        block_at(self.world?, cell)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -274,6 +557,8 @@ enum Drip {
     DripstoneWater,
     DripstoneLava,
     ObsidianTear,
+    Nectar,
+    SporeBlossom,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -285,24 +570,26 @@ enum DripStage {
 }
 
 impl Drip {
-    fn falling(self) -> P {
-        match self {
+    fn falling(self) -> Option<P> {
+        Some(match self {
             Drip::Water => P::FallingWater,
             Drip::Lava => P::FallingLava,
             Drip::Honey => P::FallingHoney,
             Drip::DripstoneWater => P::FallingDripstoneWater,
             Drip::DripstoneLava => P::FallingDripstoneLava,
             Drip::ObsidianTear => P::FallingObsidianTear,
-        }
+            Drip::Nectar | Drip::SporeBlossom => return None,
+        })
     }
 
-    fn landing(self) -> P {
-        match self {
+    fn landing(self) -> Option<P> {
+        Some(match self {
             Drip::Water | Drip::DripstoneWater => P::Splash,
             Drip::Lava | Drip::DripstoneLava => P::LandingLava,
             Drip::Honey => P::LandingHoney,
             Drip::ObsidianTear => P::LandingObsidianTear,
-        }
+            Drip::Nectar | Drip::SporeBlossom => return None,
+        })
     }
 
     fn landing_sound(self) -> Option<&'static str> {
@@ -319,7 +606,7 @@ impl Drip {
         match self {
             Drip::Water | Drip::DripstoneWater => Some(FluidKind::Water),
             Drip::Lava | Drip::DripstoneLava => Some(FluidKind::Lava),
-            Drip::Honey | Drip::ObsidianTear => None,
+            Drip::Honey | Drip::ObsidianTear | Drip::Nectar | Drip::SporeBlossom => None,
         }
     }
 
@@ -332,6 +619,8 @@ impl Drip {
 enum Sprite {
     Fixed([f32; 4]),
     Animated(u16),
+    #[allow(dead_code)]
+    Clock(u16),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -359,33 +648,69 @@ enum Light {
     Block,
 }
 
-const PHYSICS: u8 = 1 << 0;
-const TERRAIN: u8 = 1 << 1;
-const TRANSLUCENT: u8 = 1 << 2;
-const FULLBRIGHT: u8 = 1 << 3;
-const CRIT_DECAY: u8 = 1 << 4;
-const FADE_OUT: u8 = 1 << 5;
-const WATER_DROP: u8 = 1 << 6;
-const ITEM: u8 = 1 << 7;
+const PHYSICS: u32 = 1 << 0;
+const TERRAIN: u32 = 1 << 1;
+const TRANSLUCENT: u32 = 1 << 2;
+const FULLBRIGHT: u32 = 1 << 3;
+const CRIT_DECAY: u32 = 1 << 4;
+const FADE_OUT: u32 = 1 << 5;
+const WATER_DROP: u32 = 1 << 6;
+const ITEM: u32 = 1 << 7;
+const SPEED_UP_Y_BLOCKED: u32 = 1 << 8;
+const FIREWORK_SPARK: u32 = 1 << 9;
+
+const FIREWORK_SPARK_LIMIT: u32 = 3000;
+
+#[derive(Resource, Default)]
+struct FireworkSparks(u32);
+
+const FIREWORK_TRAIL_LIMIT: u32 = 2000;
+
+#[derive(Resource, Default)]
+struct FireworkShows {
+    shows: Vec<magic::Show>,
+    clock: f32,
+    level: u32,
+}
 
 const DESTROY_GRID: i32 = 4;
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_particles(
     shared: Res<Shared>,
     gui: Res<crate::gui::GuiState>,
     gui_assets: Option<Res<crate::gui::render::GuiAssets>>,
     mut atlas: ResMut<ParticleAtlas>,
     view: Res<crate::renderer::FrameView>,
-    mut live: ResMut<LiveParticles>,
+    mut active: ResMut<LiveParticles>,
+    mut held: ResMut<HeldParticles>,
     mut particle_rng: ResMut<ParticleRng>,
     mut elder_guardian: ResMut<crate::entities::elder_guardian::ElderGuardianCurse>,
+    mut sparks: ResMut<FireworkSparks>,
+    mut shows: ResMut<FireworkShows>,
 ) {
     use crate::session::ParticleEmit;
 
-    let emits = std::mem::take(&mut shared.0.lock().unwrap().session.particle_emits);
+    let (emits, level_id) = {
+        let mut s = shared.0.lock().unwrap();
+        (
+            std::mem::take(&mut s.session.particle_emits),
+            crate::client::tick_rate::level(),
+        )
+    };
+    if !held.list.0.is_empty() {
+        held.release(level_id, &view, &mut active);
+    }
     if emits.is_empty() {
         return;
     }
+    let live: &mut LiveParticles = if view.world_run.runs {
+        &mut active
+    } else {
+        held.world_ticks = view.world_ticks;
+        held.level = level_id;
+        &mut held.list
+    };
     if let (Some(atlas), Some(gui_assets)) = (&mut atlas.0, &gui_assets) {
         atlas.items = Some(gui_assets.atlas.clone());
     }
@@ -411,8 +736,19 @@ fn spawn_particles(
     let mut explosions = Vec::new();
 
     for emit in emits {
-        if live.0.len() >= MAX_LIVE_PARTICLES {
-            break;
+        let len = live.0.len();
+        let full = len >= MAX_LIVE_PARTICLES;
+        let more = match &emit {
+            ParticleEmit::Event(_) | ParticleEmit::Firework(_) => true,
+            ParticleEmit::Level(level) => matches!(level.particle, P::ElderGuardian),
+            ParticleEmit::Block(_)
+            | ParticleEmit::Explosion(_)
+            | ParticleEmit::Tracking(_)
+            | ParticleEmit::Cloud(_)
+            | ParticleEmit::ItemUse(_) => false,
+        };
+        if full && !more {
+            continue;
         }
         match emit {
             ParticleEmit::Block(spawn) => {
@@ -422,11 +758,12 @@ fn spawn_particles(
             ParticleEmit::Level(level) => {
                 levels += 1;
                 if matches!(level.particle, P::ElderGuardian) {
-                    elder_guardian.add(if level.count == 0 {
+                    let count = if level.count == 0 {
                         1
                     } else {
                         level.count.min(MAX_EMIT_COUNT)
-                    });
+                    };
+                    elder_guardian.add(count, level_id);
                     continue;
                 }
                 if let Some(atlas) = atlas {
@@ -484,8 +821,26 @@ fn spawn_particles(
             ParticleEmit::ItemUse(item_use) => {
                 uses += 1;
                 let Some(atlas) = atlas else { continue };
-                spawn_item_use(&item_use, atlas, world, eye, status, &mut live.0, rng);
+                spawn_item_use(&item_use, atlas, eye, status, &mut live.0, rng);
             }
+            ParticleEmit::Firework(firework) => {
+                levels += 1;
+                let Some(atlas) = atlas else { continue };
+                magic::spawn_firework(
+                    &firework,
+                    atlas,
+                    world,
+                    eye,
+                    status,
+                    &mut live.0,
+                    rng,
+                    &mut sparks.0,
+                    &mut shows.shows,
+                );
+            }
+        }
+        if full {
+            live.0.truncate(len);
         }
     }
 
@@ -517,7 +872,6 @@ fn spawn_particles(
 fn spawn_item_use(
     emit: &crate::session::ItemUseEmit,
     atlas: &Atlas,
-    world: Option<&azalea_world::World>,
     eye: DVec3,
     status: ParticleStatus,
     live: &mut Vec<Particle>,
@@ -559,7 +913,7 @@ fn spawn_item_use(
         }
         let aux = Vec3::new(d.x as f32, (d.y + 0.05) as f32, d.z as f32);
         if let Some(recipe) = item_recipe(atlas, emit.item, Some(aux), rng) {
-            push_recipe(live, world, rng, recipe, pos);
+            push_recipe(live, rng, recipe, pos);
         }
     }
 }
@@ -803,31 +1157,16 @@ pub(crate) fn spawn_block_break(
         let size =
             0.1 * (rng.next_f32() * 0.5 + 0.5) * 2.0 / 2.0 * if spawn.mining { 0.6 } else { 1.0 };
         let lifetime = (4.0 / (rng.next_f32() * 0.9 + 0.1)) as u32;
+        let phase = rng.next_f32() * TICK;
 
-        let mut particle = Particle {
-            prev: pos,
-            pos,
-            velocity,
-            gravity: 1.0,
-            friction: 0.98,
-            tick_acc: rng.next_f32() / 20.0,
-            age: 0,
-            lifetime,
-            tint,
-            size,
-            grow: Grow::Fixed,
-            sprite: Sprite::Fixed(random_sub_uv(tile, &mut rng)),
-            flags: PHYSICS | TERRAIN,
-            drip: None,
-            origin: pos,
-            motion: Motion::Integrate,
-            light: Light::Cell,
-        };
-        if particle.lifetime > 0 {
-            particle.age = 1;
-            advance_one_tick(&mut particle, world, &mut rng);
-        }
-        live.push(particle);
+        let mut r = blank_recipe(Sprite::Fixed(random_sub_uv(tile, &mut rng)));
+        r.velocity = velocity;
+        r.gravity = 1.0;
+        r.lifetime = lifetime;
+        r.tint = tint;
+        r.size = size;
+        r.flags = PHYSICS | TERRAIN;
+        live.push(Particle::from_recipe(r, pos, phase));
     }
 }
 
@@ -960,45 +1299,15 @@ fn add_level_particle(
         ),
         _ => pos,
     };
-    if let Some(recipe) = recipe(particle_kind, atlas, arg, rng) {
-        push_recipe(live, world, rng, recipe, pos);
+    let spawn = SpawnCtx { pos, world, eye };
+    if let Some(recipe) = recipe(particle_kind, atlas, arg, rng, &spawn) {
+        push_recipe(live, rng, recipe, pos);
     }
 }
 
-fn push_recipe(
-    live: &mut Vec<Particle>,
-    world: Option<&azalea_world::World>,
-    rng: &mut JavaRandom,
-    recipe: Recipe,
-    pos: DVec3,
-) {
-    let origin = pos + recipe.nudge;
-    let pos = match recipe.motion {
-        Motion::FlyTowards { .. } => origin + recipe.velocity.as_dvec3(),
-        _ => origin,
-    };
-    let mut particle = Particle {
-        prev: pos,
-        pos,
-        velocity: recipe.velocity,
-        gravity: recipe.gravity,
-        friction: recipe.friction,
-        tick_acc: rng.next_f32() / 20.0,
-        age: 0,
-        lifetime: recipe.lifetime.max(1),
-        tint: recipe.tint,
-        size: recipe.size,
-        grow: recipe.grow,
-        sprite: recipe.sprite,
-        flags: recipe.flags,
-        drip: recipe.drip,
-        origin,
-        motion: recipe.motion,
-        light: recipe.light,
-    };
-    particle.age = 1;
-    advance_one_tick(&mut particle, world, rng);
-    live.push(particle);
+fn push_recipe(live: &mut Vec<Particle>, rng: &mut JavaRandom, recipe: Recipe, pos: DVec3) {
+    let phase = rng.next_f32() * TICK;
+    live.push(Particle::from_recipe(recipe, pos, phase));
 }
 
 pub(crate) fn overrides_limiter(kind: &P) -> bool {
@@ -1107,7 +1416,7 @@ fn seed_puffs(
             eye,
         );
         if let Some(puff) = live.get_mut(len) {
-            puff.tick_acc -= tick as f32 * TICK;
+            puff.tick_acc -= (tick + 1) as f32 * TICK;
         }
     }
     true
@@ -1185,22 +1494,10 @@ fn spawn_noxious_gas_cloud_seed(
         let dir = Vec3::new(rng.next_f32() - 0.5, 0.0, rng.next_f32() - 0.5).normalize_or_zero();
         let distance = rng.next_f32() * 3.0;
         let at = centre + (dir * distance).as_dvec3() - DVec3::new(0.0, 0.25, 0.0);
-        if let Some(world) = world {
-            let below = block_at(
-                world,
-                [
-                    at.x.floor() as i32,
-                    (at.y - 1.0).floor() as i32,
-                    at.z.floor() as i32,
-                ],
-            );
-            let in_water_above = below.is_some_and(|state| {
-                let fluid = azalea::block::fluid_state::FluidState::from(state);
-                fluid.kind == azalea::block::fluid_state::FluidKind::Water && fluid.is_source()
-            });
-            if is_solid_at(Some(world), at) || !in_water_above {
-                continue;
-            }
+        if let Some(world) = world
+            && !noxious_gas_reaches(world, centre, at)
+        {
+            continue;
         }
         let gate = SpawnGate::ALWAYS_SHOW;
         if !spawn_held(
@@ -1219,6 +1516,45 @@ fn spawn_noxious_gas_cloud_seed(
             return;
         }
     }
+}
+
+fn noxious_gas_reaches(world: &azalea_world::World, centre: DVec3, at: DVec3) -> bool {
+    use azalea::physics::clip::{BlockShapeType, ClipContext, FluidPickType, clip};
+    use azalea::physics::collision::BlockWithShape;
+    use azalea_core::position::{BlockPos, Vec3 as WorldVec3};
+
+    let cell = at.floor().as_ivec3();
+    let pos = BlockPos::new(cell.x, cell.y, cell.z);
+    let passable = world.get_block_state(pos).is_none_or(|state| {
+        state.is_air()
+            || state.as_block_kind() == azalea_registry::builtin::BlockKind::Water
+            || state.collision_shape(pos).is_empty()
+    });
+    if !passable || at.distance_squared(centre) > 9.0 {
+        return false;
+    }
+    let below_at = at - DVec3::Y;
+    let water_below =
+        block_at(world, below_at.floor().as_ivec3().to_array()).is_some_and(|state| {
+            let fluid = azalea::block::fluid_state::FluidState::from(state);
+            fluid.kind == azalea::block::fluid_state::FluidKind::Water && fluid.is_source()
+        });
+    if !water_below {
+        return false;
+    }
+    let below_source = centre - DVec3::Y;
+    let hit = clip(
+        &world.chunks,
+        ClipContext {
+            from: WorldVec3::new(below_source.x, below_source.y, below_source.z),
+            to: WorldVec3::new(below_at.x, below_at.y, below_at.z),
+            block_shape_type: BlockShapeType::Collider,
+            fluid_pick_type: FluidPickType::None,
+            held_item: azalea_registry::builtin::ItemKind::Air,
+            entity: None,
+        },
+    );
+    hit.miss
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1278,6 +1614,7 @@ struct AnimateLevel {
     thundering: bool,
     game_time: u64,
     biomes: Option<std::sync::Arc<Vec<u8>>>,
+    marker: Option<azalea_registry::builtin::BlockKind>,
 }
 
 fn frame_sky_darken(view: &crate::renderer::FrameView) -> i32 {
@@ -1295,8 +1632,9 @@ fn animate_tick_particles(
     mut clock: ResMut<AmbientClock>,
     mut rain_sound: ResMut<crate::renderer::weather::RainSoundTime>,
 ) {
-    clock.0 += time.delta_secs();
-    if clock.0 < TICK {
+    let passed = view.world_delta(time.delta_secs());
+    clock.0 += passed;
+    if clock.0 < TICK || passed == 0.0 {
         return;
     }
     clock.0 = (clock.0 - TICK).min(TICK);
@@ -1306,7 +1644,17 @@ fn animate_tick_particles(
     };
     let status = gui.options.particles;
     let rain = env.rain;
-    if status == ParticleStatus::Minimal && rain <= 0.0 && !SAMPLE_FOR_SOUND {
+    let marker = if view.in_world && view.gamemode == crate::session::Gamemode::Creative {
+        use azalea_registry::builtin::BlockKind;
+        match view.local.main_hand.id {
+            "barrier" => Some(BlockKind::Barrier),
+            "light" => Some(BlockKind::Light),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if status == ParticleStatus::Minimal && rain <= 0.0 && !SAMPLE_FOR_SOUND && marker.is_none() {
         return;
     }
     let eye = view.camera_world;
@@ -1330,6 +1678,7 @@ fn animate_tick_particles(
         biomes: crate::util::biome_color::any_ambient_particles()
             .then(|| crate::client::worker::biome_table(&world.registries))
             .filter(|table| !table.is_empty()),
+        marker,
     };
     let mut ctx = Emitter {
         cell: center,
@@ -1343,7 +1692,7 @@ fn animate_tick_particles(
         rng: &mut particle_rng.0,
     };
     'sampling: for _ in 0..ANIMATE_SAMPLES {
-        if status == ParticleStatus::Minimal && !SAMPLE_FOR_SOUND {
+        if status == ParticleStatus::Minimal && !SAMPLE_FOR_SOUND && marker.is_none() {
             break;
         }
         for radius in ANIMATE_RADII {
@@ -1430,6 +1779,14 @@ fn do_animate_tick(
     };
     if !is_quiet(state) {
         block_and_fluid_ambient(ctx, state, light, level);
+    }
+    if let Some(marker) = level.marker
+        && azalea_registry::builtin::BlockKind::from(state) == marker
+    {
+        let marker_particle =
+            P::BlockMarker(azalea::entity::particle::BlockParticle { block_state: state });
+        let at = rel(ctx.cell, [0.5; 3]);
+        ctx.emit(&marker_particle, at, Vec3::ZERO, false);
     }
     biome_ambient(ctx, state, level);
 }
@@ -1713,7 +2070,7 @@ fn emit_ambient(
                 let pitch = ctx.f32() * 0.7 + 0.6;
                 play("block.campfire.crackle", Bus::Blocks, centre, volume, pitch);
             }
-            if !ctx.one_in(5) {
+            if state.as_block_kind() != BlockKind::Campfire || !ctx.one_in(5) {
                 return;
             }
             let xa = ctx.f32() / 2.0;
@@ -1925,7 +2282,10 @@ fn emit_ambient(
             if ctx.f32() < chance && open {
                 let particle = match leaf {
                     Leaf::BiomeTinted | Leaf::AzaleaTint => {
-                        P::TintedLeaves(azalea::entity::particle::ColorParticle::default())
+                        let [r, g, b] = leaf_tint_color(leaf, state, cell, ctx.world);
+                        P::TintedLeaves(azalea::entity::particle::ColorParticle {
+                            color: azalea_core::color::ArgbColor::new(255, r, g, b),
+                        })
                     }
                     Leaf::Cherry => P::CherryLeaves,
                     Leaf::PaleOak => P::PaleOakLeaves,
@@ -2625,26 +2985,37 @@ fn emit_fluid_ambient(fluid: &azalea::block::fluid_state::FluidState, ctx: &mut 
 struct Recipe {
     velocity: Vec3,
     gravity: f32,
-    friction: f32,
+    friction: Vec3,
     lifetime: u32,
     size: f32,
     tint: [f32; 4],
     grow: Grow,
     sprite: Sprite,
-    flags: u8,
+    flags: u32,
     drip: Option<(Drip, DripStage)>,
     motion: Motion,
     light: Light,
     nudge: DVec3,
+    start_offset: DVec3,
+    pre_ticked: bool,
+    start_age: u32,
+    delay_ticks: u32,
+    roll: f32,
+    roll_speed: f32,
+    roll_accel: f32,
+    facing: Facing,
+    behavior: Option<&'static Behavior>,
+    data: [f32; 8],
+    target: DVec3,
 }
 
-fn base_recipe(sprite: Sprite, rng: &mut JavaRandom) -> Recipe {
+fn blank_recipe(sprite: Sprite) -> Recipe {
     Recipe {
         velocity: Vec3::ZERO,
-        gravity: 1.0,
-        friction: 0.98,
-        lifetime: (4.0 / (rng.next_f32() * 0.9 + 0.1)) as u32,
-        size: 0.1 * (rng.next_f32() * 0.5 + 0.5) * 2.0,
+        gravity: 0.0,
+        friction: Vec3::splat(0.98),
+        lifetime: 0,
+        size: 0.0,
         tint: [1.0, 1.0, 1.0, 1.0],
         grow: Grow::Fixed,
         sprite,
@@ -2653,7 +3024,25 @@ fn base_recipe(sprite: Sprite, rng: &mut JavaRandom) -> Recipe {
         motion: Motion::Integrate,
         light: Light::Cell,
         nudge: DVec3::ZERO,
+        start_offset: DVec3::ZERO,
+        pre_ticked: false,
+        start_age: 0,
+        delay_ticks: 0,
+        roll: 0.0,
+        roll_speed: 0.0,
+        roll_accel: 0.0,
+        facing: Facing::Camera,
+        behavior: None,
+        data: [0.0; 8],
+        target: DVec3::ZERO,
     }
+}
+
+fn base_recipe(sprite: Sprite, rng: &mut JavaRandom) -> Recipe {
+    let mut r = blank_recipe(sprite);
+    r.lifetime = (4.0 / (rng.next_f32() * 0.9 + 0.1)) as u32;
+    r.size = 0.1 * (rng.next_f32() * 0.5 + 0.5) * 2.0;
+    r
 }
 
 fn short_lifetime(rng: &mut JavaRandom) -> u32 {
@@ -2812,15 +3201,28 @@ fn recipe(
     atlas: &Atlas,
     arg: Vec3,
     rng: &mut JavaRandom,
+    ctx: &SpawnCtx,
 ) -> Option<Recipe> {
     use azalea::entity::particle::Particle as P;
 
+    if let Some(claimed) = leaves::recipe(particle, atlas, arg, rng, ctx) {
+        return claimed;
+    }
+    if let Some(claimed) = sculk::recipe(particle, atlas, arg, rng, ctx) {
+        return claimed;
+    }
+    if let Some(claimed) = magic::recipe(particle, atlas, arg, rng, ctx) {
+        return claimed;
+    }
+    if let Some(claimed) = water::recipe(particle, atlas, arg, rng, ctx) {
+        return claimed;
+    }
+    if let Some(claimed) = terrain::recipe(particle, atlas, arg, rng, ctx) {
+        return claimed;
+    }
+
     let name = particle_name(particle);
     match particle {
-        P::Block(b) | P::BlockMarker(b) | P::FallingDust(b) => {
-            terrain_recipe(b.block_state, arg, rng)
-        }
-
         P::Flame | P::SoulFireFlame | P::CopperFireFlame => {
             flame_recipe(atlas, name, arg, rng, 1.0)
         }
@@ -2840,7 +3242,11 @@ fn recipe(
                 gravity: -0.1,
                 physics: true,
             };
-            ash_smoke_recipe(atlas, name, arg, rng, ash)
+            let mut r = ash_smoke_recipe(atlas, name, arg, rng, ash)?;
+            if matches!(particle, P::WhiteSmoke) {
+                r.tint = [0.729_411_8, 0.694_117_67, 0.760_784_3, 1.0];
+            }
+            Some(r)
         }
         P::Ash => {
             let ash = AshSmoke {
@@ -2889,7 +3295,7 @@ fn recipe(
             let mut r =
                 suspended_particle_recipe(atlas, name, Some(Vec3::new(0.0, -0.8, 0.0)), rng)?;
             r.lifetime = 500 + rng.next_int(501);
-            r.gravity = 0.01 / 0.04;
+            r.gravity = 0.01;
             r.tint = [0.32, 0.5, 0.22, 1.0];
             Some(r)
         }
@@ -2904,8 +3310,7 @@ fn recipe(
             r.size = 0.1 * (rng.next_f32() * rng.next_f32() * 6.0 + 1.0);
             r.lifetime = (16.0 / (rng.next_f32() * 0.8 + 0.2)) as u32 + 2;
             r.gravity = -0.1;
-            r.friction = 0.9;
-            r.grow = Grow::In;
+            r.friction = Vec3::splat(0.9);
             Some(r)
         }
         P::Explosion => {
@@ -2915,48 +3320,34 @@ fn recipe(
             r.lifetime = 6 + rng.next_int(4);
             let grey = rng.next_f32() * 0.6 + 0.4;
             r.tint = [grey, grey, grey, 1.0];
-            r.size = 2.0 * (1.0 - arg.x.clamp(0.0, 1.0) * 0.5);
+            r.size = 2.0 * (1.0 - arg.x * 0.5);
+            r.flags = FULLBRIGHT;
+            Some(r)
+        }
+        P::SweepAttack => {
+            let mut r = base_recipe(Sprite::Animated(atlas.sheet_index(name)?), rng);
+            r.velocity = Vec3::ZERO;
+            r.gravity = 0.0;
+            r.lifetime = 4;
+            let grey = rng.next_f32() * 0.6 + 0.4;
+            r.tint = [grey, grey, grey, 1.0];
+            r.size = 1.0 - arg.x * 0.5;
             r.flags = FULLBRIGHT;
             Some(r)
         }
 
-        P::Splash | P::Rain => {
-            let uv = random_frame(atlas, name, rng)?;
-            let mut r = base_recipe(Sprite::Fixed(uv), rng);
-            r.gravity = if matches!(particle, P::Splash) {
-                0.04 / 0.04
-            } else {
-                0.06 / 0.04
-            };
-            r.velocity = Vec3::new(arg.x, rng.next_f32() * 0.2 + 0.1, arg.z);
-            r.lifetime = short_lifetime(rng);
-            r.flags |= WATER_DROP;
-            Some(r)
-        }
         P::Underwater => {
             let mut r = suspended_particle_recipe(atlas, name, None, rng)?;
             r.tint = [0.4, 0.4, 0.7, 1.0];
             Some(r)
         }
-        P::Bubble | P::BubblePop | P::CurrentDown | P::BubbleColumnUp => {
-            let uv = random_frame(atlas, name, rng)?;
-            let mut r = base_recipe(Sprite::Fixed(uv), rng);
-            r.size *= rng.next_f32() * 0.6 + 0.2;
-            r.velocity = arg * 0.2 + centred_jitter(rng, 0.04);
-            r.gravity = -0.05;
-            r.friction = 0.85;
-            r.lifetime = short_lifetime(rng);
-            Some(r)
-        }
-
-        P::Dust(dust) => dust_recipe(atlas, name, arg, rng, unit_rgb(&dust.color), dust.scale),
-        P::DustColorTransition(dust) => {
-            dust_recipe(atlas, name, arg, rng, unit_rgb(&dust.from), dust.scale)
-        }
-        P::DustPlume => dust_recipe(atlas, name, arg, rng, [0.75, 0.65, 0.5], 1.0),
 
         P::HappyVillager | P::Composter | P::EggCrack => {
-            suspended_recipe(atlas, name, arg, rng, [1.0, 1.0, 1.0, 1.0])
+            let mut r = suspended_recipe(atlas, name, arg, rng, [1.0, 1.0, 1.0, 1.0])?;
+            if matches!(particle, P::Composter) {
+                r.lifetime = 3 + rng.next_int(5);
+            }
+            Some(r)
         }
         P::Mycelium => {
             let grey = rng.next_f32() * 0.1 + 0.2;
@@ -2964,19 +3355,24 @@ fn recipe(
         }
         P::Dolphin => {
             let alpha = 1.0 - rng.next_f32() * 0.7;
-            suspended_recipe(atlas, name, arg, rng, [0.3, 0.5, 1.0, alpha])
+            let mut r = suspended_recipe(atlas, name, arg, rng, [0.3, 0.5, 1.0, alpha])?;
+            r.lifetime /= 2;
+            Some(r)
         }
 
         P::Heart | P::AngryVillager => {
             let uv = random_frame(atlas, name, rng)?;
             let mut r = base_recipe(Sprite::Fixed(uv), rng);
-            r.velocity = arg * 0.01 + Vec3::Y * 0.1;
+            r.velocity = base_velocity(Vec3::ZERO, rng) * 0.01 + Vec3::Y * 0.1;
             r.gravity = 0.0;
-            r.friction = 0.86;
+            r.friction = Vec3::splat(0.86);
             r.lifetime = 16;
             r.size *= 1.5;
             r.grow = Grow::In;
-            r.flags = 0;
+            r.flags = SPEED_UP_Y_BLOCKED;
+            if matches!(particle, P::AngryVillager) {
+                r.nudge = DVec3::new(0.0, 0.5, 0.0);
+            }
             Some(r)
         }
         P::Note => {
@@ -2987,13 +3383,13 @@ fn recipe(
                 (((hue + offset) * std::f32::consts::TAU).sin() * 0.65 + 0.35).max(0.0)
             };
             r.tint = [channel(0.0), channel(1.0 / 3.0), channel(2.0 / 3.0), 1.0];
-            r.velocity = Vec3::new(arg.x * 0.01, arg.y * 0.01 + 0.2, arg.z * 0.01);
+            r.velocity = base_velocity(Vec3::ZERO, rng) * 0.01 + Vec3::Y * 0.2;
             r.gravity = 0.0;
-            r.friction = 0.66;
+            r.friction = Vec3::splat(0.66);
             r.lifetime = 6;
             r.size *= 1.5;
             r.grow = Grow::In;
-            r.flags = 0;
+            r.flags = PHYSICS | SPEED_UP_Y_BLOCKED;
             Some(r)
         }
 
@@ -3006,25 +3402,10 @@ fn recipe(
             r.lifetime = (rng.next_f32() * 10.0) as u32 + 40;
             r.velocity = arg;
             r.gravity = 0.0;
-            r.friction = 1.0;
+            r.friction = Vec3::ONE;
             r.grow = Grow::Portal;
             r.flags = 0;
             r.motion = Motion::Portal;
-            r.light = Light::Quartic;
-            Some(r)
-        }
-        P::ReversePortal => {
-            let uv = random_frame(atlas, name, rng)?;
-            let mut r = base_recipe(Sprite::Fixed(uv), rng);
-            let br = rng.next_f32() * 0.6 + 0.4;
-            r.tint = [0.9 * br, 0.3 * br, br, 1.0];
-            r.size = 0.1 * (rng.next_f32() * 0.2 + 0.5);
-            r.lifetime = (rng.next_f32() * 10.0) as u32 + 40;
-            r.velocity = arg * 0.05;
-            r.gravity = 0.0;
-            r.friction = 0.93;
-            r.grow = Grow::Portal;
-            r.flags = 0;
             r.light = Light::Quartic;
             Some(r)
         }
@@ -3038,48 +3419,14 @@ fn recipe(
             r.lifetime = (rng.next_f32() * 10.0) as u32 + 30;
             r.velocity = arg;
             r.gravity = 0.0;
-            r.friction = 1.0;
+            r.friction = Vec3::ONE;
             r.flags = if vault { TRANSLUCENT } else { 0 };
             if vault {
                 r.size *= 1.5;
+                r.behavior = Some(&VAULT_CONNECTION);
             }
             r.motion = Motion::FlyTowards { vault };
             r.light = if vault { Light::Block } else { Light::Quartic };
-            Some(r)
-        }
-
-        P::Lava => {
-            let uv = random_frame(atlas, name, rng)?;
-            let mut r = base_recipe(Sprite::Fixed(uv), rng);
-            r.velocity = Vec3::new(
-                (rng.next_f32() - 0.5) * 0.16,
-                rng.next_f32() * 0.4 + 0.05,
-                (rng.next_f32() - 0.5) * 0.16,
-            );
-            r.gravity = 0.75;
-            r.friction = 0.999;
-            r.size *= rng.next_f32() * 2.0 + 0.2;
-            r.lifetime = (16.0 / (rng.next_f32() * 0.8 + 0.2)) as u32;
-            r.grow = Grow::Lava;
-            r.flags = PHYSICS | FULLBRIGHT;
-            Some(r)
-        }
-
-        P::Cloud | P::Sneeze => {
-            let mut r = base_recipe(Sprite::Animated(atlas.sheet_index(name)?), rng);
-            r.velocity = arg + Vec3::splat(0.1) * (rng.next_f32() - 0.5);
-            let grey = 1.0 - rng.next_f32() * 0.3;
-            r.tint = if matches!(particle, P::Sneeze) {
-                [0.22, 1.0, 0.53, 0.4]
-            } else {
-                [grey, grey, grey, 1.0]
-            };
-            r.size *= 1.875;
-            r.friction = 0.96;
-            r.gravity = 0.0;
-            r.lifetime = (((8.0 / (rng.next_f32() * 0.8 + 0.3)) * 2.5) as u32).max(1);
-            r.grow = Grow::In;
-            r.flags = TRANSLUCENT;
             Some(r)
         }
 
@@ -3108,28 +3455,7 @@ fn recipe(
             spell_recipe(atlas, name, arg, rng, [br, 0.0, br, 1.0])
         }
 
-        P::EndRod => {
-            let lifetime = 60 + rng.next_int(12);
-            animated_recipe(atlas, name, rng, arg, 0.0125, lifetime, 0.75)
-        }
-        P::TotemOfUndying => {
-            let lifetime = 60 + rng.next_int(12);
-            let mut r = animated_recipe(atlas, name, rng, arg, 1.25, lifetime, 0.75)?;
-            r.friction = 0.6;
-            let v = rng.next_f32();
-            r.tint = if rng.next_int(4) == 0 {
-                [0.6 + v * 0.2, 0.6 + v * 0.3, v * 0.2, 1.0]
-            } else {
-                [0.1 + v * 0.2, 0.4 + v * 0.3, v * 0.2, 1.0]
-            };
-            Some(r)
-        }
-        P::Firework => {
-            let lifetime = 20 + rng.next_int(20);
-            animated_recipe(atlas, name, rng, arg, 0.1, lifetime, 1.0)
-        }
-
-        P::Glow | P::GlowSquidInk | P::WaxOn | P::WaxOff | P::ElectricSpark | P::Scrape => {
+        P::WaxOn | P::WaxOff | P::ElectricSpark | P::Scrape => {
             let mut r = base_recipe(Sprite::Animated(atlas.sheet_index(name)?), rng);
             r.velocity = match particle {
                 P::Scrape => arg * 0.01,
@@ -3137,40 +3463,20 @@ fn recipe(
                 _ => arg * 0.25,
             };
             r.gravity = 0.0;
-            r.friction = 0.96;
+            r.friction = Vec3::splat(0.96);
             r.size *= 0.75;
             r.lifetime = match particle {
                 P::ElectricSpark => rng.next_int(2) + 2,
-                P::Glow | P::GlowSquidInk => short_lifetime(rng),
                 _ => rng.next_int(30) + 10,
             };
             r.tint = match particle {
                 P::WaxOn => [0.91, 0.55, 0.08, 1.0],
-                P::WaxOff | P::ElectricSpark => [1.0, 0.9, 1.0, 1.0],
-                P::Scrape => [0.29, 0.58, 0.51, 1.0],
-                _ if rng.next_int(2) == 0 => [0.6, 1.0, 0.8, 1.0],
-                _ => [0.08, 0.4, 0.4, 1.0],
+                P::Scrape if rng.next_bool() => [0.29, 0.58, 0.51, 1.0],
+                P::Scrape => [0.43, 0.77, 0.62, 1.0],
+                _ => [1.0, 0.9, 1.0, 1.0],
             };
-            r.flags = 0;
+            r.flags = SPEED_UP_Y_BLOCKED;
             r.light = Light::Linear;
-            Some(r)
-        }
-
-        P::Crit | P::EnchantedHit | P::DamageIndicator => {
-            let mut r = base_recipe(Sprite::Fixed(atlas.crit?), rng);
-            let grey = rng.next_f32() * 0.3 + 0.6;
-            r.tint = [grey, grey, grey, 1.0];
-            if matches!(particle, P::EnchantedHit) {
-                r.tint[0] *= 0.3;
-                r.tint[1] *= 0.8;
-            }
-            r.velocity = arg * 0.4;
-            r.gravity = 0.5;
-            r.friction = 0.7;
-            r.size *= 0.75;
-            r.lifetime = ((6.0 / (rng.next_f32() * 0.8 + 0.6)) as u32).max(1);
-            r.grow = Grow::In;
-            r.flags = CRIT_DECAY;
             Some(r)
         }
 
@@ -3213,11 +3519,15 @@ fn recipe(
         P::LandingObsidianTear => {
             drip_recipe(atlas, name, Drip::ObsidianTear, DripStage::Land, rng)
         }
+        P::FallingNectar => drip_recipe(atlas, name, Drip::Nectar, DripStage::Fall, rng),
+        P::FallingSporeBlossom => {
+            drip_recipe(atlas, name, Drip::SporeBlossom, DripStage::Fall, rng)
+        }
 
         P::Gust | P::SmallGust => {
             let mut r = base_recipe(Sprite::Animated(atlas.sheet_index(name)?), rng);
             r.gravity = 0.0;
-            r.friction = 1.0;
+            r.friction = Vec3::ONE;
             r.lifetime = 12 + rng.next_int(4);
             r.size = if matches!(particle, P::SmallGust) {
                 0.15
@@ -3230,65 +3540,39 @@ fn recipe(
 
         P::GustEmitterLarge | P::GustEmitterSmall => None,
 
-        P::SulfurBubbles => {
-            let uv = random_frame(atlas, name, rng)?;
-            let mut r = base_recipe(Sprite::Fixed(uv), rng);
-            let xd = arg.x * 0.2 + (rng.next_f32() * 2.0 - 1.0) * 0.02;
-            let zd = arg.y * 0.2 + (rng.next_f32() * 2.0 - 1.0) * 0.02;
-            r.velocity = Vec3::new(xd, 0.0, zd);
-            let size_start = 0.02 + 0.02 * rng.next_f32();
-            r.size = size_start + 0.5 * (0.15 - size_start);
-            r.gravity = -0.04;
-            r.friction = 0.85;
-            r.lifetime = 285;
-            Some(r)
-        }
-
         P::NoxiousGas => {
-            let mut r = base_recipe(Sprite::Animated(atlas.sheet_index(name)?), rng);
-            r.velocity = base_velocity(Vec3::ZERO, rng) * 0.1 + arg;
-            r.size *= 0.75 * 3.0;
-            r.gravity = -0.02;
-            r.friction = 0.96;
-            r.lifetime = ((6.0 / (rng.next_f32() * 0.5 + 0.5) * 3.0) as u32).max(1);
-            r.grow = Grow::In;
-            r.flags = PHYSICS | TRANSLUCENT | FADE_OUT;
+            let ash = AshSmoke {
+                dir: Vec3::splat(0.1),
+                scale: 3.0,
+                color_random: 0.3,
+                max_lifetime: 5.0,
+                gravity: -0.02,
+                physics: true,
+            };
+            let mut r = ash_smoke_recipe(atlas, name, arg, rng, ash)?;
+            r.tint = [1.0, 1.0, 1.0, 1.0];
+            r.lifetime = (6.0 / (f64::from(rng.next_f32()) * 0.5 + 0.5) * 3.0) as u32;
+            r.flags |= TRANSLUCENT;
+            r.behavior = Some(&NOXIOUS_GAS);
             Some(r)
         }
 
         P::GeyserBase(g) | P::GeyserPoof(g) => {
             let water = g.water_blocks as f32;
             let burst = g.burst_impulse_base + 0.25 * water;
-            let mut r = base_recipe(Sprite::Animated(atlas.sheet_index(name)?), rng);
-            let mut v = base_velocity(Vec3::ZERO, rng) * burst + arg;
-            v.y = v.y.abs();
-            r.velocity = v;
-            r.size *= 0.75 * (3.0 + 0.125 * water);
-            r.gravity = 0.0;
-            r.friction = 0.725;
+            let ash = AshSmoke {
+                dir: Vec3::splat(burst),
+                scale: 3.0 + 0.125 * water,
+                color_random: 0.0,
+                max_lifetime: 0.0,
+                gravity: 0.0,
+                physics: true,
+            };
+            let mut r = ash_smoke_recipe(atlas, name, arg, rng, ash)?;
+            r.velocity.y = r.velocity.y.abs();
+            r.friction = Vec3::splat(0.725);
+            r.tint = [1.0, 1.0, 1.0, 1.0];
             r.lifetime = (25.0 * (0.8 + 0.2 * rng.next_f32())) as u32;
-            r.grow = Grow::In;
-            Some(r)
-        }
-
-        P::GeyserPlume(g) => {
-            let height = 5 * g.water_blocks.max(1);
-            let prop = (if g.water_blocks == 1 { 1.5 } else { 1.0 }) * height as f32 * 1.45;
-            let mut r = base_recipe(Sprite::Animated(atlas.sheet_index(name)?), rng);
-            let v0 = 0.04 * prop;
-            let decel = v0 * v0 / (2.0 * (height - 1) as f32);
-            r.velocity = Vec3::new(
-                (rng.next_f32() - 0.5) * 0.2 * 0.5,
-                v0 + decel,
-                (rng.next_f32() - 0.5) * 0.2 * 0.5,
-            );
-            r.size *= 0.75 * (2.5 + height as f32 / 8.0);
-            r.gravity = decel / 0.04;
-            r.friction = 1.0;
-            r.lifetime = ((v0 / decel).ceil() as u32 + 5)
-                .min(height as u32 * 5)
-                .max(1);
-            r.flags = PHYSICS;
             Some(r)
         }
 
@@ -3305,13 +3589,42 @@ fn recipe(
             ];
             let mut r = base_recipe(Sprite::Fixed(uv), rng);
             r.velocity = base_velocity(Vec3::ZERO, rng);
+            r.gravity = 1.0;
             r.size /= 2.0;
             Some(r)
         }
 
         P::NoxiousGasCloud | P::Geyser(_) => None,
 
+        P::ElderGuardian | P::ExplosionEmitter => None,
+
         _ => generic_recipe(atlas, name, arg, rng),
+    }
+}
+
+static VAULT_CONNECTION: Behavior = Behavior {
+    tint: Some(vault_connection_tint),
+    ..Behavior::NONE
+};
+
+fn vault_connection_tint(p: &Particle, partial: f32) -> [f32; 4] {
+    let t = (p.age as f32 + partial) / p.lifetime.max(1) as f32;
+    let alpha = ((t - 0.25) / 0.75).clamp(0.0, 1.0) * 0.6;
+    [p.tint[0], p.tint[1], p.tint[2], alpha]
+}
+
+static NOXIOUS_GAS: Behavior = Behavior {
+    tick: Some(noxious_gas_tick),
+    ..Behavior::NONE
+};
+
+fn noxious_gas_tick(p: &mut Particle, ctx: &mut TickCtx<'_>) {
+    ctx.default_tick(p);
+    let lifetime = p.lifetime as f32;
+    let fade_from = lifetime / 2.0;
+    let age = p.age as f32;
+    if age > fade_from {
+        p.tint[3] = (lifetime - (age - fade_from)) / lifetime;
     }
 }
 
@@ -3323,6 +3636,7 @@ fn terrain_recipe(
     let tile = particle_uv(state)?;
     let mut r = base_recipe(Sprite::Fixed(random_sub_uv(tile, rng)), rng);
     r.velocity = arg * 0.1 + base_velocity(Vec3::ZERO, rng);
+    r.gravity = 1.0;
     r.tint = [0.6, 0.6, 0.6, 1.0];
     r.size /= 2.0;
     r.flags = PHYSICS | TERRAIN;
@@ -3342,6 +3656,7 @@ fn item_recipe(atlas: &Atlas, id: &str, aux: Option<Vec3>, rng: &mut JavaRandom)
     let mut r = base_recipe(Sprite::Fixed(uv), rng);
     let base = base_velocity(Vec3::ZERO, rng);
     r.velocity = aux.map_or(base, |aux| base * 0.1 + aux);
+    r.gravity = 1.0;
     r.size /= 2.0;
     r.flags = PHYSICS | ITEM;
     Some(r)
@@ -3360,7 +3675,7 @@ fn flame_recipe(
     let mut jitter = || f64::from((rng.next_f32() - rng.next_f32()) * 0.05);
     r.nudge = DVec3::new(jitter(), jitter(), jitter());
     r.gravity = 0.0;
-    r.friction = 0.96;
+    r.friction = Vec3::splat(0.96);
     r.size *= scale;
     r.lifetime = short_lifetime(rng) + 4;
     r.grow = Grow::Flame;
@@ -3391,12 +3706,12 @@ fn ash_smoke_recipe(
     r.tint = [grey, grey, grey, 1.0];
     r.size *= 0.75 * ash.scale;
     r.gravity = ash.gravity;
-    r.friction = 0.96;
+    r.friction = Vec3::splat(0.96);
     r.lifetime = ((f64::from(ash.max_lifetime) / (f64::from(rng.next_f32()) * 0.8 + 0.2)
         * f64::from(ash.scale)) as u32)
         .max(1);
     r.grow = Grow::In;
-    r.flags = if ash.physics { PHYSICS } else { 0 };
+    r.flags = SPEED_UP_Y_BLOCKED | if ash.physics { PHYSICS } else { 0 };
     Some(r)
 }
 
@@ -3414,7 +3729,7 @@ fn campfire_recipe(
     r.lifetime = rng.next_int(50) + base_lifetime;
     r.gravity = 3.0e-6 / 0.04;
     r.velocity = Vec3::new(arg.x, arg.y + rng.next_f32() / 500.0, arg.z);
-    r.friction = 1.0;
+    r.friction = Vec3::ONE;
     r.tint = [1.0, 1.0, 1.0, alpha];
     r.flags = PHYSICS | TRANSLUCENT;
     r.motion = Motion::Campfire;
@@ -3441,9 +3756,10 @@ fn dust_recipe(
     r.velocity = arg * 0.1;
     r.size *= 0.75 * scale;
     r.gravity = 0.0;
-    r.friction = 0.96;
+    r.friction = Vec3::splat(0.96);
     r.lifetime = ((short_lifetime(rng) as f32 * scale) as u32).max(1);
     r.grow = Grow::In;
+    r.flags |= SPEED_UP_Y_BLOCKED;
     Some(r)
 }
 
@@ -3457,10 +3773,10 @@ fn suspended_recipe(
     let uv = random_frame(atlas, name, rng)?;
     let mut r = base_recipe(Sprite::Fixed(uv), rng);
     r.tint = tint;
-    r.velocity = arg * 0.02;
+    r.velocity = base_velocity(arg, rng) * 0.02;
     r.size *= rng.next_f32() * 0.6 + 0.5;
     r.gravity = 0.0;
-    r.friction = 0.99;
+    r.friction = Vec3::splat(0.99);
     r.lifetime = (20.0 / (rng.next_f32() * 0.8 + 0.2)) as u32;
     r.flags = 0;
     Some(r)
@@ -3481,7 +3797,7 @@ fn suspended_particle_recipe(
     r.size *= rng.next_f32() * 0.6 + if seed.is_some() { 0.6 } else { 0.2 };
     r.lifetime = (16.0 / (rng.next_f32() * 0.8 + 0.2)) as u32;
     r.gravity = 0.0;
-    r.friction = 1.0;
+    r.friction = Vec3::ONE;
     r.flags = 0;
     r.nudge = DVec3::new(0.0, -0.125, 0.0);
     Some(r)
@@ -3510,9 +3826,9 @@ fn spell_recipe(
     r.velocity = v;
     r.size *= 0.75;
     r.gravity = -0.1;
-    r.friction = 0.96;
+    r.friction = Vec3::splat(0.96);
     r.lifetime = short_lifetime(rng);
-    r.flags = TRANSLUCENT;
+    r.flags = TRANSLUCENT | SPEED_UP_Y_BLOCKED;
     Some(r)
 }
 
@@ -3528,7 +3844,7 @@ fn animated_recipe(
     let mut r = base_recipe(Sprite::Animated(atlas.sheet_index(name)?), rng);
     r.velocity = arg;
     r.gravity = gravity;
-    r.friction = 0.91;
+    r.friction = Vec3::splat(0.91);
     r.size *= scale;
     r.lifetime = lifetime.max(1);
     r.flags = TRANSLUCENT | FULLBRIGHT | FADE_OUT;
@@ -3546,7 +3862,7 @@ fn generic_recipe(atlas: &Atlas, name: &str, arg: Vec3, rng: &mut JavaRandom) ->
     let mut r = base_recipe(sprite, rng);
     r.velocity = arg * 0.1;
     r.gravity = 0.0;
-    r.friction = 0.96;
+    r.friction = Vec3::splat(0.96);
     r.size *= 0.75;
     r.lifetime = short_lifetime(rng);
     r.flags = 0;
@@ -3564,20 +3880,31 @@ fn drip_recipe(
     let mut r = base_recipe(Sprite::Fixed(random_frame(atlas, name, rng)?), rng);
     let viscous = matches!(drip, Drip::Honey | Drip::ObsidianTear);
     let rgb = match (drip, stage) {
+        (Drip::Lava | Drip::DripstoneLava, DripStage::Hang) => [1.0, 1.0, 1.0],
         (Drip::Water | Drip::DripstoneWater, _) => [0.2, 0.3, 1.0],
         (Drip::Lava | Drip::DripstoneLava, _) => [1.0, 0.2857143, 0.083333336],
         (Drip::Honey, DripStage::Hang) => [0.622, 0.508, 0.082],
         (Drip::Honey, DripStage::Land) => [0.522, 0.408, 0.082],
         (Drip::Honey, _) => [0.582, 0.448, 0.082],
         (Drip::ObsidianTear, _) => [0.51171875, 0.03125, 0.890625],
+        (Drip::Nectar, _) => [0.92, 0.782, 0.72],
+        (Drip::SporeBlossom, _) => [0.32, 0.5, 0.22],
     };
     r.tint = [rgb[0], rgb[1], rgb[2], 1.0];
     let spread = f64::from(rng.next_f32()) * 0.8 + 0.2;
     let gravity = match stage {
         DripStage::Hang => {
             r.lifetime = if viscous { 100 } else { 40 };
-            r.friction = 0.98 * 0.02;
+            r.friction = Vec3::splat(0.98 * 0.02);
             GRAVITY * 0.02 * if viscous { 0.01 } else { 1.0 }
+        }
+        DripStage::Fall | DripStage::Landed if drip == Drip::Nectar => {
+            r.lifetime = (16.0 / spread) as u32;
+            0.007
+        }
+        DripStage::Fall | DripStage::Landed if drip == Drip::SporeBlossom => {
+            r.lifetime = (64.0 / (rng.next_f32() * 0.8 + 0.1)) as u32;
+            0.005
         }
         DripStage::Fall | DripStage::Landed => {
             r.lifetime = (64.0 / spread) as u32;
@@ -3595,7 +3922,7 @@ fn drip_recipe(
     };
     r.gravity = gravity / 0.04;
     if drip == Drip::ObsidianTear {
-        r.flags |= FULLBRIGHT;
+        r.light = Light::Block;
     }
     if stage != DripStage::Land {
         r.flags &= !PHYSICS;
@@ -3673,23 +4000,120 @@ fn drip_fall(p: &mut Particle, world: Option<&azalea_world::World>, drip: Drip, 
     if let Some(floor) = drip_floor(world, p.pos, *next) {
         next.y = floor;
         p.drip = Some((drip, DripStage::Landed));
-        p.lifetime = p.age;
+        p.remove();
         return;
     }
-    let cell = next.floor().as_ivec3();
-    let (x, z) = (next.x - f64::from(cell.x), next.z - f64::from(cell.z));
-    if let Some(kind) = drip.fluid()
-        && let Some(state) = block_at(world, cell.to_array())
-        && azalea::block::fluid_state::FluidState::from(state).kind == kind
-        && next.y
-            < f64::from(cell.y) + crate::renderer::weather::surface_top(world, state, cell, x, z)
-    {
-        p.lifetime = p.age;
+    if in_own_fluid(world, drip, *next) {
+        p.remove();
     }
 }
 
-fn advance_one_tick(p: &mut Particle, world: Option<&azalea_world::World>, rng: &mut JavaRandom) {
+fn in_own_fluid(world: &azalea_world::World, drip: Drip, at: DVec3) -> bool {
+    let Some(kind) = drip.fluid() else {
+        return false;
+    };
+    let cell = at.floor().as_ivec3();
+    let Some(state) = block_at(world, cell.to_array()) else {
+        return false;
+    };
+    let (x, z) = (at.x - f64::from(cell.x), at.z - f64::from(cell.z));
+    azalea::block::fluid_state::FluidState::from(state).kind == kind
+        && at.y
+            < f64::from(cell.y) + crate::renderer::weather::surface_top(world, state, cell, x, z)
+}
+
+const MAX_COLLISION_SPEED_SQ: f32 = 100.0 * 100.0;
+
+fn move_particle(p: &mut Particle, world: Option<&azalea_world::World>, delta: Vec3) -> MoveResult {
+    if p.stopped {
+        return MoveResult {
+            on_ground: p.on_ground,
+            ..MoveResult::default()
+        };
+    }
+    let mut next = p.pos + delta.as_dvec3();
+    let mut ya = delta.y;
+    let (mut x_blocked, mut y_blocked, mut z_blocked) = (false, false, false);
+    if p.flags & PHYSICS != 0
+        && delta != Vec3::ZERO
+        && delta.length_squared() < MAX_COLLISION_SPEED_SQ
+    {
+        if delta.y != 0.0 && is_solid_at(world, DVec3::new(p.pos.x, next.y, p.pos.z)) {
+            next.y = if delta.y < 0.0 {
+                next.y.floor() + 1.0
+            } else {
+                next.y.floor()
+            };
+            ya = (next.y - p.pos.y) as f32;
+            y_blocked = true;
+        }
+        if delta.x != 0.0 && is_solid_at(world, DVec3::new(next.x, next.y, p.pos.z)) {
+            next.x = p.pos.x;
+            x_blocked = true;
+        }
+        if delta.z != 0.0 && is_solid_at(world, DVec3::new(next.x, next.y, next.z)) {
+            next.z = p.pos.z;
+            z_blocked = true;
+        }
+    }
+    p.pos = next;
+    if delta.y.abs() >= 1.0e-5 && ya.abs() < 1.0e-5 {
+        p.stopped = true;
+    }
+    p.on_ground = y_blocked && delta.y < 0.0;
+    if x_blocked {
+        p.velocity.x = 0.0;
+    }
+    if z_blocked {
+        p.velocity.z = 0.0;
+    }
+    MoveResult {
+        on_ground: p.on_ground,
+        x_blocked,
+        y_blocked,
+        z_blocked,
+    }
+}
+
+fn integrate(p: &mut Particle, world: Option<&azalea_world::World>) -> MoveResult {
+    p.velocity.y -= 0.04 * p.gravity;
+    let moved = match p.drip {
+        Some((drip, DripStage::Fall)) => {
+            let mut next = p.pos + p.velocity.as_dvec3();
+            drip_fall(p, world, drip, &mut next);
+            p.pos = next;
+            MoveResult::default()
+        }
+        _ => move_particle(p, world, p.velocity),
+    };
+    if p.flags & SPEED_UP_Y_BLOCKED != 0 && p.pos.y == p.prev.y {
+        p.velocity.x *= 1.1;
+        p.velocity.z *= 1.1;
+    }
+    p.velocity *= p.friction;
+    if p.on_ground {
+        p.velocity.x *= 0.7;
+        p.velocity.z *= 0.7;
+    }
+    moved
+}
+
+fn tick_one(p: &mut Particle, ctx: &mut TickCtx) {
     p.prev = p.pos;
+    p.prev_roll = p.roll;
+    if p.age >= p.lifetime {
+        p.remove();
+        return;
+    }
+    p.age += 1;
+    match p.behavior.and_then(|b| b.tick) {
+        Some(tick) => tick(p, ctx),
+        None => builtin_tick(p, ctx),
+    }
+}
+
+fn builtin_tick(p: &mut Particle, ctx: &mut TickCtx) {
+    let world = ctx.world;
     match p.motion {
         Motion::Portal => {
             let a = p.age as f32 / p.lifetime as f32;
@@ -3710,50 +4134,37 @@ fn advance_one_tick(p: &mut Particle, world: Option<&azalea_world::World>, rng: 
             return;
         }
         Motion::Campfire => {
+            if p.tint[3] <= 0.0 {
+                p.remove();
+                return;
+            }
+            let rng = &mut *ctx.rng;
             let mut drift = || rng.next_f32() / 5000.0 * if rng.next_bool() { 1.0 } else { -1.0 };
             p.velocity.x += drift();
             p.velocity.z += drift();
         }
         Motion::Integrate => {}
     }
-    p.velocity.y -= 0.04 * p.gravity;
+    if let Some((drip, DripStage::Hang)) = p.drip
+        && drip.cools()
+    {
+        let ticks = p.age.saturating_sub(1) as f32;
+        p.tint = [1.0, 16.0 / (ticks + 16.0), 4.0 / (ticks + 8.0), 1.0];
+    }
 
-    let mut next = p.pos + p.velocity.as_dvec3();
-    let mut on_ground = false;
-    if p.flags & PHYSICS != 0 {
-        if p.velocity.y != 0.0 && is_solid_at(world, DVec3::new(p.pos.x, next.y, p.pos.z)) {
-            if p.velocity.y < 0.0 {
-                next.y = next.y.floor() + 1.0;
-                on_ground = true;
-            } else {
-                next.y = next.y.floor();
-            }
-            p.velocity.y = 0.0;
-        }
-        if p.velocity.x != 0.0 && is_solid_at(world, DVec3::new(next.x, p.pos.y, p.pos.z)) {
-            next.x = p.pos.x;
-            p.velocity.x = 0.0;
-        }
-        if p.velocity.z != 0.0 && is_solid_at(world, DVec3::new(p.pos.x, p.pos.y, next.z)) {
-            next.z = p.pos.z;
-            p.velocity.z = 0.0;
-        }
-    }
-    match p.drip {
-        Some((drip, DripStage::Fall)) => drip_fall(p, world, drip, &mut next),
-        Some((drip, DripStage::Hang)) if drip.cools() => {
-            let age = p.age as f32;
-            p.tint = [1.0, 16.0 / (age + 16.0), 4.0 / (age + 8.0), 1.0];
-        }
-        _ => {}
-    }
-    p.pos = next;
+    integrate(p, world);
+    p.roll_speed += p.roll_accel;
+    p.roll += p.roll_speed;
 
-    p.velocity *= p.friction;
-    if on_ground {
-        p.velocity.x *= 0.7;
-        p.velocity.z *= 0.7;
+    if let Some((drip, DripStage::Hang | DripStage::Land)) = p.drip
+        && let Some(world) = world
+        && in_own_fluid(world, drip, p.pos)
+    {
+        p.drip = None;
+        p.remove();
+        return;
     }
+
     if p.flags & WATER_DROP != 0
         && let Some(world) = world
     {
@@ -3767,7 +4178,7 @@ fn advance_one_tick(p: &mut Particle, world: Option<&azalea_world::World>, rng: 
                 p.pos.z - f64::from(cell.z),
             );
             if top > 0.0 && p.pos.y < f64::from(cell.y) + top {
-                p.lifetime = p.age;
+                p.remove();
             }
         }
     }
@@ -3780,13 +4191,8 @@ fn advance_one_tick(p: &mut Particle, world: Option<&azalea_world::World>, rng: 
         let half = p.lifetime / 2;
         p.tint[3] = 1.0 - (p.age.saturating_sub(half) as f32 / p.lifetime as f32);
     }
-    if p.motion == Motion::Campfire {
-        if p.age >= p.lifetime.saturating_sub(60) && p.tint[3] > 0.01 {
-            p.tint[3] -= 0.015;
-        }
-        if p.tint[3] <= 0.0 {
-            p.lifetime = p.age;
-        }
+    if p.motion == Motion::Campfire && p.age >= p.lifetime.saturating_sub(60) && p.tint[3] > 0.01 {
+        p.tint[3] -= 0.015;
     }
 }
 
@@ -3799,14 +4205,7 @@ fn particle_world() -> Option<std::sync::Arc<parking_lot::RwLock<azalea_world::W
 
 const TICK: f32 = 1.0 / 20.0;
 
-struct DripNext<'a> {
-    atlas: Option<&'a Atlas>,
-    rng: &'a mut JavaRandom,
-    status: ParticleStatus,
-    eye: DVec3,
-}
-
-fn drip_stage_ended(particle: &mut Particle, next: &mut DripNext) -> bool {
+fn drip_stage_ended(particle: &mut Particle, ctx: &mut TickCtx) -> bool {
     let Some((drip, stage)) = particle.drip else {
         return false;
     };
@@ -3814,7 +4213,7 @@ fn drip_stage_ended(particle: &mut Particle, next: &mut DripNext) -> bool {
         DripStage::Hang => drip.falling(),
         DripStage::Landed => {
             if let Some(event) = drip.landing_sound() {
-                let volume = next.rng.next_f32() * (1.0 - 0.3) + 0.3;
+                let volume = ctx.rng.next_f32() * (1.0 - 0.3) + 0.3;
                 crate::util::level_events::play(
                     event,
                     crate::util::level_events::Bus::Blocks,
@@ -3827,33 +4226,86 @@ fn drip_stage_ended(particle: &mut Particle, next: &mut DripNext) -> bool {
         }
         DripStage::Fall | DripStage::Land => return false,
     };
-    let Some(atlas) = next.atlas else {
-        return false;
-    };
-    if !SpawnGate::normal(&kind).allows(particle.pos, next.eye, next.status, next.rng) {
+    let Some(kind) = kind else { return false };
+    let Some(atlas) = ctx.atlas else { return false };
+    if !SpawnGate::normal(&kind).allows(particle.pos, ctx.eye, ctx.status, ctx.rng) {
         return false;
     }
-    let Some(recipe) = recipe(&kind, atlas, Vec3::ZERO, next.rng) else {
+    let spawn = SpawnCtx {
+        pos: particle.pos,
+        world: ctx.world,
+        eye: ctx.eye,
+    };
+    let Some(recipe) = recipe(&kind, atlas, Vec3::ZERO, ctx.rng, &spawn) else {
         return false;
     };
-    particle.prev = particle.pos;
-    particle.velocity = recipe.velocity;
-    particle.gravity = recipe.gravity;
-    particle.friction = recipe.friction;
-    particle.age = 0;
-    particle.lifetime = recipe.lifetime.max(1);
-    particle.tint = recipe.tint;
-    particle.size = recipe.size;
-    particle.grow = recipe.grow;
-    particle.sprite = recipe.sprite;
-    particle.flags = recipe.flags;
-    particle.drip = recipe.drip;
-    particle.origin = particle.pos;
-    particle.motion = recipe.motion;
-    particle.light = recipe.light;
+    *particle = Particle::from_recipe(recipe, particle.pos, particle.tick_acc);
     true
 }
 
+#[derive(Default)]
+struct LocalPlayerTrack {
+    seen: bool,
+    tick: u64,
+    pos: DVec3,
+    delta: Vec3,
+}
+
+impl LocalPlayerTrack {
+    fn observe(&mut self, view: &crate::renderer::FrameView) {
+        let here = DVec3::from_array(view.player_pos);
+        if !self.seen {
+            *self = LocalPlayerTrack {
+                seen: true,
+                tick: view.ticks,
+                pos: here,
+                delta: Vec3::ZERO,
+            };
+        } else if view.ticks != self.tick {
+            let ticks = view.ticks.saturating_sub(self.tick).max(1) as f32;
+            self.delta = (here - self.pos).as_vec3() / ticks;
+            self.pos = here;
+            self.tick = view.ticks;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_children(
+    live: &mut Vec<Particle>,
+    children: Vec<Child>,
+    atlas: Option<&Atlas>,
+    world: Option<&azalea_world::World>,
+    rng: &mut JavaRandom,
+    status: ParticleStatus,
+    eye: DVec3,
+    sparks: &mut u32,
+) {
+    for child in children {
+        if live.len() >= MAX_LIVE_PARTICLES {
+            break;
+        }
+        match child {
+            Child::Kind { kind, pos, arg } => {
+                if let Some(atlas) = atlas {
+                    let gate = SpawnGate::normal(&kind);
+                    add_level_particle(live, atlas, world, rng, status, &kind, gate, pos, arg, eye);
+                }
+            }
+            Child::Recipe { recipe, pos } => {
+                if recipe.flags & FIREWORK_SPARK != 0 {
+                    if *sparks >= FIREWORK_TRAIL_LIMIT {
+                        continue;
+                    }
+                    *sparks += 1;
+                }
+                push_recipe(live, rng, recipe, pos);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tick_particles(
     time: Res<Time>,
     gui: Res<crate::gui::GuiState>,
@@ -3861,35 +4313,102 @@ fn tick_particles(
     atlas: Res<ParticleAtlas>,
     mut particle_rng: ResMut<ParticleRng>,
     mut live: ResMut<LiveParticles>,
+    mut local_player: Local<LocalPlayerTrack>,
+    mut players: Local<Vec<(DVec3, Vec3)>>,
+    mut ticked_len: Local<usize>,
+    mut sparks: ResMut<FireworkSparks>,
+    held: Res<HeldParticles>,
+    mut shows: ResMut<FireworkShows>,
 ) {
+    local_player.observe(&view);
+    let level = crate::client::tick_rate::level();
+    if shows.shows.is_empty() || !view.in_world || shows.level != level {
+        shows.level = level;
+        shows.shows.clear();
+        shows.clock = 0.0;
+    } else if let Some(atlas) = atlas.0.as_ref() {
+        shows.clock += view.world_delta(time.delta_secs());
+        while shows.clock >= TICK {
+            shows.clock -= TICK;
+            let FireworkShows { shows, .. } = &mut *shows;
+            magic::step_shows(
+                shows,
+                atlas,
+                &mut live.0,
+                &mut particle_rng.0,
+                &mut sparks.0,
+            );
+        }
+    }
+    let fresh_from = (*ticked_len).min(live.0.len());
     if live.0.is_empty() {
+        *ticked_len = 0;
+        sparks.0 = held.sparks();
         return;
     }
-    let mut next = DripNext {
-        atlas: atlas.0.as_ref(),
-        rng: &mut particle_rng.0,
-        status: gui.options.particles,
-        eye: view.camera_world,
-    };
-    let dt = time.delta_secs();
+    players.clear();
+    if view.in_world && view.gamemode != crate::session::Gamemode::Spectator {
+        players.push((local_player.pos, local_player.delta));
+    }
+    for entity in view.entities.iter() {
+        if matches!(entity.kind, azalea_registry::builtin::EntityKind::Player) {
+            let now = DVec3::from_array(entity.position(1.0));
+            let before = DVec3::from_array(entity.position(0.0));
+            players.push((now, (now - before).as_vec3()));
+        }
+    }
+    let status = gui.options.particles;
+    let eye = view.camera_world;
+    let dt = view.world_delta(time.delta_secs());
     let world_arc = particle_world();
     let world = world_arc
         .as_deref()
         .map(|w| crate::client::tracking::read_lock(w, "tick_particles"));
     let world = world.as_deref();
 
+    let mut ctx = TickCtx {
+        world,
+        rng: &mut particle_rng.0,
+        atlas: atlas.0.as_ref(),
+        status,
+        eye,
+        players: players.as_slice(),
+        entities: view.entities.as_slice(),
+        children: Vec::new(),
+    };
+    let mut row = 0usize;
+    let mut alive_sparks = 0u32;
     live.0.retain_mut(|particle| {
-        particle.tick_acc += dt;
+        if row < fresh_from {
+            particle.tick_acc += dt;
+        }
+        row += 1;
         while particle.tick_acc >= TICK {
             particle.tick_acc -= TICK;
-            if particle.age >= particle.lifetime {
+            tick_one(particle, &mut ctx);
+            if particle.dead {
                 break;
             }
-            particle.age += 1;
-            advance_one_tick(particle, world, next.rng);
         }
-        particle.age < particle.lifetime || drip_stage_ended(particle, &mut next)
+        let keep = !particle.dead || drip_stage_ended(particle, &mut ctx);
+        alive_sparks += u32::from(keep && particle.flags & FIREWORK_SPARK != 0);
+        keep
     });
+    sparks.0 = alive_sparks + held.sparks();
+    let TickCtx { children, rng, .. } = ctx;
+    if !children.is_empty() {
+        spawn_children(
+            &mut live.0,
+            children,
+            atlas.0.as_ref(),
+            world,
+            rng,
+            status,
+            eye,
+            &mut sparks.0,
+        );
+    }
+    *ticked_len = live.0.len();
 }
 
 #[derive(Component)]
@@ -3924,9 +4443,12 @@ fn draw_particles(
     let item_image = gui_assets.as_ref().map(|gui| &gui.image);
     let origin = render_origin.world();
     let rotation = view.camera_rotation;
-    let right = rotation * Vec3::X;
-    let up = rotation * Vec3::Y;
-    let normal = (rotation * Vec3::Z).to_array();
+    let camera = CameraBasis {
+        rotation,
+        right: rotation * Vec3::X,
+        up: rotation * Vec3::Y,
+        eye: (view.camera_world - origin).as_vec3(),
+    };
 
     let used = {
         let light_map = crate::client::tracking::read_lock(
@@ -3955,14 +4477,24 @@ fn draw_particles(
             if !ready {
                 continue;
             }
-            let (block_light, sky_light) = if particle.flags & FULLBRIGHT != 0 {
-                (15, 15)
-            } else {
-                let (block, sky) = crate::renderer::lightmap::levels_in(
+            let cell_light = || {
+                crate::renderer::lightmap::levels_in(
                     &light_map,
                     crate::renderer::lightmap::cell_of(particle.pos.to_array()),
-                );
-                (emitted_block_light(particle, block), sky)
+                )
+            };
+            let (block_light, sky_light) = match particle.behavior.and_then(|b| b.light) {
+                Some(light) => {
+                    let (block, sky) = cell_light();
+                    let frac = (particle.tick_acc / TICK).clamp(0.0, 1.0);
+                    let (block, sky) = light(particle, frac, block, sky);
+                    (block.min(15), sky.min(15))
+                }
+                None if particle.flags & FULLBRIGHT != 0 => (15, 15),
+                None => {
+                    let (block, sky) = cell_light();
+                    (emitted_block_light(particle, block), sky)
+                }
             };
             let key = BatchKey {
                 block_light,
@@ -3974,18 +4506,26 @@ fn draw_particles(
             let slot = match index.get(&key) {
                 Some(&slot) => slot,
                 None => {
-                    if used >= MAX_PARTICLE_BATCHES {
-                        continue;
-                    }
-                    let slot = used;
-                    used += 1;
-                    if groups.len() <= slot {
-                        groups.push(Vec::new());
-                        keys.push(key);
+                    let folded = if used >= MAX_PARTICLE_BATCHES {
+                        nearest_batch(&keys[..used], key)
                     } else {
-                        keys[slot] = key;
-                    }
-                    groups[slot].clear();
+                        None
+                    };
+                    let slot = match folded {
+                        Some(slot) => slot,
+                        None => {
+                            let slot = used;
+                            used += 1;
+                            if groups.len() <= slot {
+                                groups.push(Vec::new());
+                                keys.push(key);
+                            } else {
+                                keys[slot] = key;
+                            }
+                            groups[slot].clear();
+                            slot
+                        }
+                    };
                     index.insert(key, slot);
                     slot
                 }
@@ -4043,9 +4583,7 @@ fn draw_particles(
             &live.0,
             &batches.groups[slot],
             origin,
-            right,
-            up,
-            normal,
+            &camera,
             sheet,
         );
     }
@@ -4140,15 +4678,33 @@ fn emitted_block_light(particle: &Particle, block: u8) -> u8 {
     (packed / 16) as u8
 }
 
-#[allow(clippy::too_many_arguments)]
+fn nearest_batch(keys: &[BatchKey], key: BatchKey) -> Option<usize> {
+    keys.iter()
+        .enumerate()
+        .filter(|(_, k)| {
+            k.sheet == key.sheet && k.translucent == key.translucent && k.dim == key.dim
+        })
+        .min_by_key(|(_, k)| {
+            k.block_light.abs_diff(key.block_light) + k.sky_light.abs_diff(key.sky_light)
+        })
+        .map(|(slot, _)| slot)
+}
+
+struct CameraBasis {
+    rotation: Quat,
+    right: Vec3,
+    up: Vec3,
+    eye: Vec3,
+}
+
+const ALPHA_DISCARD: f32 = 0.1;
+
 fn write_batch_mesh(
     mesh: &mut Mesh,
     particles: &[Particle],
     group: &[u32],
     origin: DVec3,
-    right: Vec3,
-    up: Vec3,
-    normal: [f32; 3],
+    camera: &CameraBasis,
     sheet: Option<&Atlas>,
 ) {
     let mut positions = match mesh.remove_attribute(Mesh::ATTRIBUTE_POSITION) {
@@ -4182,16 +4738,29 @@ fn write_batch_mesh(
         let lifetime = p.lifetime.max(1);
         let frac = (p.tick_acc / TICK).clamp(0.0, 1.0);
         let centre = (p.prev.lerp(p.pos, f64::from(frac)) - origin).as_vec3();
+        let hooks = p.behavior;
+        let tint = match hooks.and_then(|b| b.tint) {
+            Some(tint) => tint(p, frac),
+            None => p.tint,
+        };
+        if tint[3] < ALPHA_DISCARD {
+            continue;
+        }
         let t = (p.age as f32 + frac) / lifetime as f32;
-        let scale = p.size
-            * match p.grow {
-                Grow::Fixed => 1.0,
-                Grow::In => (t * 32.0).clamp(0.0, 1.0),
-                Grow::Flame => 1.0 - t * t * 0.5,
-                Grow::Lava => 1.0 - t * t,
-                Grow::Portal => 1.0 - (1.0 - t) * (1.0 - t),
-            };
-        if scale <= 0.0 {
+        let scale = match hooks.and_then(|b| b.size) {
+            Some(size) => size(p, frac),
+            None => {
+                p.size
+                    * match p.grow {
+                        Grow::Fixed => 1.0,
+                        Grow::In => (t * 32.0).clamp(0.0, 1.0),
+                        Grow::Flame => 1.0 - t * t * 0.5,
+                        Grow::Lava => 1.0 - t * t,
+                        Grow::Portal => 1.0 - (1.0 - t) * (1.0 - t),
+                    }
+            }
+        };
+        if scale == 0.0 {
             continue;
         }
         let [u0, v0, u1, v1] = match p.sprite {
@@ -4202,7 +4771,40 @@ fn write_batch_mesh(
                 let frame = p.age as usize * frames.saturating_sub(1) / lifetime as usize;
                 sheet.frame_uv(index, frame)
             }
+            Sprite::Clock(index) => {
+                let Some(sheet) = sheet else { continue };
+                let frametime = sheet.frametime(index).max(1);
+                sheet.frame_uv(index, (p.age / frametime) as usize)
+            }
         };
+        let (mut right, mut up, cull_back) = match (hooks.and_then(|b| b.orient), p.facing) {
+            (Some(orient), _) => {
+                let q = orient(p, frac);
+                (q * Vec3::X, q * Vec3::Y, true)
+            }
+            (None, Facing::Fixed(q)) => (q * Vec3::X, q * Vec3::Y, true),
+            (None, Facing::CameraY) => {
+                let (y, w) = (camera.rotation.y, camera.rotation.w);
+                let len = (y * y + w * w).sqrt();
+                let q = if len > 1.0e-6 {
+                    Quat::from_xyzw(0.0, y / len, 0.0, w / len)
+                } else {
+                    Quat::IDENTITY
+                };
+                (q * Vec3::X, q * Vec3::Y, true)
+            }
+            (None, Facing::Camera) => (camera.right, camera.up, false),
+        };
+        let roll = p.prev_roll + (p.roll - p.prev_roll) * frac;
+        if roll != 0.0 {
+            let (sin, cos) = roll.sin_cos();
+            (right, up) = (right * cos + up * sin, up * cos - right * sin);
+        }
+        let normal = right.cross(up);
+        if cull_back && normal.dot(camera.eye - centre) <= 0.0 {
+            continue;
+        }
+        let normal = normal.to_array();
         let base = positions.len() as u32;
         let dx = right * scale;
         let dy = up * scale;
@@ -4215,7 +4817,7 @@ fn write_batch_mesh(
             positions.push(corner.to_array());
             normals.push(normal);
             uvs.push(uv);
-            colors.push(p.tint);
+            colors.push(tint);
         }
         indices.extend(QUAD_INDICES.map(|i| base + i));
     }
@@ -4324,6 +4926,35 @@ fn tint_ratio(
         TintKind::DryFoliage => crate::util::biome_color::dry_foliage_ratio(idx),
         TintKind::Water => crate::util::biome_color::water_ratio(idx),
     }
+}
+
+fn leaf_tint_color(
+    leaf: crate::blocks::ambient::Leaf,
+    state: azalea::block::BlockState,
+    cell: [i32; 3],
+    world: &azalea_world::World,
+) -> [u8; 3] {
+    use azalea::block::BlockTrait;
+
+    if leaf == crate::blocks::ambient::Leaf::AzaleaTint {
+        return [0x70, 0x92, 0x2D];
+    }
+    let block: Box<dyn BlockTrait> = Box::<dyn BlockTrait>::from(state);
+    match block.id() {
+        "spruce_leaves" => return [0x61, 0x99, 0x61],
+        "birch_leaves" => return [0x80, 0xA7, 0x55],
+        _ => {}
+    }
+    let plains = crate::util::biome_color::with_tints(|t| {
+        crate::util::biome_color::Tints::plains(t).foliage
+    });
+    let ratio = tint_ratio(state, cell, Some(world));
+    std::array::from_fn(|i| {
+        let linear = crate::util::mth::srgb_byte_to_linear(plains[i]) * ratio[i];
+        (crate::util::mth::linear_to_srgb(linear) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    })
 }
 
 fn random_sub_uv(tile: [f32; 4], rng: &mut JavaRandom) -> [f32; 4] {

@@ -32,6 +32,7 @@ pub struct Slot {
     pub sides: bool,
     pub range2: u32,
     pub exposed: bool,
+    pub fade: bool,
 }
 
 pub struct Merged {
@@ -71,6 +72,7 @@ impl Merged {
             sides: false,
             range2: u32::MAX,
             exposed: false,
+            fade: false,
         };
         Merged {
             of_state: of_state.into_boxed_slice(),
@@ -103,6 +105,7 @@ struct Source {
     sides: bool,
     lava: bool,
     exposed: bool,
+    lava_fade: bool,
 }
 
 fn key(sources: &[Option<Source>; COUNT]) -> u64 {
@@ -121,7 +124,8 @@ fn key(sources: &[Option<Source>; COUNT]) -> u64 {
                     | (s.lines as u64) << 8
                     | (s.sides as u64) << 9
                     | (s.lava as u64) << 10
-                    | (s.exposed as u64) << 11);
+                    | (s.exposed as u64) << 11
+                    | (s.lava_fade as u64) << 12);
             }
         }
     }
@@ -152,6 +156,7 @@ fn sources() -> [Option<Source>; COUNT] {
             sides,
             lava: e.lava.is_some_and(|t| s.flag(t)),
             exposed: e.exposed.is_some_and(|t| s.flag(t)),
+            lava_fade: e.lava_fade.is_some_and(|t| s.flag(t)),
         })
     })
 }
@@ -170,11 +175,12 @@ fn fold(sources: &[Option<Source>; COUNT]) -> Merged {
         max_range = max_range.max(source.range);
         of_row[m] = vec![NO_ROW; source.list.count()];
         let index = source.list.index();
-        let lava = if source.lava {
+        let lava_row = if source.lava || source.lava_fade {
             source.list.find("lava").map(|r| r as u16)
         } else {
             None
         };
+        let lava = lava_row.filter(|_| source.lava);
 
         for (state_id, dst) in of_state.iter_mut().enumerate() {
             if *dst != NONE_ENTRY {
@@ -200,6 +206,7 @@ fn fold(sources: &[Option<Source>; COUNT]) -> Merged {
                     sides: source.sides,
                     range2: (source.range * source.range) as u32,
                     exposed: source.exposed,
+                    fade: source.lava_fade && lava_row == Some(row),
                 };
                 *cached = match slots.iter().position(|s| *s == slot) {
                     Some(i) => i as u16,

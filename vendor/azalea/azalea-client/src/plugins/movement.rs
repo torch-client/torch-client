@@ -16,12 +16,12 @@ use azalea_physics::{
     PhysicsSystems, ai_step,
     client_movement::{ClientMovementState, SprintDirection, WalkDirection},
     collision::{
-        BorderSource,
+        BorderSource, MovingBlocks,
         entity_collisions::{AabbQuery, CollidableEntityQuery, update_last_bounding_box},
         world_collisions::PowderSnowCollision,
     },
     fluids::{is_eye_in_fluid, player_eye_height},
-    travel::{no_collision, travel},
+    travel::{no_collision_with, travel},
 };
 use azalea_protocol::{
     common::movements::MoveFlags,
@@ -101,7 +101,7 @@ pub fn send_position(
             &mut Physics,
             &mut LastSentLookDirection,
         ),
-        With<HasClientLoaded>,
+        (With<HasClientLoaded>, Without<NotControlledCamera>),
     >,
     mut commands: Commands,
 ) {
@@ -116,7 +116,6 @@ pub fn send_position(
     ) in query.iter_mut()
     {
         let packet = {
-
             let x_delta = position.x - last_sent_position.x;
             let y_delta = position.y - last_sent_position.y;
             let z_delta = position.z - last_sent_position.z;
@@ -308,6 +307,8 @@ pub fn local_player_ai_step(
                 Option<&Pose>,
                 Option<&ActiveEffects>,
                 Option<&Passenger>,
+                Has<NotControlledCamera>,
+                Option<&MovingBlocks>,
             ),
             &mut Physics,
             &mut Sprinting,
@@ -330,7 +331,7 @@ pub fn local_player_ai_step(
         hunger,
         last_sent_input,
         item_in_use,
-        (fall_flying, border, pose, active_effects, passenger),
+        (fall_flying, border, pose, active_effects, passenger, not_controlled_camera, moving),
         mut physics,
         mut sprinting,
         mut crouching,
@@ -350,6 +351,7 @@ pub fn local_player_ai_step(
             aabb_query: &aabb_query,
             collidable_entity_query: &collidable_entity_query,
             border: BorderSource::at(border, position.x, position.z),
+            moving,
         };
 
         let new_crouching = !abilities.flying
@@ -423,6 +425,11 @@ pub fn local_player_ai_step(
             }
         }
 
+        if not_controlled_camera {
+            physics.x_acceleration *= 0.98;
+            physics.z_acceleration *= 0.98;
+            continue;
+        }
         let move_vector = modify_input(
             physics_state.move_vector,
             item_in_use.map(|u| u.speed_multiplier),
@@ -447,6 +454,9 @@ pub struct ItemInUse {
     pub speed_multiplier: f32,
     pub can_sprint: bool,
 }
+
+#[derive(Clone, Component, Copy, Debug, Default)]
+pub struct NotControlledCamera;
 
 #[derive(Clone, Component, Copy, Debug, PartialEq, Eq)]
 pub struct Passenger {
@@ -607,6 +617,7 @@ pub fn update_pose(
             &metadata::Swimming,
             Option<&metadata::FallFlying>,
             Option<&metadata::AutoSpinAttack>,
+            Option<&MovingBlocks>,
         ),
         With<HasClientLoaded>,
     >,
@@ -624,6 +635,7 @@ pub fn update_pose(
         swimming,
         fall_flying,
         auto_spin_attack,
+        moving,
     ) in query.iter_mut()
     {
         let world = world_holder.shared.read();
@@ -635,6 +647,7 @@ pub fn update_pose(
             aabb_query: &aabb_query,
             collidable_entity_query: &collidable_entity_query,
             border: BorderSource::at(border, position.x, position.z),
+            moving,
         };
 
         if !can_player_fit_within_blocks_and_entities_when(&ctx, Pose::Swimming) {
@@ -679,9 +692,10 @@ struct CanPlayerFitCtx<'world, 'state, 'a, 'b> {
     aabb_query: &'a AabbQuery<'world, 'state, 'b>,
     collidable_entity_query: &'a CollidableEntityQuery<'world, 'state>,
     border: Option<BorderSource<'a>>,
+    moving: Option<&'a MovingBlocks>,
 }
 fn can_player_fit_within_blocks_and_entities_when(ctx: &CanPlayerFitCtx, pose: Pose) -> bool {
-    no_collision(
+    no_collision_with(
         ctx.world,
         Some(ctx.entity),
         ctx.aabb_query,
@@ -692,5 +706,6 @@ fn can_player_fit_within_blocks_and_entities_when(ctx: &CanPlayerFitCtx, pose: P
             .deflate_all(1.0e-7),
         false,
         PowderSnowCollision::default(),
+        ctx.moving,
     )
 }

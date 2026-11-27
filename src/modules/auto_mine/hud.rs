@@ -37,7 +37,7 @@ pub fn count(bot: &Client, area: &Area) {
     if VALID.load(Relaxed) {
         return;
     }
-    let now = crate::client::tracking::game_time();
+    let now = crate::client::tracking::client_ticks();
     if now < NEXT.load(Relaxed) {
         return;
     }
@@ -82,6 +82,9 @@ pub fn draw(p: &mut Painter, _: &Snapshot) {
     let air = (volume - LEFT.load(Relaxed)).clamp(0, volume);
     let approx = if APPROX.load(Relaxed) { "~" } else { "" };
     let mut panel = TextPanel::new(p, HUD_W);
-    panel.text(&format!("AutoMine {approx}{air} / {volume} air"), 0xFF_FFFF);
+    panel.text(
+        &crate::lang::trf!("auto_mine.hud.air", approx, air, volume),
+        0xFF_FFFF,
+    );
     panel.bar(air as f32 / volume as f32, 0x33_CCFF);
 }

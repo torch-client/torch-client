@@ -5,12 +5,17 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
 use azalea_core::position::ChunkPos;
-use seedcrack::{Event, FinderKind, Observation, Version, scan_chunk};
+use seedcrack::cracker::{BEDROCK_TARGET, OVERWORLD_BEDROCK_CAP};
+use seedcrack::{
+    Band, BedrockCell, Event, FinderKind, Mode, Observation, Trust, Version, Yields, scan_chunk,
+};
 
 use super::cache::{self, Cache, Drawn};
 use super::hud;
-use super::search::{Cmd, Out, Search, stage_name};
-use super::{CHUNK_ARRIVED, EDGE, FINDERS, IMPORT, OWNER, Request, SESSION, take_request};
+use super::search::{Cmd, Out, Search, band_name, bedrock_progress, hint_text, stage_name};
+use super::{
+    CHUNK_ARRIVED, CrackMode, EDGE, FINDERS, IMPORT, OWNER, Request, SESSION, take_request,
+};
 use crate::modules::chat_math::{say, show_local_events};
 use crate::modules::esp::blocks::id_of;
 use crate::modules::registry::{
@@ -51,7 +56,69 @@ const NEIGHBOURS: [(i32, i32); 8] = [
     (1, 1),
 ];
 
+type BedrockRow = (Band, i32, &'static str, bool);
+
+static NETHER_BEDROCK: [BedrockRow; 4] = [
+    (Band::NetherFloor, 4, "bedrock", true),
+    (Band::NetherFloor, 1, "netherrack", false),
+    (Band::NetherRoof, 123, "bedrock", true),
+    (Band::NetherRoof, 126, "netherrack", false),
+];
+
+static OVERWORLD_BEDROCK: [BedrockRow; 8] = [
+    (Band::OverworldFloor, -63, "bedrock", true),
+    (Band::OverworldFloor, -63, "deepslate", false),
+    (Band::OverworldFloor, -62, "bedrock", true),
+    (Band::OverworldFloor, -62, "deepslate", false),
+    (Band::OverworldFloor, -61, "bedrock", true),
+    (Band::OverworldFloor, -61, "deepslate", false),
+    (Band::OverworldFloor, -60, "bedrock", true),
+    (Band::OverworldFloor, -60, "deepslate", false),
+];
+
+fn bedrock_rows(dimension: Dimension, (min_y, height): (i32, i32)) -> &'static [BedrockRow] {
+    match dimension {
+        Dimension::Nether if min_y == 0 => &NETHER_BEDROCK[..],
+        Dimension::Overworld if (min_y, height) == (-64, 384) => &OVERWORLD_BEDROCK[..],
+        _ => &[],
+    }
+}
+
+fn band_slot(band: Band) -> usize {
+    match band {
+        Band::NetherFloor => 0,
+        Band::NetherRoof => 1,
+        Band::OverworldFloor => 2,
+    }
+}
+
+fn bedrock_cap(band: Band) -> usize {
+    match band {
+        Band::NetherFloor | Band::NetherRoof => BEDROCK_TARGET,
+        Band::OverworldFloor => OVERWORLD_BEDROCK_CAP,
+    }
+}
+
+fn settings() -> (Mode, bool) {
+    let s = store();
+    let mode = match s.choice(setting::MODE) {
+        CrackMode::Normal => Mode::Normal,
+        CrackMode::Fast => Mode::Fast,
+    };
+    (mode, s.flag(setting::BEDROCK))
+}
+
 const SAVE_AFTER: u32 = 20;
+
+const PARKED_MAX: usize = 2;
+
+struct Parked {
+    hash: i64,
+    search: Option<Search>,
+    found: HashMap<Observation, Drawn>,
+    seed: Option<i64>,
+    trusted: Option<Trust>,
+}
 
 struct State {
     session: u32,
@@ -64,6 +131,7 @@ struct State {
     backlog: bool,
     biomes: Vec<String>,
     found: HashMap<Observation, Drawn>,
+    ignored: HashSet<Observation>,
     redraw: bool,
     shown: bool,
     target: Option<i64>,
@@ -71,6 +139,11 @@ struct State {
     seed: Option<i64>,
     unsaved: Option<u32>,
     rejoined: bool,
+    parked: Vec<Parked>,
+    warned_hidden: bool,
+    bedrock: [HashSet<BedrockCell>; 3],
+    applied: Option<(Mode, bool)>,
+    trusted: Option<Trust>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -147,10 +220,6 @@ fn listed<T: std::fmt::Display>(values: &[T]) -> String {
     format!(": {}", values.join(", "))
 }
 
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
-}
-
 struct View<'a> {
     region: Region<'a>,
     biomes: &'a [String],
@@ -180,15 +249,12 @@ impl seedcrack::World for View<'_> {
 
 impl State {
     fn new(shared: &SharedMutex, session: u32, version: Option<Version>) -> State {
+        let (mode, bedrock) = settings();
         let search = match version {
             Some(version) => {
-                let search = Search::start(version);
+                let search = Search::start(version, mode, bedrock);
                 if search.is_none() {
-                    tell(
-                        shared,
-                        RED,
-                        "Seed Cracker: could not start the search thread",
-                    );
+                    tell(shared, RED, crate::lang::tr!("seed_cracker.no_thread"));
                     hud::off();
                 }
                 search
@@ -198,7 +264,7 @@ impl State {
                 tell(
                     shared,
                     RED,
-                    format!("Seed Cracker: off, it has no tables for protocol {protocol}"),
+                    crate::lang::trf!("seed_cracker.no_tables", protocol),
                 );
                 hud::off();
                 None
@@ -215,6 +281,7 @@ impl State {
             backlog: true,
             biomes: Vec::new(),
             found: HashMap::new(),
+            ignored: HashSet::new(),
             redraw: true,
             shown: false,
             target: None,
@@ -222,6 +289,55 @@ impl State {
             seed: None,
             unsaved: None,
             rejoined: false,
+            parked: Vec::new(),
+            warned_hidden: false,
+            bedrock: Default::default(),
+            applied: Some((mode, bedrock)),
+            trusted: None,
+        }
+    }
+
+    fn forget_bedrock(&mut self) {
+        self.bedrock = Default::default();
+        self.ignored.clear();
+    }
+
+    fn export_bedrock(&self, shared: &SharedMutex) {
+        let mut cells: Vec<&BedrockCell> = self.bedrock[band_slot(Band::OverworldFloor)]
+            .iter()
+            .collect();
+        if cells.is_empty() {
+            tell(shared, RED, crate::lang::tr!("seed_cracker.export.none"));
+            return;
+        }
+        cells.sort();
+        let rows: Vec<_> = cells
+            .iter()
+            .map(|c| serde_json::json!({ "x": c.x(), "y": c.y(), "z": c.z(), "bedrock": c.bedrock() }))
+            .collect();
+        let doc =
+            serde_json::json!({ "target_hash": self.hash, "k": 0, "cells": rows }).to_string();
+        crate::platform::clipboard::set(&doc);
+        say(
+            shared,
+            GREEN,
+            crate::lang::trf!("seed_cracker.export.copied", cells.len()),
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = crate::platform::storage::dir().join("seed_cracker_bedrock.json");
+            match std::fs::write(&path, &doc) {
+                Ok(()) => say(
+                    shared,
+                    GRAY,
+                    crate::lang::trf!("seed_cracker.export.saved", path.display()),
+                ),
+                Err(e) => tell(
+                    shared,
+                    RED,
+                    crate::lang::trf!("seed_cracker.export.failed", path.display(), e),
+                ),
+            }
         }
     }
 
@@ -235,21 +351,16 @@ impl State {
         self.dimension = dimension::current();
         self.redraw = true;
         self.rejoined = true;
+        self.warned_hidden = false;
     }
 
     fn restore(&mut self, shared: &SharedMutex, hash: i64) {
         self.target = Some(hash);
+        self.forget_bedrock();
         if let Some(c) = cache::load(hash) {
             let n = self.take_in(c.finds);
             if n > 0 {
-                say(
-                    shared,
-                    GRAY,
-                    format!(
-                        "Seed Cracker: {n} find{} restored from the cache",
-                        plural(n)
-                    ),
-                );
+                say(shared, GRAY, crate::lang::trn!("seed_cracker.restored", n));
             }
             if let Some(seed) = c.seed
                 && self.seed.is_none()
@@ -263,17 +374,50 @@ impl State {
     fn switch_world(&mut self, shared: &SharedMutex, hash: i64) {
         self.save();
         let server = crate::modules::seed_xray::server_hash();
-        if let Some(search) = self.search.as_mut() {
-            search.send(Cmd::Clear);
-            if hash != server && hash != 0 {
-                search.send(Cmd::Add {
-                    observation: Observation::HashedSeed(hash),
-                    sighting: None,
-                });
+        let mut search = self.search.take();
+        if let Some(search) = search.as_mut() {
+            search.pause(true);
+        }
+        if let Some(old) = self.target
+            && (!self.found.is_empty() || self.seed.is_some())
+        {
+            self.parked.retain(|p| p.hash != old);
+            self.parked.push(Parked {
+                hash: old,
+                search,
+                found: std::mem::take(&mut self.found),
+                seed: self.seed.take(),
+                trusted: self.trusted,
+            });
+        }
+        self.trusted = None;
+        if let Some(i) = self.parked.iter().position(|p| p.hash == hash) {
+            let back = self.parked.remove(i);
+            self.search = back.search;
+            self.found = back.found;
+            self.seed = back.seed;
+            self.trusted = back.trusted;
+            if let Some(search) = self.search.as_mut() {
+                search.pause(false);
+            }
+            self.applied = None;
+        } else {
+            let (mode, bedrock) = settings();
+            self.search = self.version.and_then(|v| Search::start(v, mode, bedrock));
+            self.applied = Some((mode, bedrock));
+            if self.search.is_none() {
+                tell(shared, RED, crate::lang::tr!("seed_cracker.no_thread"));
             }
         }
-        self.found.clear();
-        self.seed = None;
+        while self.parked.len() > PARKED_MAX {
+            self.parked.remove(0);
+        }
+        if hash != server && hash != 0 {
+            self.send(Cmd::Add {
+                observation: Observation::HashedSeed(hash),
+                sighting: None,
+            });
+        }
         self.scanned.clear();
         self.backlog = true;
         self.hash = 0;
@@ -285,6 +429,55 @@ impl State {
     fn send(&mut self, cmd: Cmd) {
         if let Some(search) = self.search.as_mut() {
             search.send(cmd);
+        }
+    }
+
+    fn apply_settings(&mut self) {
+        let wanted = settings();
+        if self.applied == Some(wanted) {
+            return;
+        }
+        let (mode, bedrock) = wanted;
+        self.send(Cmd::SetMode(mode));
+        self.send(Cmd::SetBedrock(bedrock));
+        if let Some((_, was)) = self.applied
+            && was != bedrock
+        {
+            self.forget_bedrock();
+            if bedrock {
+                self.scanned.clear();
+                self.backlog = true;
+            }
+        }
+        self.applied = Some(wanted);
+    }
+
+    fn answered(&mut self, shared: &SharedMutex, trust: Option<Trust>) {
+        let prefix = store().text(prefix_setting::PREFIX);
+        match trust {
+            Some(Trust::Bedrock) => {
+                self.found
+                    .retain(|o, _| !matches!(o, Observation::Structure(_)));
+                self.redraw = true;
+                self.changed();
+                say(
+                    shared,
+                    YELLOW,
+                    crate::lang::trf!("seed_cracker.trusted.bedrock", prefix),
+                );
+            }
+            Some(Trust::Structures) => {
+                self.forget_bedrock();
+                say(
+                    shared,
+                    YELLOW,
+                    crate::lang::trf!("seed_cracker.trusted.structures", prefix),
+                );
+            }
+            None => say(shared, GRAY, crate::lang::tr!("seed_cracker.trusted.none")),
+        }
+        if trust.is_some() {
+            self.trusted = trust;
         }
     }
 
@@ -333,18 +526,14 @@ impl State {
             Err(field_err) => match Cache::parse(&crate::platform::clipboard::get()) {
                 Ok(share) => share,
                 Err(_) if field.trim().is_empty() => {
-                    tell(
-                        shared,
-                        RED,
-                        "Seed Cracker: paste a friend's share into Friend's share first",
-                    );
+                    tell(shared, RED, crate::lang::tr!("seed_cracker.import.empty"));
                     return;
                 }
                 Err(_) => {
                     tell(
                         shared,
                         RED,
-                        format!("Seed Cracker: that is not a share: {field_err}"),
+                        crate::lang::trf!("seed_cracker.import.not_share", field_err),
                     );
                     return;
                 }
@@ -355,40 +544,18 @@ impl State {
 
         if self.target == Some(share.hash) {
             let n = self.take_in(share.finds);
-            say(
-                shared,
-                AQUA,
-                format!(
-                    "Seed Cracker: {n} of the friend's {total} find{} were new",
-                    plural(total)
-                ),
-            );
+            let text = crate::lang::trn!("seed_cracker.import.merged", total, n);
+            say(shared, AQUA, text);
         } else {
             self.switch_world(shared, share.hash);
             let n = self.take_in(share.finds);
             let prefix = store().text(prefix_setting::PREFIX);
-            if self.foreign {
-                say(
-                    shared,
-                    YELLOW,
-                    format!(
-                        "Seed Cracker: switched to the friend's world (hashed seed {}), {n} of {total} find{} new; \
-                         this world's finds are kept, and it is not scanned until {prefix}cracker clear or the \
-                         next join",
-                        share.hash,
-                        plural(total),
-                    ),
-                );
+            let text = if self.foreign {
+                crate::lang::trn!("seed_cracker.import.foreign", total, share.hash, n, prefix)
             } else {
-                say(
-                    shared,
-                    YELLOW,
-                    format!(
-                        "Seed Cracker: back to this server's world, {n} of the friend's {total} find{} new",
-                        plural(total)
-                    ),
-                );
-            }
+                crate::lang::trn!("seed_cracker.import.back", total, n)
+            };
+            say(shared, YELLOW, text);
         }
         if let Some(seed) = share.seed
             && self.seed.is_none()
@@ -401,20 +568,20 @@ impl State {
         let request = take_request();
         if self.search.is_none() {
             if IMPORT.swap(false, Relaxed) || request.is_some() {
-                tell(
-                    shared,
-                    RED,
-                    "Seed Cracker: off, this server's version is not supported",
-                );
+                tell(shared, RED, crate::lang::tr!("seed_cracker.unsupported"));
             }
             return;
         }
 
         let hash = crate::modules::seed_xray::server_hash();
         let rejoined = std::mem::take(&mut self.rejoined);
+        if hash == 0 && !self.warned_hidden {
+            self.warned_hidden = true;
+            warn_hidden(shared);
+        }
         if self.target.is_none() {
             self.restore(shared, hash);
-        } else if rejoined && (self.foreign || self.target != Some(hash)) {
+        } else if rejoined && (self.foreign || (hash != 0 && self.target != Some(hash))) {
             self.switch_world(shared, hash);
         }
         if !self.foreign && hash != 0 && hash != self.hash {
@@ -424,6 +591,7 @@ impl State {
                 sighting: None,
             });
         }
+        self.apply_settings();
         match request {
             Some(Request::Status) => self.send(Cmd::Status),
             Some(Request::Clear) => {
@@ -431,6 +599,8 @@ impl State {
                 self.hash = 0;
                 self.found.clear();
                 self.seed = None;
+                self.trusted = None;
+                self.forget_bedrock();
                 self.save();
                 if self.foreign {
                     self.switch_world(shared, hash);
@@ -438,16 +608,15 @@ impl State {
                 self.scanned.clear();
                 self.backlog = true;
                 self.redraw = true;
-                tell(
-                    shared,
-                    YELLOW,
-                    "Seed Cracker: cleared; loaded chunks are scanned again",
-                );
+                tell(shared, YELLOW, crate::lang::tr!("seed_cracker.cleared"));
             }
             Some(Request::Restart) => {
                 self.send(Cmd::Restart);
-                tell(shared, YELLOW, "Seed Cracker: searching again");
+                tell(shared, YELLOW, crate::lang::tr!("seed_cracker.restarted"));
             }
+            Some(Request::TrustBedrock) => self.send(Cmd::Resolve(Trust::Bedrock)),
+            Some(Request::TrustStructures) => self.send(Cmd::Resolve(Trust::Structures)),
+            Some(Request::ExportBedrock) => self.export_bedrock(shared),
             None => {}
         }
         if IMPORT.swap(false, Relaxed) {
@@ -486,11 +655,22 @@ impl State {
             self.redraw = true;
         }
         let target = to_seedcrack(dimension);
+        let structures = self.trusted != Some(Trust::Bedrock);
         let kinds: Vec<FinderKind> = FinderKind::ALL
             .into_iter()
             .filter(|&k| k.dimension() == target && finder_on(k))
+            .filter(|&k| structures || !matches!(k.yields(), Yields::Structure(_)))
             .collect();
-        if kinds.is_empty() {
+        let bedrock = self.applied.is_some_and(|(_, on)| on)
+            && self.trusted != Some(Trust::Structures)
+            && Band::ALL.into_iter().any(|b| {
+                let here = match b {
+                    Band::NetherFloor | Band::NetherRoof => Dimension::Nether,
+                    Band::OverworldFloor => Dimension::Overworld,
+                };
+                here == dimension && self.bedrock[band_slot(b)].len() < bedrock_cap(b)
+            });
+        if kinds.is_empty() && !bedrock {
             return Vec::new();
         }
 
@@ -548,6 +728,11 @@ impl State {
         };
 
         crate::prof_span!("modules:seed_cracker");
+        let rows: &[BedrockRow] = if bedrock {
+            bedrock_rows(dimension, bounds)
+        } else {
+            &[]
+        };
         let mut sightings = Vec::new();
         for (at, handles) in &jobs {
             let view = View {
@@ -558,6 +743,9 @@ impl State {
             for &kind in &kinds {
                 for found in scan_chunk(&view, target, at.0, at.1, |k| k == kind) {
                     let observation = found.observation;
+                    if self.ignored.contains(&observation) {
+                        continue;
+                    }
                     let drawn = Drawn {
                         dimension,
                         boxes: found.boxes,
@@ -569,8 +757,30 @@ impl State {
                     self.redraw = true;
                     sightings.push(Cmd::Add {
                         observation,
-                        sighting: Some((kind.name(), chunk_of(&observation, *at))),
+                        sighting: Some((super::finder_label(kind), chunk_of(&observation, *at))),
                     });
+                }
+            }
+            let (x0, z0) = (at.0 * 16, at.1 * 16);
+            for &(band, y, id, on) in rows {
+                let held = &mut self.bedrock[band_slot(band)];
+                for z in z0..z0 + 16 {
+                    for x in x0..x0 + 16 {
+                        if held.len() >= bedrock_cap(band) {
+                            break;
+                        }
+                        if view.region.state(x, y, z).map(id_of) != Some(id) {
+                            continue;
+                        }
+                        if let Some(cell) = BedrockCell::new(band, x, y, z, on)
+                            && held.insert(cell)
+                        {
+                            sightings.push(Cmd::Add {
+                                observation: Observation::Bedrock(cell),
+                                sighting: None,
+                            });
+                        }
+                    }
                 }
             }
             drop(view);
@@ -587,20 +797,29 @@ impl State {
                 structure_bits,
                 decorator_bits,
             } => {
-                let mut bits = format!("{structure_bits:.1} structure bits");
-                if decorator_bits > 0.0 {
-                    bits += &format!(", {decorator_bits:.1} decoration bits");
-                }
-                tell(
-                    shared,
-                    WHITE,
-                    format!(
-                        "Seed Cracker: {} at chunk {}, {} ({bits})",
-                        label.to_lowercase(),
-                        chunk.0,
-                        chunk.1
-                    ),
+                let (structure_bits, decorator_bits) = (
+                    format!("{structure_bits:.1}"),
+                    (decorator_bits > 0.0).then(|| format!("{decorator_bits:.1}")),
                 );
+                let label = label.to_lowercase();
+                let text = match decorator_bits {
+                    Some(dec) => crate::lang::trf!(
+                        "seed_cracker.added.both",
+                        label,
+                        chunk.0,
+                        chunk.1,
+                        structure_bits,
+                        dec
+                    ),
+                    None => crate::lang::trf!(
+                        "seed_cracker.added",
+                        label,
+                        chunk.0,
+                        chunk.1,
+                        structure_bits
+                    ),
+                };
+                tell(shared, WHITE, text);
             }
             Out::Status(lines) => {
                 for line in lines {
@@ -608,67 +827,89 @@ impl State {
                 }
             }
             Out::Event(event) => self.event(shared, event),
+            Out::Hint { hint, cells } => {
+                if let Some(text) = hint_text(hint, cells) {
+                    tell(shared, GRAY, crate::lang::trf!("seed_cracker.chat", text));
+                }
+            }
+            Out::BandFull { band, cells } => {
+                let text = bedrock_progress(band, cells);
+                tell(shared, GRAY, crate::lang::trf!("seed_cracker.chat", text));
+            }
+            Out::Resolved(trust) => self.answered(shared, trust),
         }
     }
 
     fn event(&mut self, shared: &SharedMutex, event: Event) {
         let prefix = store().text(prefix_setting::PREFIX);
         match event {
-            Event::PillarSeeds(seeds) => tell(
-                shared,
-                AQUA,
-                format!(
-                    "Seed Cracker: {} pillar seed{}{}",
-                    seeds.len(),
-                    plural(seeds.len()),
-                    listed(&seeds)
-                ),
-            ),
+            Event::PillarSeeds(seeds) => {
+                let text =
+                    crate::lang::trn!("seed_cracker.pillar_seeds", seeds.len(), listed(&seeds));
+                tell(shared, AQUA, text)
+            }
             Event::PillarsInconsistent => tell(
                 shared,
                 RED,
-                "Seed Cracker: the End's spikes fit no pillar seed, so they are ignored; the overworld can still crack it",
+                crate::lang::tr!("seed_cracker.pillars_inconsistent"),
             ),
-            Event::Started(stage) => {
-                tell(shared, GRAY, format!("Seed Cracker: {}", stage_name(stage)))
-            }
-            Event::LiftedLowParts(n) => tell(
+            Event::Started(stage) => tell(
                 shared,
                 GRAY,
-                format!(
-                    "Seed Cracker: {n} low part{} left after the lift filter",
-                    plural(n)
-                ),
+                crate::lang::trf!("seed_cracker.started", stage_name(stage)),
             ),
-            Event::StructureSeeds(seeds) => tell(
-                shared,
-                AQUA,
-                format!(
-                    "Seed Cracker: {} structure seed{}{}",
-                    seeds.len(),
-                    plural(seeds.len()),
-                    listed(&seeds)
-                ),
-            ),
+            Event::LiftedLowParts(n) => {
+                let text = crate::lang::trn!("seed_cracker.lifted", n);
+                tell(shared, GRAY, text)
+            }
+            Event::StructureSeeds(seeds) => {
+                let text =
+                    crate::lang::trn!("seed_cracker.structure_seeds", seeds.len(), listed(&seeds));
+                tell(shared, AQUA, text)
+            }
             Event::NoStructureSeed => tell(
                 shared,
                 RED,
-                format!("Seed Cracker: no result: a sighting is wrong, run {prefix}cracker clear"),
+                crate::lang::trf!("seed_cracker.no_structure_seed", prefix),
             ),
             Event::WorldSeeds(seeds) => self.world_seeds(shared, &seeds),
-            Event::HashMismatch => tell(
-                shared,
-                RED,
-                "Seed Cracker: no world seed matches the server's hashed seed; dungeons, desert wells and end \
-                 gateways can pick it instead",
-            ),
+            Event::HashMismatch => {
+                tell(shared, RED, crate::lang::tr!("seed_cracker.hash_mismatch"))
+            }
             Event::NoWorldSeed => tell(
                 shared,
                 RED,
-                format!(
-                    "Seed Cracker: no world seed fits the decorations: a sighting is wrong, run {prefix}cracker clear"
-                ),
+                crate::lang::trf!("seed_cracker.no_world_seed", prefix),
             ),
+            Event::BandSeeds(band, n) => {
+                let text = crate::lang::trn!("seed_cracker.band_seeds", n, band_name(band));
+                tell(shared, AQUA, text)
+            }
+            Event::BedrockOverflow(band) => tell(
+                shared,
+                RED,
+                crate::lang::trf!("seed_cracker.bedrock_overflow", band_name(band), prefix),
+            ),
+            Event::BedrockInconsistent => tell(
+                shared,
+                RED,
+                crate::lang::trf!("seed_cracker.bedrock_inconsistent", prefix),
+            ),
+            Event::BedrockConflict => conflict_prompt(shared, &prefix),
+            Event::SightingIgnored(s) => {
+                let observation = Observation::Structure(s);
+                if self.ignored.insert(observation) {
+                    if self.found.remove(&observation).is_some() {
+                        self.unsaved.get_or_insert(0);
+                        self.redraw = true;
+                    }
+                    say(
+                        shared,
+                        YELLOW,
+                        crate::lang::trf!("seed_cracker.sighting_ignored", s.chunk_x, s.chunk_z),
+                    );
+                }
+            }
         }
     }
 
@@ -677,12 +918,7 @@ impl State {
             tell(
                 shared,
                 AQUA,
-                format!(
-                    "Seed Cracker: {} world seed{}{}",
-                    seeds.len(),
-                    plural(seeds.len()),
-                    listed(seeds)
-                ),
+                crate::lang::trf!("seed_cracker.world_seeds", seeds.len(), listed(seeds)),
             );
             return;
         };
@@ -694,7 +930,7 @@ impl State {
         let events: Vec<SpanEvent> = vec![SpanEvent {
             click: Some(Click::CopyToClipboard(text.clone())),
             hover: Some(Hover::Lines(vec![vec![Span::colored(
-                "Click to copy",
+                crate::lang::tr!("seed_cracker.click_to_copy"),
                 GRAY,
             )]])),
             insertion: Some(text.clone()),
@@ -703,7 +939,7 @@ impl State {
         style.underline = true;
         style.event = 1;
         let spans = vec![
-            Span::colored("Seed Cracker: world seed ", WHITE),
+            Span::colored(crate::lang::tr!("seed_cracker.world_seed"), WHITE),
             Span {
                 text: text.clone(),
                 style,
@@ -717,11 +953,7 @@ impl State {
         let s = store();
         if s.flag(setting::SEND) {
             s.set_text_at(xray_setting::SEED.0 as usize, &text);
-            tell(
-                shared,
-                GRAY,
-                "Seed Cracker: sent to Seed Xray's Seed setting",
-            );
+            tell(shared, GRAY, crate::lang::tr!("seed_cracker.sent_to_xray"));
         }
     }
 
@@ -751,6 +983,69 @@ impl State {
     }
 }
 
+fn warn_hidden(shared: &SharedMutex) {
+    use crate::gui::toast::{SystemId, ToastEvent};
+    say(shared, YELLOW, crate::lang::tr!("seed_cracker.hidden_hash"));
+    crate::session::queue_toasts(
+        shared,
+        [ToastEvent::System {
+            id: SystemId::HiddenHashedSeed,
+            title: vec![Span::colored(
+                crate::lang::tr!("seed_cracker.hidden_hash.toast_title"),
+                YELLOW,
+            )],
+            message: vec![Span::colored(
+                crate::lang::tr!("seed_cracker.hidden_hash.toast_message"),
+                WHITE,
+            )],
+            multiline: true,
+        }],
+    );
+}
+
+fn conflict_prompt(shared: &SharedMutex, prefix: &str) {
+    say(shared, RED, crate::lang::tr!("seed_cracker.conflict"));
+    let choices = [
+        (
+            crate::lang::tr!("seed_cracker.conflict.bedrock"),
+            "cracker trust bedrock",
+        ),
+        (
+            crate::lang::tr!("seed_cracker.conflict.structures"),
+            "cracker trust structures",
+        ),
+        (
+            crate::lang::tr!("seed_cracker.conflict.clear"),
+            "cracker clear",
+        ),
+    ];
+    let mut spans = Vec::new();
+    let mut events: Vec<SpanEvent> = Vec::new();
+    for (i, (label, command)) in choices.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::colored(" ", WHITE));
+        }
+        let line = format!("{prefix}{command}");
+        let hover = crate::lang::trf!("seed_cracker.conflict.hover", line);
+        let mut style = Style::colored(YELLOW);
+        style.underline = true;
+        style.event = crate::text::events::push(
+            &mut events,
+            SpanEvent {
+                click: Some(Click::SuggestCommand(line)),
+                hover: Some(Hover::Lines(vec![vec![Span::colored(hover, GRAY)]])),
+                insertion: None,
+            },
+        );
+        spans.push(Span {
+            text: label.to_string(),
+            style,
+        });
+    }
+    let mut s = shared.lock().unwrap();
+    show_local_events(&mut s.session, spans, Some(Arc::from(events)));
+}
+
 impl Drop for State {
     fn drop(&mut self) {
         if self.unsaved.is_some() {
@@ -766,7 +1061,7 @@ pub fn tick(bot: &azalea::Client, shared: &SharedMutex) {
     match EDGE.poll(store()) {
         Phase::Off => {
             if IMPORT.swap(false, Relaxed) {
-                tell(shared, RED, "Seed Cracker: turn it on to import a share");
+                tell(shared, RED, crate::lang::tr!("seed_cracker.import.off"));
             }
             return;
         }

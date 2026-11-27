@@ -82,6 +82,12 @@ pub fn draw(
         slots::draw_stack(p, &offer.result, row_x + 68.0, item_y);
     }
 
+    if ui.selected >= 0 && ctx.input.select && (ui.selected as usize) < offers.offers.len() {
+        out.push(InvAction::SelectTrade(ui.selected as u32));
+        #[cfg(feature = "audio")]
+        widgets::play_click();
+    }
+
     if offers.show_progress {
         draw_xp_bar(
             p,

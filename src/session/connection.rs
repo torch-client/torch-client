@@ -13,12 +13,15 @@ pub struct SessionState {
     pub level_loading: Option<LevelLoading>,
     pub player_section_ready: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub current_address: Option<String>,
+    pub pack_address: Option<String>,
     pub advanced_tooltips: bool,
     pub fly_toggle: bool,
     pub flying: bool,
     pub auto_jump: bool,
     pub fov: FovState,
     pub camera_eye: CameraEye,
+    pub spectate: Option<Spectate>,
+    pub cart_ride: Option<crate::play::riding::cart_lerp::LocalCart>,
     pub portal_effect: PortalEffect,
     pub spinning_effect: SpinningEffect,
     pub sky_flash_time: i32,
@@ -82,6 +85,9 @@ pub struct SessionState {
     pub sleep_timer: u32,
     pub player_pos_prev: [f64; 3],
     pub game_time: u64,
+    pub client_ticks: u64,
+    pub world_ticks: u64,
+    pub world_run: WorldRun,
     pub border: azalea::world::WorldBorder,
     pub last_tick_time: Option<crate::platform::time::Instant>,
     pub hotbar_target: Option<u8>,
@@ -90,6 +96,7 @@ pub struct SessionState {
     pub pending_drops: Vec<DropRequest>,
     pub command_block_open: Option<CommandBlockOpen>,
     pub command_block_pos: Option<azalea_core::position::BlockPos>,
+    pub command_minecart: Option<i32>,
     pub command_block_data: Option<CommandBlockData>,
     pub command_block_update: Option<CommandBlockUpdate>,
     pub game_master_open: Option<GameMasterOpen>,
@@ -116,6 +123,7 @@ pub struct SessionState {
     pub reconfiguring: bool,
     pub dialog_submits: Vec<crate::play::dialog::Submit>,
     pub server_links: Vec<ServerLink>,
+    pub server_info: ServerInfo,
     pub server_packs: crate::client::server_packs::ServerPacks,
     pub targeted_block: Option<TargetedBlock>,
     pub targeted_entity: bool,
@@ -126,12 +134,14 @@ pub struct SessionState {
     pub safe_anchor: Option<CameraAim>,
     pub route_look: Option<CameraAim>,
     pub ore_miner_look: Option<CameraAim>,
+    pub builder_look: Option<CameraAim>,
+    pub farmer_look: Option<CameraAim>,
     pub attack_strength: f32,
     pub attack_delay: f32,
     pub item_swap: f32,
     pub breaking: Vec<BreakingBlock>,
     pub remote_breaking: std::collections::HashMap<i32, RemoteBreak>,
-    pub item_pickups: Vec<crate::play::item_pickup::ItemPickup>,
+    pub item_pickups: crate::play::item_pickup::ItemPickups,
     pub particle_emits: Vec<ParticleEmit>,
     pub map_updates: Vec<MapUpdate>,
     pub clear_maps: bool,
@@ -255,12 +265,42 @@ pub struct FovState {
     pub first_person: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ServerInfo {
+    pub brand: Option<String>,
+    pub max_players: Option<i32>,
+    pub view_distance: Option<u32>,
+    pub simulation_distance: Option<u32>,
+    pub enforces_secure_chat: Option<bool>,
+    pub online_mode: Option<bool>,
+    pub reduced_debug_info: Option<bool>,
+    pub difficulty_locked: Option<bool>,
+    pub dimension: Option<String>,
+    pub hashed_seed: Option<i64>,
+    pub flat: Option<bool>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TickRate(pub f32);
 
 impl Default for TickRate {
     fn default() -> Self {
         TickRate(20.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorldRun {
+    pub frozen: bool,
+    pub runs: bool,
+}
+
+impl Default for WorldRun {
+    fn default() -> Self {
+        WorldRun {
+            frozen: false,
+            runs: true,
+        }
     }
 }
 
@@ -304,6 +344,65 @@ impl CameraEye {
 
     pub fn sample(&self, partial: f32) -> f32 {
         self.prev + (self.cur - self.prev) * partial
+    }
+}
+
+#[derive(Clone)]
+pub struct Spectate {
+    pub id: i32,
+    pub target: SpectateTarget,
+    pub eye_height: f32,
+    pub camera_distance: f32,
+    pub frozen: bool,
+}
+
+#[derive(Clone)]
+pub enum SpectateTarget {
+    Player(Box<HumanoidAnim>),
+    Entity(Box<crate::entities::feed::EntityAnim>),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SpectateFrame {
+    pub feet: [f64; 3],
+    pub y_rot: f32,
+    pub x_rot: f32,
+    pub sleeping: bool,
+    pub bed_orientation: Option<crate::blocks::direction::Direction>,
+    pub camera_distance: f32,
+}
+
+impl Spectate {
+    pub fn entity_frozen(&self) -> bool {
+        matches!(&self.target, SpectateTarget::Entity(anim) if anim.is_frozen())
+    }
+
+    pub fn frame(&self, partial: f32) -> SpectateFrame {
+        let t = if self.frozen { 1.0 } else { partial };
+        match &self.target {
+            SpectateTarget::Player(anim) => {
+                let sample = anim.sample(t);
+                SpectateFrame {
+                    feet: anim.position(t),
+                    y_rot: sample.body_yaw + sample.head_yaw,
+                    x_rot: sample.pitch,
+                    sleeping: sample.sleeping,
+                    bed_orientation: sample.bed_orientation,
+                    camera_distance: self.camera_distance,
+                }
+            }
+            SpectateTarget::Entity(anim) => {
+                let (y_rot, x_rot) = anim.look(t);
+                SpectateFrame {
+                    feet: anim.position(t),
+                    y_rot,
+                    x_rot,
+                    sleeping: false,
+                    bed_orientation: None,
+                    camera_distance: self.camera_distance,
+                }
+            }
+        }
     }
 }
 
@@ -377,6 +476,7 @@ pub enum WaypointPos {
 pub struct WaypointInfo {
     pub id: WaypointKey,
     pub style: String,
+    pub foreign_style: bool,
     pub color: Option<[f32; 3]>,
     pub pos: WaypointPos,
 }
@@ -413,9 +513,9 @@ impl WorldClock {
         self.ticks += (self.rate as f64 + slice).max(0.0);
     }
 
-    pub fn resync(&mut self, server: WorldClock) {
+    pub fn resync(&mut self, server: WorldClock, runs: bool) {
         let drift = server.ticks - self.ticks;
-        if drift.abs() >= RESYNC_SNAP_TICKS {
+        if !runs || drift.abs() >= RESYNC_SNAP_TICKS {
             *self = server;
             return;
         }

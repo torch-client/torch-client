@@ -1,0 +1,23 @@
+{
+  "pathfinder.already_following": "Уже следую за %s",
+  "pathfinder.arrived": "На месте",
+  "pathfinder.cancelled": "Маршрут отменён",
+  "pathfinder.cancelled.mine": "Маршрут отменён: блок не ломается",
+  "pathfinder.cancelled.place": "Маршрут отменён: блок не удалось поставить",
+  "pathfinder.follow_who": "За кем следовать? Добавьте имя игрока",
+  "pathfinder.following": "Следую за %s",
+  "pathfinder.following_now": "Теперь следую за %s",
+  "pathfinder.gave_up": "Сдаюсь: %s",
+  "pathfinder.gave_up_restarts": "Сдаюсь: маршрут не приближал к цели, начинался заново раз: %s",
+  "pathfinder.getting_away": "%s уходит",
+  "pathfinder.going_to": "Иду к координатам: %s %s %s",
+  "pathfinder.lost": "Потерян из виду: %s",
+  "pathfinder.no_route": "Маршрута к цели нет",
+  "pathfinder.no_way": "Путь не найден: %s",
+  "pathfinder.self": "Это вы",
+  "pathfinder.self.stopped": "Это вы; следование за %s прекращено",
+  "pathfinder.stopped": "Остановлено",
+  "pathfinder.stopped_following": "Следование за %s прекращено",
+  "pathfinder.unseen": "Не вижу: %s",
+  "pathfinder.unseen.stopped": "Не вижу: %s, следование за %s прекращено"
+}

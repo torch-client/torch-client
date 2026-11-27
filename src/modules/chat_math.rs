@@ -24,7 +24,7 @@ pub(super) fn say(shared: &SharedMutex, rgb: u32, text: impl Into<String>) {
     show_local_spans(&mut s.session, vec![Span::colored(text, rgb)]);
 }
 
-pub(super) fn show_local_spans(session: &mut SessionState, spans: Vec<Span>) {
+pub(crate) fn show_local_spans(session: &mut SessionState, spans: Vec<Span>) {
     show_local_events(session, spans, None);
 }
 

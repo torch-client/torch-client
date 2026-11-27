@@ -1,0 +1,18 @@
+{
+  "play.nbt.expected_open": "Expected [ to start the component list, as in [custom_name='Name',!lore]",
+  "play.nbt.expected_name": "Expected a component name at position %s",
+  "play.nbt.unknown_component": "Unknown component %s at position %s",
+  "play.nbt.named_twice": "Component %s is named twice",
+  "play.nbt.expected_equals": "Expected = after %s at position %s",
+  "play.nbt.malformed": "Malformed %s: %s",
+  "play.nbt.expected_component": "Expected a component at position %s",
+  "play.nbt.expected_separator": "Expected , or ] at position %s",
+  "play.nbt.trailing": "Unexpected text after ] at position %s",
+  "play.nbt.no_inventory": "No inventory yet",
+  "play.nbt.copied": " data copied",
+  "play.nbt.creative_only": "Creative mode only.",
+  "play.nbt.hold_item": "You must hold an item in your main hand.",
+  "play.nbt.count_set": "Set mainhand stack count to %s.",
+  "play.nbt.over_max": "The count %s is over this item's max stack size %s; the server will ignore the change",
+  "play.nbt.updated": "Item updated"
+}

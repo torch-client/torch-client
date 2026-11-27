@@ -1,0 +1,5 @@
+{
+  "renderer.shader_quality.fancy": "Fancy",
+  "renderer.shader_quality.fast": "Fast",
+  "renderer.shader_quality.mobile": "Mobile"
+}

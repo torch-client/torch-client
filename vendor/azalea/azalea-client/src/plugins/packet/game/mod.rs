@@ -608,7 +608,39 @@ impl GamePacketHandler<'_> {
         });
     }
 
-    pub fn chunks_biomes(&mut self, _p: &ClientboundChunksBiomes) {}
+    pub fn chunks_biomes(&mut self, p: &ClientboundChunksBiomes) {
+        debug!(
+            "Got chunks biomes packet for {} columns",
+            p.chunk_biome_data.len()
+        );
+
+        as_system::<Query<&WorldHolder>>(self.ecs, |query| {
+            let Ok(world_holder) = query.get(self.player) else {
+                return;
+            };
+            let biome_registry_len =
+                azalea_world::chunk::biome_registry_len(&world_holder.shared.read().registries);
+            for data in &p.chunk_biome_data {
+                let chunk = world_holder
+                    .partial
+                    .read()
+                    .chunks
+                    .limited_get(&data.pos)
+                    .cloned();
+                let Some(chunk) = chunk else {
+                    warn!(
+                        "Ignoring biomes for a column that is not present: {}, {}",
+                        data.pos.x, data.pos.z
+                    );
+                    continue;
+                };
+                let replaced = chunk.write().replace_biomes(&data.buffer, biome_registry_len);
+                if let Err(failure) = replaced {
+                    azalea_world::chunk::report_decode_failure(data.pos, &failure);
+                }
+            }
+        });
+    }
 
     pub fn light_update(&mut self, _p: &ClientboundLightUpdate) {
     }
@@ -1490,7 +1522,51 @@ impl GamePacketHandler<'_> {
         });
     }
 
-    pub fn player_look_at(&mut self, _p: &ClientboundPlayerLookAt) {}
+    pub fn player_look_at(&mut self, p: &ClientboundPlayerLookAt) {
+        use azalea_entity::dimensions::EntityDimensions;
+        use azalea_protocol::packets::game::c_player_look_at::Anchor;
+
+        debug!("Got player look at packet {p:?}");
+
+        as_system::<(
+            Query<(&EntityIdIndex, &Position, &EntityDimensions, &mut LookDirection)>,
+            Query<(&Position, &EntityDimensions), Without<LocalEntity>>,
+            Commands,
+        )>(self.ecs, |(mut query, targets, mut commands)| {
+            let Ok((index, position, dimensions, mut direction)) = query.get_mut(self.player)
+            else {
+                return;
+            };
+            let anchored = |at: &Position, size: &EntityDimensions, anchor: Anchor| {
+                let lift = match anchor {
+                    Anchor::Feet => 0.0,
+                    Anchor::Eyes => f64::from(size.eye_height),
+                };
+                Vec3::new(at.x, at.y + lift, at.z)
+            };
+            let to = p
+                .entity
+                .as_ref()
+                .and_then(|at| {
+                    let entity =
+                        index.get_by_minecraft_entity(MinecraftEntityId(at.entity as i32))?;
+                    let (position, dimensions) = targets.get(entity).ok()?;
+                    Some(anchored(position, dimensions, at.to_anchor))
+                })
+                .unwrap_or(p.pos);
+            let from = anchored(position, dimensions, p.from_anchor);
+
+            let (xd, yd, zd) = (to.x - from.x, to.y - from.y, to.z - from.z);
+            let sd = (xd * xd + zd * zd).sqrt();
+            let wrap = |degrees: f32| (degrees + 180.0).rem_euclid(360.0) - 180.0;
+            let x_rot = wrap((-(yd.atan2(sd) * 57.295_776_367_187_5)) as f32);
+            let y_rot = wrap((zd.atan2(xd) * 57.295_776_367_187_5) as f32 - 90.0);
+            *direction = LookDirection::new(y_rot, x_rot);
+            commands
+                .entity(self.player)
+                .insert(crate::movement::ServerSetLook);
+        });
+    }
 
     pub fn remove_mob_effect(&mut self, p: &ClientboundRemoveMobEffect) {
         debug!("Got remove mob effect packet {p:?}");
@@ -1800,8 +1876,23 @@ impl GamePacketHandler<'_> {
     pub fn bundle_delimiter(&mut self, _p: &ClientboundBundleDelimiter) {}
     pub fn damage_event(&mut self, _p: &ClientboundDamageEvent) {}
     pub fn hurt_animation(&mut self, _p: &ClientboundHurtAnimation) {}
-    pub fn ticking_state(&mut self, _p: &ClientboundTickingState) {}
-    pub fn ticking_step(&mut self, _p: &ClientboundTickingStep) {}
+    pub fn ticking_state(&mut self, p: &ClientboundTickingState) {
+        if let Some(mut rate) = self
+            .ecs
+            .get_resource_mut::<azalea_core::tick::TickRateManager>()
+        {
+            rate.set_tick_rate(p.tick_rate);
+            rate.set_frozen(p.is_frozen);
+        }
+    }
+    pub fn ticking_step(&mut self, p: &ClientboundTickingStep) {
+        if let Some(mut rate) = self
+            .ecs
+            .get_resource_mut::<azalea_core::tick::TickRateManager>()
+        {
+            rate.set_frozen_ticks_to_run(p.tick_steps as i32);
+        }
+    }
     pub fn reset_score(&mut self, _p: &ClientboundResetScore) {}
     pub fn cookie_request(&mut self, p: &ClientboundCookieRequest) {
         debug!("Got cookie request packet {p:?}");
@@ -1824,7 +1915,17 @@ impl GamePacketHandler<'_> {
     }
     pub fn debug_sample(&mut self, _p: &ClientboundDebugSample) {}
     pub fn pong_response(&mut self, _p: &ClientboundPongResponse) {}
-    pub fn transfer(&mut self, _p: &ClientboundTransfer) {}
+    pub fn transfer(&mut self, p: &ClientboundTransfer) {
+        debug!("Got transfer packet {p:?}");
+
+        as_system::<Commands>(self.ecs, |mut commands| {
+            commands.trigger(crate::cookies::TransferEvent {
+                entity: self.player,
+                host: p.host.clone(),
+                port: p.port,
+            });
+        });
+    }
     pub fn move_minecart_along_track(&mut self, _p: &ClientboundMoveMinecartAlongTrack) {}
     pub fn set_held_slot(&mut self, p: &ClientboundSetHeldSlot) {
         debug!("Got set held slot packet {p:?}");
@@ -1836,7 +1937,28 @@ impl GamePacketHandler<'_> {
             }
         });
     }
-    pub fn set_player_inventory(&mut self, _p: &ClientboundSetPlayerInventory) {}
+    pub fn set_player_inventory(&mut self, p: &ClientboundSetPlayerInventory) {
+        debug!("Got set player inventory packet {p:?}");
+        crate::inventory::trace(format_args!(
+            "SetPlayerInventory slot={} item={:?}",
+            p.slot, p.contents
+        ));
+
+        let menu_slot = match p.slot {
+            hotbar @ 0..=8 => 36 + hotbar,
+            main @ 9..=35 => main,
+            armor @ 36..=39 => 44 - armor,
+            40 => 45,
+            _ => return,
+        };
+        as_system::<Query<&mut Inventory>>(self.ecs, |mut query| {
+            let mut inventory = query.get_mut(self.player).unwrap();
+            if let Some(slot) = inventory.inventory_menu.slot_mut(menu_slot as usize) {
+                *slot = p.contents.clone();
+            }
+            inventory.sync_player_slots(false);
+        });
+    }
     pub fn projectile_power(&mut self, _p: &ClientboundProjectilePower) {}
     pub fn custom_report_details(&mut self, _p: &ClientboundCustomReportDetails) {}
     pub fn server_links(&mut self, _p: &ClientboundServerLinks) {}

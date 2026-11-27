@@ -105,6 +105,8 @@ const TO_RESET_LEVEL: u8 = 10;
 const TO_PACKS: u8 = 11;
 #[cfg(feature = "shader_support")]
 const TO_PACK_IDS: u8 = 12;
+const TO_COLUMN_BIOMES: u8 = 13;
+const TO_HIDDEN: u8 = 14;
 
 #[cfg(resource_packs)]
 const MESHER_FILES: [&str; 4] = [
@@ -138,6 +140,13 @@ pub enum ToWorker {
         data: Vec<u8>,
     },
     Blocks(Vec<(i32, i32, i32, u32)>),
+    Hidden {
+        version: u32,
+        active: bool,
+        cells: Vec<([i32; 3], u8)>,
+        writes: Vec<(i32, i32, i32, u32)>,
+    },
+    ColumnBiomes(Vec<(i32, i32, Vec<u8>)>),
     Unload {
         cx: i32,
         cz: i32,
@@ -171,6 +180,8 @@ impl ToWorker {
             ToWorker::Chunk { .. } => "chunk",
             ToWorker::LightUpdate { .. } => "light update",
             ToWorker::Blocks(_) => "blocks",
+            ToWorker::Hidden { .. } => "hidden cells",
+            ToWorker::ColumnBiomes(_) => "column biomes",
             ToWorker::Unload { .. } => "unload",
             ToWorker::Backlog { .. } => "backlog",
             ToWorker::ResetLight => "reset light",
@@ -233,12 +244,35 @@ impl ToWorker {
             }
             ToWorker::Blocks(blocks) => {
                 let mut w = Writer::new(TO_BLOCK_CHANGE);
-                w.u32(blocks.len() as u32);
-                for &(x, y, z, state) in blocks {
-                    w.i32(x);
-                    w.i32(y);
-                    w.i32(z);
-                    w.u32(state);
+                write_blocks(&mut w, blocks);
+                w.finish()
+            }
+            ToWorker::Hidden {
+                version,
+                active,
+                cells,
+                writes,
+            } => {
+                let mut w = Writer::new(TO_HIDDEN);
+                w.u32(*version);
+                w.bool(*active);
+                w.u32(cells.len() as u32);
+                for (cell, what) in cells {
+                    for &v in cell {
+                        w.i32(v);
+                    }
+                    w.u8(*what);
+                }
+                write_blocks(&mut w, writes);
+                w.finish()
+            }
+            ToWorker::ColumnBiomes(columns) => {
+                let mut w = Writer::new(TO_COLUMN_BIOMES);
+                w.u32(columns.len() as u32);
+                for (cx, cz, data) in columns {
+                    w.i32(*cx);
+                    w.i32(*cz);
+                    w.bytes(data);
                 }
                 w.finish()
             }
@@ -317,13 +351,28 @@ impl ToWorker {
                 cz: r.i32()?,
                 data: r.bytes()?.to_vec(),
             },
-            TO_BLOCK_CHANGE => {
+            TO_BLOCK_CHANGE => ToWorker::Blocks(read_blocks(&mut r)?),
+            TO_HIDDEN => {
+                let (version, active) = (r.u32()?, r.bool()?);
                 let n = r.count()?;
-                let mut blocks = Vec::with_capacity(n);
+                let mut cells = Vec::with_capacity(n);
                 for _ in 0..n {
-                    blocks.push((r.i32()?, r.i32()?, r.i32()?, r.u32()?));
+                    cells.push(([r.i32()?, r.i32()?, r.i32()?], r.u8()?));
                 }
-                ToWorker::Blocks(blocks)
+                ToWorker::Hidden {
+                    version,
+                    active,
+                    cells,
+                    writes: read_blocks(&mut r)?,
+                }
+            }
+            TO_COLUMN_BIOMES => {
+                let n = r.count()?;
+                let mut columns = Vec::with_capacity(n);
+                for _ in 0..n {
+                    columns.push((r.i32()?, r.i32()?, r.bytes()?.to_vec()));
+                }
+                ToWorker::ColumnBiomes(columns)
             }
             TO_UNLOAD => ToWorker::Unload {
                 cx: r.i32()?,
@@ -364,6 +413,25 @@ impl ToWorker {
             _ => return None,
         })
     }
+}
+
+fn write_blocks(w: &mut Writer, blocks: &[(i32, i32, i32, u32)]) {
+    w.u32(blocks.len() as u32);
+    for &(x, y, z, state) in blocks {
+        w.i32(x);
+        w.i32(y);
+        w.i32(z);
+        w.u32(state);
+    }
+}
+
+fn read_blocks(r: &mut Reader) -> Option<Vec<(i32, i32, i32, u32)>> {
+    let n = r.count()?;
+    let mut blocks = Vec::with_capacity(n);
+    for _ in 0..n {
+        blocks.push((r.i32()?, r.i32()?, r.i32()?, r.u32()?));
+    }
+    Some(blocks)
 }
 
 const FROM_READY: u8 = 1;
@@ -438,6 +506,7 @@ fn mesh_buf(w: &mut Writer, buf: &MeshBuf) {
     w.bytes(bytemuck::cast_slice(&buf.verts));
     w.u32(buf.solid_quads);
     w.u32(buf.cutout_quads);
+    w.u32(buf.hidden);
     for v in buf.faces.as_flattened() {
         w.u32(u32::from(*v));
     }
@@ -458,6 +527,7 @@ fn read_mesh_buf(r: &mut Reader) -> Option<MeshBuf> {
     buf.verts = read_pod(r.bytes()?)?;
     buf.solid_quads = r.u32()?;
     buf.cutout_quads = r.u32()?;
+    buf.hidden = r.u32()?;
     buf.min = min;
     buf.max = max;
     for v in buf.faces.as_flattened_mut() {

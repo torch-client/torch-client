@@ -167,7 +167,6 @@ pub enum Anim {
     Vault(vault::Vault),
     Gateway(gateway::Gateway),
     Beacon(beacon::Beacon),
-    Piston(piston::Progress),
     PotentSulfur(potent_sulfur::Sulfur),
     Campfire,
 }
@@ -190,7 +189,6 @@ impl Anim {
             BlockEntityKind::Vault => Anim::Vault(Default::default()),
             BlockEntityKind::EndGateway => Anim::Gateway(Default::default()),
             BlockEntityKind::Beacon => Anim::Beacon(Default::default()),
-            BlockEntityKind::Piston => Anim::Piston(Default::default()),
             BlockEntityKind::PotentSulfur => Anim::PotentSulfur(Default::default()),
             BlockEntityKind::Campfire => Anim::Campfire,
             _ => Anim::None,
@@ -203,7 +201,6 @@ impl Anim {
         match self {
             Anim::Spawner(spin) => spin.on_data(data),
             Anim::Gateway(gateway) => gateway.on_data(data),
-            Anim::Piston(progress) => progress.on_data(data),
             _ => {}
         }
     }
@@ -236,7 +233,6 @@ impl Anim {
                     beacon.tick(ctx, scan);
                 }
             }
-            Anim::Piston(progress) => progress.tick(),
             Anim::PotentSulfur(sulfur) => sulfur.tick(ctx),
             Anim::Campfire => items::campfire_particle_tick(ctx),
         }

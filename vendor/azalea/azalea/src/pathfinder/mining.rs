@@ -106,6 +106,14 @@ impl MiningCache {
         self.water_block_state_range.contains(&block.id())
             || self.lava_block_state_range.contains(&block.id())
             || is_waterlogged(block)
+            || matches!(
+                BlockKind::from(block),
+                BlockKind::BubbleColumn
+                    | BlockKind::Seagrass
+                    | BlockKind::TallSeagrass
+                    | BlockKind::Kelp
+                    | BlockKind::KelpPlant
+            )
     }
 
     pub fn is_falling_block(&self, block: BlockState) -> bool {

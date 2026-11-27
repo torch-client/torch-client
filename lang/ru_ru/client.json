@@ -1,0 +1,21 @@
+{
+  "client.status.connecting": "Подключение к %s...",
+  "client.status.still_closing": "Предыдущее соединение ещё закрывается, повторите позже",
+  "client.status.thread_failed": "Не удалось запустить поток соединения",
+  "client.status.refused": "Отказано: %s",
+  "client.status.could_not_connect": "Не удалось подключиться: %s",
+  "client.status.waiting_for_chunks": "Подключено, ожидание чанков...",
+  "client.status.spawned": "Появление в (%s,%s,%s)",
+  "client.status.disconnected": "Отключение",
+  "client.status.disconnected_because": "Отключение: %s",
+  "client.status.connection_failed": "Ошибка соединения: %s",
+  "client.status.connection_lost": "Соединение потеряно",
+  "client.status.stalled": "Отключение (поток бота завис)",
+  "client.status.stalled_reason": "Соединение перестало отвечать и было закрыто клиентом.",
+  "client.status.transfer_unsupported": "Сервер попытался перенаправить вас на другой сервер. Это соединение не поддерживает перенаправление.",
+  "client.chat.signing_unavailable": "Подписанный чат включён, но у клиента пока нет сертификата подписи. Отправлено без подписи.",
+  "client.chat.tag_secure": "Подтверждённое сообщение. Подписано отправителем:",
+  "client.self_update.start_failed": "Не удалось начать загрузку: %s",
+  "client.bedrock_art.no_answer": "GitHub не ответил",
+  "client.bedrock_art.damaged": "Текстура кнопки повреждена при получении"
+}

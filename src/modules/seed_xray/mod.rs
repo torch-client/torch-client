@@ -22,6 +22,7 @@ use super::list::{BitList, Built, Entry};
 use super::nearest_first;
 use super::registry::{Id, seed_xray as setting};
 use super::{Edge, Phase, store};
+use crate::lang::Key;
 use crate::renderer::dimension::{self, Dimension};
 use crate::session::SharedMutex;
 use crate::text::{GREEN, RED, WHITE, YELLOW};
@@ -39,7 +40,9 @@ static SERVER_HASH: AtomicI64 = AtomicI64::new(0);
 static CHUNK_ARRIVED: AtomicBool = AtomicBool::new(false);
 static CHECK: AtomicBool = AtomicBool::new(false);
 
-pub(in crate::modules) static GROUPS: [&str; 1] = ["Ores"];
+pub(in crate::modules) static GROUPS: [Key; 1] = [Key::of("lists.ores.group")];
+
+pub(in crate::modules) const TITLE: Key = Key::of("lists.ores.title");
 
 pub(in crate::modules) fn build_ores() -> Built {
     let entries = Kind::ALL
@@ -47,6 +50,7 @@ pub(in crate::modules) fn build_ores() -> Built {
         .map(|k| Entry {
             group: 0,
             label: Cow::Borrowed(k.label()),
+            shown: k.shown(),
             on: *k != Kind::Coal,
             color: blocks::color_of(k.block()),
         })
@@ -56,7 +60,7 @@ pub(in crate::modules) fn build_ores() -> Built {
 
 pub static ORES: BitList = BitList::new(
     "seed_xray",
-    "Ores",
+    TITLE,
     214.0,
     &GROUPS,
     true,
@@ -127,9 +131,6 @@ fn hopped() -> bool {
 }
 
 fn rows() -> &'static [Row] {
-    if hopped() {
-        return &[];
-    }
     match dimension::current() {
         Dimension::Overworld => &table::OVERWORLD,
         Dimension::Nether => &table::NETHER,
@@ -139,20 +140,15 @@ fn rows() -> &'static [Row] {
 
 fn report(shared: &SharedMutex, seed: Option<i64>) {
     let Some(seed) = seed else {
-        say(shared, YELLOW, "Seed Xray: no seed set");
+        say(shared, YELLOW, crate::lang::tr!("seed_xray.no_seed"));
         return;
     };
     if hopped() {
-        say(shared, RED, "Seed Xray: off, this server is not on 26.2");
-        return;
+        say(shared, YELLOW, crate::lang::tr!("seed_xray.hopped"));
     }
     let server = SERVER_HASH.load(Relaxed);
     if server != 0 && server != crate::util::hash::obfuscate_seed(seed) {
-        say(
-            shared,
-            RED,
-            "Seed Xray: this seed does not match the server's, expect wrong ores",
-        );
+        say(shared, RED, crate::lang::tr!("seed_xray.mismatch"));
     }
 }
 
@@ -320,6 +316,7 @@ pub fn append(
                     sides,
                     range2: range2 as u32,
                     exposed: false,
+                    fade: false,
                 };
                 slots.iter().position(|s| *s == slot).unwrap_or_else(|| {
                     slots.push(slot);
@@ -420,33 +417,24 @@ fn check(bot: &azalea::Client, shared: &SharedMutex, st: &State) {
     }
 
     if jobs.is_empty() {
-        say(
-            shared,
-            YELLOW,
-            "Seed check: nothing simulated around you yet",
-        );
+        say(shared, YELLOW, crate::lang::tr!("seed_xray.check.empty"));
         return;
     }
     say(
         shared,
         GREEN,
-        format!(
-            "Seed check over {} chunks: matched/predicted, real",
-            jobs.len()
-        ),
+        crate::lang::trf!("seed_xray.check.head", jobs.len()),
     );
     for kind in Kind::ALL {
         let k = kind as usize;
         if guessed[k] != 0 || real[k] != 0 {
-            let line = format!(
-                "{}: {}/{}, {}",
-                kind.label(),
-                matched[k],
-                guessed[k],
-                real[k]
+            let (m, g, r) = (matched[k], guessed[k], real[k]);
+            crate::log_info!("seed_xray", "{}: {m}/{g}, {r}", kind.label());
+            say(
+                shared,
+                WHITE,
+                format!("{}: {m}/{g}, {r}", kind.shown().get()),
             );
-            crate::log_info!("seed_xray", "{line}");
-            say(shared, WHITE, line);
         }
     }
 }

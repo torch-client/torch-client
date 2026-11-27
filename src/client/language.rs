@@ -124,6 +124,7 @@ fn commit(applied: Applied) -> bool {
         format!("{}\n{}", applied.code, applied.text)
     };
     log_info!("language", "applied {}", applied.code);
+    crate::lang::set_code(&applied.code);
     *APPLIED.lock() = Some(applied);
     storage::LANGUAGE.store(&stored);
     crate::gui::tooltip::reset_lang();
@@ -148,6 +149,10 @@ pub(crate) fn apply(lang: &Language) {
     spawn("language", move || async move {
         match fetch_file(&hash).await {
             Ok(text) => {
+                if *FETCH.lock() != Fetch::Fetching(code.clone()) {
+                    log_info!("language", "{code} arrived after another choice, dropped");
+                    return;
+                }
                 let saved = commit(Applied {
                     code: code.clone(),
                     text: Arc::from(text),
@@ -269,6 +274,25 @@ pub(crate) fn adopt(bytes: &[u8]) {
         None => log_warn!("language", "the installed language list is unreadable"),
     }
     *LIST.lock() = languages.map(Arc::new);
+    #[cfg(feature = "multi_language")]
+    follow_locale();
+}
+
+#[cfg(feature = "multi_language")]
+fn follow_locale() {
+    if !crate::lang::detected() || current() != ENGLISH || fetch() != Fetch::Idle {
+        return;
+    }
+    if storage::LANGUAGE.load().is_some() {
+        return;
+    }
+    let code = crate::lang::active().code();
+    let Some(row) = list().and_then(|l| l.iter().find(|l| l.code == code).cloned()) else {
+        log_info!("language", "the system language {code} is not in the list");
+        return;
+    };
+    log_info!("language", "following the system language to {code}");
+    apply(&row);
 }
 
 pub(super) async fn table_from_index(

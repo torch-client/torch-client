@@ -3,11 +3,11 @@ use std::ops::{Range, RangeInclusive};
 
 use toml_edit::{Document, Item, TableLike};
 
-use super::api::{self, Stage};
-use super::caps::{Format, Needs};
+use super::api::{self, SkyPart, Stage};
+use super::caps::{self, Format, Needs, TierName};
 use super::condition::Condition;
 use super::interface;
-use super::options::{self, Decl, Field, Kind, Literal, Options, Preset};
+use super::options::{self, Decl, Field, Kind, Literal, Options, Preset, Value, Values};
 use super::package;
 use super::problem::{Position, Problem};
 
@@ -106,7 +106,7 @@ impl Requires {
 #[derive(Clone, Debug)]
 pub(crate) struct Target {
     pub(crate) id: String,
-    pub(crate) format: Format,
+    pub(crate) formats: Vec<Format>,
     pub(crate) size: Size,
     #[allow(
         dead_code,
@@ -179,6 +179,7 @@ pub(crate) struct Group {
     pub(crate) writes: Vec<Named>,
     pub(crate) stages: Vec<Stage>,
     pub(crate) vertex: bool,
+    pub(crate) sky_parts: Vec<SkyPart>,
     pub(crate) at: Position,
 }
 
@@ -190,20 +191,57 @@ fn parse_stage(name: &str) -> Option<Stage> {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Shadow {
-    #[allow(
-        dead_code,
-        reason = "phase 3 of docs/SHADER_FORMAT.md draws the shadow pass"
-    )]
-    pub(crate) resolution: u32,
-    #[allow(
-        dead_code,
-        reason = "phase 3 of docs/SHADER_FORMAT.md draws the shadow pass"
-    )]
-    pub(crate) distance: f64,
+    pub(crate) resolution: Setting,
+    pub(crate) distance: Setting,
     pub(crate) color: bool,
     pub(crate) file: Option<FileRef>,
     pub(crate) when: Option<Condition>,
     pub(crate) at: Position,
+}
+
+const SHADOW_RESOLUTION: f64 = 2048.0;
+const SHADOW_DISTANCE: f64 = 128.0;
+
+impl Shadow {
+    pub(crate) fn resolution(&self, values: &Values) -> u32 {
+        self.resolution.at(values, SHADOW_RESOLUTION) as u32
+    }
+
+    pub(crate) fn distance(&self, values: &Values) -> f64 {
+        self.distance.at(values, SHADOW_DISTANCE)
+    }
+
+    fn options(&self) -> impl Iterator<Item = &str> {
+        [&self.resolution, &self.distance]
+            .into_iter()
+            .filter_map(Setting::option)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Setting {
+    Fixed(f64),
+    Option(String),
+}
+
+impl Setting {
+    fn at(&self, values: &Values, fallback: f64) -> f64 {
+        match self {
+            Setting::Fixed(value) => *value,
+            Setting::Option(id) => match values.get(id) {
+                Some(Value::Int(i)) => f64::from(i),
+                Some(Value::Float(f)) => f,
+                _ => fallback,
+            },
+        }
+    }
+
+    fn option(&self) -> Option<&str> {
+        match self {
+            Setting::Fixed(_) => None,
+            Setting::Option(id) => Some(id),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -311,14 +349,14 @@ pub(crate) struct Dimension {
     pub(crate) id: String,
     pub(crate) targets: Option<Vec<Target>>,
     pub(crate) geometry: Option<Geometry>,
-    pub(crate) shadow: Option<Shadow>,
+    pub(crate) shadow: Option<Option<Shadow>>,
     pub(crate) passes: Option<Vec<Pass>>,
 }
 
 #[derive(Clone, Debug)]
 #[allow(
     dead_code,
-    reason = "phase 3 of docs/SHADER_FORMAT.md resolves the entries to block states"
+    reason = "entity and item materials are numbered in a later step of phase 3 of docs/SHADER_FORMAT.md"
 )]
 pub(crate) struct Material {
     pub(crate) id: String,
@@ -382,10 +420,6 @@ impl Manifest {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "phase 2 of docs/SHADER_FORMAT.md draws the layout of the dimension the player is in"
-    )]
     pub(crate) fn layout(&self, dimension: &str) -> Layout<'_> {
         let id = if dimension.contains(':') {
             dimension.to_owned()
@@ -409,16 +443,17 @@ impl Manifest {
             geometry: dimension
                 .and_then(|d| d.geometry.as_ref())
                 .unwrap_or(&self.geometry),
-            shadow: dimension
-                .and_then(|d| d.shadow.as_ref())
-                .or(self.shadow.as_ref()),
+            shadow: match dimension.and_then(|d| d.shadow.as_ref()) {
+                Some(own) => own.as_ref(),
+                None => self.shadow.as_ref(),
+            },
             passes: dimension
                 .and_then(|d| d.passes.as_deref())
                 .unwrap_or(&self.passes),
         }
     }
 
-    pub(crate) fn condition_options(&self) -> BTreeSet<&str> {
+    pub(crate) fn manifest_options(&self) -> BTreeSet<&str> {
         let mut out = BTreeSet::new();
         for layout in self.layouts() {
             let conditions = layout
@@ -430,21 +465,28 @@ impl Manifest {
             for condition in conditions {
                 out.extend(condition.mentions());
             }
+            out.extend(layout.shadow.into_iter().flat_map(Shadow::options));
         }
         out
+    }
+
+    pub(crate) fn default_values(&self, tier: TierName) -> Values {
+        let mut values = Values::defaults(&self.options);
+        if let Some(preset) = self
+            .presets
+            .iter()
+            .find(|p| p.default_on.iter().any(|(t, _)| *t == tier))
+        {
+            values.apply(preset);
+        }
+        values
     }
 
     pub(crate) fn needs(&self) -> Needs {
         let mut needs = Needs::default();
         let mut formats = BTreeSet::new();
         for layout in self.layouts() {
-            formats.extend(
-                layout
-                    .targets
-                    .iter()
-                    .map(|t| t.format)
-                    .filter(|f| !f.info().baseline),
-            );
+            formats.extend(layout.targets.iter().map(|t| t.formats.clone()));
             for pass in layout.passes {
                 match pass.kind {
                     PassKind::Screen => {
@@ -463,7 +505,7 @@ impl Manifest {
                 needs.outputs = needs.outputs.max(1);
             }
         }
-        needs.formats = formats.into_iter().collect();
+        needs.format_lists = formats.into_iter().collect();
         needs
     }
 
@@ -502,10 +544,11 @@ impl Manifest {
                 needs.outputs.max(1)
             ));
         }
-        for format in &needs.formats {
+        let needed = needs.declared_formats();
+        for format in &needed {
             if !declared.formats.contains(format) {
                 report(format!(
-                    "a target is {} but [requires] `formats` does not list it",
+                    "a target needs {} but [requires] `formats` does not list it",
                     format.name()
                 ));
             }
@@ -516,9 +559,9 @@ impl Manifest {
                     "{} is in the baseline and does not go in [requires] `formats`",
                     format.name()
                 ));
-            } else if !needs.formats.contains(format) {
+            } else if !needed.contains(format) {
                 report(format!(
-                    "[requires] lists {} but no target uses it",
+                    "[requires] lists {} but no target needs it; a format list needs only its last entry",
                     format.name()
                 ));
             }
@@ -1021,7 +1064,7 @@ fn read(cx: &mut Ctx<'_>, root: &dyn TableLike) -> Manifest {
         None => Requires::none(Position { line: 1, column: 1 }),
     };
 
-    let parts = read_layout(cx, &mut top, &options);
+    let parts = read_layout(cx, &mut top, &options, false);
 
     let dimensions = top
         .get("dimension")
@@ -1065,7 +1108,7 @@ fn read(cx: &mut Ctx<'_>, root: &dyn TableLike) -> Manifest {
         requires,
         targets: parts.targets.unwrap_or_default(),
         geometry: parts.geometry.unwrap_or_default(),
-        shadow: parts.shadow,
+        shadow: parts.shadow.flatten(),
         passes: parts.passes.unwrap_or_default(),
         dimensions,
         textures,
@@ -1079,11 +1122,16 @@ fn read(cx: &mut Ctx<'_>, root: &dyn TableLike) -> Manifest {
 struct Parts {
     targets: Option<Vec<Target>>,
     geometry: Option<Geometry>,
-    shadow: Option<Shadow>,
+    shadow: Option<Option<Shadow>>,
     passes: Option<Vec<Pass>>,
 }
 
-fn read_layout(cx: &mut Ctx<'_>, fields: &mut Fields<'_>, options: &Options) -> Parts {
+fn read_layout(
+    cx: &mut Ctx<'_>,
+    fields: &mut Fields<'_>,
+    options: &Options,
+    dimension: bool,
+) -> Parts {
     let targets = fields.get("target").map(|e| {
         e.tables(cx)
             .into_iter()
@@ -1091,9 +1139,18 @@ fn read_layout(cx: &mut Ctx<'_>, fields: &mut Fields<'_>, options: &Options) -> 
             .collect::<Vec<Target>>()
     });
     let geometry = fields.get("geometry").and_then(|e| read_geometry(cx, e));
-    let shadow = fields
-        .get("shadow")
-        .and_then(|e| read_shadow(cx, e, options));
+    let shadow = fields.get("shadow").and_then(|e| match e.item.as_bool() {
+        Some(false) if dimension => Some(None),
+        Some(_) => {
+            cx.report_hint(
+                e.span().start,
+                "`shadow` is a [shadow] table here",
+                "`shadow = false` goes in a [dimension.<name>] table, where it removes the top level's [shadow]",
+            );
+            None
+        }
+        None => read_shadow(cx, e, options).map(Some),
+    });
     let passes = fields.get("pass").map(|e| {
         e.tables(cx)
             .into_iter()
@@ -1152,28 +1209,7 @@ fn read_target(
 ) -> Option<Target> {
     let mut f = Fields::new(table, at, "[[target]]");
     let id = f.need(cx, "id").and_then(|e| e.string(cx));
-    let format = match f.get("format").and_then(|e| e.string(cx)) {
-        None => Some(Format::Rgba16Float),
-        Some(name) => match Format::parse(&name.value) {
-            Some(Format::Depth) => {
-                cx.report_hint(
-                    name.span.start,
-                    "a [[target]] is a colour target",
-                    "the scene's depth is the engine's scene_depth",
-                );
-                None
-            }
-            Some(format) => Some(format),
-            None => {
-                cx.report_hint(
-                    name.span.start,
-                    format!("`{}` is not a target format", name.value),
-                    "see native::caps::FORMATS for the names",
-                );
-                None
-            }
-        },
-    };
+    let formats = read_formats(cx, &mut f, at);
     let size = match (f.get("scale"), f.get("size")) {
         (Some(scale), Some(_)) => {
             cx.report(scale.at, "a target has `scale` or `size`, not both");
@@ -1207,7 +1243,7 @@ fn read_target(
     check_id(cx, &id, "target");
     Some(Target {
         id: id.value,
-        format: format?,
+        formats,
         size: size?,
         mips,
         history,
@@ -1215,6 +1251,82 @@ fn read_target(
         when,
         at: cx.pos(at),
     })
+}
+
+fn read_formats(cx: &mut Ctx<'_>, f: &mut Fields<'_>, at: usize) -> Vec<Format> {
+    let stand_in = vec![Format::Rgba8Unorm];
+    let Some(entry) = f.get("format") else {
+        cx.report_hint(
+            at,
+            "[[target]] needs `format`",
+            "\"rgba8unorm\" renders on every tier; [\"rgba16float\", \"rgba8unorm\"] is HDR where the device has it",
+        );
+        return stand_in;
+    };
+    let names = if entry.item.as_str().is_some() {
+        entry.string(cx).into_iter().collect::<Vec<_>>()
+    } else if let Some(array) = entry.item.as_array() {
+        let names = entry.strings(cx).unwrap_or_default();
+        if names.len() != array.len() {
+            return stand_in;
+        }
+        names
+    } else {
+        entry.wrong(cx, "a format name or a list of them");
+        return stand_in;
+    };
+
+    let mut ok = true;
+    if names.is_empty() || names.len() > caps::MAX_FORMAT_LIST {
+        cx.report(
+            entry.at,
+            format!(
+                "`format` lists {} formats; a list has 1 to {}",
+                names.len(),
+                caps::MAX_FORMAT_LIST
+            ),
+        );
+        ok = false;
+    }
+    let mut formats: Vec<Format> = Vec::with_capacity(names.len());
+    for name in &names {
+        match Format::parse(&name.value) {
+            Some(Format::Depth) => {
+                cx.report_hint(
+                    name.span.start,
+                    "a [[target]] is a colour target",
+                    "the scene's depth is the engine's scene_depth",
+                );
+                ok = false;
+            }
+            Some(format) if formats.contains(&format) => {
+                cx.report(name.span.start, format!("{} is listed twice", name.value));
+                ok = false;
+            }
+            Some(format) => formats.push(format),
+            None => {
+                cx.report_hint(
+                    name.span.start,
+                    format!("`{}` is not a target format", name.value),
+                    "see native::caps::FORMATS for the names",
+                );
+                ok = false;
+            }
+        }
+    }
+    if let Some(first) = formats.first()
+        && formats
+            .iter()
+            .any(|format| format.info().class != first.info().class)
+    {
+        cx.report_hint(
+            entry.at,
+            "the formats in `format` mix float and unsigned integer",
+            "every entry needs the same class, so the target's WGSL type does not depend on which one the device gets",
+        );
+        ok = false;
+    }
+    if ok { formats } else { stand_in }
 }
 
 fn read_geometry(cx: &mut Ctx<'_>, entry: Entry<'_>) -> Option<Geometry> {
@@ -1271,6 +1383,13 @@ fn read_group(cx: &mut Ctx<'_>, entry: Entry<'_>, kind: api::Group) -> Option<Gr
         }
     }
     let vertex = f.get("vertex").and_then(|e| e.boolean(cx)).unwrap_or(false);
+    let sky_parts = match kind {
+        api::Group::Opaque => match f.get("sky_parts") {
+            Some(entry) => read_sky_parts(cx, entry),
+            None => SkyPart::ALL.to_vec(),
+        },
+        api::Group::Translucent => Vec::new(),
+    };
     f.finish(cx);
 
     if writes.is_empty() {
@@ -1282,8 +1401,31 @@ fn read_group(cx: &mut Ctx<'_>, entry: Entry<'_>, kind: api::Group) -> Option<Gr
         writes,
         stages,
         vertex,
+        sky_parts,
         at: cx.pos(at),
     })
+}
+
+fn read_sky_parts(cx: &mut Ctx<'_>, entry: Entry<'_>) -> Vec<SkyPart> {
+    let mut parts = Vec::new();
+    for name in entry.strings(cx).unwrap_or_default() {
+        match SkyPart::parse(&name.value) {
+            Some(part) if parts.contains(&part) => {
+                cx.report(name.span.start, format!("`{}` is listed twice", name.value))
+            }
+            Some(part) => parts.push(part),
+            None => {
+                let names: Vec<&str> = SkyPart::ALL.iter().map(|p| p.name()).collect();
+                cx.report_hint(
+                    name.span.start,
+                    format!("`{}` is not a sky part", name.value),
+                    format!("one of: {}", names.join(", ")),
+                );
+            }
+        }
+    }
+    parts.sort_by_key(|part| part.id());
+    parts
 }
 
 fn check_writes(cx: &mut Ctx<'_>, writes: &[Named], what: &str) {
@@ -1311,11 +1453,10 @@ fn read_shadow(cx: &mut Ctx<'_>, entry: Entry<'_>, options: &Options) -> Option<
     let mut f = Fields::new(table, at, "[shadow]");
     let resolution = f
         .get("resolution")
-        .map_or(Some(2048), |e| e.integer(cx, 256..=8192))
-        .map(|n| n as u32);
+        .and_then(|e| read_setting(cx, e, options, 256.0..=8192.0, true));
     let distance = f
         .get("distance")
-        .map_or(Some(128.0), |e| e.number_in(cx, 16.0..=512.0));
+        .and_then(|e| read_setting(cx, e, options, 16.0..=512.0, false));
     let color = f.get("color").and_then(|e| e.boolean(cx)).unwrap_or(false);
     let file_entry = f.get("file");
     let file = file_entry.and_then(|e| read_file_ref(cx, e, ".wgsl"));
@@ -1332,13 +1473,70 @@ fn read_shadow(cx: &mut Ctx<'_>, entry: Entry<'_>, options: &Options) -> Option<
         _ => {}
     }
     Some(Shadow {
-        resolution: resolution.unwrap_or(2048),
-        distance: distance.unwrap_or(128.0),
+        resolution: resolution.unwrap_or(Setting::Fixed(SHADOW_RESOLUTION)),
+        distance: distance.unwrap_or(Setting::Fixed(SHADOW_DISTANCE)),
         color,
         file,
         when,
         at: cx.pos(at),
     })
+}
+
+fn read_setting(
+    cx: &mut Ctx<'_>,
+    entry: Entry<'_>,
+    options: &Options,
+    range: RangeInclusive<f64>,
+    integer: bool,
+) -> Option<Setting> {
+    let (lo, hi) = (*range.start(), *range.end());
+    let Some(id) = entry.item.as_str() else {
+        return if integer {
+            entry
+                .integer(cx, lo as i64..=hi as i64)
+                .map(|n| Setting::Fixed(n as f64))
+        } else {
+            entry.number_in(cx, range).map(Setting::Fixed)
+        };
+    };
+    let at = entry.span().start;
+    let key = entry.key;
+    let Some(decl) = options.get(id) else {
+        cx.report_hint(
+            at,
+            format!("`{key}` names no option `{id}`"),
+            "a number, or the id of an option that sets it",
+        );
+        return None;
+    };
+    let (min, max) = match (&decl.kind, integer) {
+        (Kind::Int { min, max }, _) => (f64::from(*min), f64::from(*max)),
+        (Kind::Float { min, max, .. }, false) => (*min, *max),
+        (kind, _) => {
+            let wanted = if integer {
+                "an int option"
+            } else {
+                "an int or float option"
+            };
+            cx.report(
+                at,
+                format!(
+                    "`{key}` is set by `{id}`, a {} option; it takes {wanted}",
+                    kind.type_name()
+                ),
+            );
+            return None;
+        }
+    };
+    if min < lo || max > hi {
+        cx.report_hint(
+            at,
+            format!("option `{id}` runs {min}..{max}, and `{key}` must stay inside {lo}..{hi}"),
+            format!("narrow the option's `min` and `max` to {lo}..{hi} or less"),
+        );
+        return None;
+    }
+    Some(Setting::Option(id.to_owned()))
 }
 
 fn read_pass(
@@ -1583,6 +1781,31 @@ fn read_preset(
     let id = f.need(cx, "id").and_then(|e| e.string(cx));
     let name = f.get("name").and_then(|e| e.string(cx)).map(|s| s.value);
     let set_entry = f.need(cx, "set");
+    let mut default_on = Vec::new();
+    for tier in f
+        .get("default_on")
+        .and_then(|e| e.strings(cx))
+        .unwrap_or_default()
+    {
+        match caps::TIERS
+            .iter()
+            .map(|t| t.name)
+            .find(|t| t.name() == tier.value)
+        {
+            Some(name) if default_on.iter().any(|(t, _)| *t == name) => {
+                cx.report(tier.span.start, format!("{} is listed twice", tier.value))
+            }
+            Some(name) => default_on.push((name, cx.pos(tier.span.start))),
+            None => {
+                let names: Vec<&str> = caps::TIERS.iter().map(|t| t.name.name()).collect();
+                cx.report_hint(
+                    tier.span.start,
+                    format!("`{}` is not a tier", tier.value),
+                    format!("one of: {}", names.join(", ")),
+                );
+            }
+        }
+    }
     f.finish(cx);
 
     let mut set = Vec::new();
@@ -1617,6 +1840,7 @@ fn read_preset(
         id: id.value,
         name,
         set,
+        default_on,
         at: cx.pos(at),
     })
 }
@@ -1690,7 +1914,7 @@ fn read_dimensions(cx: &mut Ctx<'_>, entry: Entry<'_>, options: &Options) -> Vec
             continue;
         };
         let mut f = Fields::new(dim_table, dim_at, format!("[dimension.{name}]"));
-        let parts = read_layout(cx, &mut f, options);
+        let parts = read_layout(cx, &mut f, options, true);
         f.finish(cx);
         let Some(id) = id else { continue };
         if out.iter().any(|d| d.id == id) {
@@ -1825,6 +2049,17 @@ fn validate(cx: &mut Ctx<'_>, manifest: &Manifest) {
         manifest.presets.iter().map(|p| (p.id.as_str(), p.at)),
         "[[preset]]",
     );
+    let mut defaults: HashMap<TierName, &str> = HashMap::new();
+    for preset in &manifest.presets {
+        for &(tier, at) in &preset.default_on {
+            if let Some(first) = defaults.insert(tier, preset.id.as_str()) {
+                cx.report_at(
+                    at,
+                    format!("{} already defaults to preset `{first}`", tier.name()),
+                );
+            }
+        }
+    }
     check_unique(
         cx,
         manifest.materials.iter().map(|m| (m.id.as_str(), m.at)),
@@ -2267,7 +2502,7 @@ format = "rg16float"
 
 [[target]]
 id = "lit"
-format = "rgba16float"
+format = ["rgba16float", "rgba8unorm"]
 history = true
 
 [geometry.opaque]
@@ -2342,7 +2577,11 @@ items = ["shadows", "exposure"]
         assert_eq!(m.api, Api { major: 1, minor: 0 });
         let layout = m.layout("overworld");
         assert_eq!(layout.targets.len(), 3);
-        assert_eq!(layout.targets[0].format, Format::Rgba8Unorm);
+        assert_eq!(layout.targets[0].formats, [Format::Rgba8Unorm]);
+        assert_eq!(
+            layout.targets[2].formats,
+            [Format::Rgba16Float, Format::Rgba8Unorm]
+        );
         assert!(layout.targets[2].history);
         let opaque = layout.geometry.opaque.as_ref().unwrap();
         assert_eq!(opaque.stages, [Stage::Terrain, Stage::Entity]);
@@ -2360,7 +2599,7 @@ items = ["shadows", "exposure"]
             "shadows"
         );
         assert_eq!(
-            m.condition_options().into_iter().collect::<Vec<_>>(),
+            m.manifest_options().into_iter().collect::<Vec<_>>(),
             ["shadows"]
         );
         let exposure = m.options.get("exposure").unwrap();
@@ -2379,7 +2618,7 @@ items = ["shadows", "exposure"]
         let m = parse_ok(EXAMPLE);
         let needs = m.needs();
         assert_eq!(needs.outputs, 2);
-        assert_eq!(needs.formats, [Format::Rg16Float]);
+        assert_eq!(needs.declared_formats(), [Format::Rg16Float]);
         let found: Vec<String> = m
             .requires_problems()
             .into_iter()
@@ -2400,6 +2639,93 @@ items = ["shadows", "exposure"]
         assert!(found[0].contains("outputs = 3"), "{found:#?}");
         assert!(found[1].contains("rg16float"), "{found:#?}");
         assert!(found[2].contains("rgba16float"), "{found:#?}");
+    }
+
+    #[test]
+    fn target_formats_are_checked_where_they_are() {
+        assert_eq!(
+            only(&EXAMPLE.replace("format = \"rgba8unorm\"\n", "")),
+            "12:1: [[target]] needs `format`"
+        );
+        assert!(
+            problems(&EXAMPLE.replace("format = \"rgba8unorm\"\n", ""))[0]
+                .hint
+                .as_deref()
+                .unwrap()
+                .contains("rgba8unorm")
+        );
+        assert_eq!(
+            only(&EXAMPLE.replace("format = \"rgba8unorm\"", "format = 3")),
+            "14:10: `format` must be a format name or a list of them"
+        );
+        let lit = |list: &str| EXAMPLE.replace("[\"rgba16float\", \"rgba8unorm\"]", list);
+        assert_eq!(
+            only(&lit("[]")),
+            "22:1: `format` lists 0 formats; a list has 1 to 4"
+        );
+        assert_eq!(
+            only(&lit(
+                "[\"rgba16float\", \"rgba8unorm\", \"rgb10a2unorm\", \"r16float\", \"rg16float\"]"
+            )),
+            "22:1: `format` lists 5 formats; a list has 1 to 4"
+        );
+        assert_eq!(
+            only(&lit("[\"rgba16float\", \"rgba16float\"]")),
+            "22:26: rgba16float is listed twice"
+        );
+        assert_eq!(
+            only(&lit("[\"rgba16float\", \"depth\"]")),
+            "22:26: a [[target]] is a colour target"
+        );
+        assert_eq!(
+            only(&lit("[\"rgba16float\", \"rgba8\"]")),
+            "22:26: `rgba8` is not a target format"
+        );
+        assert_eq!(
+            only(&lit("[\"rgba16float\", \"rgba32uint\"]")),
+            "22:1: the formats in `format` mix float and unsigned integer"
+        );
+        let m = parse_ok(&lit("[\"rgba8unorm\"]"));
+        assert_eq!(
+            m.layout("overworld").targets[2].formats,
+            [Format::Rgba8Unorm]
+        );
+    }
+
+    #[test]
+    fn requires_names_the_last_entry_of_a_list() {
+        let text = EXAMPLE.replace(
+            "[\"rgba16float\", \"rgba8unorm\"]",
+            "[\"rgba32float\", \"rgba16float\"]",
+        );
+        let found: Vec<String> = parse_ok(&text)
+            .requires_problems()
+            .into_iter()
+            .map(|p| p.message)
+            .collect();
+        assert_eq!(
+            found,
+            ["a target needs rgba16float but [requires] `formats` does not list it"]
+        );
+        let text = text.replace(
+            "formats = [\"rg16float\"]",
+            "formats = [\"rg16float\", \"rgba16float\"]",
+        );
+        assert!(parse_ok(&text).requires_problems().is_empty());
+        let text = text.replace(
+            "formats = [\"rg16float\", \"rgba16float\"]",
+            "formats = [\"rg16float\", \"rgba16float\", \"rgba32float\"]",
+        );
+        let found: Vec<String> = parse_ok(&text)
+            .requires_problems()
+            .into_iter()
+            .map(|p| p.message)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(
+            found[0].starts_with("[requires] lists rgba32float but no target needs it"),
+            "{found:#?}"
+        );
     }
 
     #[test]
@@ -2562,11 +2888,25 @@ items = ["shadows", "exposure"]
         let m = parse_ok(&with(nether));
         assert_eq!(
             m.layout("minecraft:the_nether").shadow.unwrap().resolution,
-            512
+            Setting::Fixed(512.0)
         );
         assert_eq!(m.layout("the_nether").passes.len(), 1);
         assert_eq!(m.layout("the_nether").targets.len(), 3);
         assert_eq!(m.layout("the_end").passes.len(), 2);
+
+        let m = parse_ok(&with("\n[dimension.the_nether]\nshadow = false\n"));
+        assert!(m.layout("the_nether").shadow.is_none());
+        assert!(m.layout("overworld").shadow.is_some());
+        let top = EXAMPLE
+            .replace(
+                "[shadow]\nresolution = 2048\ndistance = 128.0\nwhen = \"shadows\"\n",
+                "",
+            )
+            .replace(
+                "version = \"0.3.0\"\n",
+                "version = \"0.3.0\"\nshadow = false\n",
+            );
+        assert!(only(&top).ends_with("`shadow` is a [shadow] table here"));
 
         let bad = "\n[dimension.nether.shadow]\nresolution = 512\n";
         assert!(only(&with(bad)).contains("`nether` is not a dimension"));
@@ -2580,6 +2920,104 @@ items = ["shadows", "exposure"]
         );
         let key = "\n[dimension.the_end]\noption = []\n";
         assert!(only(&with(key)).contains("`option` is not a key of [dimension.the_end]"));
+    }
+
+    #[test]
+    fn shadow_numbers_can_come_from_options() {
+        let size = "\n[[option]]\nid = \"size\"\ntype = \"int\"\ndefault = 1024\nmin = 512\nmax = 2048\n\
+                    \n[[option]]\nid = \"reach\"\ntype = \"float\"\ndefault = 96.0\nmin = 32.0\nmax = 128.0\n";
+        let text = with(size)
+            .replace(
+                "resolution = 2048\ndistance = 128.0",
+                "resolution = \"size\"\ndistance = \"reach\"",
+            )
+            .replace(
+                "items = [\"shadows\", \"exposure\"]",
+                "items = [\"shadows\", \"exposure\", \"size\", \"reach\"]",
+            );
+        let m = parse_ok(&text);
+        let shadow = m.layout("overworld").shadow.unwrap();
+        let mut values = Values::defaults(&m.options);
+        assert_eq!(
+            (shadow.resolution(&values), shadow.distance(&values)),
+            (1024, 96.0)
+        );
+        values.set(&m.options, "size", Value::Int(512)).unwrap();
+        assert_eq!(shadow.resolution(&values), 512);
+        assert_eq!(
+            m.manifest_options().into_iter().collect::<Vec<_>>(),
+            ["reach", "shadows", "size"]
+        );
+
+        let wide = text.replace("max = 2048", "max = 9000");
+        assert!(only(&wide).ends_with(
+            "option `size` runs 512..9000, and `resolution` must stay inside 256..8192"
+        ));
+        let float = text.replace("resolution = \"size\"", "resolution = \"reach\"");
+        assert!(
+            only(&float).ends_with(
+                "`resolution` is set by `reach`, a float option; it takes an int option"
+            )
+        );
+        let missing = text.replace("distance = \"reach\"", "distance = \"far\"");
+        assert!(only(&missing).ends_with("`distance` names no option `far`"));
+    }
+
+    #[test]
+    fn presets_can_be_a_tiers_default() {
+        let presets = "\n[[preset]]\nid = \"low\"\nset = { shadows = false }\ndefault_on = [\"webgl2\"]\n\
+                       \n[[preset]]\nid = \"high\"\nset = { shadows = true }\n";
+        let m = parse_ok(&with(presets));
+        assert_eq!(
+            m.default_values(TierName::WebGl2).get("shadows"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            m.default_values(TierName::Desktop).get("shadows"),
+            Some(Value::Bool(true))
+        );
+        let unknown = with(&presets.replace("[\"webgl2\"]", "[\"webgl3\"]"));
+        assert!(only(&unknown).ends_with("`webgl3` is not a tier"));
+        let twice = with(&format!("{presets}default_on = [\"webgl2\"]\n"));
+        assert!(only(&twice).ends_with("webgl2 already defaults to preset `low`"));
+    }
+
+    #[test]
+    fn the_opaque_group_lists_its_sky_parts() {
+        let m = parse_ok(EXAMPLE);
+        assert_eq!(
+            m.layout("overworld")
+                .geometry
+                .opaque
+                .as_ref()
+                .unwrap()
+                .sky_parts,
+            SkyPart::ALL
+        );
+        let listed = EXAMPLE.replace(
+            "stages = [\"terrain\", \"entity\"]",
+            "stages = [\"terrain\", \"entity\"]\nsky_parts = [\"sun\", \"sunrise\"]",
+        );
+        let m = parse_ok(&listed);
+        assert_eq!(
+            m.layout("overworld")
+                .geometry
+                .opaque
+                .as_ref()
+                .unwrap()
+                .sky_parts,
+            [SkyPart::Sunrise, SkyPart::Sun]
+        );
+        let bad = EXAMPLE.replace(
+            "stages = [\"terrain\", \"entity\"]",
+            "stages = [\"terrain\", \"entity\"]\nsky_parts = [\"sky\"]",
+        );
+        assert!(only(&bad).ends_with("`sky` is not a sky part"));
+        let translucent = EXAMPLE.replace(
+            "writes = [\"lit\"]\n\n[shadow]",
+            "writes = [\"lit\"]\nsky_parts = []\n\n[shadow]",
+        );
+        assert!(only(&translucent).ends_with("`sky_parts` is not a key of [geometry.translucent]"));
     }
 
     #[test]

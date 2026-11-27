@@ -11,7 +11,7 @@ use azalea_entity::{
     metadata::{
         AbstractArrow, AbstractBoat, AbstractLiving, AbstractMinecart, ArmorStand,
         ArmorStandMarker, EndCrystal, FallingBlock, InGround, Interaction, ItemFrame,
-        ShulkerBullet, Tnt,
+        LeashKnot, Painting, ShulkerBullet, Tnt,
     },
     view_vector,
 };
@@ -117,6 +117,8 @@ pub type MaybePickableEntityQuery<'world, 'state, 'a> = Query<
             (With<AbstractLiving>, Without<Dead>),
             With<AbstractArrow>,
             With<ItemFrame>,
+            With<Painting>,
+            With<LeashKnot>,
         )>,
     ),
 >;

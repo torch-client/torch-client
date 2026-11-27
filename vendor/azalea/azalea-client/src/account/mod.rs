@@ -1,4 +1,4 @@
-#[cfg(feature = "online-mode")]
+#[cfg(all(feature = "online-mode", not(target_arch = "wasm32")))]
 pub mod microsoft;
 pub mod offline;
 
@@ -51,7 +51,7 @@ pub trait AccountTrait: Send + Sync + Debug {
         public_key: &'a [u8],
         private_key: &'a [u8; 16],
         server_id: &'a str,
-        proxy: Option<reqwest::Proxy>,
+        proxy: Option<azalea_auth::HttpProxy>,
     ) -> BoxFuture<'a, Result<(), ClientSessionServerError>> {
         let _ = (public_key, private_key, server_id, proxy);
         Box::pin(async { Ok(()) })

@@ -35,6 +35,14 @@ mod seam {
         false
     }
 
+    pub(crate) fn forward_hidden() -> bool {
+        false
+    }
+
+    pub(crate) fn forward_biomes(_world: &WorldRef, _columns: &[&ColumnBiomes]) -> bool {
+        false
+    }
+
     pub(crate) fn forward_unload(_cx: i32, _cz: i32) -> bool {
         false
     }
@@ -193,7 +201,51 @@ mod seam {
         true
     }
 
+    pub(crate) fn forward_hidden() -> bool {
+        if !active() {
+            return false;
+        }
+        send_hidden(take_blocks());
+        true
+    }
+
+    fn send_hidden(writes: Vec<(i32, i32, i32, u32)>) {
+        let (version, active, cells) = crate::client::worldsync::hidden::export();
+        host::send(&ToWorker::Hidden {
+            version,
+            active,
+            cells,
+            writes,
+        });
+    }
+
+    pub(crate) fn forward_biomes(world: &WorldRef, columns: &[&ColumnBiomes]) -> bool {
+        if !active() {
+            return false;
+        }
+        send_biomes(world);
+        send(&ToWorker::ColumnBiomes(
+            columns
+                .iter()
+                .map(|c| (c.pos.x, c.pos.z, c.buffer.clone()))
+                .collect(),
+        ));
+        true
+    }
+
     fn flush_blocks() {
+        let batch = take_blocks();
+        if batch.is_empty() {
+            return;
+        }
+        if crate::client::worldsync::hidden::is_active() {
+            send_hidden(batch);
+        } else {
+            host::send(&ToWorker::Blocks(batch));
+        }
+    }
+
+    fn take_blocks() -> Vec<(i32, i32, i32, u32)> {
         let batch = BLOCKS.with(|blocks| {
             let (list, at) = &mut *blocks.borrow_mut();
             at.clear();
@@ -201,8 +253,8 @@ mod seam {
         });
         if !batch.is_empty() {
             super::tally::count("block writes", batch.len() as u64);
-            host::send(&ToWorker::Blocks(batch));
         }
+        batch
     }
 
     fn send(msg: &ToWorker) {
@@ -332,6 +384,7 @@ pub(crate) use seam::*;
 use crate::lighting::ColumnPos;
 use azalea::block::BlockState;
 use azalea_core::position::BlockPos;
+use azalea_protocol::packets::game::c_chunks_biomes::ChunkBiomeData as ColumnBiomes;
 use azalea_protocol::packets::game::c_level_chunk_with_light::ClientboundLevelChunkWithLight as ChunkPacket;
 use azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData as LightPacket;
 

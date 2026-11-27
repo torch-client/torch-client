@@ -4,21 +4,21 @@ use bevy::prelude::*;
 use bevy::render::Extract;
 use bevy::render::render_phase::{ViewBinnedRenderPhases, ViewSortedRenderPhases};
 use bevy::render::render_resource::{
-    BindGroupLayout, BindGroupLayoutDescriptor, Buffer, RenderPipeline, TextureFormat, TextureView,
-    TextureViewId,
+    BindGroupLayout, BindGroupLayoutDescriptor, Buffer, RenderPipeline, TextureFormat,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::view::{ExtractedView, ViewTarget};
 
 use super::GPU_LABEL;
 use super::compile::EntityKind;
-use super::entities::{EntityBatch, EntityDraw, EntityInstance};
+use super::entities::{EntityFrame, EntityPasses, EntityPrograms};
 use super::fullscreen::Blit;
 use super::inputs::Inputs;
 use super::install::{CompiledPack, Installed};
 use super::packatlas::PackAtlas;
 use super::pipelines::{Building, Pipelines, make_layout, program_layout};
 use super::plan::{Plan, PlanKey};
+use super::takeover::ViewPacks;
 use super::targets::{
     ShadowTargets, Statics, Target, Targets, custom_target, image_stub, image_target, noise_target,
     storage_buffer,
@@ -66,8 +66,8 @@ pub(super) struct Install {
     history: History,
     customs: CustomState,
     pub(super) frame: FrameState,
-    pub(super) entity_textures:
-        std::collections::HashMap<AssetId<Image>, (TextureViewId, TextureView)>,
+    pub(super) entities: EntityPrograms,
+    pub(super) entity_frame: EntityFrame,
 }
 
 pub(super) struct InstallGpu {
@@ -111,6 +111,7 @@ pub(super) struct Sized {
     pub(super) key: PlanKey,
     pub(super) targets: Targets,
     pub(super) plans: Vec<Plan>,
+    pub(super) entity_passes: Vec<EntityPasses>,
     pub(super) setup_done: std::sync::atomic::AtomicBool,
     pub(super) fully_cleared: std::sync::atomic::AtomicBool,
 }
@@ -120,13 +121,6 @@ pub(super) struct FrameState {
     far: f32,
     pub(super) inputs: Inputs,
     pub(super) camera: Vec3,
-    pub(super) entity_draws: Vec<EntityDraw>,
-    pub(super) entity_roots: std::collections::HashMap<Entity, i32>,
-    pub(super) entity_instances: Vec<EntityInstance>,
-    pub(super) entity_batches: Vec<EntityBatch>,
-    pub(super) entity_buffer: Option<Buffer>,
-    pub(super) entity_frame: u32,
-    pub(super) entity_texture_use: std::collections::HashMap<Option<AssetId<Image>>, u32>,
 }
 
 impl PackRender {
@@ -149,14 +143,6 @@ impl PackRender {
                 .and_then(|(_, b)| b.ready()),
             None => process.blit.pipeline(format),
         }
-    }
-
-    pub(crate) fn draws_hand(&self) -> bool {
-        self.install.as_ref().is_some_and(|i| {
-            EntityKind::ALL
-                .iter()
-                .any(|k| k.is_hand() && i.installed.entities[k.index()].is_some())
-        })
     }
 
     pub(crate) fn generation(&self) -> u32 {
@@ -287,6 +273,7 @@ fn install(device: &RenderDevice, queue: &RenderQueue, installed: Arc<Installed>
             .shadow
             .then(|| ShadowTargets::new(device, &installed, usage.shadow_filtered)),
     };
+    let entities = EntityPrograms::glsl(&installed, usage.shadow);
     Install {
         customs: installed.customs.state(),
         history: History::default(),
@@ -295,8 +282,39 @@ fn install(device: &RenderDevice, queue: &RenderQueue, installed: Arc<Installed>
         stage: Stage::Queued,
         finals: Vec::new(),
         frame: FrameState::default(),
-        entity_textures: std::collections::HashMap::new(),
+        entities,
+        entity_frame: EntityFrame::default(),
         installed,
+    }
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct HandTaken(bool);
+
+pub(crate) fn empty_hand_phases(
+    taken: Res<HandTaken>,
+    hand_views: Query<&ExtractedView, With<crate::renderer::hand::HandCamera>>,
+    mut opaque: ResMut<ViewBinnedRenderPhases<bevy::core_pipeline::core_3d::Opaque3d>>,
+    mut alpha_mask: ResMut<ViewBinnedRenderPhases<bevy::core_pipeline::core_3d::AlphaMask3d>>,
+    mut transmissive: ResMut<ViewSortedRenderPhases<bevy::pbr::Transmissive3d>>,
+    mut transparent: ResMut<ViewSortedRenderPhases<bevy::core_pipeline::core_3d::Transparent3d>>,
+    gpu_preprocessing: Res<bevy::render::batching::gpu_preprocessing::GpuPreprocessingSupport>,
+) {
+    if !taken.0 {
+        return;
+    }
+    let mode = gpu_preprocessing
+        .min(bevy::render::batching::gpu_preprocessing::GpuPreprocessingMode::PreprocessingOnly);
+    for view in &hand_views {
+        let key = view.retained_view_entity;
+        opaque.remove(&key);
+        alpha_mask.remove(&key);
+        transmissive.remove(&key);
+        transparent.remove(&key);
+        opaque.prepare_for_new_frame(key, mode);
+        alpha_mask.prepare_for_new_frame(key, mode);
+        transmissive.prepare_for_new_frame(key);
+        transparent.prepare_for_new_frame(key);
     }
 }
 
@@ -304,7 +322,8 @@ fn install(device: &RenderDevice, queue: &RenderQueue, installed: Arc<Installed>
 pub(crate) fn take_over_view(
     terrain_group: Res<TerrainBindGroup>,
     takeover: Option<ResMut<PackTakeover>>,
-    render: Option<Res<PackRender>>,
+    mut hand_taken: ResMut<HandTaken>,
+    packs: ViewPacks,
     views: Query<(&ExtractedView, &ViewTarget), With<TerrainView>>,
     hand_views: Query<&ExtractedView, With<crate::renderer::hand::HandCamera>>,
     mut opaque: ResMut<ViewBinnedRenderPhases<bevy::core_pipeline::core_3d::Opaque3d>>,
@@ -324,9 +343,8 @@ pub(crate) fn take_over_view(
 ) {
     let Some(mut takeover) = takeover else { return };
     let mut taken_over = false;
-    if let Some(render) = render
-        && terrain_group.group.is_some()
-    {
+    let mut hand = false;
+    if terrain_group.group.is_some() {
         let mut hide = |key: &bevy::render::view::RetainedViewEntity| {
             opaque.remove(key);
             alpha_mask.remove(key);
@@ -339,13 +357,16 @@ pub(crate) fn take_over_view(
                 phases.remove(key);
             }
         };
+        let mut draws_hand = false;
         for (view, target) in &views {
-            if render.drawable(target.main_texture_format()).is_some() {
+            if let Some(claim) = packs.claim(target.main_texture_format()) {
                 taken_over = true;
+                draws_hand |= claim.hand;
                 hide(&view.retained_view_entity);
             }
         }
-        if taken_over && render.draws_hand() {
+        if taken_over && draws_hand {
+            hand = true;
             let mode = gpu_preprocessing.min(
                 bevy::render::batching::gpu_preprocessing::GpuPreprocessingMode::PreprocessingOnly,
             );
@@ -363,6 +384,9 @@ pub(crate) fn take_over_view(
                 transparent.prepare_for_new_frame(key);
             }
         }
+    }
+    if hand_taken.0 != hand {
+        hand_taken.0 = hand;
     }
     if takeover.0 != taken_over {
         if !taken_over {

@@ -41,6 +41,8 @@ pub(crate) fn handle_packet(
     #[cfg(lua_mods)]
     crate::modules::script::packet(packet);
     crate::modules::sound_esp::packet(packet);
+    crate::modules::new_chunks::packet(world, packet);
+    crate::modules::coord_logger::packet(shared, packet);
     #[cfg(lua_mods)]
     if let ClientboundGamePacket::TagQuery(p) = packet {
         crate::modules::script::tag_query(p);
@@ -54,6 +56,7 @@ pub(crate) fn handle_packet(
     if let ClientboundGamePacket::Login(p) = packet {
         crate::client::tracking::LOCAL_ENTITY_ID
             .store(p.player_id.0, std::sync::atomic::Ordering::Relaxed);
+        crate::client::tracking::set_camera_entity(None);
         let mut s = shared.lock().unwrap();
         s.session.hardcore = p.hardcore;
         s.session.show_death_screen = p.show_death_screen;
@@ -62,6 +65,16 @@ pub(crate) fn handle_packet(
             "reduced debug info {}",
             if p.reduced_debug_info { "on" } else { "off" }
         );
+        let info = &mut s.session.server_info;
+        info.max_players = Some(p.max_players);
+        info.view_distance = Some(p.chunk_radius);
+        info.simulation_distance = Some(p.simulation_distance);
+        info.enforces_secure_chat = Some(p.enforces_secure_chat);
+        info.online_mode = Some(p.online_mode);
+        info.reduced_debug_info = Some(p.reduced_debug_info);
+        info.dimension = Some(p.common.dimension.to_string());
+        info.hashed_seed = Some(p.common.seed);
+        info.flat = Some(p.common.is_flat);
         s.session.health_epoch = s.session.health_epoch.wrapping_add(1);
         s.session.last_set_health = None;
         s.session.chat_ack_pending = 0;
@@ -78,10 +91,14 @@ pub(crate) fn handle_packet(
         crate::client::tick::request_attack_ticker_reset();
     }
     if let ClientboundGamePacket::Respawn(p) = packet {
+        crate::client::tracking::set_camera_entity(None);
         let mut s = shared.lock().unwrap();
         s.session
             .last_death
             .clone_from(&p.common.last_death_location);
+        s.session.server_info.dimension = Some(p.common.dimension.to_string());
+        s.session.server_info.hashed_seed = Some(p.common.seed);
+        s.session.server_info.flat = Some(p.common.is_flat);
         s.session.health_epoch = s.session.health_epoch.wrapping_add(1);
         s.session.death_cause = None;
         s.session.remote_breaking.clear();
@@ -94,6 +111,14 @@ pub(crate) fn handle_packet(
             anim.reset_hurt();
         }
         crate::client::tick::request_attack_ticker_reset();
+    }
+    if let ClientboundGamePacket::SetCamera(p) = packet {
+        let id = p.camera_id.0;
+        if id == crate::client::tracking::local_entity_id() {
+            crate::client::tracking::set_camera_entity(None);
+        } else if world.shared.read().entity_by_id.contains_key(&p.camera_id) {
+            crate::client::tracking::set_camera_entity(Some(id));
+        }
     }
     if let ClientboundGamePacket::SetHealth(p) = packet {
         let last = shared
@@ -146,6 +171,7 @@ pub(crate) fn handle_packet(
     maps(shared, packet);
     session_state(world, shared, packet);
     level_lifecycle(world, shared, packet);
+    crate::modules::gamemode_notifier::packet(shared, packet);
     crate::client::tablist::packet(shared, packet);
     crate::client::bossbar::packet(shared, packet);
     crate::client::sky_flash::packet(shared, packet);
@@ -248,7 +274,7 @@ fn trace(packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::TickingState(p) => {
             crate::diag::note_packet_detail(&format!(
-                "tick rate {}, frozen {} (a frozen server never runs its chunk sender)",
+                "tick rate {}, frozen {} (a frozen server still sends chunks)",
                 p.tick_rate, p.is_frozen
             ));
         }
@@ -386,7 +412,7 @@ fn block_item_state(stack: &azalea_inventory::ItemStack) -> Option<u32> {
     use std::str::FromStr;
 
     let data = stack.as_present()?;
-    let kind = azalea_registry::builtin::BlockKind::from_str(data.kind.to_str()).ok()?;
+    let kind = azalea_registry::builtin::BlockKind::from_str(data.known_kind()?.to_str()).ok()?;
     let mut block = Box::<dyn BlockTrait>::from(BlockState::from(kind));
     if let Some(props) = data.get_component::<azalea_inventory::components::BlockState>() {
         for (name, value) in &props.properties {
@@ -553,6 +579,7 @@ fn server_lighting(world: &WorldHolder, packet: &ClientboundGamePacket) {
                 worldsync::send_server_light(p.x, p.z, server_light(&p.light_data));
             }
         }
+        ClientboundGamePacket::ChunksBiomes(p) => worldsync::note_biomes_changed(world, p),
         _ => {}
     }
 }
@@ -567,8 +594,31 @@ fn block_entities(world: &WorldHolder, shared: &SharedMutex, packet: &Clientboun
             command_block_data(shared, p);
         }
         ClientboundGamePacket::BlockEvent(p) => {
-            blockentities::feed::on_block_event(p, &world.shared.read());
+            let destroyed = blockentities::feed::on_block_event(p, &world.shared);
+            if !destroyed.is_empty() {
+                let mut s = shared.lock().unwrap();
+                for (pos, data) in destroyed {
+                    crate::session::push_particle_emit(
+                        &mut s.session.particle_emits,
+                        crate::session::ParticleEmit::Event(crate::session::LevelEventEmit {
+                            id: 2001,
+                            pos,
+                            data,
+                            global: false,
+                        }),
+                    );
+                }
+            }
         }
+        ClientboundGamePacket::BlockUpdate(p) => {
+            blockentities::sim::piston::on_server_updates(std::iter::once((p.pos, p.block_state)));
+        }
+        ClientboundGamePacket::SectionBlocksUpdate(p) => {
+            blockentities::sim::piston::on_server_updates(
+                p.states.iter().map(|s| (p.section_pos + s.pos, s.state)),
+            );
+        }
+        ClientboundGamePacket::BlockChangedAck(_) => blockentities::sim::piston::on_ack(),
         ClientboundGamePacket::TestInstanceBlockStatus(p) => test_instance_status(shared, p),
         _ => {}
     }
@@ -606,12 +656,7 @@ fn command_block_data(shared: &SharedMutex, packet: &ClientboundBlockEntityData)
             .tag
             .get("LastOutput")
             .and_then(crate::client::chat_text::from_nbt_tag)
-            .map(|text| {
-                crate::client::chat_text::to_spans(&text)
-                    .iter()
-                    .map(|span| span.text.as_str())
-                    .collect()
-            })
+            .map(|text| crate::client::chat_text::to_plain(&text))
             .unwrap_or_default()
     } else {
         String::new()
@@ -743,9 +788,11 @@ fn maps(shared: &SharedMutex, packet: &ClientboundGamePacket) {
         )
     });
     let list = decorations.as_deref().map(Vec::as_slice);
-    let colors = match &p.color_patch.0 {
+    let dirty = match &p.color_patch.0 {
         Some(patch) => apply_map_patch(
             id,
+            p.scale,
+            p.locked,
             patch.start_x,
             patch.start_y,
             patch.width,
@@ -753,19 +800,19 @@ fn maps(shared: &SharedMutex, packet: &ClientboundGamePacket) {
             &patch.map_colors,
             list,
         ),
-        None => apply_map_patch(id, 0, 0, 0, 0, &[], list),
+        None => apply_map_patch(id, p.scale, p.locked, 0, 0, 0, 0, &[], list),
     };
     let mut s = shared.lock().unwrap();
     match s.session.map_updates.iter_mut().find(|u| u.id == id) {
         Some(pending) => {
-            pending.colors = colors;
+            pending.dirty = pending.dirty.union(dirty);
             if decorations.is_some() {
                 pending.decorations = decorations;
             }
         }
         None => s.session.map_updates.push(MapUpdate {
             id,
-            colors,
+            dirty,
             decorations,
         }),
     }
@@ -835,6 +882,26 @@ fn entity_state(shared: &SharedMutex, packet: &ClientboundGamePacket) {
         }
         ClientboundGamePacket::SetEntityMotion(p) => {
             record_velocity(p.id.0, p.delta.to_vec3());
+        }
+        ClientboundGamePacket::MoveMinecartAlongTrack(p) => {
+            if crate::client::tracking::minecart_improvements() {
+                let steps = p
+                    .lerp_steps
+                    .iter()
+                    .map(|s| crate::util::minecart_lerp::Step {
+                        pos: [s.position.x, s.position.y, s.position.z],
+                        movement: [s.movement.x, s.movement.y, s.movement.z],
+                        y_rot: unpack_degrees(s.y_rot as i8),
+                        x_rot: unpack_degrees(s.x_rot as i8),
+                        weight: s.weight,
+                    });
+                crate::client::tracking::cart_lerps()
+                    .lock()
+                    .unwrap()
+                    .entry(p.entity_id.0)
+                    .or_default()
+                    .push(steps);
+            }
         }
         ClientboundGamePacket::SetEntityData(p) => {
             use azalea::entity::EntityDataValue;
@@ -922,9 +989,6 @@ fn session_state(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbound
         ClientboundGamePacket::GameEvent(p) if p.event == EventType::ImmediateRespawn => {
             shared.lock().unwrap().session.show_death_screen = p.param == 0.0;
         }
-        ClientboundGamePacket::TickingState(p) => {
-            shared.lock().unwrap().session.tick_rate = crate::session::TickRate(p.tick_rate);
-        }
         ClientboundGamePacket::GameEvent(p) if p.event == EventType::GuardianElderEffect => {
             let mut s = shared.lock().unwrap();
             s.session.elder_guardian_effects += 1;
@@ -949,15 +1013,18 @@ fn session_state(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbound
                 || p.event_id == entity_event::FULL_DEBUG_INFO)
                 && p.entity_id.0 == crate::client::tracking::local_entity_id() =>
         {
+            let on = p.event_id == entity_event::REDUCED_DEBUG_INFO;
             crate::log_info!(
                 "gamerule",
                 "reduced debug info {}",
-                if p.event_id == entity_event::REDUCED_DEBUG_INFO {
-                    "on"
-                } else {
-                    "off"
-                }
+                if on { "on" } else { "off" }
             );
+            shared
+                .lock()
+                .unwrap()
+                .session
+                .server_info
+                .reduced_debug_info = Some(on);
         }
         ClientboundGamePacket::OpenSignEditor(p) => {
             use crate::blockentities::feed::{BlockEntityData, SignFace};
@@ -1122,6 +1189,7 @@ fn session_state(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbound
             let mut trims: [Option<&'static str>; 4] = [None; 4];
             let mut worn = [crate::util::combat::Worn::default(); 4];
             let mut stacks: [Option<crate::session::SlotStack>; 4] = Default::default();
+            let mut hand_stacks: [Option<crate::session::SlotStack>; 2] = Default::default();
             {
                 let guard = patterned.then(|| world.shared.read());
                 let registries = guard.as_deref().map(|w| &w.registries);
@@ -1143,8 +1211,14 @@ fn session_state(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbound
                 };
                 for (slot, stack) in &p.slots.slots {
                     match slot {
-                        EquipmentSlot::Mainhand => main_hand = Some(item(stack)),
-                        EquipmentSlot::Offhand => off_hand = Some(item(stack)),
+                        EquipmentSlot::Mainhand => {
+                            main_hand = Some(item(stack));
+                            hand_stacks[0] = gui(stack);
+                        }
+                        EquipmentSlot::Offhand => {
+                            off_hand = Some(item(stack));
+                            hand_stacks[1] = gui(stack);
+                        }
                         EquipmentSlot::Head => {
                             head = Some(item(stack));
                             trims[0] = trim(stack);
@@ -1234,10 +1308,33 @@ fn session_state(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbound
                     }
                 }
             }
+            if hand_stacks.iter().any(Option::is_some) {
+                let hands = Arc::make_mut(&mut entry.hands);
+                for (dst, src) in hands.iter_mut().zip(hand_stacks) {
+                    if let Some(src) = src {
+                        *dst = src;
+                    }
+                }
+            }
         }
         ClientboundGamePacket::ChangeDifficulty(p) => {
             crate::client::tracking::DIFFICULTY
                 .store(p.difficulty as u8, std::sync::atomic::Ordering::Relaxed);
+            shared.lock().unwrap().session.server_info.difficulty_locked = Some(p.locked);
+        }
+        ClientboundGamePacket::SetChunkCacheRadius(p) => {
+            shared.lock().unwrap().session.server_info.view_distance = Some(p.radius);
+        }
+        ClientboundGamePacket::SetSimulationDistance(p) => {
+            shared
+                .lock()
+                .unwrap()
+                .session
+                .server_info
+                .simulation_distance = Some(p.simulation_distance);
+        }
+        ClientboundGamePacket::CustomPayload(p) => {
+            crate::client::dialogs::brand(shared, &p.identifier, &p.data)
         }
         ClientboundGamePacket::SetTime(p) => {
             GAME_TIME.store(p.game_time as i64, std::sync::atomic::Ordering::Relaxed);
@@ -1256,7 +1353,8 @@ fn session_state(world: &WorldHolder, shared: &SharedMutex, packet: &Clientbound
             }
             s.session.game_time = p.game_time as u64;
             if let Some(clock) = clock {
-                s.session.day_clock.resync(clock);
+                let runs = s.session.world_run.runs;
+                s.session.day_clock.resync(clock, runs);
             }
         }
         ClientboundGamePacket::SetActionBarText(p) => {
@@ -1453,6 +1551,7 @@ pub(crate) fn waypoint_parts(p: &ClientboundWaypoint) -> (WaypointKey, Option<Wa
     let info = WaypointInfo {
         id: key.clone(),
         style: p.waypoint.icon.style.path().to_string(),
+        foreign_style: p.waypoint.icon.style.namespace() != "minecraft",
         color: p
             .waypoint
             .icon

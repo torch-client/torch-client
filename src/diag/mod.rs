@@ -26,10 +26,11 @@ pub use layer::custom_layers;
 pub use runtime::{CPU_METRICS, MEMORY_METRICS, Runtime, runtime};
 pub use stats::{Counts, Stat, add, bump, counts, get};
 pub use watchdog::{
-    Phase, TickGuard, light_thread_died, note_bot_stopped, note_bot_update, note_cache_center,
-    note_chunk_packet, note_event, note_frame, note_packet, note_packet_detail, note_sent_packet,
-    note_view, on_chunk_received, on_connected, on_disconnected, on_spawned, set_watching,
-    start_watchdog, timed, trace_enabled, tracing_packets,
+    Phase, TickGuard, force_disconnect_pending, light_thread_died, note_bot_stopped,
+    note_bot_update, note_cache_center, note_chunk_packet, note_event, note_frame, note_packet,
+    note_packet_detail, note_sent_packet, note_view, on_chunk_received, on_connected,
+    on_disconnected, on_spawned, set_watching, start_watchdog, timed, trace_enabled,
+    tracing_packets,
 };
 
 #[cfg_attr(not(feature = "profiling"), allow(unused_imports))]

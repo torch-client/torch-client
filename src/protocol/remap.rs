@@ -74,9 +74,17 @@ impl IdSpace {
 struct Runs {
     runs: Vec<(i32, Option<i32>)>,
     count: i32,
+    target_count: i32,
 }
 
 impl Runs {
+    fn get_past_end(&self, id: i32) -> Option<i32> {
+        if id >= self.count {
+            return (id - self.count).checked_add(self.target_count);
+        }
+        self.get(id)
+    }
+
     fn get(&self, id: i32) -> Option<i32> {
         if id < 0 || id >= self.count {
             return None;
@@ -129,6 +137,7 @@ impl Runs {
         Runs {
             runs,
             count: self.count,
+            target_count: next.target_count,
         }
     }
 }
@@ -141,11 +150,16 @@ pub(crate) struct Remap {
 
 impl Remap {
     pub(crate) fn map(&self, space: IdSpace, id: i32) -> Option<i32> {
-        self.spaces[space as usize].get(id)
+        let runs = &self.spaces[space as usize];
+        match space {
+            IdSpace::Item => runs.get_past_end(id),
+            _ => runs.get(id),
+        }
     }
 
     pub(crate) fn is_identity(&self, space: IdSpace) -> bool {
-        self.spaces[space as usize].is_identity()
+        let runs = &self.spaces[space as usize];
+        runs.is_identity() && (space != IdSpace::Item || runs.count == runs.target_count)
     }
 
     pub(crate) fn from(&self) -> ProtocolVersion {
@@ -248,21 +262,31 @@ impl Remap {
                 if runs.windows(2).any(|w| w[0].0 >= w[1].0) {
                     return Err(format!("{field}.{key} is not sorted"));
                 }
-                out.push(Runs { runs, count });
+                out.push(Runs {
+                    runs,
+                    count,
+                    target_count: 0,
+                });
             }
             Ok(out)
         };
 
+        let mut forward = direction("forward")?;
+        let mut back = direction("back")?;
+        for (there, here) in forward.iter_mut().zip(back.iter_mut()) {
+            there.target_count = here.count;
+            here.target_count = there.count;
+        }
         Ok((
             Remap {
                 from,
                 to,
-                spaces: direction("forward")?,
+                spaces: forward,
             },
             Remap {
                 from: to,
                 to: from,
-                spaces: direction("back")?,
+                spaces: back,
             },
         ))
     }
@@ -504,7 +528,28 @@ mod tests {
         assert_eq!(r.map(IdSpace::BlockState, 29670), Some(29872));
         assert_eq!(r.map(IdSpace::BlockState, 29671), None);
         assert_eq!(r.map(IdSpace::BlockState, -1), None);
-        assert_eq!(r.map(IdSpace::Item, 1505), None);
+        assert_eq!(r.map(IdSpace::Item, -1), None);
+    }
+
+    #[test]
+    fn modded_item_ids_pass_past_the_end() {
+        for (from, to) in [(774, 775), (775, 776), (774, 776)] {
+            let forward = pair(from, to);
+            let back = pair(to, from);
+            let (here, there) = (count(forward, IdSpace::Item), count(back, IdSpace::Item));
+            for k in [0, 1, 500] {
+                assert_eq!(forward.map(IdSpace::Item, here + k), Some(there + k));
+                assert_eq!(back.map(IdSpace::Item, there + k), Some(here + k));
+            }
+        }
+        assert_eq!(pair(774, 776).map(IdSpace::Item, 1505), Some(1537));
+        assert_eq!(pair(776, 774).map(IdSpace::Item, 1537), Some(1505));
+        assert_eq!(
+            pair(776, 774).map(IdSpace::Item, 257),
+            None,
+            "26.2's golden_dandelion"
+        );
+        assert!(!pair(774, 776).is_identity(IdSpace::Item));
     }
 
     fn is_the_bed(from: i32, to: i32, space: IdSpace, id: i32) -> bool {
@@ -679,24 +724,34 @@ mod tests {
         let first = Runs {
             runs: vec![(0, Some(0)), (2, None), (4, Some(1))],
             count: 6,
+            target_count: 7,
         };
         let second = Runs {
             runs: vec![(0, Some(0)), (5, None), (6, Some(-6))],
             count: 7,
+            target_count: 7,
         };
         let composed = first.then(&second);
         assert_eq!(composed.runs, [(0, Some(0)), (2, None), (5, Some(-5))]);
         assert_eq!(composed.count, 6);
+        assert_eq!(composed.target_count, 7);
+        assert_eq!(
+            composed.get_past_end(6),
+            Some(7),
+            "past the end lands past the end"
+        );
         let got: Vec<_> = (0..6).map(|id| composed.get(id)).collect();
         assert_eq!(got, [Some(0), Some(1), None, None, None, Some(0)]);
 
         let first = Runs {
             runs: vec![(0, Some(3))],
             count: 3,
+            target_count: 4,
         };
         let second = Runs {
             runs: vec![(0, Some(0))],
             count: 4,
+            target_count: 4,
         };
         let composed = first.then(&second);
         assert_eq!(composed.runs, [(0, Some(3)), (1, None)]);

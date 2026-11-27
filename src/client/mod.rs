@@ -40,6 +40,7 @@ pub(crate) mod stats;
 pub(crate) mod sulfur_archetypes;
 pub(crate) mod tablist;
 pub(crate) mod tick;
+pub(crate) mod tick_rate;
 pub(crate) mod tracking;
 #[cfg(all(feature = "update_checker", not(target_arch = "wasm32")))]
 pub(crate) mod update_checker;

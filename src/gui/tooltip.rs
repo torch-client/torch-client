@@ -12,7 +12,7 @@ use crate::generated_items::{Rarity, item};
 use crate::gui::painter::Painter;
 use crate::items::potions;
 use crate::items::tips::{self, TipAt};
-use crate::modules::better_tooltips::{self, FoodRows};
+use crate::modules::better_tooltips::{self, FoodRows, Opts, Preview};
 use crate::play::mob_effects;
 use crate::session::{BundleView, SlotStack};
 use crate::text::{Font, Span};
@@ -124,42 +124,7 @@ pub(crate) use label;
 pub(crate) fn translate(key: &str, args: &[String]) -> String {
     let lang = LANG.get();
     let template: &str = lang.get(key).map_or(key, String::as_str);
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    let mut next = args.iter();
-    while let Some(i) = rest.find('%') {
-        out.push_str(&rest[..i]);
-        rest = &rest[i..];
-        let bytes = rest.as_bytes();
-        let digits = bytes[1..].iter().take_while(|b| b.is_ascii_digit()).count();
-        match (digits, bytes.get(1 + digits)) {
-            (1.., Some(b'$')) if bytes.get(2 + digits) == Some(&b's') => {
-                let n: usize = rest[1..1 + digits].parse().unwrap_or(0);
-                match n.checked_sub(1).and_then(|i| args.get(i)) {
-                    Some(a) => out.push_str(a),
-                    None => out.push_str(&rest[..3 + digits]),
-                }
-                rest = &rest[3 + digits..];
-            }
-            (0, Some(b'%')) => {
-                out.push('%');
-                rest = &rest[2..];
-            }
-            (0, Some(b's')) => {
-                match next.next() {
-                    Some(a) => out.push_str(a),
-                    None => out.push_str("%s"),
-                }
-                rest = &rest[2..];
-            }
-            _ => {
-                out.push('%');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
+    crate::util::placeholders::substitute(template, args)
 }
 
 pub(crate) fn roman(n: i32) -> String {
@@ -254,7 +219,7 @@ fn potion_name(stack: &SlotStack) -> Option<String> {
     Some(translate(&contents.name_key(stack.item), &[]))
 }
 
-fn potion_lines(
+pub(crate) fn potion_lines(
     effects: &[potions::PotionEffectInstance],
     scale: f32,
     tick_rate: f32,
@@ -388,6 +353,9 @@ pub(crate) fn styled_hover_name(stack: &SlotStack) -> Vec<Span> {
                     false,
                 );
             }
+            if let Some(raw) = stack.modded {
+                return plain(format!("Modded item #{raw}"), Rarity::Epic.color());
+            }
             let name = item(stack.item).map_or(stack.item, |d| d.name);
             plain(name.to_string(), color)
         }
@@ -447,24 +415,43 @@ fn enchantment_block(
     }
 }
 
+#[cfg(test)]
 fn build_lines(stack: &SlotStack, advanced: bool, creative: bool) -> Vec<Vec<Span>> {
+    build_lines_with(stack, advanced, creative, &Opts::OFF).0
+}
+
+fn build_lines_with(
+    stack: &SlotStack,
+    advanced: bool,
+    creative: bool,
+    opts: &Opts,
+) -> (Vec<Vec<Span>>, Option<Preview>) {
     use azalea_inventory::components as comp;
 
     let registries = tips::registries();
-    let (attack_speed_base, peaceful) = tips::player();
-    let ctx = tips::Ctx {
-        registries: registries.as_deref(),
-        advanced,
-        attack_speed_base: Some(attack_speed_base),
-        peaceful,
-    };
+    let registries = registries.as_deref();
     let built;
     let data: Option<&azalea_inventory::ItemStackData> = match stack.raw.as_deref() {
         Some(raw) => raw.as_present(),
         None => {
-            built = crate::play::inventory_bridge::creative_stack(stack, ctx.registries);
+            built = crate::play::inventory_bridge::creative_stack(stack, registries);
             built.as_present()
         }
+    };
+    let preview = data.and_then(|d| better_tooltips::preview::build(stack, d, registries, opts));
+    let (attack_speed_base, peaceful) = tips::player();
+    let ctx = tips::Ctx {
+        registries,
+        advanced,
+        attack_speed_base: Some(attack_speed_base),
+        peaceful,
+        containers: if matches!(preview, Some(Preview::Grid(_))) {
+            tips::ContainerRows::Hidden
+        } else if opts.compact {
+            tips::ContainerRows::Compact
+        } else {
+            tips::ContainerRows::Vanilla
+        },
     };
     let shows = |kind: DataComponentKind| data.is_none_or(|d| tips::shows(d, kind));
     let tips_at = |at: TipAt, out: &mut Vec<Vec<Span>>| {
@@ -474,7 +461,7 @@ fn build_lines(stack: &SlotStack, advanced: bool, creative: bool) -> Vec<Vec<Spa
     };
 
     if !creative && data.is_some_and(tips::hides_tooltip) {
-        return Vec::new();
+        return (Vec::new(), None);
     }
 
     let mut out: Vec<Vec<Span>> = Vec::new();
@@ -592,7 +579,22 @@ fn build_lines(stack: &SlotStack, advanced: bool, creative: bool) -> Vec<Vec<Spa
         ));
     }
 
-    out
+    if let Some(d) = data {
+        let top = better_tooltips::rows::top_rows(stack, d, opts, creative, tick_rate);
+        if !top.is_empty() {
+            let rest = out.split_off(1);
+            out.extend(top);
+            out.extend(rest);
+        }
+        if let Some(key) = opts.hint_key
+            && better_tooltips::preview::applies(stack, d, opts)
+        {
+            out.push(Vec::new());
+            out.push(better_tooltips::rows::hint_row(key));
+        }
+    }
+
+    (out, preview)
 }
 
 fn box_height(rows: usize) -> f32 {
@@ -651,10 +653,12 @@ struct LineCache {
     tick_rate: f32,
     lang_epoch: u32,
     tips_epoch: u32,
-    food_values: bool,
+    opts: Opts,
+    map: Option<crate::gui::map_view::MapMeta>,
     lines: Vec<Vec<Span>>,
     bundle: BundleText,
     food: Option<(usize, FoodRows)>,
+    preview: Option<Preview>,
 }
 
 const BUNDLE_WIDTH: f32 = 96.0;
@@ -672,9 +676,28 @@ struct BundleText {
     hidden: String,
 }
 
+fn shown_bundle(stack: &SlotStack) -> Option<&BundleView> {
+    use azalea_inventory::components::BundleContents;
+
+    let view = stack.bundle.as_deref()?;
+    let revealed = || {
+        (better_tooltips::reveals_components() || better_tooltips::reveals_tooltip())
+            && stack
+                .raw
+                .as_deref()
+                .and_then(azalea_inventory::ItemStack::as_present)
+                .is_some_and(|d| {
+                    d.get_unless_removed::<BundleContents>().is_some()
+                        && !tips::hides_tooltip(d)
+                        && tips::shows_component::<BundleContents>(d)
+                })
+    };
+    (view.shows || revealed()).then_some(view)
+}
+
 impl BundleText {
     fn new(stack: &SlotStack, font: &Font) -> BundleText {
-        let Some(view) = stack.bundle.as_deref().filter(|view| view.shows) else {
+        let Some(view) = shown_bundle(stack) else {
             return BundleText::default();
         };
         let description = translate("item.minecraft.bundle.empty.description", &[]);
@@ -710,7 +733,7 @@ struct BundleImage<'a> {
 
 impl<'a> BundleImage<'a> {
     fn of(stack: &'a SlotStack, text: &'a BundleText, vw: f32, vh: f32) -> Option<Self> {
-        let view = stack.bundle.as_deref().filter(|view| view.shows)?;
+        let view = shown_bundle(stack)?;
         Some(BundleImage {
             view,
             text,
@@ -875,9 +898,10 @@ pub fn draw(
         stack,
         advanced,
         creative,
+        true,
         &atlas.font,
-        |lines, bundle, food| {
-            let image = BundleImage::of(stack, bundle, vw, vh);
+        |lines, bundle, food, preview| {
+            let image = Image::of(stack, bundle, preview, vw, vh);
             place_lines(p, lines, image, food, |w, h| position(mx, my, vw, vh, w, h));
         },
     );
@@ -895,11 +919,18 @@ pub(crate) fn draw_with_line(
     advanced: bool,
 ) {
     let atlas = p.atlas;
-    with_lines(stack, advanced, false, &atlas.font, |lines, _, food| {
-        let mut all = lines.to_vec();
-        all.extend(extra.map(|text| plain(text, WHITE)));
-        place_lines(p, &all, None, food, |w, h| position(mx, my, vw, vh, w, h));
-    });
+    with_lines(
+        stack,
+        advanced,
+        false,
+        false,
+        &atlas.font,
+        |lines, _, food, _| {
+            let mut all = lines.to_vec();
+            all.extend(extra.map(|text| plain(text, WHITE)));
+            place_lines(p, &all, None, food, |w, h| position(mx, my, vw, vh, w, h));
+        },
+    );
 }
 
 pub fn draw_over_slot(
@@ -916,9 +947,10 @@ pub fn draw_over_slot(
         stack,
         advanced,
         creative,
+        true,
         &atlas.font,
-        |lines, bundle, food| {
-            let image = BundleImage::of(stack, bundle, vw, vh);
+        |lines, bundle, food, preview| {
+            let image = Image::of(stack, bundle, preview, vw, vh);
             place_lines(p, lines, image, food, |w, h| {
                 position_over_slot(slot.0, slot.1, vw, vh, w, h)
             })
@@ -930,8 +962,9 @@ fn with_lines(
     stack: &SlotStack,
     advanced: bool,
     creative: bool,
+    images: bool,
     font: &Font,
-    draw: impl FnOnce(&[Vec<Span>], &BundleText, Option<(usize, &FoodRows)>),
+    draw: impl FnOnce(&[Vec<Span>], &BundleText, Option<(usize, &FoodRows)>, Option<&Preview>),
 ) {
     if stack.is_empty() {
         return;
@@ -939,7 +972,12 @@ fn with_lines(
     let lang_epoch = LANG.epoch();
     let tips_epoch = tips::epoch();
     let tick_rate = tick_rate();
-    let food_values = better_tooltips::food_values();
+    let mut opts = Opts::now();
+    if !images {
+        opts.previewing = false;
+        opts.hint_key = None;
+    }
+    let map = stack.map_id.and_then(crate::gui::map_view::meta);
     LINES.with_borrow_mut(|cache| {
         let hit = cache.as_ref().is_some_and(|c| {
             c.advanced == advanced
@@ -947,12 +985,13 @@ fn with_lines(
                 && c.tick_rate == tick_rate
                 && c.lang_epoch == lang_epoch
                 && c.tips_epoch == tips_epoch
-                && c.food_values == food_values
+                && c.opts == opts
+                && c.map == map
                 && c.stack == *stack
         });
         if !hit {
-            let mut lines = build_lines(stack, advanced, creative);
-            let food = (food_values && !lines.is_empty())
+            let (mut lines, preview) = build_lines_with(stack, advanced, creative, &opts);
+            let food = (opts.food && !lines.is_empty())
                 .then(|| FoodRows::of(stack, font))
                 .flatten()
                 .map(|rows| {
@@ -967,10 +1006,12 @@ fn with_lines(
                 tick_rate,
                 lang_epoch,
                 tips_epoch,
-                food_values,
+                opts,
+                map,
                 lines,
                 bundle: BundleText::new(stack, font),
                 food,
+                preview,
             });
         }
         if let Some(c) = cache.as_ref() {
@@ -978,6 +1019,7 @@ fn with_lines(
                 &c.lines,
                 &c.bundle,
                 c.food.as_ref().map(|(at, rows)| (*at, rows)),
+                c.preview.as_ref(),
             );
         }
     });
@@ -987,10 +1029,51 @@ pub(crate) fn draw_lines(p: &mut Painter, lines: &[Vec<Span>], mx: f32, my: f32,
     place_lines(p, lines, None, None, |w, h| position(mx, my, vw, vh, w, h));
 }
 
+enum Image<'a> {
+    Bundle(BundleImage<'a>),
+    Preview(&'a Preview),
+}
+
+impl<'a> Image<'a> {
+    fn of(
+        stack: &'a SlotStack,
+        bundle: &'a BundleText,
+        preview: Option<&'a Preview>,
+        vw: f32,
+        vh: f32,
+    ) -> Option<Self> {
+        match preview {
+            Some(preview) => Some(Image::Preview(preview)),
+            None => BundleImage::of(stack, bundle, vw, vh).map(Image::Bundle),
+        }
+    }
+
+    fn width(&self) -> f32 {
+        match self {
+            Image::Bundle(_) => BUNDLE_WIDTH,
+            Image::Preview(preview) => preview.width(),
+        }
+    }
+
+    fn height(&self) -> f32 {
+        match self {
+            Image::Bundle(bundle) => bundle.height(),
+            Image::Preview(preview) => preview.height(),
+        }
+    }
+
+    fn draw(&self, p: &mut Painter, x: f32, y: f32, w: f32) {
+        match self {
+            Image::Bundle(bundle) => bundle.draw(p, x, y, w),
+            Image::Preview(preview) => preview.draw(p, x, y, w),
+        }
+    }
+}
+
 fn place_lines(
     p: &mut Painter,
     lines: &[Vec<Span>],
-    image: Option<BundleImage<'_>>,
+    image: Option<Image<'_>>,
     food: Option<(usize, &FoodRows)>,
     place: impl FnOnce(f32, f32) -> (f32, f32),
 ) {
@@ -1001,16 +1084,9 @@ fn place_lines(
     let w = lines
         .iter()
         .map(|l| p.atlas.font.width(l).ceil())
-        .fold(
-            if image.is_some() {
-                BUNDLE_WIDTH
-            } else {
-                0.0f32
-            },
-            f32::max,
-        )
+        .fold(image.as_ref().map_or(0.0f32, Image::width), f32::max)
         .max(food.map_or(0.0, |(_, rows)| rows.width()));
-    let image_height = image.as_ref().map(BundleImage::height);
+    let image_height = image.as_ref().map(Image::height);
     let h = match image_height {
         Some(height) => ROW_HEIGHT * lines.len() as f32 + height,
         None => box_height(lines.len()),

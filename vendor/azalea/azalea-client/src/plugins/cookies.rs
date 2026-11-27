@@ -33,9 +33,19 @@ impl Plugin for CookiesPlugin {
     }
 }
 
-#[derive(Component, Default)]
+#[derive(Clone, Component, Debug, Default)]
 pub struct ServerCookies {
     pub map: HashMap<Identifier, Vec<u8>>,
+}
+
+const MAX_COOKIE_PAYLOAD: usize = 5120;
+const MAX_COOKIES: usize = 1024;
+
+#[derive(EntityEvent)]
+pub struct TransferEvent {
+    pub entity: Entity,
+    pub host: String,
+    pub port: u32,
 }
 
 #[derive(EntityEvent)]
@@ -94,6 +104,19 @@ pub fn handle_store_cookie(
     mut query: Query<&mut ServerCookies>,
 ) {
     if let Ok(mut server_cookies) = query.get_mut(store_cookie.entity) {
+        if store_cookie.payload.len() > MAX_COOKIE_PAYLOAD {
+            warn!(
+                "refusing a cookie of {} bytes, the limit is {MAX_COOKIE_PAYLOAD}",
+                store_cookie.payload.len()
+            );
+            return;
+        }
+        if server_cookies.map.len() >= MAX_COOKIES
+            && !server_cookies.map.contains_key(&store_cookie.key)
+        {
+            warn!("refusing a cookie, this connection already holds {MAX_COOKIES}");
+            return;
+        }
         server_cookies
             .map
             .insert(store_cookie.key.clone(), store_cookie.payload.clone());

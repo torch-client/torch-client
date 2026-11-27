@@ -1,6 +1,7 @@
 use super::args::{Tok, rest};
 use super::table::{Owner, Table};
 use crate::gui::keybinds::Bound;
+use crate::lang::{Key, tr, trf};
 use crate::modules::chat_math::{GREEN, RED};
 use crate::modules::registry::{self, Category, Kind, Mode, ModuleDef, SettingDef};
 use crate::modules::{Value, store};
@@ -9,8 +10,9 @@ use crate::text::{AQUA, GRAY, Span, WHITE, YELLOW};
 pub struct Builtin {
     pub name: &'static str,
     pub aliases: &'static [&'static str],
-    pub usage: &'static str,
-    pub tip: &'static str,
+    pub usage: Key,
+    pub tip: Key,
+    pub tip_names: fn() -> Vec<&'static str>,
     pub shape: Shape,
     pub run: fn(&mut Call),
 }
@@ -31,6 +33,15 @@ pub enum Shape {
     Mine,
     Choice(&'static [&'static str]),
     Friend,
+    Nbt,
+    #[cfg(feature = "seed_cracker")]
+    Cracker,
+}
+
+impl Shape {
+    pub fn raw_args(self) -> bool {
+        self == Shape::Nbt
+    }
 }
 
 #[derive(Default)]
@@ -58,12 +69,28 @@ impl Line {
         self.put(s, GRAY)
     }
 
-    fn state(self, on: bool) -> Line {
-        self.put(on_off(on), if on { GREEN } else { RED })
-    }
-
     pub fn error(s: impl Into<String>) -> Line {
         Line::default().put(s, RED)
+    }
+
+    fn fill(mut self, template: &str, pieces: &[(&str, u32)]) -> Line {
+        const MARK: char = '\u{1}';
+        let marks: Vec<String> = (0..pieces.len())
+            .map(|i| format!("{MARK}{i}{MARK}"))
+            .collect();
+        let filled = crate::util::placeholders::substitute(template, &marks);
+        for (i, part) in filled.split(MARK).enumerate() {
+            if i % 2 == 0 {
+                if !part.is_empty() {
+                    self = self.t(part);
+                }
+            } else if let Some(&(text, rgb)) =
+                part.parse::<usize>().ok().and_then(|n| pieces.get(n))
+            {
+                self = self.put(text, rgb);
+            }
+        }
+        self
     }
 }
 
@@ -74,6 +101,8 @@ pub struct Call<'a> {
     pub prefix: &'a str,
     pub out: Vec<Line>,
     pub send: Option<String>,
+    pub edit: Option<crate::play::item_components::ItemEdit>,
+    pub shared: &'a crate::session::SharedMutex,
 }
 
 impl Call<'_> {
@@ -94,68 +123,78 @@ impl Call<'_> {
     }
 }
 
-pub static BUILTINS: [Builtin; 15 + cfg!(feature = "seed_cracker") as usize] = [
+const DEV_BUILTINS: usize = 0;
+
+pub static BUILTINS: [Builtin; 17 + cfg!(feature = "seed_cracker") as usize + DEV_BUILTINS] = [
     Builtin {
         name: "help",
         aliases: &[],
-        usage: "[command]",
-        tip: "Lists every command, or shows how to use one",
+        usage: Key::of("commands.help.usage"),
+        tip: Key::of("commands.help.tip"),
+        tip_names: no_names,
         shape: Shape::Help,
         run: help,
     },
     Builtin {
         name: "toggle",
         aliases: &["t"],
-        usage: "<module>",
-        tip: "Switches a module on or off",
+        usage: Key::of("commands.toggle.usage"),
+        tip: Key::of("commands.toggle.tip"),
+        tip_names: no_names,
         shape: Shape::Module,
         run: toggle,
     },
     Builtin {
         name: "set",
         aliases: &[],
-        usage: "<module> <setting> <value>",
-        tip: "Changes one of a module's settings",
+        usage: Key::of("commands.set.usage"),
+        tip: Key::of("commands.set.tip"),
+        tip_names: no_names,
         shape: Shape::Set,
         run: set,
     },
     Builtin {
         name: "get",
         aliases: &[],
-        usage: "<module> [setting]",
-        tip: "Shows a module's settings, or one of them",
+        usage: Key::of("commands.get.usage"),
+        tip: Key::of("commands.get.tip"),
+        tip_names: no_names,
         shape: Shape::Get,
         run: get,
     },
     Builtin {
         name: "bind",
         aliases: &[],
-        usage: "<module> <key|none>",
-        tip: "Binds a module's switch to a key or mouse button",
+        usage: Key::of("commands.bind.usage"),
+        tip: Key::of("commands.bind.tip"),
+        tip_names: no_names,
         shape: Shape::Bind,
         run: bind,
     },
     Builtin {
         name: "profile",
         aliases: &[],
-        usage: "[legit|normal|blatant]",
-        tip: "Shows or changes which modules may run",
+        usage: Key::of("commands.profile.usage"),
+        tip: Key::of("commands.profile.tip"),
+        tip_names: no_names,
         shape: Shape::Profile,
         run: profile,
     },
     Builtin {
         name: "prefix",
         aliases: &[],
-        usage: "[text]",
-        tip: "Shows or changes what a command line starts with",
+        usage: Key::of("commands.prefix.usage"),
+        tip: Key::of("commands.prefix.tip"),
+        tip_names: no_names,
         shape: Shape::Word,
         run: prefix,
     },
     Builtin {
         name: "seedcheck",
         aliases: &[],
-        usage: "",
-        tip: "Compares Seed Xray's prediction with the blocks around you",
+        usage: Key::NONE,
+        tip: Key::of("commands.seedcheck.tip"),
+        tip_names: seed_xray_name,
         shape: Shape::Word,
         run: seedcheck,
     },
@@ -163,68 +202,116 @@ pub static BUILTINS: [Builtin; 15 + cfg!(feature = "seed_cracker") as usize] = [
     Builtin {
         name: "cracker",
         aliases: &[],
-        usage: "[status|clear|restart|help]",
-        tip: "Seed Cracker: what it has, forget it all, search again, or what to look for",
-        shape: Shape::Choice(&["status", "clear", "restart", "help"]),
+        usage: Key::of("commands.cracker.usage"),
+        tip: Key::of("commands.cracker.tip"),
+        tip_names: seed_cracker_name,
+        shape: Shape::Cracker,
         run: cracker,
     },
     Builtin {
         name: "say",
         aliases: &[],
-        usage: "<text...>",
-        tip: "Sends the text as chat, for a line that has to start with the prefix",
+        usage: Key::of("commands.say.usage"),
+        tip: Key::of("commands.say.tip"),
+        tip_names: no_names,
         shape: Shape::Rest,
         run: say,
     },
     Builtin {
         name: "modules",
         aliases: &[],
-        usage: "[category]",
-        tip: "Lists the modules, the ones switched on marked",
+        usage: Key::of("commands.modules.usage"),
+        tip: Key::of("commands.modules.tip"),
+        tip_names: no_names,
         shape: Shape::Category,
         run: modules,
     },
     Builtin {
         name: "goto",
         aliases: &[],
-        usage: "<x> <y> <z>|freecam|stop",
-        tip: "Walks to a block, or to where the freecam is, drawing the route; ~ is relative to your feet",
+        usage: Key::of("commands.goto.usage"),
+        tip: Key::of("commands.goto.tip"),
+        tip_names: no_names,
         shape: Shape::Goto,
         run: goto,
     },
     Builtin {
         name: "mine",
         aliases: &[],
-        usage: "[ore|log|wood|block|stop] [count]",
-        tip: "Switches OreMiner on with its Ores list, or for one ore family, logs, wood or one block this run, mining count blocks when given; stop switches it off",
+        usage: Key::of("commands.mine.usage"),
+        tip: Key::of("commands.mine.tip"),
+        tip_names: ore_miner_and_ores,
         shape: Shape::Mine,
         run: mine,
     },
     Builtin {
         name: "stop",
         aliases: &[],
-        usage: "",
-        tip: "Switches OreMiner off, as .mine stop does",
+        usage: Key::NONE,
+        tip: Key::of("commands.stop.tip"),
+        tip_names: ore_miner_name,
         shape: Shape::Choice(&[]),
         run: stop,
     },
     Builtin {
         name: "follow",
         aliases: &[],
-        usage: "[player]",
-        tip: "Walks after a player in sight until they leave it; on its own, stops",
+        usage: Key::of("commands.follow.usage"),
+        tip: Key::of("commands.follow.tip"),
+        tip_names: no_names,
         shape: Shape::Follow,
         run: follow,
     },
     Builtin {
         name: "friend",
         aliases: &[],
-        usage: "[list] | add <player> | remove <player>",
-        tip: "Lists, adds or removes friends; combat modules leave friends alone unless Attack friends is on",
+        usage: Key::of("commands.friend.usage"),
+        tip: Key::of("commands.friend.tip"),
+        tip_names: no_names,
         shape: Shape::Friend,
         run: friend,
     },
+    Builtin {
+        name: "nbt",
+        aliases: &[],
+        usage: Key::of("commands.nbt.usage"),
+        tip: Key::of("commands.nbt.tip"),
+        tip_names: no_names,
+        shape: Shape::Nbt,
+        run: nbt,
+    },
+    Builtin {
+        name: "server",
+        aliases: &["serverinfo"],
+        usage: Key::NONE,
+        tip: Key::of("commands.server.tip"),
+        tip_names: no_names,
+        shape: Shape::Choice(&[]),
+        run: server,
+    },
 ];
+
+fn no_names() -> Vec<&'static str> {
+    Vec::new()
+}
+
+fn seed_xray_name() -> Vec<&'static str> {
+    vec![registry::module(registry::Id::SeedXray).label()]
+}
+
+#[cfg(feature = "seed_cracker")]
+fn seed_cracker_name() -> Vec<&'static str> {
+    vec![registry::module(registry::Id::SeedCracker).label()]
+}
+
+fn ore_miner_name() -> Vec<&'static str> {
+    vec![registry::module(registry::Id::OreMiner).label()]
+}
+
+fn ore_miner_and_ores() -> Vec<&'static str> {
+    const ORES: Key = Key::of("modules.ore_miner.ORES.name");
+    vec![registry::module(registry::Id::OreMiner).label(), ORES.get()]
+}
 
 pub fn norm(s: &str) -> String {
     s.chars()
@@ -233,37 +320,97 @@ pub fn norm(s: &str) -> String {
         .collect()
 }
 
-fn find_module(name: &str) -> Result<&'static ModuleDef, String> {
-    let want = norm(name);
-    registry::modules()
-        .find(|m| norm(m.name) == want || m.aliases().iter().any(|a| norm(a) == want))
-        .ok_or_else(|| format!("No module named `{name}`"))
+pub(super) fn pick<T: Copy, R: Iterator<Item = T>, E: IntoIterator<Item = &'static str>>(
+    rows: impl Fn() -> R,
+    want: &str,
+    english: impl Fn(T) -> E,
+    drawn: impl Fn(T) -> &'static str,
+) -> Option<T> {
+    rows()
+        .find(|&r| english(r).into_iter().any(|n| norm(n) == want))
+        .or_else(|| rows().find(|&r| norm(drawn(r)) == want))
 }
 
-fn find_setting(m: &ModuleDef, name: &str) -> Result<(usize, &'static SettingDef), String> {
-    let want = norm(name);
-    m.slots()
-        .zip(m.settings())
-        .find(|(_, d)| norm(d.name) == want)
-        .ok_or_else(|| {
-            let names: Vec<String> = m.settings().iter().map(|d| norm(d.name)).collect();
-            if names.is_empty() {
-                format!("{} has no settings", m.name)
-            } else {
-                format!(
-                    "{} has no setting `{name}`; it has {}",
-                    m.name,
-                    names.join(", ")
-                )
-            }
-        })
+pub(super) fn rescued<T>(typed: &str, find: impl Fn(&str) -> Option<T>) -> Option<T> {
+    let found = find(typed);
+    #[cfg(feature = "multi_language")]
+    let found = found.or_else(|| remapped(typed, &find));
+    found
+}
+
+#[cfg(any(feature = "multi_language", test))]
+#[cfg_attr(not(feature = "multi_language"), allow(dead_code))]
+pub(super) fn remapped<T>(typed: &str, find: impl Fn(&str) -> Option<T>) -> Option<T> {
+    let keys = crate::util::keyboard_layout::to_qwerty(typed);
+    if keys == typed { None } else { find(&keys) }
+}
+
+fn find_module(name: &str) -> Result<&'static ModuleDef, String> {
+    rescued(name, |typed| {
+        let aliases =
+            |m: &'static ModuleDef| std::iter::once(m.name).chain(m.aliases().iter().copied());
+        pick(registry::modules, &norm(typed), aliases, |m| m.label())
+    })
+    .ok_or_else(|| trf!("commands.no_module", name))
+}
+
+fn find_setting(m: &'static ModuleDef, name: &str) -> Result<(usize, &'static SettingDef), String> {
+    rescued(name, |typed| {
+        let rows = || m.slots().zip(m.settings());
+        pick(rows, &norm(typed), |(_, d)| [d.name], |(_, d)| d.label())
+    })
+    .ok_or_else(|| {
+        let names: Vec<String> = m.settings().iter().map(|d| norm(d.label())).collect();
+        if names.is_empty() {
+            trf!("commands.no_settings", m.label())
+        } else {
+            trf!("commands.no_setting", m.label(), name, names.join(", "))
+        }
+    })
+}
+
+fn find_option(
+    options: &'static [&'static str],
+    keys: &'static [Key],
+    value: &str,
+) -> Option<usize> {
+    rescued(value, |typed| {
+        pick(
+            || 0..options.len(),
+            &norm(typed),
+            |i| [options[i]],
+            |i| registry::option_label(options, keys, i),
+        )
+    })
+}
+
+fn find_category(name: &str) -> Option<Category> {
+    rescued(name, |typed| {
+        pick(
+            || Category::ALL.into_iter(),
+            &norm(typed),
+            |c| [c.name()],
+            |c| c.label(),
+        )
+    })
+}
+
+fn find_mode(name: &str) -> Option<Mode> {
+    rescued(name, |typed| {
+        pick(
+            || Mode::ALL.into_iter(),
+            &norm(typed),
+            |m| [Mode::NAMES[m as usize]],
+            |m| m.label(),
+        )
+    })
 }
 
 fn shown(slot: usize, def: &SettingDef) -> Option<String> {
     let s = store();
     Some(match (def.kind, s.value(slot)) {
         (Kind::Text { .. }, _) => format!("\"{}\"", s.text_at(slot)),
-        (Kind::List { .. }, _) => "a list; edit it in the click GUI".to_string(),
+        (Kind::List { .. }, _) => tr!("commands.value.list").to_string(),
         (Kind::Button { .. }, _) => return None,
         (_, Some(Value::Bool(b))) => on_off(b).to_string(),
         (Kind::Slider { decimals, .. }, Some(Value::Num(x))) => {
@@ -273,8 +420,11 @@ fn shown(slot: usize, def: &SettingDef) -> Option<String> {
             let d = decimals as usize;
             format!("{:.*}..{:.*}", d, lo, d, hi)
         }
-        (Kind::Enum { options, .. }, Some(Value::Choice(i))) => {
-            options.get(i as usize).copied().unwrap_or("?").to_string()
+        (Kind::Enum { options, keys, .. }, Some(Value::Choice(i))) => {
+            match registry::option_label(options, keys, i as usize) {
+                "" => "?".to_string(),
+                drawn => drawn.to_string(),
+            }
         }
         (_, Some(Value::Key(b))) => b.display_name().to_string(),
         _ => "?".to_string(),
@@ -297,19 +447,18 @@ fn number(w: &str) -> Result<f32, String> {
     w.parse::<f32>()
         .ok()
         .filter(|x| x.is_finite())
-        .ok_or_else(|| format!("`{w}` is not a number"))
+        .ok_or_else(|| trf!("commands.not_number", w))
 }
 
 fn state_line(m: &ModuleDef) -> Line {
     let s = store();
     let armed = s.armed(m.id);
-    let mut line = Line::default().name(m.name).t(" is ").state(armed);
+    let state = (on_off(armed), if armed { GREEN } else { RED });
+    let mut line = Line::default().fill(tr!("commands.state.is"), &[(m.label(), AQUA), state]);
     if armed && !s.allowed(m.id) {
-        let mode = Mode::NAMES[m.mode as usize];
-        let now = Mode::NAMES[s.profile() as usize];
-        line = line.dim(format!(
-            ", but held back: it needs the {mode} profile and {now} is in force"
-        ));
+        let mode = m.mode.label();
+        let now = s.profile().label();
+        line = line.dim(trf!("commands.state.held_back", mode, now));
     }
     line
 }
@@ -327,10 +476,8 @@ fn help(c: &mut Call) {
     let p = c.prefix.to_string();
     let table = c.table;
     let Some(name) = c.arg(0).map(str::to_lowercase) else {
-        let head = Line::default()
-            .t("Commands (")
-            .value(format!("{p}help <command>"))
-            .t(" for one):");
+        let arg = format!("{p}help {}", tr!("commands.help.head_arg"));
+        let head = Line::default().fill(tr!("commands.help.head"), &[(arg.as_str(), YELLOW)]);
         c.line(head);
         for cmd in &table.commands {
             let mut line = usage_line(&p, &cmd.shown(), &cmd.usage()).t(format!(": {}", cmd.tip()));
@@ -341,13 +488,14 @@ fn help(c: &mut Call) {
         }
         return;
     };
-    let Some(cmd) = table.find(&name) else {
-        c.err(format!("No command `{name}`"));
+    let Some(cmd) = rescued(&name, |n| table.find(n)) else {
+        c.err(trf!("commands.help.unknown", name));
         return;
     };
     c.line(usage_line(&p, &cmd.shown(), &cmd.usage()));
-    if !cmd.tip().is_empty() {
-        c.ok(cmd.tip());
+    let tip = cmd.tip();
+    if !tip.is_empty() {
+        c.ok(tip);
     }
     let others: Vec<String> = cmd
         .names
@@ -356,20 +504,18 @@ fn help(c: &mut Call) {
         .map(|n| format!("{p}{n}"))
         .collect();
     if !others.is_empty() {
-        c.line(Line::default().t("Also: ").value(others.join(", ")));
+        let others = others.join(", ");
+        c.line(Line::default().fill(tr!("commands.help.also"), &[(others.as_str(), YELLOW)]));
     }
     if let Some(q) = &cmd.qualified {
-        c.line(
-            Line::default()
-                .t("Always reachable as ")
-                .value(format!("{p}{q}")),
-        );
+        let q = format!("{p}{q}");
+        c.line(Line::default().fill(tr!("commands.help.qualified"), &[(q.as_str(), YELLOW)]));
     }
 }
 
 fn toggle(c: &mut Call) {
     let Some(name) = c.arg(0) else {
-        c.err("Which module? Usage: toggle <module>");
+        c.err(tr!("commands.toggle.which"));
         return;
     };
     match find_module(name) {
@@ -383,7 +529,7 @@ fn toggle(c: &mut Call) {
 
 fn set(c: &mut Call) {
     let (Some(module), Some(setting)) = (c.arg(0), c.arg(1)) else {
-        c.err("Usage: set <module> <setting> <value>");
+        c.err(tr!("commands.set.usage_line"));
         return;
     };
     let m = match find_module(module) {
@@ -396,18 +542,19 @@ fn set(c: &mut Call) {
     };
     let value = rest(c.raw, &c.toks, 2);
     if value.is_empty() && !matches!(def.kind, Kind::Text { .. }) {
-        return c.err(format!(
-            "Usage: set {} {} <value>",
-            norm(m.name),
-            norm(def.name)
+        return c.err(trf!(
+            "commands.set.usage_value",
+            norm(m.label()),
+            norm(def.label())
         ));
     }
+    let label = def.label();
     let s = store();
     let word = c.arg(2).unwrap_or_default().to_string();
     let result: Result<(), String> = match def.kind {
         Kind::Toggle { .. } => bool_word(&word)
             .map(|b| s.set_value(slot, Value::Bool(b)))
-            .ok_or_else(|| format!("{} takes on or off, not `{word}`", def.name)),
+            .ok_or_else(|| trf!("commands.set.toggle", label, word)),
         Kind::Slider { min, max, .. } => {
             let max = crate::modules::registry::typed_max(slot as usize, max);
             number(&word).map(|x| s.set_value(slot, Value::Num(x.clamp(min, max))))
@@ -418,7 +565,7 @@ fn set(c: &mut Call) {
                 None => c.arg(3).map(|b| (word.clone(), b.to_string())),
             };
             match pair {
-                None => Err(format!("{} takes a range: low..high", def.name)),
+                None => Err(trf!("commands.set.range", label)),
                 Some((a, b)) => {
                     number(&a)
                         .and_then(|a| number(&b).map(|b| (a, b)))
@@ -429,24 +576,21 @@ fn set(c: &mut Call) {
                 }
             }
         }
-        Kind::Enum { options, .. } => match options.iter().position(|o| norm(o) == norm(&value)) {
+        Kind::Enum { options, keys, .. } => match find_option(options, keys, &value) {
             Some(i) => {
                 s.set_value(slot, Value::Choice(i as u8));
                 Ok(())
             }
-            None => Err(format!(
-                "{} is one of {}",
-                def.name,
-                options
-                    .iter()
-                    .map(|o| norm(o))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
+            None => {
+                let drawn =
+                    (0..options.len()).map(|i| norm(registry::option_label(options, keys, i)));
+                let names = drawn.collect::<Vec<_>>().join(", ");
+                Err(trf!("commands.set.enum", label, names))
+            }
         },
         Kind::Text { max_len, .. } => {
             if value.chars().count() > max_len {
-                Err(format!("{} is at most {max_len} characters", def.name))
+                Err(trf!("commands.set.text_long", label, max_len))
             } else {
                 s.set_text_at(slot, &value);
                 Ok(())
@@ -459,18 +603,15 @@ fn set(c: &mut Call) {
             }
             _ => Bound::from_typed_name(&word)
                 .map(|b| s.set_value(slot, Value::Key(b)))
-                .ok_or_else(|| format!("`{word}` is not a key name")),
+                .ok_or_else(|| trf!("commands.set.not_key", word)),
         },
-        Kind::List { .. } => Err(format!("{} is a list; edit it in the click GUI", def.name)),
-        Kind::Button { .. } => Err(format!(
-            "{} is a button; press it in the click GUI",
-            def.name
-        )),
+        Kind::List { .. } => Err(trf!("commands.set.list", label)),
+        Kind::Button { .. } => Err(trf!("commands.set.button", label)),
     };
     match result {
         Ok(()) => {
             let now = shown(slot, def).unwrap_or_default();
-            c.line(setting_line(m.name, def.name, now));
+            c.line(setting_line(m.label(), label, now));
         }
         Err(e) => c.err(e),
     }
@@ -487,7 +628,7 @@ fn setting_line(module: &str, setting: &str, value: String) -> Line {
 
 fn get(c: &mut Call) {
     let Some(module) = c.arg(0) else {
-        c.err("Usage: get <module> [setting]");
+        c.err(tr!("commands.get.usage_line"));
         return;
     };
     let m = match find_module(module) {
@@ -497,25 +638,32 @@ fn get(c: &mut Call) {
     if let Some(setting) = c.arg(1) {
         match find_setting(m, setting) {
             Ok((slot, def)) => {
-                let now = shown(slot, def).unwrap_or_else(|| "a button".to_string());
-                c.line(setting_line(m.name, def.name, now));
+                let now =
+                    shown(slot, def).unwrap_or_else(|| tr!("commands.value.button").to_string());
+                c.line(setting_line(m.label(), def.label(), now));
             }
             Err(e) => c.err(e),
         }
         return;
     }
     let bind = store().bind(m.id);
-    c.line(state_line(m).t(", bound to ").value(bind.display_name()));
+    c.line(state_line(m).fill(tr!("commands.get.bound"), &[(bind.display_name(), YELLOW)]));
     for (slot, def) in m.slots().zip(m.settings()) {
         if let Some(now) = shown(slot, def) {
-            c.line(Line::default().t("  ").name(def.name).t(" = ").value(now));
+            c.line(
+                Line::default()
+                    .t("  ")
+                    .name(def.label())
+                    .t(" = ")
+                    .value(now),
+            );
         }
     }
 }
 
 fn bind(c: &mut Call) {
     let (Some(module), Some(key)) = (c.arg(0), c.arg(1)) else {
-        c.err("Usage: bind <module> <key|none>");
+        c.err(tr!("commands.bind.usage_line"));
         return;
     };
     let m = match find_module(module) {
@@ -526,67 +674,54 @@ fn bind(c: &mut Call) {
         "none" | "unbound" => Bound::Unbound,
         _ => match Bound::from_typed_name(key) {
             Some(b) => b,
-            None => {
-                return c.err(format!(
-                    "`{key}` is not a key name; try r, f5, leftshift or mouse.4"
-                ));
-            }
+            None => return c.err(trf!("commands.bind.not_key", key)),
         },
     };
     store().set_bind(m.id, b);
-    c.line(
-        Line::default()
-            .name(m.name)
-            .t(" is bound to ")
-            .value(b.display_name()),
-    );
+    let pieces = [(m.label(), AQUA), (b.display_name(), YELLOW)];
+    c.line(Line::default().fill(tr!("commands.bind.done"), &pieces));
 }
 
 fn profile_line(name: &str) -> Line {
-    Line::default()
-        .t("The ")
-        .value(name)
-        .t(" profile is in force")
+    Line::default().fill(tr!("commands.profile.in_force"), &[(name, YELLOW)])
 }
 
 fn profile(c: &mut Call) {
     let s = store();
     let Some(name) = c.arg(0) else {
-        c.line(profile_line(Mode::NAMES[s.profile() as usize]));
+        c.line(profile_line(s.profile().label()));
         return;
     };
-    match Mode::NAMES
-        .iter()
-        .position(|n| n.eq_ignore_ascii_case(name))
-    {
-        Some(i) => {
-            s.set_profile(Mode::ALL[i]);
-            c.line(profile_line(Mode::NAMES[i]));
+    match find_mode(name) {
+        Some(mode) => {
+            s.set_profile(mode);
+            c.line(profile_line(mode.label()));
         }
-        None => c.err(format!(
-            "`{name}` is not a profile; legit, normal or blatant"
-        )),
+        None => c.err(trf!("commands.profile.unknown", name)),
     }
 }
 
 fn prefix(c: &mut Call) {
     let Some(new) = c.arg(0).map(str::to_string) else {
         let p = c.prefix.to_string();
-        c.line(Line::default().t("The prefix is ").value(p));
+        c.line(Line::default().fill(tr!("commands.prefix.is"), &[(p.as_str(), YELLOW)]));
         return;
     };
     if let Err(e) = super::check_prefix(&new) {
         return c.err(e);
     }
     store().set_text_at(registry::commands::PREFIX.0 as usize, &new);
-    c.line(Line::default().t("The prefix is now ").value(new));
+    c.line(Line::default().fill(tr!("commands.prefix.now"), &[(new.as_str(), YELLOW)]));
 }
 
 fn seedcheck(c: &mut Call) {
     if store().enabled(registry::Id::SeedXray) {
         crate::modules::seed_xray::request_check();
     } else {
-        c.err("Seed Xray is off");
+        c.err(trf!(
+            "commands.module_off",
+            registry::module(registry::Id::SeedXray).label()
+        ));
     }
 }
 
@@ -598,28 +733,34 @@ fn cracker(c: &mut Call) {
         crate::modules::seed_cracker::open_help();
         return;
     }
-    let request = match word.as_str() {
-        "status" => Request::Status,
-        "clear" => Request::Clear,
-        "restart" => Request::Restart,
-        other => {
-            c.err(format!(
-                "Unknown: {other}. Usage: cracker [status|clear|restart|help]"
-            ));
+    let side = c.arg(1).map(str::to_string);
+    let request = match (word.as_str(), side.as_deref()) {
+        ("status", _) => Request::Status,
+        ("clear", _) => Request::Clear,
+        ("restart", _) => Request::Restart,
+        ("trust", Some("bedrock")) => Request::TrustBedrock,
+        ("trust", Some("structures")) => Request::TrustStructures,
+        ("export", Some("bedrock")) => Request::ExportBedrock,
+        _ => {
+            let typed = c.raw.trim().to_string();
+            c.err(trf!("commands.cracker.unknown", typed));
             return;
         }
     };
     if store().enabled(registry::Id::SeedCracker) {
         crate::modules::seed_cracker::request(request);
     } else {
-        c.err("Seed Cracker is off");
+        c.err(trf!(
+            "commands.module_off",
+            registry::module(registry::Id::SeedCracker).label()
+        ));
     }
 }
 
 fn say(c: &mut Call) {
     let text = c.raw.trim().to_string();
     if text.is_empty() {
-        c.err("Usage: say <text...>");
+        c.err(tr!("commands.say.usage_line"));
         return;
     }
     c.send = Some(text);
@@ -634,12 +775,12 @@ fn goto(c: &mut Call) {
     if c.arg(0) == Some("freecam") && c.toks.len() == 1 {
         match crate::modules::freecam::eye() {
             Some(eye) => request(Request::Goto(eye.map(|v| Coord::Abs(v.floor() as i32)))),
-            None => c.err("The freecam is off; turn it on and fly to the spot first"),
+            None => c.err(tr!("commands.goto.freecam_off")),
         }
         return;
     }
     if c.toks.len() != 3 {
-        let usage = format!("Usage: {}goto <x> <y> <z> | freecam | stop", c.prefix);
+        let usage = trf!("commands.goto.usage_line", c.prefix);
         c.err(usage);
         return;
     }
@@ -649,9 +790,7 @@ fn goto(c: &mut Call) {
         match Coord::parse(&text) {
             Some(v) => *slot = v,
             None => {
-                c.err(format!(
-                    "`{text}` is not a coordinate; use a whole number, ~ or ~n"
-                ));
+                c.err(trf!("commands.goto.not_coord", text));
                 return;
             }
         }
@@ -664,18 +803,14 @@ fn mine(c: &mut Call) {
     use crate::modules::seed_xray::table::Kind;
     let stop = c.arg(0).is_some_and(is_stop);
     if c.toks.len() > 2 || (stop && c.toks.len() > 1) {
-        let usage = format!("Usage: {}mine [ore|log|wood|block|stop] [count]", c.prefix);
+        let usage = trf!("commands.mine.usage_line", c.prefix);
         return c.err(usage);
     }
     let count = match c.arg(1) {
         None => None,
         Some(t) => match mine_count(t) {
             Some(n) => Some(n),
-            None => {
-                return c.err(format!(
-                    "`{t}` is not a count; use a whole number from 1 up"
-                ));
-            }
+            None => return c.err(trf!("commands.mine.not_count", t)),
         },
     };
     match c.arg(0) {
@@ -685,10 +820,7 @@ fn mine(c: &mut Call) {
             Some(want) => ore_miner::start(Some(want), count),
             None => {
                 let names: Vec<String> = Kind::ALL.into_iter().map(kind_name).collect();
-                return c.err(format!(
-                    "`{w}` is not a block that can be mined; use a block id, log, wood or an ore family ({})",
-                    names.join(", ")
-                ));
+                return c.err(trf!("commands.mine.not_block", w, names.join(", ")));
             }
         },
     }
@@ -697,7 +829,7 @@ fn mine(c: &mut Call) {
 
 fn stop(c: &mut Call) {
     if !c.toks.is_empty() {
-        return c.err(format!("Usage: {}stop", c.prefix));
+        return c.err(trf!("commands.stop.usage_line", c.prefix));
     }
     store().set_enabled(registry::Id::OreMiner, false);
     c.line(state_line(registry::module(registry::Id::OreMiner)));
@@ -718,7 +850,7 @@ fn is_stop(w: &str) -> bool {
 fn follow(c: &mut Call) {
     use crate::modules::pathfinder::{Request, request};
     if c.toks.len() > 1 {
-        let usage = format!("Usage: {}follow [player]", c.prefix);
+        let usage = trf!("commands.follow.usage_line", c.prefix);
         return c.err(usage);
     }
     request(Request::Follow(c.arg(0).map(str::to_string)));
@@ -726,10 +858,7 @@ fn follow(c: &mut Call) {
 
 fn friend(c: &mut Call) {
     use crate::modules::friends;
-    let usage = format!(
-        "Usage: {}friend [list] | add <player> | remove <player>",
-        c.prefix
-    );
+    let usage = trf!("commands.friend.usage_line", c.prefix);
     match (
         c.arg(0).map(str::to_ascii_lowercase).as_deref(),
         c.arg(1),
@@ -738,10 +867,10 @@ fn friend(c: &mut Call) {
         (None | Some("list"), None, _) => {
             let names = friends::list();
             if names.is_empty() {
-                let hint = format!("{}friend add <player>", c.prefix);
-                return c.line(Line::default().t("No friends. ").dim(hint));
+                let hint = trf!("commands.friend.add_hint", c.prefix);
+                return c.line(Line::default().t(tr!("commands.friend.none")).dim(hint));
             }
-            let mut line = Line::default().t(format!("Friends ({}): ", names.len()));
+            let mut line = Line::default().t(trf!("commands.friend.list", names.len()));
             for (i, n) in names.into_iter().enumerate() {
                 if i > 0 {
                     line = line.dim(", ");
@@ -752,20 +881,25 @@ fn friend(c: &mut Call) {
         }
         (Some("add"), Some(name), 2) => {
             if !friends::valid_name(name) {
-                let msg = format!("{name} is not a valid player name");
+                let msg = trf!("commands.friend.invalid", name);
                 return c.err(msg);
             }
             let name = name.to_string();
+            let pieces = [(name.as_str(), AQUA)];
             if friends::add(&name) {
-                c.line(Line::default().t("Added ").name(name).t(" as a friend"));
+                c.line(Line::default().fill(tr!("commands.friend.added"), &pieces));
             } else {
-                c.line(Line::default().name(name).t(" is already a friend"));
+                c.line(Line::default().fill(tr!("commands.friend.already"), &pieces));
             }
         }
         (Some("remove"), Some(name), 2) => match friends::remove(name) {
-            Some(gone) => c.line(Line::default().t("Removed ").name(gone).t(" from friends")),
+            Some(gone) => {
+                c.line(
+                    Line::default().fill(tr!("commands.friend.removed"), &[(gone.as_str(), AQUA)]),
+                );
+            }
             None => {
-                let msg = format!("{name} is not a friend");
+                let msg = trf!("commands.friend.not_friend", name);
                 c.err(msg);
             }
         },
@@ -774,26 +908,185 @@ fn friend(c: &mut Call) {
 }
 
 fn modules(c: &mut Call) {
-    let only = c.arg(0).map(norm);
+    let only = match c.arg(0) {
+        None => None,
+        Some(name) => match find_category(name) {
+            Some(cat) => Some(cat),
+            None => {
+                c.err(tr!("commands.modules.categories"));
+                return;
+            }
+        },
+    };
     let s = store();
-    let mut any = false;
     for cat in Category::ALL {
-        if only.as_deref().is_some_and(|o| o != norm(cat.name())) {
+        if only.is_some_and(|o| o != cat) {
             continue;
         }
-        any = true;
-        let mut line = Line::default().name(cat.name()).t(":");
+        let mut line = Line::default().name(cat.label()).t(":");
         for (i, m) in cat.modules().enumerate() {
             line = line.t(if i == 0 { " " } else { ", " });
             line = if s.armed(m.id) {
-                line.put(m.name, GREEN)
+                line.put(m.label(), GREEN)
             } else {
-                line.t(m.name)
+                line.t(m.label())
             };
         }
         c.line(line);
     }
-    if !any {
-        c.err("Categories are combat, render, world, movement and misc");
+}
+
+fn nbt(c: &mut Call) {
+    use crate::play::item_components::{COUNT_RANGE, ItemEdit, kind_named, parse_components};
+    let usage = trf!("commands.nbt.usage_line", c.prefix);
+    let raw = c.raw.trim();
+    let (sub, rest) = raw
+        .split_once(char::is_whitespace)
+        .map_or((raw, ""), |(s, r)| (s, r.trim()));
+    let edit = match (sub.to_lowercase().as_str(), rest.is_empty()) {
+        ("get", true) => ItemEdit::Get,
+        ("copy", true) => ItemEdit::Copy,
+        ("add", false) => match parse_components(rest) {
+            Ok(list) => ItemEdit::Add(list),
+            Err(e) => return c.err(e),
+        },
+        ("set", false) => match parse_components(rest) {
+            Ok(list) => ItemEdit::Set(list),
+            Err(e) => return c.err(e),
+        },
+        ("remove", false) => match kind_named(rest) {
+            Some(kind) => ItemEdit::Remove(kind),
+            None => return c.err(trf!("commands.nbt.unknown_component", rest)),
+        },
+        ("count", false) => match rest.parse::<i32>() {
+            Ok(n) if COUNT_RANGE.contains(&n) => ItemEdit::Count(n),
+            _ => {
+                return c.err(trf!(
+                    "commands.nbt.count_range",
+                    COUNT_RANGE.start(),
+                    COUNT_RANGE.end()
+                ));
+            }
+        },
+        _ => return c.err(usage),
+    };
+    c.edit = Some(edit);
+}
+
+fn server(c: &mut Call) {
+    let shared = c.shared;
+    let (address, info, tick_rate, frozen, hardcore, op_level, players, links) = {
+        let s = shared.lock().unwrap();
+        if !s.in_world {
+            return c.err(tr!("commands.server.offline"));
+        }
+        let ss = &s.session;
+        (
+            ss.current_address.clone(),
+            ss.server_info.clone(),
+            ss.tick_rate.0,
+            ss.world_run.frozen,
+            ss.hardcore,
+            ss.op_level,
+            ss.tab_list.rows.len(),
+            ss.server_links.len(),
+        )
+    };
+    let unsent = tr!("commands.server.unsent");
+    let yes_no = |b: Option<bool>| match b {
+        Some(true) => tr!("commands.server.yes").to_string(),
+        Some(false) => tr!("commands.server.no").to_string(),
+        None => unsent.to_string(),
+    };
+    let row = |label: &str, value: String| Line::default().t(format!("{label}: ")).value(value);
+
+    c.line(Line::default().name(tr!("commands.server.title")));
+    c.line(row(
+        tr!("commands.server.address"),
+        address.unwrap_or_else(|| unsent.to_string()),
+    ));
+    let protocol = crate::util::session_protocol();
+    let version = match crate::util::session_version_name() {
+        Some(name) => format!("{name} ({protocol})"),
+        None => protocol.to_string(),
+    };
+    c.line(row(tr!("commands.server.version"), version));
+    let mut brand = Line::default().t(format!("{}: ", tr!("commands.server.brand")));
+    match &info.brand {
+        Some(b) => brand.0.extend(crate::text::parse_formatted_from(
+            b,
+            crate::text::Style::colored(YELLOW),
+        )),
+        None => brand = brand.value(unsent),
     }
+    c.line(brand);
+    let max = info
+        .max_players
+        .map_or_else(|| unsent.to_string(), |m| m.to_string());
+    c.line(row(
+        tr!("commands.server.players"),
+        format!("{players} / {max}"),
+    ));
+    let chunks = |d: Option<u32>| d.map_or_else(|| unsent.to_string(), |d| d.to_string());
+    c.line(row(
+        tr!("commands.server.view_distance"),
+        chunks(info.view_distance),
+    ));
+    c.line(row(
+        tr!("commands.server.simulation_distance"),
+        chunks(info.simulation_distance),
+    ));
+    let difficulty = match info.difficulty_locked {
+        None => unsent.to_string(),
+        Some(locked) => {
+            let key = match crate::client::tracking::DIFFICULTY
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                0 => "options.difficulty.peaceful",
+                1 => "options.difficulty.easy",
+                2 => "options.difficulty.normal",
+                _ => "options.difficulty.hard",
+            };
+            let mut d = crate::gui::tooltip::translate(key, &[]);
+            if hardcore {
+                d = format!(
+                    "{d}, {}",
+                    crate::gui::tooltip::translate("selectWorld.gameMode.hardcore", &[])
+                );
+            }
+            if locked {
+                d = format!("{d}, {}", tr!("commands.server.locked"));
+            }
+            d
+        }
+    };
+    c.line(row(tr!("commands.server.difficulty"), difficulty));
+    let mut rate = format!("{tick_rate}");
+    if frozen {
+        rate = format!("{rate}, {}", tr!("commands.server.frozen"));
+    }
+    c.line(row(tr!("commands.server.tick_rate"), rate));
+    c.line(row(
+        tr!("commands.server.online_mode"),
+        yes_no(info.online_mode),
+    ));
+    c.line(row(
+        tr!("commands.server.secure_chat"),
+        yes_no(info.enforces_secure_chat),
+    ));
+    c.line(row(
+        tr!("commands.server.reduced_debug"),
+        yes_no(info.reduced_debug_info),
+    ));
+    c.line(row(tr!("commands.server.op_level"), op_level.to_string()));
+    let mut dimension = info.dimension.unwrap_or_else(|| unsent.to_string());
+    if info.flat == Some(true) {
+        dimension = format!("{dimension}, {}", tr!("commands.server.flat"));
+    }
+    c.line(row(tr!("commands.server.dimension"), dimension));
+    let seed = info
+        .hashed_seed
+        .map_or_else(|| unsent.to_string(), |h| h.to_string());
+    c.line(row(tr!("commands.server.seed_hash"), seed));
+    c.line(row(tr!("commands.server.links"), links.to_string()));
 }

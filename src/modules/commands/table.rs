@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 use super::args::Arg;
 use super::builtin::{BUILTINS, Builtin};
+use super::tree::Names;
 use crate::modules::registry::ModuleIx;
 use crate::play::commands::CommandTree;
 
@@ -42,16 +43,23 @@ impl Command {
         }
     }
 
-    pub fn tip(&self) -> &'static str {
+    pub fn tip(&self) -> String {
         match &self.owner {
-            Owner::Builtin(b) => b.tip,
-            Owner::Script(s) => s.decl.tip,
+            Owner::Builtin(b) => {
+                let names: Vec<String> = (b.tip_names)().into_iter().map(str::to_string).collect();
+                if names.is_empty() {
+                    b.tip.get().to_string()
+                } else {
+                    crate::util::placeholders::substitute(b.tip.get(), &names)
+                }
+            }
+            Owner::Script(s) => s.decl.tip.to_string(),
         }
     }
 
     pub fn usage(&self) -> String {
         match &self.owner {
-            Owner::Builtin(b) => b.usage.to_string(),
+            Owner::Builtin(b) => b.usage.get().to_string(),
             Owner::Script(s) => super::args::usage(&s.decl.args),
         }
     }
@@ -123,19 +131,61 @@ impl Table {
     }
 }
 
-struct Current {
-    table: Arc<Table>,
-    tree: Arc<CommandTree>,
+struct Trees {
+    english: Arc<CommandTree>,
+    drawn: Arc<CommandTree>,
+    both: Arc<CommandTree>,
 }
 
-static CURRENT: LazyLock<RwLock<Current>> = LazyLock::new(|| {
-    let (table, _) = Table::with_scripts(Vec::new());
-    let tree = super::tree::build(&table);
-    RwLock::new(Current {
-        table: Arc::new(table),
-        tree: Arc::new(tree),
-    })
-});
+impl Trees {
+    fn build(table: &Table) -> Trees {
+        let english = Arc::new(super::tree::build(table, Names::English));
+        #[cfg(feature = "multi_language")]
+        if crate::lang::active() != crate::lang::Lang::EnUs {
+            let drawn = Arc::new(super::tree::build(table, Names::Drawn));
+            let both = Arc::new(super::tree::build(table, Names::Both));
+            return Trees {
+                english,
+                drawn,
+                both,
+            };
+        }
+        Trees {
+            drawn: english.clone(),
+            both: english.clone(),
+            english,
+        }
+    }
+
+    fn get(&self, names: Names) -> Arc<CommandTree> {
+        match names {
+            Names::English => self.english.clone(),
+            Names::Drawn => self.drawn.clone(),
+            Names::Both => self.both.clone(),
+        }
+    }
+}
+
+struct Current {
+    table: Arc<Table>,
+    trees: Trees,
+    epoch: u32,
+}
+
+impl Current {
+    fn new(table: Table) -> Current {
+        let epoch = crate::lang::epoch();
+        let trees = Trees::build(&table);
+        Current {
+            table: Arc::new(table),
+            trees,
+            epoch,
+        }
+    }
+}
+
+static CURRENT: LazyLock<RwLock<Current>> =
+    LazyLock::new(|| RwLock::new(Current::new(Table::with_scripts(Vec::new()).0)));
 
 static GENERATION: AtomicU32 = AtomicU32::new(0);
 
@@ -147,26 +197,31 @@ pub fn table() -> Arc<Table> {
         .clone()
 }
 
-pub fn tree() -> Arc<CommandTree> {
-    CURRENT
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .tree
-        .clone()
+pub fn tree(names: Names) -> Arc<CommandTree> {
+    let epoch = crate::lang::epoch();
+    {
+        let current = CURRENT.read().unwrap_or_else(PoisonError::into_inner);
+        if current.epoch == epoch {
+            return current.trees.get(names);
+        }
+    }
+    let mut current = CURRENT.write().unwrap_or_else(PoisonError::into_inner);
+    if current.epoch != epoch {
+        current.trees = Trees::build(&current.table);
+        current.epoch = epoch;
+    }
+    current.trees.get(names)
 }
 
 pub fn generation() -> u32 {
-    GENERATION.load(Relaxed)
+    GENERATION.load(Relaxed).wrapping_add(crate::lang::epoch())
 }
 
 #[cfg_attr(not(lua_mods), allow(dead_code))]
 pub fn install_scripts(scripts: Vec<ScriptCommand>) -> Vec<String> {
     let (table, clashes) = Table::with_scripts(scripts);
-    let tree = super::tree::build(&table);
-    *CURRENT.write().unwrap_or_else(PoisonError::into_inner) = Current {
-        table: Arc::new(table),
-        tree: Arc::new(tree),
-    };
+    let current = Current::new(table);
+    *CURRENT.write().unwrap_or_else(PoisonError::into_inner) = current;
     GENERATION.fetch_add(1, Relaxed);
     clashes
 }

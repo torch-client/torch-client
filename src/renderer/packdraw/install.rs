@@ -206,6 +206,8 @@ pub(crate) fn sync_compiled_pack(
 ) {
     let Some(tier) = tier else { return };
     let loaded = gui.shaderpacks.loaded.as_ref();
+    #[cfg(feature = "native_shaders")]
+    let loaded = loaded.filter(|l| !l.native);
     let wanted = loaded.map(|l| l.name.clone());
     let revision = gui.shaderpacks.revision();
     let editing = gui.screen == crate::gui::Screen::ShaderOptions;
@@ -292,31 +294,34 @@ pub(crate) fn reject(generation: u32) {
     REJECTED.store(generation, std::sync::atomic::Ordering::Release);
 }
 
+pub(super) fn rejected(generation: u32) -> bool {
+    REJECTED.load(std::sync::atomic::Ordering::Acquire) == generation
+}
+
 pub(crate) fn sync_pack_vertices(
     compiled: Option<Res<CompiledPack>>,
+    #[cfg(feature = "native_shaders")] native: Option<Res<super::native::NativePack>>,
     shared: Res<crate::renderer::systems::Shared>,
     mut published: Local<Option<Arc<crate::renderer::packvertex::BlockIds>>>,
 ) {
-    let rejected = REJECTED.load(std::sync::atomic::Ordering::Acquire);
-    let live = compiled
-        .as_deref()
-        .filter(|c| c.installed.generation != rejected);
-    let player_shadow = live.is_some_and(|c| {
-        let casters = c.installed.shadow_casters;
-        c.installed.entities[super::compile::EntityKind::ShadowCaster.index()].is_some()
-            && (casters.player || casters.entities)
+    let live = compiled.as_deref().and_then(CompiledPack::vertices);
+    #[cfg(feature = "native_shaders")]
+    let live = live.or_else(|| {
+        native
+            .as_deref()
+            .and_then(super::native::NativePack::vertices)
     });
-    crate::renderer::packvertex::set_player_shadow(player_shadow);
-    let wanted = live.and_then(|c| c.installed.block_ids.clone());
-    let remesh = match (published.as_ref(), wanted.as_ref()) {
+    crate::renderer::packvertex::set_player_shadow(live.is_some_and(|v| v.player_shadow));
+    let wanted = live.and_then(|v| v.block_ids);
+    let remesh = match (published.as_ref(), wanted) {
         (None, None) => return,
         (Some(old), Some(new)) if Arc::ptr_eq(old, new) => return,
         (Some(old), Some(new)) => old != new,
         _ => true,
     };
-    crate::renderer::packvertex::set_current(wanted.clone());
-    crate::client::mesh_worker::forward_pack_ids(wanted.as_deref());
-    *published = wanted;
+    crate::renderer::packvertex::set_current(wanted.cloned());
+    crate::client::mesh_worker::forward_pack_ids(wanted.map(|ids| &**ids));
+    *published = wanted.cloned();
     if remesh {
         let Ok(mut state) = shared.0.lock();
         state.reload_chunks_requested = true;

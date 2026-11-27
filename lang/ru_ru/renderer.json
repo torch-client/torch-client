@@ -1,0 +1,5 @@
+{
+  "renderer.shader_quality.fancy": "Детально",
+  "renderer.shader_quality.fast": "Быстро",
+  "renderer.shader_quality.mobile": "Для мобильных"
+}

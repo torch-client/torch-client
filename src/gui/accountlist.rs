@@ -24,8 +24,8 @@ impl AccountKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            AccountKind::Offline => "Offline Account",
-            AccountKind::Microsoft => "Microsoft Account",
+            AccountKind::Offline => crate::lang::tr!("profile.kind.offline"),
+            AccountKind::Microsoft => crate::lang::tr!("profile.kind.microsoft"),
         }
     }
 

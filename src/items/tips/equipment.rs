@@ -567,6 +567,7 @@ mod tests {
             advanced: false,
             attack_speed_base: Some(4.0),
             peaceful: false,
+            containers: super::super::ContainerRows::Vanilla,
         }
     }
 

@@ -5,7 +5,6 @@ use bevy::prelude::*;
 
 use super::models::monsters::guardian;
 use super::{Blend, EntityImages, bake, geom};
-use crate::renderer::dimension::Dimension;
 use crate::renderer::entity_material::{EntityMaterial, LightMode, Lit, diffuse_lights};
 use crate::renderer::lightmap::cell_light;
 
@@ -21,15 +20,25 @@ pub(crate) struct ElderGuardianNode;
 #[derive(Resource, Default)]
 pub(crate) struct ElderGuardianCurse {
     pending: u32,
+    held_at: u64,
     live: Vec<u64>,
     mesh: Option<Handle<Mesh>>,
     nodes: Vec<(Entity, Handle<EntityMaterial>)>,
-    dimension: Option<Dimension>,
+    level: u32,
 }
 
 impl ElderGuardianCurse {
-    pub(crate) fn add(&mut self, count: u32) {
-        self.pending = self.pending.saturating_add(count);
+    pub(crate) fn add(&mut self, count: u32, level: u32) {
+        self.enter(level);
+        self.pending = self.pending.saturating_add(count).min(MAX_LIVE as u32);
+    }
+
+    fn enter(&mut self, level: u32) {
+        if self.level != level {
+            self.level = level;
+            self.pending = 0;
+            self.live.clear();
+        }
     }
 }
 
@@ -51,24 +60,27 @@ pub(crate) fn sync_elder_guardian(
 ) {
     crate::prof_span!("render:sync_elder_guardian");
     let curse = &mut *curse;
-    let now = view.game_time;
-    let added = std::mem::take(&mut shared.0.lock().unwrap().session.elder_guardian_effects)
-        .saturating_add(std::mem::take(&mut curse.pending));
+    let now = view.world_ticks;
+    let (effects, level) = {
+        let mut s = shared.0.lock().unwrap();
+        (
+            std::mem::take(&mut s.session.elder_guardian_effects),
+            crate::client::tick_rate::level(),
+        )
+    };
+    curse.add(effects, level);
 
     let dimension = crate::renderer::dimension::current();
-    if curse.dimension != Some(dimension) {
-        curse.dimension = Some(dimension);
-        curse.live.clear();
-    }
     curse
         .live
         .retain(|&start| now.wrapping_sub(start) <= LIFETIME);
-    for _ in 0..added {
-        if curse.live.len() >= MAX_LIVE {
-            curse.live.remove(0);
-        }
-        curse.live.push(now);
+    if view.world_run.runs || now > curse.held_at {
+        let added = std::mem::take(&mut curse.pending) as usize;
+        let over = (curse.live.len() + added).saturating_sub(MAX_LIVE);
+        curse.live.drain(..over.min(curse.live.len()));
+        curse.live.resize(curse.live.len() + added, now);
     }
+    curse.held_at = now;
 
     let mut drawn = 0;
     let texture = if curse.live.is_empty() {
@@ -88,7 +100,7 @@ pub(crate) fn sync_elder_guardian(
         let (alpha_mode, cutoff) = Blend::Translucent.alpha();
 
         for &start in &curse.live {
-            let age_scale = (now.wrapping_sub(start) as f32 + view.partial) / LIFETIME as f32;
+            let age_scale = (now.wrapping_sub(start) as f32 + view.world_partial) / LIFETIME as f32;
             let lit = Lit {
                 tint: [
                     1.0,
@@ -110,7 +122,7 @@ pub(crate) fn sync_elder_guardian(
 
             match curse.nodes.get(drawn) {
                 Some((entity, material)) => {
-                    EntityMaterial::relight(&mut materials, material, lit);
+                    super::relight_unlit(&mut materials, material, lit, LightMode::Cardinal);
                     if let Ok((mut transform, mut vis)) = nodes.get_mut(*entity) {
                         *transform = pose;
                         vis.set_if_neq(Visibility::Inherited);
@@ -119,7 +131,7 @@ pub(crate) fn sync_elder_guardian(
                 None => {
                     let material = materials.add(EntityMaterial::new(
                         Some(texture.clone()),
-                        LightMode::Cardinal,
+                        super::unlit_light_mode(LightMode::Cardinal),
                         alpha_mode,
                         cutoff,
                         lit,

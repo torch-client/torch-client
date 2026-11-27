@@ -294,6 +294,7 @@ fn seat_riders(
     anims: &mut HashMap<i32, entities::feed::EntityAnim>,
     player_anims: &mut HashMap<i32, crate::renderer::HumanoidAnim>,
     players: &mut [crate::session::OtherPlayerInfo],
+    world_tick: &crate::client::tick_rate::WorldTick,
 ) -> Vec<(i32, [f64; 3])> {
     use crate::play::riding::{
         Hull, Passenger, SeatPose, passenger_attachment, vehicle_attachment,
@@ -324,13 +325,17 @@ fn seat_riders(
     let pending_of = |id: i32| at.get(&id).map(|&i| &pending[i as usize]);
     let mut seated = Vec::with_capacity(order.len());
     for (_, rider) in order {
+        if !world_tick.entity_ticks(rider) {
+            continue;
+        }
         let m = mounts[&rider];
-        let (vehicle_kind, vehicle) = match anims.get(&m.vehicle) {
-            Some(a) => (a.kind, a.seat_body()),
+        let (vehicle_kind, vehicle, ride) = match anims.get(&m.vehicle) {
+            Some(a) => (a.kind, a.seat_body(), a.cart_ride()),
             None => match player_anims.get(&m.vehicle) {
                 Some(a) => (
                     EntityKind::Player,
                     a.seat_body(player_scale(players, m.vehicle)),
+                    None,
                 ),
                 None => continue,
             },
@@ -385,6 +390,7 @@ fn seat_riders(
             if let Some((boat_y_rot, offset)) = boat_turn {
                 a.turn_in_boat(boat_y_rot, offset);
             }
+            a.set_cart_ride(ride);
         } else if let Some(a) = player_anims.get_mut(&rider) {
             a.set_seated_pos(pos);
             if let Some((boat_y_rot, _)) = boat_turn {
@@ -395,6 +401,7 @@ fn seat_riders(
                 if let Some((boat_y_rot, _)) = boat_turn {
                     p.anim.turn_in_boat(boat_y_rot);
                 }
+                p.cart_ride = ride;
             }
         }
         seated.push((rider, pos));
@@ -619,6 +626,17 @@ fn is_bare_object(kind: azalea_registry::builtin::EntityKind) -> bool {
     )
 }
 
+fn item_label(stack: &azalea_inventory::ItemStack) -> (std::sync::Arc<[crate::text::Span]>, i32) {
+    let slot = crate::play::inventory_bridge::slot_stack(stack, None, false);
+    if slot.is_empty() {
+        return (std::sync::Arc::default(), 0);
+    }
+    (
+        crate::gui::tooltip::styled_hover_name(&slot).into(),
+        slot.count as i32,
+    )
+}
+
 fn is_item_frame(kind: azalea_registry::builtin::EntityKind) -> bool {
     use azalea_registry::builtin::EntityKind;
     matches!(kind, EntityKind::ItemFrame | EntityKind::GlowItemFrame)
@@ -640,7 +658,13 @@ pub(crate) fn collect_entities(
     bot: &Client,
     seen_players: &HashSet<i32>,
     players: &mut [crate::session::OtherPlayerInfo],
-) -> std::sync::Arc<Vec<entities::feed::EntityAnim>> {
+    camera: Option<i32>,
+    hide_camera: bool,
+    world_tick: &crate::client::tick_rate::WorldTick,
+) -> (
+    std::sync::Arc<Vec<entities::feed::EntityAnim>>,
+    Option<entities::feed::EntityAnim>,
+) {
     use azalea::entity::dimensions::EntityDimensions;
     use azalea::entity::{EntityKindComponent, metadata};
     use azalea::entity::{LookDirection, Position};
@@ -650,9 +674,21 @@ pub(crate) fn collect_entities(
     use entities::feed::{EntityAnim, TickInput, walk_factor};
 
     let Ok(origin) = bot.position() else {
-        return std::sync::Arc::default();
+        return (std::sync::Arc::default(), None);
     };
     let driven = crate::play::riding::driven_pose();
+    let new_carts = crate::client::tracking::minecart_improvements();
+    let cart_views: HashMap<i32, crate::util::minecart_lerp::LerpView> = if new_carts {
+        crate::client::tracking::cart_lerps()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, lerp)| lerp.view().active())
+            .map(|(id, lerp)| (*id, lerp.view().clone()))
+            .collect()
+    } else {
+        HashMap::new()
+    };
 
     let heads_guard = head_yaws().lock().unwrap();
     let equip_guard = equipment().lock().unwrap();
@@ -787,6 +823,7 @@ pub(crate) fn collect_entities(
             input.walk_halted = matches!(kind, EntityKind::Camel | EntityKind::CamelHusk)
                 && (input.pose != Pose::Standing || input.shared.dash);
             input.head_targets = [None; 2];
+            input.attach = None;
             input.attack_target = None;
             input.leash_holder = leash_map.and_then(|m| m.get(&id).copied());
             let (animal, camel_pose, glow_uuid) = seat_and_glow(eref, kind, input.is_passenger);
@@ -901,7 +938,12 @@ pub(crate) fn collect_entities(
         let relax_state_one = living && flag::<metadata::RelaxStateOne>(eref);
 
         if !is_bare_object(kind) {
-            shared.item = meta::<metadata::ItemItem>(eref)
+            let dropped = meta::<metadata::ItemItem>(eref);
+            (shared.item_label, shared.item_count) = match (&dropped, kind) {
+                (Some(stack), azalea_registry::builtin::EntityKind::Item) => item_label(stack),
+                _ => (std::sync::Arc::default(), 0),
+            };
+            shared.item = dropped
                 .or_else(|| meta::<metadata::ItemFrameItem>(eref))
                 .or_else(|| meta::<metadata::ItemDisplayItemStack>(eref))
                 .or_else(|| meta::<metadata::FireworksItem>(eref))
@@ -1356,6 +1398,13 @@ pub(crate) fn collect_entities(
             playing_dead,
             open_mouth,
             head_targets: [None; 2],
+            attached_to: if kind == EntityKind::FireworkRocket {
+                eref.get_component::<metadata::AttachedToTarget>()
+                    .and_then(|t| t.0.0)
+            } else {
+                None
+            },
+            attach: None,
             attack_target: None,
             shared: std::sync::Arc::new(shared),
             eating,
@@ -1489,6 +1538,10 @@ pub(crate) fn collect_entities(
                 .then(|| bodies.get(&target).copied())
                 .flatten();
         }
+    }
+
+    if pending.iter().any(|p| p.input.attached_to.is_some()) {
+        resolve_attachments(bot, &mut pending);
     }
 
     if pending.iter().any(|p| p.kind == EntityKind::EnderDragon) {
@@ -1688,18 +1741,30 @@ pub(crate) fn collect_entities(
         if anim.kind != kind {
             *anim = EntityAnim::new(id, kind);
         }
+        if new_carts {
+            anim.set_cart_lerp(cart_views.get(&id));
+        }
         ticked.push(id);
         at.insert(id, i as u32);
     }
 
-    let mut work: Vec<(&mut EntityAnim, &TickInput)> = Vec::with_capacity(ticked.len());
+    let mut work: Vec<(&mut EntityAnim, &TickInput, bool)> = Vec::with_capacity(ticked.len());
     for (id, anim) in anims.iter_mut() {
         if let Some(&i) = at.get(id) {
-            work.push((anim, &pending[i as usize].input));
+            anim.set_frozen(world_tick.entity_frozen(*id));
+            work.push((
+                anim,
+                &pending[i as usize].input,
+                world_tick.entity_ticks(*id),
+            ));
         }
     }
-    par_for_each_mut(&mut work, |(anim, input)| {
-        anim.tick_in(input, level);
+    par_for_each_mut(&mut work, |(anim, input, ticks)| {
+        if *ticks {
+            anim.tick_in(input, level);
+        } else {
+            anim.tick_frozen(input, level);
+        }
     });
     drop(work);
 
@@ -1717,6 +1782,7 @@ pub(crate) fn collect_entities(
             &mut anims,
             &mut player_anims,
             players,
+            world_tick,
         );
         mounts
             .iter()
@@ -1736,7 +1802,13 @@ pub(crate) fn collect_entities(
             anim.set_vehicle_body_rot(pairs.get(id).copied());
         }
     }
-    let live: Vec<&EntityAnim> = ticked.iter().filter_map(|id| anims.get(id)).collect();
+    let camera_anim = camera.and_then(|id| anims.get(&id)).cloned();
+    let hidden = camera.filter(|_| hide_camera);
+    let live: Vec<&EntityAnim> = ticked
+        .iter()
+        .filter(|id| Some(**id) != hidden)
+        .filter_map(|id| anims.get(id))
+        .collect();
     let out = publish_snapshot(&live);
 
     drop(_snap_timer);
@@ -1755,21 +1827,22 @@ pub(crate) fn collect_entities(
     meta_cache().lock().unwrap().retain(|id, _| only_live(id));
     evict(crate::client::tracking::meta_dirty(), only_live);
     evict(velocities(), only_live);
+    evict(crate::client::tracking::cart_lerps(), only_live);
     crate::play::item_pickup::taken()
         .lock()
         .unwrap()
         .retain(only_live);
-    evict(passengers(), only_live);
     evict(crate::client::tracking::leashes(), only_live);
     let local = crate::client::tracking::local_entity_id();
     evict(crate::client::tracking::attributes(), |id| {
         live(id) || *id == local
     });
+    evict(passengers(), |id| live(id) || *id == local);
     evict(on_grounds(), live);
     evict(head_yaws(), live);
     evict(equipment(), live);
 
-    out
+    (out, camera_anim)
 }
 
 type SnapshotRing = [Option<std::sync::Arc<Vec<entities::feed::EntityAnim>>>; 2];
@@ -1778,6 +1851,113 @@ const SNAPSHOT_SLACK: usize = 2;
 
 static SNAPSHOTS: crate::session::SideMutex<SnapshotRing> =
     crate::session::SideMutex::new([None, None]);
+
+fn resolve_attachments(bot: &Client, pending: &mut [Pending]) {
+    use azalea::ecs::query::With;
+    use azalea::entity::{LookDirection, Physics, Position, metadata};
+    use entities::feed::Attachment;
+
+    struct Target {
+        feet: [f64; 3],
+        velocity: [f64; 3],
+        hand: [f64; 3],
+    }
+    let local = crate::client::tracking::local_entity_id();
+    let wanted: HashSet<i32> = pending
+        .iter()
+        .filter_map(|p| p.input.attached_to)
+        .map(|id| id as i32)
+        .collect();
+    let motions: HashMap<i32, [f64; 3]> = {
+        let velocities = velocities().lock().unwrap();
+        wanted
+            .iter()
+            .filter_map(|id| velocities.get(id).map(|(v, _)| (*id, *v)))
+            .collect()
+    };
+    let motion = |id: i32| motions.get(&id).copied().unwrap_or([0.0; 3]);
+    let mut targets: HashMap<i32, Target> = HashMap::new();
+    for p in pending
+        .iter()
+        .filter(|p| wanted.contains(&p.id) && p.input.is_living)
+    {
+        targets.insert(
+            p.id,
+            Target {
+                feet: p.input.pos,
+                velocity: motion(p.id),
+                hand: [0.0; 3],
+            },
+        );
+    }
+    let main_hand_left_local = crate::SHARED
+        .get()
+        .and_then(|shared| shared.try_lock().ok())
+        .is_some_and(|shared| shared.skin_prefs.main_hand_left);
+    for eref in bot
+        .nearest_entities::<With<metadata::Player>>()
+        .unwrap_or_default()
+        .iter()
+    {
+        let Some(id) = eref
+            .get_component::<azalea_core::entity_id::MinecraftEntityId>()
+            .map(|i| i.0)
+        else {
+            continue;
+        };
+        if !wanted.contains(&id) {
+            continue;
+        }
+        let Some(pos) = eref.get_component::<Position>().map(|p| **p) else {
+            continue;
+        };
+        let velocity = if id == local {
+            eref.get_component::<Physics>()
+                .map_or([0.0; 3], |p| [p.velocity.x, p.velocity.y, p.velocity.z])
+        } else {
+            motion(id)
+        };
+        let gliding = eref
+            .get_component::<metadata::FallFlying>()
+            .is_some_and(|f| f.0);
+        let yaw = eref
+            .get_component::<LookDirection>()
+            .map(|look| look.y_rot())
+            .filter(|_| gliding);
+        let hand = match yaw {
+            Some(yaw) => {
+                let left = if id == local {
+                    main_hand_left_local
+                } else {
+                    eref.get_component::<metadata::PlayerMainHand>()
+                        .is_some_and(|h| matches!(h.0, azalea::entity::HumanoidArm::Left))
+                };
+                let yaw = yaw + if left { -80.0 } else { 80.0 };
+                let (sin, cos) = (-yaw * 0.017_453_292_f32).sin_cos();
+                [f64::from(sin) * 0.5, 0.0, f64::from(cos) * 0.5]
+            }
+            None => [0.0; 3],
+        };
+        targets.insert(
+            id,
+            Target {
+                feet: [pos.x, pos.y, pos.z],
+                velocity,
+                hand,
+            },
+        );
+    }
+    for p in pending.iter_mut() {
+        let Some(target) = p.input.attached_to.and_then(|id| targets.get(&(id as i32))) else {
+            continue;
+        };
+        let [x, y, z] = [0, 1, 2].map(|i| target.feet[i] + target.hand[i]);
+        p.input.attach = Some(Attachment {
+            pos: [x, y, z],
+            velocity: target.velocity,
+        });
+    }
+}
 
 fn publish_snapshot(
     live: &[&entities::feed::EntityAnim],
@@ -2128,6 +2308,13 @@ fn query(min: [f64; 3], max: [f64; 3], movement: [f64; 3]) -> (Aabb, AzVec3) {
 }
 
 impl entities::physics::Level for ChunkLevel<'_> {
+    fn rail(&self, pos: [i32; 3]) -> Option<crate::util::rail::RailShape> {
+        let pos = AzBlockPos::new(pos[0], pos[1], pos[2]);
+        self.world
+            .get_block_state(pos)
+            .and_then(crate::util::rail::shape_of)
+    }
+
     fn collide(&self, min: [f64; 3], max: [f64; 3], movement: [f64; 3]) -> [f64; 3] {
         let (aabb, movement) = query(min, max, movement);
         let mut cells = [AzBlockPos::new(0, 0, 0); MAX_FAST_CELLS];

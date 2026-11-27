@@ -13,6 +13,7 @@ use crate::text::Span;
 mod api;
 mod author;
 mod blocks;
+pub mod build;
 mod capture;
 mod chunk;
 mod fs;
@@ -327,6 +328,7 @@ pub fn leave() {
         .clear();
     render::clear();
     ghost::clear();
+    build::clear();
     image::clear();
     chunk::clear();
     nbt::forget();
@@ -393,6 +395,7 @@ fn load(in_world: bool, chat: bool) {
     nbt::forget();
     render::clear();
     ghost::clear();
+    build::clear();
     image::clear();
     chunk::clear();
 

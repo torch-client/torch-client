@@ -1,0 +1,15 @@
+{
+  "shaderpacks.title": "Shader Packs",
+  "shaderpacks.open_button": "Shader Packs...",
+  "shaderpacks.none_row": "(none)",
+  "shaderpacks.no_packs": "No packs in the shaders folder",
+  "shaderpacks.no_packs_web": "Drop a pack on the page, or choose one below",
+  "shaderpacks.runs_without": "%s: runs without %s",
+  "shaderpacks.open_folder": "Open Shader Pack Folder",
+  "shaderpacks.done": "Done",
+  "shaderpacks.reset": "Reset",
+  "shaderpacks.profile": "Profile: %s",
+  "shaderpacks.custom": "Custom",
+  "shaderpacks.on": "ON",
+  "shaderpacks.off": "OFF"
+}

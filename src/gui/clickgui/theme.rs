@@ -1,88 +1,89 @@
 use crate::gui::painter::Painter;
+use crate::lang::Key;
 
 pub struct Accent {
-    pub name: &'static str,
+    pub name: Key,
     pub base: u32,
     pub hi: u32,
 }
 
 pub static ACCENTS: &[Accent] = &[
     Accent {
-        name: "Emerald",
+        name: Key::of("clickgui.accent.emerald"),
         base: 0x2F_A8_78,
         hi: 0x38_BE_8B,
     },
     Accent {
-        name: "Sky",
+        name: Key::of("clickgui.accent.sky"),
         base: 0x3B_8F_E0,
         hi: 0x4F_A3_F2,
     },
     Accent {
-        name: "Amber",
+        name: Key::of("clickgui.accent.amber"),
         base: 0xD9_A2_38,
         hi: 0xF2_BA_52,
     },
     Accent {
-        name: "Rose",
+        name: Key::of("clickgui.accent.rose"),
         base: 0xDB_57_75,
         hi: 0xF2_70_8C,
     },
     Accent {
-        name: "Violet",
+        name: Key::of("clickgui.accent.violet"),
         base: 0x86_5C_EF,
         hi: 0x9E_74_F5,
     },
     Accent {
-        name: "Steel",
+        name: Key::of("clickgui.accent.steel"),
         base: 0x62_72_8C,
         hi: 0x7A_8A_A3,
     },
 ];
 
 pub struct Surface {
-    pub name: &'static str,
+    pub name: Key,
     pub base: u32,
     pub light: bool,
 }
 
 pub static SURFACES: &[Surface] = &[
     Surface {
-        name: "Ink",
+        name: Key::of("clickgui.surface.ink"),
         base: 0x0E_0E_0E,
         light: false,
     },
     Surface {
-        name: "Graphite",
+        name: Key::of("clickgui.surface.graphite"),
         base: 0x17_19_1C,
         light: false,
     },
     Surface {
-        name: "Midnight",
+        name: Key::of("clickgui.surface.midnight"),
         base: 0x0D_13_20,
         light: false,
     },
     Surface {
-        name: "Moss",
+        name: Key::of("clickgui.surface.moss"),
         base: 0x11_18_15,
         light: false,
     },
     Surface {
-        name: "Plum",
+        name: Key::of("clickgui.surface.plum"),
         base: 0x17_10_1B,
         light: false,
     },
     Surface {
-        name: "Ash",
+        name: Key::of("clickgui.surface.ash"),
         base: 0x21_21_23,
         light: false,
     },
     Surface {
-        name: "Paper",
+        name: Key::of("clickgui.surface.paper"),
         base: 0xEC_E7_DF,
         light: true,
     },
     Surface {
-        name: "Mist",
+        name: Key::of("clickgui.surface.mist"),
         base: 0xDF_E4_EA,
         light: true,
     },

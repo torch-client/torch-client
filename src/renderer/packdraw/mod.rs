@@ -16,6 +16,8 @@ mod images;
 mod inputs;
 mod install;
 mod mipmaps;
+#[cfg(feature = "native_shaders")]
+mod native;
 mod node;
 mod packatlas;
 mod pipelines;
@@ -23,6 +25,7 @@ mod plan;
 #[cfg(all(target_arch = "wasm32", not(feature = "webgpu")))]
 pub(crate) mod rawviews;
 mod sources;
+mod takeover;
 mod targets;
 mod uniforms;
 mod usage;
@@ -36,8 +39,6 @@ use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::render::renderer::RenderDevice;
 use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSystems};
-
-use crate::renderer::terrain_pool::draw::PackTakeover;
 
 pub(crate) const GPU_LABEL: &str = "shaderpack";
 
@@ -166,20 +167,16 @@ fn report_pack_timing(
     }
 }
 
-fn drop_failed_pack(
-    takeover: Option<ResMut<PackTakeover>>,
-    render: Option<ResMut<frame::PackRender>>,
-) {
+fn drop_failed_pack(render: Option<ResMut<frame::PackRender>>) {
     if !GPU_FAILED.load(Ordering::Acquire) {
         return;
     }
-    let (Some(mut takeover), Some(mut render)) = (takeover, render) else {
+    let Some(mut render) = render else {
         return;
     };
     let generation = render.generation();
     if generation != 0 {
         render.reject_install();
-        takeover.0 = false;
         let message = GPU_ERROR
             .lock()
             .ok()
@@ -208,6 +205,11 @@ pub(crate) struct ShaderPackPlugin;
 
 impl Plugin for ShaderPackPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(not(feature = "native_shaders"))]
+        let pack_installed = resource_exists::<install::CompiledPack>;
+        #[cfg(feature = "native_shaders")]
+        let pack_installed =
+            resource_exists::<install::CompiledPack>.or(resource_exists::<native::NativePack>);
         app.init_resource::<inputs::Inputs>().add_systems(
             Update,
             (
@@ -215,9 +217,11 @@ impl Plugin for ShaderPackPlugin {
                 inputs::gather_inputs
                     .after(crate::renderer::frame_view::FrameViewSystems)
                     .after(crate::renderer::systems::update_lightmap)
-                    .run_if(resource_exists::<install::CompiledPack>),
+                    .run_if(pack_installed),
             ),
         );
+        #[cfg(feature = "native_shaders")]
+        native::build(app);
         if timing_requested() {
             #[cfg(not(feature = "budget"))]
             app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
@@ -237,6 +241,7 @@ impl Plugin for ShaderPackPlugin {
                 .after(bevy::pbr::prepare_lights),
         );
         render_app
+            .init_resource::<frame::HandTaken>()
             .add_systems(
                 ExtractSchedule,
                 (
@@ -257,6 +262,9 @@ impl Plugin for ShaderPackPlugin {
                     )
                         .chain()
                         .in_set(RenderSystems::PrepareAssets),
+                    frame::empty_hand_phases
+                        .after(RenderSystems::Queue)
+                        .before(RenderSystems::PhaseSort),
                     frame::prepare_uniforms
                         .in_set(RenderSystems::PrepareResources)
                         .before(crate::renderer::terrain_pool::cull::prepare_cull),
@@ -289,6 +297,8 @@ impl Plugin for ShaderPackPlugin {
                 .resource::<bevy::render::renderer::RenderAdapter>(),
         );
         render_app.insert_resource(frame::PackRender::new());
+        #[cfg(feature = "native_shaders")]
+        native::finish(app);
     }
 }
 

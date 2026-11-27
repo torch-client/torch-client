@@ -9,7 +9,8 @@ use bevy::render::texture::GpuImage;
 use bevy::render::view::ExtractedView;
 
 use super::super::GPU_LABEL;
-use super::super::compile::{ScreenStage, Segment, Step};
+use super::super::compile::{EntityKind, ScreenStage, Segment, Step};
+use super::super::entities::EntityPasses;
 use super::super::formats::wgpu_format;
 use super::super::frame::{Install, PackRender, Sized, Stage, Usage};
 use super::super::fullscreen::Blit;
@@ -179,17 +180,19 @@ pub(crate) fn prepare_plan(
         uniforms: &gpu.uniforms,
         device: &device,
     };
-    let first = resources.plan(pipelines, &process.blit, Flips::default());
+    let (first, first_entities) = resources.plan(pipelines, &process.blit, Flips::default());
     let end = first.end;
-    let plans = if end.0 == 0 {
-        vec![first]
+    let (plans, entity_passes) = if end.0 == 0 {
+        (vec![first], vec![first_entities])
     } else {
-        vec![first, resources.plan(pipelines, &process.blit, end)]
+        let (second, second_entities) = resources.plan(pipelines, &process.blit, end);
+        (vec![first, second], vec![first_entities, second_entities])
     };
     *sized = Some(Sized {
         key,
         targets,
         plans,
+        entity_passes,
         setup_done: std::sync::atomic::AtomicBool::new(setup_done),
         fully_cleared: std::sync::atomic::AtomicBool::new(fully_cleared),
     });
@@ -438,7 +441,7 @@ impl PlanResources<'_> {
         }
     }
 
-    fn plan(&self, pipelines: &Pipelines, blit: &Blit, start: Flips) -> Plan {
+    fn plan(&self, pipelines: &Pipelines, blit: &Blit, start: Flips) -> (Plan, EntityPasses) {
         let installed = self.installed;
         let mut flips = start;
 
@@ -646,14 +649,16 @@ impl PlanResources<'_> {
         let before_deferred = flips;
 
         let deferred = stage_passes(ScreenStage::Deferred, &mut flips);
-        let entities = std::array::from_fn(|at| match EntityKind::ALL[at].segment() {
-            Segment::Shadow | Segment::Sky | Segment::World | Segment::HandSolid => {
-                entity_pass(at, before_deferred)
-            }
-            Segment::WorldTranslucent | Segment::AfterTranslucent | Segment::HandTranslucent => {
-                entity_pass(at, flips)
-            }
-        });
+        let entities: EntityPasses =
+            std::array::from_fn(|at| match EntityKind::ALL[at].segment() {
+                Segment::Shadow | Segment::Sky | Segment::World | Segment::HandSolid => {
+                    entity_pass(at, before_deferred)
+                }
+                Segment::WorldTranslucent
+                | Segment::AfterTranslucent
+                | Segment::HandTranslucent => entity_pass(at, flips),
+                Segment::Display => None,
+            });
         let translucent = Geometry::ALL
             .iter()
             .enumerate()
@@ -704,7 +709,7 @@ impl PlanResources<'_> {
             })
             .collect();
 
-        Plan {
+        let plan = Plan {
             setup: installed
                 .setup
                 .iter()
@@ -713,7 +718,6 @@ impl PlanResources<'_> {
             stages: [begin, prepare, deferred, composite],
             shadow,
             shadowcomp,
-            entities,
             clears,
             full_clears,
             opaque,
@@ -724,7 +728,8 @@ impl PlanResources<'_> {
             end: flips,
             copy_depth: self.usage.copy_depth,
             chains,
-        }
+        };
+        (plan, entities)
     }
 }
 

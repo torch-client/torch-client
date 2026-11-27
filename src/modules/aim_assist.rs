@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn the_grid_carries_what_it_drops() {
         CARRY.set((0.0, 0.0));
-        let grid = crate::renderer::input::LOOK_SCALE;
+        let grid = crate::renderer::input::look_scale();
         let mut sum = 0.0;
         for _ in 0..10 {
             let (x, _) = on_grid((grid * 0.3, 0.0));

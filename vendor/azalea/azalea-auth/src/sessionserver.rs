@@ -1,5 +1,7 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::LazyLock;
 
+#[cfg(not(target_arch = "wasm32"))]
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
@@ -7,12 +9,15 @@ use thiserror::Error;
 use tracing::debug;
 use uuid::Uuid;
 
+#[cfg(target_arch = "wasm32")]
+use crate::http::StatusCode;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::game_profile::{GameProfile, SerializableGameProfile};
 
 #[derive(Debug, Error)]
 pub enum ClientSessionServerError {
     #[error("Error sending HTTP request to sessionserver: {0}")]
-    HttpError(#[from] reqwest::Error),
+    HttpError(#[from] crate::HttpError),
     #[error("Multiplayer is not enabled for this account")]
     MultiplayerDisabled,
     #[error("This account has been banned from multiplayer")]
@@ -34,7 +39,7 @@ pub enum ClientSessionServerError {
 #[derive(Debug, Error)]
 pub enum ServerSessionServerError {
     #[error("Error sending HTTP request to sessionserver: {0}")]
-    HttpError(#[from] reqwest::Error),
+    HttpError(#[from] crate::HttpError),
     #[error("Invalid or expired session")]
     InvalidSession,
     #[error("Unexpected response from sessionserver (status code {status_code}): {body}")]
@@ -56,10 +61,11 @@ pub struct SessionServerJoinOpts<'a> {
     pub uuid: &'a Uuid,
     pub server_id: &'a str,
 
-    pub proxy: Option<reqwest::Proxy>,
+    pub proxy: Option<crate::HttpProxy>,
 }
 
 pub async fn join(opts: SessionServerJoinOpts<'_>) -> Result<(), ClientSessionServerError> {
+    #[cfg(not(target_arch = "wasm32"))]
     let client = if let Some(proxy) = opts.proxy {
         reqwest::ClientBuilder::new().proxy(proxy).build()?
     } else {
@@ -69,6 +75,11 @@ pub async fn join(opts: SessionServerJoinOpts<'_>) -> Result<(), ClientSessionSe
         });
 
         REQWEST_CLIENT.clone()
+    };
+    #[cfg(target_arch = "wasm32")]
+    let client = match opts.proxy {
+        Some(proxy) => match proxy {},
+        None => crate::HttpClient::new(),
     };
 
     let server_hash = azalea_crypto::hex_digest(&azalea_crypto::digest_data(
@@ -81,7 +92,7 @@ pub async fn join(opts: SessionServerJoinOpts<'_>) -> Result<(), ClientSessionSe
 }
 
 pub async fn join_with_server_id_hash(
-    client: &reqwest::Client,
+    client: &crate::HttpClient,
     access_token: &str,
     uuid: &Uuid,
     server_hash: &str,
@@ -129,6 +140,7 @@ pub async fn join_with_server_id_hash(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn serverside_auth(
     username: &str,
     public_key: &[u8],

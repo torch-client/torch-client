@@ -38,7 +38,10 @@ pub fn open_key() -> Option<(bevy::prelude::KeyCode, String)> {
 
 #[cfg(not(feature = "click_gui"))]
 #[inline(always)]
-pub fn completion() -> Option<(char, std::sync::Arc<crate::play::commands::CommandTree>)> {
+pub fn completion_at(
+    _: &str,
+    _: usize,
+) -> Option<(char, std::sync::Arc<crate::play::commands::CommandTree>)> {
     None
 }
 
@@ -55,9 +58,11 @@ pub use on::*;
 mod on {
     use std::sync::Arc;
 
-    use super::builtin::{Call, Line, norm};
+    use super::builtin::{Call, Line, norm, rescued};
     use super::table::{self, Owner};
+    use super::tree::Names;
     use super::{SharedMutex, args};
+    use crate::lang::{tr, trf};
     use crate::modules::chat_math::show_local_spans;
     use crate::modules::registry::{self, Id};
     use crate::modules::store;
@@ -67,22 +72,19 @@ mod on {
 
     pub fn check_prefix(p: &str) -> Result<(), String> {
         let Some(first) = p.chars().next() else {
-            return Err("The prefix cannot be empty".to_string());
+            return Err(tr!("commands.prefix_check.empty").to_string());
         };
         if first == '/' {
-            return Err("The prefix cannot start with /, which is the server's".to_string());
+            return Err(tr!("commands.prefix_check.slash").to_string());
         }
         if first.is_alphanumeric() {
-            return Err(
-                "The prefix cannot start with a letter or digit, or ordinary chat would be taken"
-                    .to_string(),
-            );
+            return Err(tr!("commands.prefix_check.alnum").to_string());
         }
         if p.chars().any(char::is_whitespace) {
-            return Err("The prefix cannot hold a space".to_string());
+            return Err(tr!("commands.prefix_check.space").to_string());
         }
         if p.chars().count() > 4 {
-            return Err("The prefix is at most 4 characters".to_string());
+            return Err(tr!("commands.prefix_check.too_long").to_string());
         }
         Ok(())
     }
@@ -137,12 +139,11 @@ mod on {
             return Some(line);
         };
         let table = table::table();
-        let Some(cmd) = table.find(&name) else {
+        let Some((cmd, name)) = rescued(&name, |n| table.find(n).map(|c| (c, n.to_string())))
+        else {
             show(
                 shared,
-                vec![Line::error(format!(
-                    "Unknown command {prefix}{name}; {prefix}help lists them"
-                ))],
+                vec![Line::error(trf!("commands.unknown", prefix, name))],
             );
             return None;
         };
@@ -150,6 +151,7 @@ mod on {
             Owner::Builtin(b) => {
                 let toks = match args::tokens(raw) {
                     Ok(t) => t,
+                    Err(_) if b.shape.raw_args() => Vec::new(),
                     Err(e) => {
                         show(shared, vec![Line::error(e)]);
                         return None;
@@ -162,25 +164,31 @@ mod on {
                     prefix: &prefix,
                     out: Vec::new(),
                     send: None,
+                    edit: None,
+                    shared,
                 };
                 (b.run)(&mut call);
-                let Call { out, send, .. } = call;
+                let Call {
+                    out, send, edit, ..
+                } = call;
                 show(shared, out);
+                if let Some(edit) = edit {
+                    let action = crate::session::InvAction::ItemEdit(Box::new(edit));
+                    shared.lock().unwrap().session.inv_actions.push(action);
+                }
                 send
             }
             Owner::Script(sc) => {
                 if !s.enabled(sc.module) {
                     let m = registry::module(sc.module);
-                    let why = format!(
-                        "{} is off; {prefix}toggle {} turns it on",
-                        m.name,
-                        norm(m.name)
-                    );
+                    let why = trf!("commands.script_off", m.label(), prefix, norm(m.name));
                     show(shared, vec![Line::error(why)]);
                     return None;
                 }
                 #[cfg(lua_mods)]
                 crate::modules::script::command_typed(name, raw.to_string());
+                #[cfg(not(lua_mods))]
+                let _ = name;
                 None
             }
         }
@@ -212,14 +220,29 @@ mod on {
         !plain(line) && store().enabled(Id::Commands) && split(line, &prefix()).is_some()
     }
 
-    pub fn completion() -> Option<(char, Arc<CommandTree>)> {
+    pub fn completion_at(line: &str, cursor: usize) -> Option<(char, Arc<CommandTree>)> {
+        #[cfg(feature = "multi_language")]
+        let names = if line.chars().skip(cursor).any(|c| !c.is_whitespace()) {
+            Names::Both
+        } else {
+            super::tree::for_line(&line.chars().take(cursor).collect::<String>())
+        };
+        #[cfg(not(feature = "multi_language"))]
+        let names = {
+            let _ = (line, cursor);
+            Names::English
+        };
+        completion_from(names)
+    }
+
+    fn completion_from(names: Names) -> Option<(char, Arc<CommandTree>)> {
         if !store().enabled(Id::Commands) {
             return None;
         }
         let p = prefix();
         let mut chars = p.chars();
         match (chars.next(), chars.next()) {
-            (Some(c), None) => Some((c, table::tree())),
+            (Some(c), None) => Some((c, table::tree(names))),
             _ => None,
         }
     }

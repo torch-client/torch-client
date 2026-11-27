@@ -14,6 +14,7 @@ pub struct State {
     pub sky_light_color: [f32; 3],
     pub ambient_color: [f32; 3],
     pub night_vision_color: [f32; 3],
+    pub fullbright: bool,
 }
 
 const BLOCK_LIGHT_TINT: Argb = Argb(0xFFFF_D84C);
@@ -41,6 +42,7 @@ impl State {
             sky_light_color: rgb(dim.sky_light_color().unwrap_or(sky.sky_light_color)),
             ambient_color: rgb(dim.ambient_light_color()),
             night_vision_color: rgb(NIGHT_VISION_COLOR),
+            fullbright: !crate::renderer::lighting_enabled(),
         }
     }
 
@@ -135,6 +137,10 @@ pub fn resolved_levels(levels: (u8, u8)) -> (u8, u8) {
     } else {
         (15, 15)
     }
+}
+
+pub fn cardinal_shades() -> &'static [f32; 6] {
+    super::dimension::current().cardinal()
 }
 
 pub fn light_color(state: &State, block: u8, sky: u8) -> [f32; 3] {
@@ -272,6 +278,9 @@ fn not_gamma(color: [f32; 3]) -> [f32; 3] {
 }
 
 pub fn texel(state: &State, block: u32, sky: u32) -> [f32; 3] {
+    if state.fullbright {
+        return [1.0; 3];
+    }
     let block_level = block as f32 / 15.0;
     let sky_level = sky as f32 / 15.0;
 

@@ -1,0 +1,13 @@
+{
+  "lua_list.done": "Done",
+  "lua_list.cancel": "Cancel",
+  "lua_list.file.asks": "%s asks for a file",
+  "lua_list.file.any": "Any file",
+  "lua_list.file.takes": "Takes %s",
+  "lua_list.file.hint_web": "Choose one, or drop it on the page",
+  "lua_list.file.hint_native": "Drop it on this window",
+  "lua_list.file.choose": "Choose file",
+  "lua_list.file.not_a_file": "%s is not a file",
+  "lua_list.file.too_big": "%s is over %s MiB",
+  "lua_list.file.unreadable": "could not read %s: %s"
+}

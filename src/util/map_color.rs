@@ -10,18 +10,33 @@ const MATERIAL_COLORS: [u32; 62] = [
 
 const BRIGHTNESS: [u32; 4] = [180, 220, 255, 135];
 
-pub fn rgba_from_packed_id(packed: u8) -> [u8; 4] {
+pub const fn rgba_from_packed_id(packed: u8) -> [u8; 4] {
     let material = (packed >> 2) as usize;
-    if material == 0 {
+    if material == 0 || material >= MATERIAL_COLORS.len() {
         return [0, 0, 0, 0];
     }
-    let Some(color) = MATERIAL_COLORS.get(material) else {
-        return [0, 0, 0, 0];
-    };
+    let color = MATERIAL_COLORS[material];
     let scale = BRIGHTNESS[(packed & 3) as usize];
-    let channel = |shift: u32| (((color >> shift) & 0xff) * scale / 255).min(255) as u8;
-    [channel(16), channel(8), channel(0), 255]
+    const fn channel(color: u32, shift: u32, scale: u32) -> u8 {
+        (((color >> shift) & 0xff) * scale / 255) as u8
+    }
+    [
+        channel(color, 16, scale),
+        channel(color, 8, scale),
+        channel(color, 0, scale),
+        255,
+    ]
 }
+
+pub const PACKED_RGBA: [[u8; 4]; 256] = {
+    let mut table = [[0u8; 4]; 256];
+    let mut packed = 0;
+    while packed < 256 {
+        table[packed] = rgba_from_packed_id(packed as u8);
+        packed += 1;
+    }
+    table
+};
 
 #[cfg(test)]
 mod tests {
@@ -49,5 +64,16 @@ mod tests {
             assert_eq!(rgba_from_packed_id(shade), [0, 0, 0, 0]);
         }
         assert_eq!(rgba_from_packed_id(63 << 2), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn table_matches_the_function() {
+        for packed in 0..=255u8 {
+            assert_eq!(
+                PACKED_RGBA[packed as usize],
+                rgba_from_packed_id(packed),
+                "packed {packed}"
+            );
+        }
     }
 }

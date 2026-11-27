@@ -21,8 +21,12 @@ pub fn register(registry: &mut BeRegistry) {
     );
 }
 
-fn chest_type(st: &BeState) -> &str {
-    match st.state.chest_half {
+fn chest_type(st: &BeState) -> &'static str {
+    half_name(st.state.chest_half)
+}
+
+fn half_name(half: ChestHalf) -> &'static str {
+    match half {
         ChestHalf::Left => "left",
         ChestHalf::Right => "right",
         ChestHalf::Single => "single",
@@ -39,15 +43,22 @@ fn key(st: &BeState) -> Option<u64> {
 }
 
 fn layer(st: &BeState) -> LayerDef {
-    match chest_type(st) {
-        "left" => models::chest_left(),
-        "right" => models::chest_right(),
-        _ => models::chest_single(),
+    layer_for(st.state.chest_half)
+}
+
+pub(crate) fn layer_for(half: ChestHalf) -> LayerDef {
+    match half {
+        ChestHalf::Left => models::chest_left(),
+        ChestHalf::Right => models::chest_right(),
+        ChestHalf::Single => models::chest_single(),
     }
 }
 
 fn material(st: &BeState) -> &'static str {
-    let block = st.state.block.as_str();
+    material_of(st.state.block.as_str())
+}
+
+pub(crate) fn material_of(block: &str) -> &'static str {
     if block.ends_with("copper_chest") {
         return if block.contains("exposed") {
             "copper_exposed"
@@ -73,19 +84,27 @@ fn material(st: &BeState) -> &'static str {
 }
 
 fn texture(st: &BeState) -> String {
-    let material = material(st);
+    texture_of(st.state.block.as_str(), st.state.chest_half)
+}
+
+pub(crate) fn texture_of(block: &str, half: ChestHalf) -> String {
+    let material = material_of(block);
     if material == "ender" {
         return "entity/chest/ender".to_string();
     }
-    match chest_type(st) {
-        "left" => format!("entity/chest/{material}_left"),
-        "right" => format!("entity/chest/{material}_right"),
-        _ => format!("entity/chest/{material}"),
+    match half {
+        ChestHalf::Left => format!("entity/chest/{material}_left"),
+        ChestHalf::Right => format!("entity/chest/{material}_right"),
+        ChestHalf::Single => format!("entity/chest/{material}"),
     }
 }
 
 fn transform(st: &BeState) -> Transform {
-    let rotation = Quat::from_rotation_y(-facing_y_rot(st.state.facing).to_radians());
+    transform_for(st.state.facing)
+}
+
+pub(crate) fn transform_for(facing: Option<Direction>) -> Transform {
+    let rotation = Quat::from_rotation_y(-facing_y_rot(facing).to_radians());
     rotate_around(rotation, Vec3::new(0.5, 0.0, 0.5))
 }
 

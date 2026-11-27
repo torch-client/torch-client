@@ -11,7 +11,7 @@ const WRAP_W: f32 = 300.0;
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) -> Option<Screen> {
     crate::gui::menu::background(p, ctx.vw, ctx.vh);
     p.text_centered(
-        "Disconnected",
+        crate::lang::tr!("gui.disconnected.title"),
         ctx.vw / 2.0,
         LAYOUT.title_y(),
         0xFFFFFF,
@@ -21,10 +21,10 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) -> Option<Sc
     let width = WRAP_W.min(ctx.vw - 40.0).max(80.0);
     let lines: Vec<Vec<Span>> = match &state.disconnect_reason {
         Some(reason) if !reason.is_empty() => p.atlas.font.wrap(reason, width),
-        _ => p
-            .atlas
-            .font
-            .wrap(&crate::text::parse_formatted("Connection lost"), width),
+        _ => p.atlas.font.wrap(
+            &crate::text::parse_formatted(crate::lang::tr!("gui.disconnected.connection_lost")),
+            width,
+        ),
     };
 
     let block_h = lines.len() as f32 * LINE_HEIGHT;

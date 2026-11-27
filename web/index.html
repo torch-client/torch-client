@@ -62,6 +62,7 @@
   <div id="bar"><div id="fill"></div></div>
   <div id="pct">0%</div>
   <div id="logbar">
+    <button id="copylog" type="button">Copy</button>
     <button id="selectall" type="button">Select all</button>
     <button id="hide" type="button">Hide</button>
     <span id="count"></span>
@@ -85,12 +86,43 @@
   const countEl = document.getElementById("count");
   const canvas = document.getElementById("canvas");
 
+  if (navigator.maxTouchPoints > 0) {
+    let held = { key: null, w: 0, h: 0 };
+    const hold = () => {
+      const body = document.body;
+      const key = document.fullscreenElement
+        ? window.innerWidth > window.innerHeight ? "landscape" : "portrait"
+        : null;
+      if (key !== held.key) held = { key, w: 0, h: 0 };
+      if (!key) {
+        body.style.width = body.style.height = "";
+        return;
+      }
+      held.w = Math.max(held.w, window.innerWidth);
+      held.h = Math.max(held.h, window.innerHeight);
+      body.style.width = `${held.w}px`;
+      body.style.height = `${held.h}px`;
+    };
+    window.addEventListener("resize", hold);
+    document.addEventListener("fullscreenchange", hold);
+  }
+
   document.getElementById("selectall").addEventListener("click", () => {
     const range = document.createRange();
     range.selectNodeContents(consoleEl);
     const selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(range);
+  });
+  const copyEl = document.getElementById("copylog");
+  copyEl.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(tail.join("\n"));
+      copyEl.textContent = "Copied";
+      setTimeout(() => (copyEl.textContent = "Copy"), 1500);
+    } catch {
+      document.getElementById("selectall").click();
+    }
   });
   let dismissed = false;
   document.getElementById("hide").addEventListener("click", () => {
@@ -113,6 +145,7 @@
     consoleEl.textContent = tail.join("\n");
     countEl.textContent = `${tail.length} line${tail.length === 1 ? "" : "s"}`;
     if (pinned) consoleEl.scrollTop = consoleEl.scrollHeight;
+    if (line.includes("= PANIC =")) dismissed = false;
     if (problem && !dismissed) status.classList.remove("quiet");
   };
   const format = (args) => args.map((a) => (a instanceof Error ? a.message : String(a))).join(" ");
@@ -120,7 +153,8 @@
     const real = console[method].bind(console);
     console[method] = (...args) => {
       real(...args);
-      logTail(prefix + format(args), method === "error");
+      const bevyError = method === "log" && typeof args[0] === "string" && args[0].startsWith("%cERROR");
+      logTail(prefix + format(args), method === "error" || bevyError);
     };
   }
   window.addEventListener("error", (e) => logTail(`error: ${e.message}`, true));

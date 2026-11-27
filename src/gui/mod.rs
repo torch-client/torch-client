@@ -21,6 +21,7 @@ pub mod clickgui;
 pub mod command_block;
 pub mod command_history;
 pub mod configphase;
+pub mod confirmcommand;
 pub mod confirmlink;
 pub mod container;
 pub mod creative;
@@ -44,6 +45,7 @@ pub mod language;
 pub mod level_loading;
 #[cfg(lua_mods)]
 pub mod lua_list;
+pub mod map_view;
 pub mod menu;
 #[cfg(lua_mods)]
 pub mod mod_images;
@@ -93,8 +95,11 @@ pub mod toast;
 pub mod tooltip;
 #[cfg(feature = "tutorial")]
 pub mod tutorial;
+pub mod waypoint_style;
 pub mod widgets;
 pub mod winscreen;
+#[cfg(singleplayer)]
+pub mod worlds;
 
 use bevy::prelude::*;
 
@@ -129,6 +134,30 @@ pub enum Screen {
     Multiplayer,
     ManageServer,
     DirectConnect,
+    #[cfg(singleplayer)]
+    SelectWorld,
+    #[cfg(singleplayer)]
+    CreateWorld,
+    #[cfg(singleplayer)]
+    EditWorld,
+    #[cfg(singleplayer)]
+    WorldGameRules,
+    #[cfg(singleplayer)]
+    WorldExperiments,
+    #[cfg(singleplayer)]
+    WorldDataPacks,
+    #[cfg(singleplayer)]
+    WorldFlat,
+    #[cfg(singleplayer)]
+    WorldBuffet,
+    #[cfg(singleplayer)]
+    WorldOptimize,
+    #[cfg(singleplayer)]
+    #[allow(
+        dead_code,
+        reason = "nothing opens it until the singleplayer backend exists"
+    )]
+    MultiplayerOptions,
     #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
     CustomProxy,
     Disconnected,
@@ -136,6 +165,7 @@ pub enum Screen {
     Options,
     VideoSettings,
     Controls,
+    MouseSettings,
     #[cfg(feature = "mobile_ui")]
     TouchLayout,
     GameSettings,
@@ -229,6 +259,10 @@ impl Screen {
         if self == Screen::CustomProxy {
             return true;
         }
+        #[cfg(singleplayer)]
+        if self.is_world_menu() {
+            return true;
+        }
         #[cfg(self_update)]
         if self == Screen::SelfUpdate {
             return true;
@@ -305,6 +339,7 @@ impl Screen {
             Screen::Options
                 | Screen::VideoSettings
                 | Screen::Controls
+                | Screen::MouseSettings
                 | Screen::GameSettings
                 | Screen::ManageStorage
         )
@@ -324,12 +359,32 @@ impl Screen {
         )
     }
 
+    #[cfg(singleplayer)]
+    fn is_world_menu(self) -> bool {
+        matches!(
+            self,
+            Screen::SelectWorld
+                | Screen::CreateWorld
+                | Screen::EditWorld
+                | Screen::WorldGameRules
+                | Screen::WorldExperiments
+                | Screen::WorldDataPacks
+                | Screen::WorldFlat
+                | Screen::WorldBuffet
+                | Screen::WorldOptimize
+        )
+    }
+
     pub fn tab_navigates(self) -> bool {
         if self.is_options() {
             return true;
         }
         #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
         if self == Screen::CustomProxy {
+            return true;
+        }
+        #[cfg(singleplayer)]
+        if self.is_world_menu() || self == Screen::MultiplayerOptions {
             return true;
         }
         #[cfg(feature = "asset_download")]
@@ -398,11 +453,13 @@ impl TouchMovement {
     #[cfg(feature = "mobile_ui")]
     pub fn caption(self) -> &'static str {
         match self {
-            TouchMovement::Buttons => "Buttons",
-            TouchMovement::Joystick => "Joystick",
-            TouchMovement::PadStick => "Pad Joystick",
-            TouchMovement::BedrockDpad => "Bedrock D-Pad",
-            TouchMovement::BedrockJoystick => "Bedrock Joystick",
+            TouchMovement::Buttons => crate::lang::tr!("options_screen.movement.buttons"),
+            TouchMovement::Joystick => crate::lang::tr!("options_screen.movement.joystick"),
+            TouchMovement::PadStick => crate::lang::tr!("options_screen.movement.pad_joystick"),
+            TouchMovement::BedrockDpad => crate::lang::tr!("options_screen.movement.bedrock_dpad"),
+            TouchMovement::BedrockJoystick => {
+                crate::lang::tr!("options_screen.movement.bedrock_joystick")
+            }
         }
     }
 
@@ -449,8 +506,8 @@ impl TouchSneak {
     #[cfg(feature = "mobile_ui")]
     pub fn caption(self) -> &'static str {
         match self {
-            TouchSneak::Toggle => "Toggle",
-            TouchSneak::Hold => "Hold",
+            TouchSneak::Toggle => crate::lang::tr!("options_screen.sneak.toggle"),
+            TouchSneak::Hold => crate::lang::tr!("options_screen.sneak.hold"),
         }
     }
 
@@ -486,11 +543,11 @@ impl LodQuality {
     #[cfg(feature = "render_lod")]
     pub fn caption(self) -> &'static str {
         match self {
-            LodQuality::Lowest => "Lowest",
-            LodQuality::Low => "Low",
-            LodQuality::Medium => "Medium",
-            LodQuality::High => "High",
-            LodQuality::Extreme => "Extreme",
+            LodQuality::Lowest => crate::lang::tr!("options_screen.lod.detail.lowest"),
+            LodQuality::Low => crate::lang::tr!("options_screen.lod.detail.low"),
+            LodQuality::Medium => crate::lang::tr!("options_screen.lod.detail.medium"),
+            LodQuality::High => crate::lang::tr!("options_screen.lod.detail.high"),
+            LodQuality::Extreme => crate::lang::tr!("options_screen.lod.detail.extreme"),
         }
     }
 
@@ -543,6 +600,14 @@ pub struct GuiOptions {
     pub inactivity_fps_limit: InactivityFpsLimit,
     pub auto_jump: bool,
     pub toggle_sprint: bool,
+    pub mouse_sensitivity: f64,
+    pub invert_mouse_x: bool,
+    pub invert_mouse_y: bool,
+    pub mouse_wheel_sensitivity: f64,
+    pub discrete_mouse_scroll: bool,
+    pub window_width: u32,
+    pub window_height: u32,
+    pub fullscreen: bool,
     pub main_hand_left: bool,
     #[cfg(feature = "skins")]
     pub skin_parts: u8,
@@ -584,6 +649,37 @@ pub const TOAST_TIME_MAX: i32 = 100;
 pub const AUTO_JUMP_DEFAULT: bool = cfg!(feature = "mobile_ui");
 
 pub const TOGGLE_SPRINT_DEFAULT: bool = cfg!(target_arch = "wasm32");
+
+pub const MOUSE_SENSITIVITY_DEFAULT: f64 = 0.5;
+
+pub fn log_mouse(value: i32) -> f64 {
+    10f64.powf(f64::from(value) / 100.0)
+}
+
+pub fn unlog_mouse(value: f64) -> i32 {
+    (value.log10() * 100.0).floor() as i32
+}
+
+pub const MOUSE_WHEEL_SLIDER_MIN: i32 = -200;
+pub const MOUSE_WHEEL_SLIDER_MAX: i32 = 100;
+pub const MOUSE_WHEEL_SENSITIVITY_MIN: f64 = 0.01;
+pub const MOUSE_WHEEL_SENSITIVITY_MAX: f64 = 10.0;
+pub const MOUSE_WHEEL_SENSITIVITY_DEFAULT: f64 = 1.0;
+
+pub const WINDOW_SIZE_DEFAULT: (u32, u32) = (1280, 720);
+#[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(dead_code))]
+pub const WINDOW_SIZE_MIN: (u32, u32) = (320, 240);
+
+#[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(dead_code))]
+pub fn window_size(options: &GuiOptions) -> (u32, u32) {
+    if options.window_width == 0 || options.window_height == 0 {
+        return WINDOW_SIZE_DEFAULT;
+    }
+    (
+        options.window_width.max(WINDOW_SIZE_MIN.0),
+        options.window_height.max(WINDOW_SIZE_MIN.1),
+    )
+}
 
 pub const FPS_COUNTER_DEFAULT: bool = true;
 
@@ -772,6 +868,34 @@ impl GuiOptions {
             toggle_sprint: value("toggleSprint")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(TOGGLE_SPRINT_DEFAULT),
+            mouse_sensitivity: value("mouseSensitivity")
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite())
+                .unwrap_or(MOUSE_SENSITIVITY_DEFAULT)
+                .clamp(0.0, 1.0),
+            invert_mouse_x: value("invertXMouse")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            invert_mouse_y: value("invertYMouse")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            mouse_wheel_sensitivity: value("mouseWheelSensitivity")
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite())
+                .unwrap_or(MOUSE_WHEEL_SENSITIVITY_DEFAULT)
+                .clamp(MOUSE_WHEEL_SENSITIVITY_MIN, MOUSE_WHEEL_SENSITIVITY_MAX),
+            discrete_mouse_scroll: value("discrete_mouse_scroll")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            window_width: value("windowWidth")
+                .and_then(|v| v.as_u64())
+                .map_or(0, |v| v.min(u64::from(u32::MAX)) as u32),
+            window_height: value("windowHeight")
+                .and_then(|v| v.as_u64())
+                .map_or(0, |v| v.min(u64::from(u32::MAX)) as u32),
+            fullscreen: value("fullscreen")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             main_hand_left: value("mainHand").and_then(|v| v.as_str().map(|s| s == "left"))
                 == Some(true),
             #[cfg(feature = "skins")]
@@ -1034,6 +1158,26 @@ fn options_json(options: &GuiOptions) -> serde_json::Value {
         "toastSystem": options.toast_system,
         "toastDisplayTime": options.toast_time as f64 / 10.0,
     });
+    {
+        let map = json.as_object_mut().expect("json! object literal");
+        let mut put = |key: &str, value: serde_json::Value| {
+            map.insert(key.to_owned(), value);
+        };
+        put("mouseSensitivity", options.mouse_sensitivity.into());
+        put("invertXMouse", options.invert_mouse_x.into());
+        put("invertYMouse", options.invert_mouse_y.into());
+        put(
+            "mouseWheelSensitivity",
+            options.mouse_wheel_sensitivity.into(),
+        );
+        put(
+            "discrete_mouse_scroll",
+            options.discrete_mouse_scroll.into(),
+        );
+        put("windowWidth", options.window_width.into());
+        put("windowHeight", options.window_height.into());
+        put("fullscreen", options.fullscreen.into());
+    }
     #[cfg(feature = "skins")]
     {
         let map = json.as_object_mut().expect("json! object literal");
@@ -1112,6 +1256,8 @@ pub struct GuiState {
     pub keybinds: keybinds::KeyBinds,
     pub controls_scroll: f32,
     pub controls_scroll_drag: Option<f32>,
+    pub mouse_scroll: f32,
+    pub mouse_scroll_drag: Option<f32>,
     pub nav: Option<Screen>,
     pub screen_buttons: Vec<MouseButton>,
     pub death: death::DeathState,
@@ -1140,6 +1286,8 @@ pub struct GuiState {
     pub asset_transfer: assetexport::State,
     #[cfg(feature = "asset_download")]
     pub language: language::State,
+    #[cfg(singleplayer)]
+    pub worlds: worlds::State,
     #[cfg(feature = "shader_support")]
     pub shaderpacks: shaderpacks::State,
     #[cfg(resource_packs)]
@@ -1225,6 +1373,7 @@ pub struct Snapshot {
     pub subtitle_text: Option<Vec<crate::text::Span>>,
     pub title_times: Option<(Option<u32>, Option<u32>, Option<u32>)>,
     pub titles_clear: Option<bool>,
+    pub world_stopped: bool,
     pub menu_slots: std::sync::Arc<[SlotStack]>,
     pub attack_strength: f32,
     pub attack_delay: f32,
@@ -1266,6 +1415,7 @@ pub struct Snapshot {
     pub xp_recent_gain: bool,
     pub waypoints: std::sync::Arc<Vec<crate::session::WaypointInfo>>,
     pub eye_pos: [f64; 3],
+    pub feet_pos: [f64; 3],
     pub camera_yaw: f32,
     pub camera_pitch: f32,
     pub sleep_timer: u32,

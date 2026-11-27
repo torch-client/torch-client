@@ -4,8 +4,10 @@ use azalea::entity::Position;
 use azalea::entity::metadata::{AreaEffectCloud, Radius, Waiting};
 use azalea::entity::particle::Particle;
 use azalea::prelude::*;
+use azalea_core::entity_id::MinecraftEntityId;
 use azalea_world::WorldName;
 
+use crate::client::tick_rate::WorldTick;
 use crate::play::emit::{self, EMIT_RANGE, Viewer};
 use crate::session::{CloudEmit, ParticleEmit, SharedMutex, SideMutex};
 
@@ -16,6 +18,7 @@ type CloudQuery = QueryState<
         &'static Radius,
         &'static Waiting,
         &'static Particle,
+        &'static MinecraftEntityId,
     ),
     With<AreaEffectCloud>,
 >;
@@ -26,7 +29,7 @@ pub(crate) fn default_particle() -> Particle {
     emit::entity_effect(0xFFFF_FFFF)
 }
 
-pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
+pub(crate) fn tick(bot: &Client, shared: &SharedMutex, world_tick: &WorldTick) {
     let Some(viewer) = Viewer::of(bot) else {
         return;
     };
@@ -35,8 +38,11 @@ pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
     let query = crate::play::entity_feed::cached_query(bot, &mut *cache);
     let ecs = bot.ecs.read();
     let mut emits = Vec::new();
-    for (name, pos, radius, waiting, particle) in query.iter(&ecs) {
-        if !viewer.in_world(name) || !viewer.within(**pos, EMIT_RANGE + f64::from(radius.0)) {
+    for (name, pos, radius, waiting, particle, id) in query.iter(&ecs) {
+        if !viewer.in_world(name)
+            || !viewer.within(**pos, EMIT_RANGE + f64::from(radius.0))
+            || !world_tick.entity_ticks(id.0)
+        {
             continue;
         }
         let particle = if *particle == Particle::default() {

@@ -65,8 +65,8 @@ pub fn read_packets(ecs: &mut World) {
         if raw_conn.network.is_none() {
             if !raw_conn.warned_no_network {
                 raw_conn.warned_no_network = true;
-                error!(
-                    "this connection has no network any more, so no further packet will be                      read on it; whatever dropped it should have logged above"
+                tracing::warn!(
+                    "this connection has no network any more, so no further packet will be read on it; whatever dropped it should have logged above"
                 );
             }
             continue;
@@ -92,8 +92,6 @@ pub fn read_packets(ecs: &mut World) {
     }
 
     #[cfg(target_arch = "wasm32")]
-    const WEB_READ_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
-    #[cfg(target_arch = "wasm32")]
     let read_started = bevy_platform::time::Instant::now();
 
     let bundle_delimiter = bundle_delimiter_byte();
@@ -102,11 +100,20 @@ pub fn read_packets(ecs: &mut World) {
         loop {
             let mut conn = conn_query.get_mut(ecs, entity).unwrap();
             #[cfg(target_arch = "wasm32")]
-            if matches!(conn.state, ConnectionProtocol::Game)
-                && read_started.elapsed() >= WEB_READ_BUDGET
-            {
-                conn.read_backlog = true;
-                break;
+            if matches!(conn.state, ConnectionProtocol::Game) {
+                let lag = azalea_protocol::traffic::read_lag();
+                if lag >= READ_LAG_HARD && !conn.read_lag_warned {
+                    conn.read_lag_warned = true;
+                    tracing::warn!(
+                        "the packet reader is {} ms behind the server ({} packets queued); lifting the read budget until it catches up",
+                        lag.as_millis(),
+                        azalea_protocol::traffic::rx_queued()
+                    );
+                }
+                if web_read_budget(lag).is_some_and(|budget| read_started.elapsed() >= budget) {
+                    conn.read_backlog = true;
+                    break;
+                }
             }
             let net_conn = conn.net_conn().unwrap();
             let read_res = net_conn.reader.try_read();
@@ -160,6 +167,7 @@ pub fn read_packets(ecs: &mut World) {
                     #[cfg(target_arch = "wasm32")]
                     {
                         conn.read_backlog = false;
+                        conn.read_lag_warned = false;
                     }
                     break;
                 }
@@ -184,6 +192,27 @@ pub fn read_packets(ecs: &mut World) {
     }
 
     queued_packet_events.write_messages(ecs);
+}
+
+#[cfg(target_arch = "wasm32")]
+const WEB_READ_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+#[cfg(target_arch = "wasm32")]
+const WEB_READ_BUDGET_MAX: std::time::Duration = std::time::Duration::from_millis(50);
+#[cfg(target_arch = "wasm32")]
+const READ_LAG_SOFT: std::time::Duration = std::time::Duration::from_millis(200);
+#[cfg(target_arch = "wasm32")]
+const READ_LAG_HARD: std::time::Duration = std::time::Duration::from_millis(600);
+
+#[cfg(target_arch = "wasm32")]
+fn web_read_budget(lag: std::time::Duration) -> Option<std::time::Duration> {
+    if lag <= READ_LAG_SOFT {
+        return Some(WEB_READ_BUDGET);
+    }
+    if lag >= READ_LAG_HARD {
+        return None;
+    }
+    let t = (lag - READ_LAG_SOFT).as_secs_f64() / (READ_LAG_HARD - READ_LAG_SOFT).as_secs_f64();
+    Some(WEB_READ_BUDGET + (WEB_READ_BUDGET_MAX - WEB_READ_BUDGET).mul_f64(t))
 }
 
 fn poll_all_writer_tasks(mut conn_query: Query<&mut RawConnection>) {
@@ -301,6 +330,8 @@ pub struct RawConnection {
     pub(crate) warned_no_network: bool,
     #[cfg(target_arch = "wasm32")]
     pub(crate) read_backlog: bool,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) read_lag_warned: bool,
     pub(crate) bundle: Option<Vec<Arc<[u8]>>>,
     pub(crate) bundle_overflowed: bool,
     pub state: ConnectionProtocol,
@@ -342,6 +373,8 @@ impl RawConnection {
             warned_no_network: false,
             #[cfg(target_arch = "wasm32")]
             read_backlog: false,
+            #[cfg(target_arch = "wasm32")]
+            read_lag_warned: false,
             bundle: None,
             bundle_overflowed: false,
             state,

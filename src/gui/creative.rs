@@ -78,7 +78,7 @@ impl Default for CreativeState {
             just_opened: false,
             tab: 0,
             scroll: 0.0,
-            search: TextBox::new(50, "Search…"),
+            search: TextBox::new(50, ""),
             dragging_scrollbar: false,
             visible: Vec::new(),
             dirty: true,
@@ -642,6 +642,10 @@ pub fn draw(
         p.text_plain(info.title, left + 8.0, top + SEARCH_Y, LABEL_COLOR, false);
     }
     if st.tab == TAB_SEARCH {
+        let hint = crate::lang::tr!("gui.creative.search_hint");
+        if st.search.placeholder != hint {
+            st.search.placeholder = hint.to_owned();
+        }
         st.search
             .draw(p, left + SEARCH_X, top + SEARCH_Y, SEARCH_W, SEARCH_H);
     }

@@ -2138,7 +2138,10 @@ mod tests {
             InvAction::ButtonClick(_)
             | InvAction::SelectTrade(_)
             | InvAction::SetBeacon { .. }
-            | InvAction::RenameItem(_) => "other".into(),
+            | InvAction::RenameItem(_)
+            | InvAction::RunCommand(_) => "other".into(),
+            #[cfg(feature = "click_gui")]
+            InvAction::ItemEdit(_) => "other".into(),
         }
     }
 

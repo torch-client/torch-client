@@ -5,7 +5,9 @@ use azalea::entity::dimensions::{
 use azalea::entity::metadata::{AttachFace, Health};
 use azalea::entity::{EntityKindComponent, LocalEntity, Position};
 use azalea::interact::pick::PickBoundingBox;
+use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::position::Vec3;
+use azalea_core::tick::Frozen;
 
 use crate::util::interp::{Interpolation, Target};
 
@@ -33,13 +35,22 @@ pub(crate) fn step_pick_boxes(
                 Option<&ShulkerPeekAmount>,
                 Option<&RemoteScale>,
             ),
+            &MinecraftEntityId,
         ),
         Without<LocalEntity>,
     >,
+    frozen: Res<Frozen>,
 ) {
-    for (entity, position, dimensions, kind, living, state, pick_box, shulker) in &mut query {
+    let new_carts = crate::client::tracking::minecart_improvements();
+    for (entity, position, dimensions, kind, living, state, pick_box, shulker, id) in &mut query {
         let target = [position.x, position.y, position.z];
         let pos = match state {
+            Some(_) if new_carts && crate::entities::feed::is_minecart(**kind) => {
+                commands
+                    .entity(entity)
+                    .remove::<(Interpolated, PickBoundingBox)>();
+                continue;
+            }
             Some(mut state) => {
                 let state = &mut *state;
                 let (mut y_rot, mut x_rot) = (0.0, 0.0);
@@ -56,11 +67,13 @@ pub(crate) fn step_pick_boxes(
                     );
                     state.target = target;
                 }
-                state.handler.interpolate(Target {
-                    pos: &mut state.pos,
-                    y_rot: &mut y_rot,
-                    x_rot: &mut x_rot,
-                });
+                if frozen.entity_ticks(id.0) {
+                    state.handler.interpolate(Target {
+                        pos: &mut state.pos,
+                        y_rot: &mut y_rot,
+                        x_rot: &mut x_rot,
+                    });
+                }
                 state.pos
             }
             None => {

@@ -1,0 +1,18 @@
+{
+  "play.nbt.expected_open": "Ожидалось [ в начале списка компонентов, как в [custom_name='Name',!lore]",
+  "play.nbt.expected_name": "Ожидалось имя компонента в позиции %s",
+  "play.nbt.unknown_component": "Неизвестный компонент %s в позиции %s",
+  "play.nbt.named_twice": "Компонент %s указан дважды",
+  "play.nbt.expected_equals": "Ожидалось = после %s в позиции %s",
+  "play.nbt.malformed": "Ошибка в %s: %s",
+  "play.nbt.expected_component": "Ожидался компонент в позиции %s",
+  "play.nbt.expected_separator": "Ожидалось , или ] в позиции %s",
+  "play.nbt.trailing": "Лишний текст после ] в позиции %s",
+  "play.nbt.no_inventory": "Инвентаря пока нет",
+  "play.nbt.copied": " данные скопированы",
+  "play.nbt.creative_only": "Только в творческом режиме.",
+  "play.nbt.hold_item": "Возьмите предмет в ведущую руку.",
+  "play.nbt.count_set": "Количество в стаке в ведущей руке: %s.",
+  "play.nbt.over_max": "Количество %s больше максимального размера стака (%s); сервер проигнорирует изменение",
+  "play.nbt.updated": "Предмет обновлён"
+}

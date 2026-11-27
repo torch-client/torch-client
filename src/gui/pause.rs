@@ -45,11 +45,6 @@ const BUTTON_TOPS: [f32; 4] = [
 
 const GRID_H: f32 = BUTTON_TOPS[3] + WIDGET_HEIGHT;
 
-#[cfg(all(target_arch = "wasm32", feature = "screen_record"))]
-const DISCONNECT_SHIFT: f32 = WIDGET_HEIGHT + BUTTON_PADDING;
-#[cfg(not(all(target_arch = "wasm32", feature = "screen_record")))]
-const DISCONNECT_SHIFT: f32 = 0.0;
-
 fn grid_origin(vw: f32, vh: f32) -> (f32, f32) {
     (
         ((vw - GRID_W) * 0.5).floor(),
@@ -70,7 +65,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let mut button = |row: usize, column: usize, width: f32, label: &'static str| {
         Button::new(
             gx + column as f32 * COLUMN_W + BUTTON_PADDING,
-            gy + BUTTON_TOPS[row] + if row == 3 { DISCONNECT_SHIFT } else { 0.0 },
+            gy + BUTTON_TOPS[row],
             width,
             WIDGET_HEIGHT,
             label,
@@ -107,25 +102,37 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "screen_record"))]
+const RECORD_ICON: f32 = 10.0;
+
+#[cfg(all(target_arch = "wasm32", feature = "screen_record"))]
 fn record_button(p: &mut Painter, ctx: &ScreenCtx, gx: f32, gy: f32) {
     use crate::platform::record::{self, Status};
+    use crate::text::Span;
 
+    let x = gx + BUTTON_PADDING + BUTTON_WIDTH_FULL + BUTTON_PADDING;
     let y = gy + BUTTON_TOPS[3];
+    let size = WIDGET_HEIGHT;
     let status = record::status();
-    let label = match status {
-        Status::Idle => "Record".to_string(),
-        Status::Recording { secs } => format!("Stop Recording ({}:{:02})", secs / 60, secs % 60),
-        Status::Saving => "Saving Recording...".to_string(),
-    };
-    let mut button = Button::new(
-        gx + BUTTON_PADDING,
-        y,
-        BUTTON_WIDTH_FULL,
-        WIDGET_HEIGHT,
-        &label,
-    );
+
+    let mut button = Button::new(x, y, size, size, "");
     button.active = !matches!(status, Status::Saving);
-    if button.draw(p, ctx) {
+    let pressed = button.draw(p, ctx);
+
+    let ix = x + ((size - RECORD_ICON) / 2.0).floor();
+    let iy = y + ((size - RECORD_ICON) / 2.0).floor();
+    match status {
+        Status::Idle => record_dot(p, ix, iy, 0xFFE02424),
+        Status::Recording { .. } => p.fill(
+            ix + 1.0,
+            iy + 1.0,
+            RECORD_ICON - 2.0,
+            RECORD_ICON - 2.0,
+            0xFFE02424,
+        ),
+        Status::Saving => record_dot(p, ix, iy, 0xFF707070),
+    }
+
+    if pressed {
         match status {
             Status::Idle => record::start(),
             Status::Recording { .. } => record::stop(),
@@ -136,10 +143,43 @@ fn record_button(p: &mut Painter, ctx: &ScreenCtx, gx: f32, gy: f32) {
         p.text_centered(
             &e,
             ctx.vw / 2.0,
-            y + DISCONNECT_SHIFT + WIDGET_HEIGHT + BUTTON_PADDING,
+            y + WIDGET_HEIGHT + BUTTON_PADDING,
             0xFF5555,
             true,
         );
+    }
+
+    if ctx.hovering(x, y, size, size)
+        && let Some(m) = ctx.mouse()
+    {
+        let tip = match status {
+            Status::Idle => crate::lang::tr!("gui.pause.record_start").to_string(),
+            Status::Recording { secs } => {
+                crate::lang::trf!(
+                    "gui.pause.record_stop",
+                    format!("{}:{:02}", secs / 60, secs % 60)
+                )
+            }
+            Status::Saving => crate::lang::tr!("gui.pause.record_saving").to_string(),
+        };
+        crate::gui::tooltip::draw_lines(
+            p,
+            &[vec![Span::colored(tip, 0xFFFFFF)]],
+            m.x,
+            m.y,
+            ctx.vw,
+            ctx.vh,
+        );
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "screen_record"))]
+fn record_dot(p: &mut Painter, x: f32, y: f32, argb: u32) {
+    let r = RECORD_ICON / 2.0;
+    for row in 0..RECORD_ICON as u32 {
+        let dy = row as f32 + 0.5 - r;
+        let half = (r * r - dy * dy).sqrt().round();
+        p.fill(x + r - half, y + row as f32, 2.0 * half, 1.0, argb);
     }
 }
 

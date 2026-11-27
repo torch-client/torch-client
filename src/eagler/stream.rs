@@ -3,6 +3,7 @@ use std::{
     pin::Pin,
     sync::Mutex,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use azalea_auth::game_profile::GameProfile;
@@ -20,6 +21,7 @@ use tokio::{
 
 use super::socket::{Frame, Rx, Socket, Tx};
 use super::wisp;
+use crate::platform::time::Instant;
 use crate::util::wire::{Reader, write_varint};
 use crate::{log_error, log_info, log_warn};
 
@@ -43,6 +45,14 @@ pub(super) fn raw_connection(
     wisp: Option<wisp::Stream>,
 ) -> transport::HandshakeConn {
     Connection::wrap_stream(spawn_bridge(socket, None, wisp))
+}
+
+#[cfg(all(feature = "microsoft_web", target_arch = "wasm32"))]
+pub(super) fn byte_stream(socket: Socket, wisp: Option<wisp::Stream>) -> Bridge {
+    Bridge {
+        game: false,
+        ..spawn_bridge(socket, None, wisp)
+    }
 }
 
 fn spawn_bridge(
@@ -84,8 +94,13 @@ fn spawn_bridge(
         login,
         profile: profile.unwrap_or_default(),
         raw,
+        game: true,
         closed: false,
     }
+}
+
+pub(super) fn discard() {
+    *PREPARED.lock().unwrap() = None;
 }
 
 fn park(connection: transport::HandshakeConn) {
@@ -104,7 +119,7 @@ fn park(connection: transport::HandshakeConn) {
 }
 
 enum FromServer {
-    Bytes(Vec<u8>),
+    Bytes(Vec<u8>, Instant),
     Ended(Option<String>),
 }
 
@@ -134,6 +149,7 @@ async fn pump(
                 tx.send_binary(body).await?;
             }
             message = rx.recv() => {
+                let received = Instant::now();
                 let frame = message?.unwrap_or(Frame::Close(None));
                 let frame = match (frame, wisp.as_mut()) {
                     (Frame::Binary(message), Some(stream)) => match stream.receive(&message) {
@@ -145,7 +161,7 @@ async fn pump(
                 };
                 match frame {
                     Frame::Binary(payload) if raw => {
-                        if incoming.send(FromServer::Bytes(payload)).is_err() {
+                        if incoming.send(FromServer::Bytes(payload, received)).is_err() {
                             log_info!("net", "eagler: azalea dropped the connection");
                             return Ok(());
                         }
@@ -157,7 +173,7 @@ async fn pump(
                     }
                     Frame::Binary(payload) => {
                         for body in unprefixed(payload) {
-                            if incoming.send(FromServer::Bytes(body)).is_err() {
+                            if incoming.send(FromServer::Bytes(body, received)).is_err() {
                                 log_info!("net", "eagler: azalea dropped the connection");
                                 return Ok(());
                             }
@@ -292,6 +308,7 @@ pub(super) struct Bridge {
     login: Login,
     profile: GameProfile,
     raw: bool,
+    game: bool,
     closed: bool,
 }
 
@@ -307,19 +324,25 @@ impl AsyncRead for Bridge {
                 return Poll::Ready(Ok(()));
             }
             match me.incoming.poll_recv(cx) {
-                Poll::Ready(Some(FromServer::Bytes(body))) => {
+                Poll::Ready(Some(FromServer::Bytes(body, received))) => {
+                    me.note_lag(received.elapsed(), me.incoming.len());
                     me.pending = if me.raw { body } else { framed(&body) };
                     me.taken = 0;
                 }
                 Poll::Ready(Some(FromServer::Ended(reason))) => {
+                    me.note_lag(Duration::ZERO, 0);
                     me.closed = true;
                     return Poll::Ready(reason.map_or(Ok(()), |r| Err(io::Error::other(r))));
                 }
                 Poll::Ready(None) => {
+                    me.note_lag(Duration::ZERO, 0);
                     me.closed = true;
                     return Poll::Ready(Ok(()));
                 }
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    me.note_lag(Duration::ZERO, 0);
+                    return Poll::Pending;
+                }
             }
         }
         let n = buf.remaining().min(me.pending.len() - me.taken);
@@ -368,6 +391,12 @@ impl AsyncWrite for Bridge {
 }
 
 impl Bridge {
+    fn note_lag(&self, wait: Duration, queued: usize) {
+        if self.game {
+            azalea_protocol::traffic::note_read_lag(wait, queued);
+        }
+    }
+
     fn absorb(&mut self, body: Vec<u8>) -> io::Result<()> {
         let expected = match self.login {
             Login::Intention(_) => Some((ID_INTENTION, "intention")),
@@ -405,7 +434,7 @@ impl Bridge {
             let raw = azalea_protocol::write::serialize_packet(&packet)
                 .map_err(|e| io::Error::other(format!("eagler: {e}")))?;
             self.inject
-                .send(FromServer::Bytes(raw.into_vec()))
+                .send(FromServer::Bytes(raw.into_vec(), Instant::now()))
                 .map_err(|_| {
                     io::Error::new(io::ErrorKind::BrokenPipe, "the eagler connection is gone")
                 })?;

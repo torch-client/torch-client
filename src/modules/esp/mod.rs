@@ -47,6 +47,7 @@ struct Esp {
     shape: Enum<Shape>,
     fill: Slider,
     lava: Option<Toggle>,
+    lava_fade: Option<Toggle>,
     exposed: Option<Toggle>,
 }
 
@@ -60,6 +61,7 @@ static ESPS: [Esp; COUNT] = [
         shape: ore_esp::SHAPE,
         fill: ore_esp::FILL,
         lava: None,
+        lava_fade: None,
         exposed: Some(ore_esp::EXPOSED),
     },
     Esp {
@@ -69,6 +71,7 @@ static ESPS: [Esp; COUNT] = [
         shape: storage_esp::SHAPE,
         fill: storage_esp::FILL,
         lava: None,
+        lava_fade: None,
         exposed: None,
     },
     Esp {
@@ -78,6 +81,7 @@ static ESPS: [Esp; COUNT] = [
         shape: xray::SHAPE,
         fill: xray::FILL,
         lava: Some(xray::LAVA),
+        lava_fade: Some(xray::LAVRENDER),
         exposed: Some(xray::EXPOSED),
     },
     Esp {
@@ -87,6 +91,7 @@ static ESPS: [Esp; COUNT] = [
         shape: block_esp::SHAPE,
         fill: block_esp::FILL,
         lava: None,
+        lava_fade: None,
         exposed: None,
     },
 ];
@@ -202,14 +207,19 @@ fn handles(
     centre: ChunkPos,
     r: Option<i32>,
 ) -> (Vec<Handle>, i32) {
+    let dist2 = |h: &Handle| {
+        let (dx, dz) = (h.0.x - centre.x, h.0.z - centre.z);
+        dx * dx + dz * dz
+    };
     let w = world.read();
     let Some(r) = r else {
-        let all = w
+        let mut all: Vec<Handle> = w
             .chunks
             .chunks()
             .iter()
             .filter_map(|at| w.chunks.get(at).map(|c| (**at, c)))
             .collect();
+        all.sort_unstable_by_key(dist2);
         return (all, w.chunks.min_y());
     };
     let r2 = r * r;
@@ -225,6 +235,7 @@ fn handles(
             }
         }
     }
+    handles.sort_unstable_by_key(dist2);
     (handles, w.chunks.min_y())
 }
 

@@ -4,6 +4,7 @@ mod parse;
 mod suggestion;
 mod tree;
 mod usage;
+mod verify;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -11,6 +12,9 @@ pub(crate) mod tests;
 pub use candidates::Source;
 pub use suggestion::{Range, Suggestion, Suggestions};
 pub use tree::{CommandTree, Node, NodeKind, Provider};
+pub use verify::{Check, verify};
+
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::text::Span;
 
@@ -88,7 +92,7 @@ pub fn update_command_info(
     let parse = parse(tree, &input, parse_start);
     info.spans = format_text(&parse, &input);
     let show_from = if options.only_show_if_cursor_past_error {
-        parse.cursor
+        parse_start
     } else {
         1
     };
@@ -114,12 +118,12 @@ pub fn update_command_info(
     if cursor == input.len() {
         if info.suggestions.is_empty() && !parse.errors.is_empty() {
             let mut literals = 0;
-            for (_, error) in &parse.errors {
+            for (_, error, at) in &parse.errors {
                 if matches!(error, ParseError::LiteralIncorrect(_)) {
                     literals += 1;
                 } else {
                     info.usage
-                        .push((exception_message(error, &input, parse.cursor), true));
+                        .push((exception_message(error, &input, *at), true));
                 }
             }
             if literals > 0 {
@@ -153,7 +157,8 @@ fn parse_exception(parse: &Parse, input: &[char]) -> String {
         return String::new();
     }
     if parse.errors.len() == 1 {
-        return exception_message(&parse.errors[0].1, input, parse.cursor);
+        let (_, error, at) = &parse.errors[0];
+        return exception_message(error, input, *at);
     }
     let message = if parse.chain[0].range.is_empty() {
         "Unknown or incomplete command. See below for error"
@@ -175,10 +180,11 @@ pub(crate) fn last_word_index(text: &[char]) -> usize {
 
 #[derive(Default)]
 pub struct SuggestionClient {
-    next_id: u32,
     inflight: Option<(u32, String)>,
     replies: Vec<(String, Suggestions)>,
 }
+
+static NEXT_ID: AtomicU32 = AtomicU32::new(0);
 
 const HELD_REPLIES: usize = 32;
 
@@ -190,8 +196,7 @@ impl SuggestionClient {
         if self.reply_for(command).is_some() {
             return None;
         }
-        self.next_id = self.next_id.wrapping_add(1);
-        let id = self.next_id;
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         self.inflight = Some((id, command.to_string()));
         Some((id, command.to_string()))
     }

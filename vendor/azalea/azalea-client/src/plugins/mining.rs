@@ -62,6 +62,7 @@ impl Plugin for MiningPlugin {
                 (
                     update_mining_component,
                     handle_auto_mine,
+                    start_held_mining,
                     handle_mining_queued,
                     decrement_mine_delay,
                     continue_mining_block,
@@ -143,6 +144,35 @@ fn handle_auto_mine(
         } else if mining.is_some() && hit_result_component.miss() {
             stop_mining_block_event.write(StopMiningBlockEvent { entity });
         }
+    }
+}
+
+pub static HOLD_TO_MINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[allow(clippy::type_complexity)]
+fn start_held_mining(
+    mut commands: Commands,
+    query: Query<
+        (Entity, &HitResultComponent, &GameMode, &MineDelay),
+        (Without<Mining>, Without<MiningQueued>),
+    >,
+) {
+    if !HOLD_TO_MINE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    for (entity, hit_result, game_mode, mine_delay) in &query {
+        if !matches!(game_mode, GameMode::Survival | GameMode::Adventure) || **mine_delay > 0 {
+            continue;
+        }
+        let Some(hit) = hit_result.as_block_hit_result_if_not_miss() else {
+            continue;
+        };
+        commands.entity(entity).insert(MiningQueued {
+            position: hit.block_pos,
+            direction: hit.direction,
+            force: true,
+            continuing: true,
+        });
     }
 }
 
@@ -416,8 +446,16 @@ fn is_same_mining_target(
     current_mining_pos: &MineBlockPos,
     current_mining_item: &MineItem,
 ) -> bool {
-    let held_item = inventory.held_item();
-    Some(target_block) == current_mining_pos.0 && held_item == &current_mining_item.0
+    Some(target_block) == current_mining_pos.0
+        && is_same_item_same_components(inventory.held_item(), &current_mining_item.0)
+}
+
+fn is_same_item_same_components(a: &ItemStack, b: &ItemStack) -> bool {
+    match (a.as_present().filter(|i| !i.is_empty()), b.as_present().filter(|i| !i.is_empty())) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.is_same_item_and_components(b),
+        _ => false,
+    }
 }
 
 #[derive(Bundle, Clone, Default)]
@@ -459,6 +497,8 @@ pub struct FinishMiningBlockEvent {
     pub entity: Entity,
     pub position: BlockPos,
 }
+
+pub static ON_LOCAL_BREAK: std::sync::OnceLock<fn(BlockPos)> = std::sync::OnceLock::new();
 
 pub fn handle_finish_mining_block_observer(
     finish_mining_block: On<FinishMiningBlockEvent>,
@@ -507,13 +547,23 @@ pub fn handle_finish_mining_block_observer(
     if !can_use_game_master_blocks(abilities, permission_level)
         && matches!(
             registry_block,
-            BlockKind::CommandBlock | BlockKind::StructureBlock
+            BlockKind::CommandBlock
+                | BlockKind::ChainCommandBlock
+                | BlockKind::RepeatingCommandBlock
+                | BlockKind::StructureBlock
+                | BlockKind::Jigsaw
+                | BlockKind::TestBlock
+                | BlockKind::TestInstanceBlock
         )
     {
         return;
     }
     if block_state == BlockState::AIR {
         return;
+    }
+
+    if let Some(hook) = ON_LOCAL_BREAK.get() {
+        hook(event.position);
     }
 
     let fluid_state = FluidState::from(block_state);
@@ -627,14 +677,20 @@ pub fn continue_mining_block(
                 position: mining.pos,
             });
             commands.trigger(SwingArmEvent { entity });
-        } else if mining.force
-            || is_same_mining_target(
-                mining.pos,
-                inventory,
-                current_mining_pos,
-                current_mining_item,
-            )
-        {
+        } else if worlds.get(world_name).is_none_or(|world| {
+            world
+                .read()
+                .get_block_state(mining.pos)
+                .unwrap_or_default()
+                .is_air()
+        }) {
+            commands.entity(entity).remove::<Mining>();
+        } else if is_same_mining_target(
+            mining.pos,
+            inventory,
+            current_mining_pos,
+            current_mining_item,
+        ) {
             trace!("continue mining block at {:?}", mining.pos);
             let world_lock = worlds.get(world_name).unwrap();
             let world = world_lock.read();
@@ -642,10 +698,6 @@ pub fn continue_mining_block(
 
             trace!("target_block_state: {target_block_state:?}");
 
-            if target_block_state.is_air() {
-                commands.entity(entity).remove::<Mining>();
-                continue;
-            }
             if mining.continuing {
                 mining.continuing = false;
                 mine_block_progress_events.write(MineBlockProgressEvent {
@@ -702,7 +754,7 @@ pub fn continue_mining_block(
             commands.entity(entity).insert(MiningQueued {
                 position: mining.pos,
                 direction: mining.dir,
-                force: false,
+                force: mining.force,
                 continuing: true,
             });
         }

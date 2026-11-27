@@ -36,6 +36,26 @@ pub struct WeatherParams {
     pub fade: Vec4,
 }
 
+#[derive(Default)]
+struct ScrollClock {
+    stopped: Option<f32>,
+    lost: f32,
+}
+
+impl ScrollClock {
+    fn step(&mut self, runs: bool, now: f32) -> [f32; 2] {
+        match self.stopped {
+            None if !runs => self.stopped = Some(now - self.lost),
+            Some(at) if runs => {
+                self.lost = now - at;
+                self.stopped = None;
+            }
+            _ => {}
+        }
+        self.stopped.map_or([-self.lost, 1.0], |at| [at, 0.0])
+    }
+}
+
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct WeatherMaterial {
     #[texture(0)]
@@ -232,11 +252,14 @@ fn update_weather(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<WeatherMaterial>>,
     mut layer: Query<(&mut Transform, &mut Visibility), With<WeatherLayer>>,
+    time: Res<Time>,
+    mut scroll: Local<ScrollClock>,
 ) {
     crate::prof_span!("render:update_weather");
     let Ok((mut transform, mut visibility)) = layer.single_mut() else {
         return;
     };
+    let [bias, rate] = scroll.step(view.world_run.runs, time.elapsed_secs_wrapped() * 20.0);
     let intensity = env.rain;
     if intensity <= 0.0 || view.no_render.has(crate::modules::no_render::Part::Weather) {
         visibility.set_if_neq(Visibility::Hidden);
@@ -252,7 +275,7 @@ fn update_weather(
         eye.y.floor() as i32,
         eye.z.floor() as i32,
     );
-    let tick = view.game_time;
+    let tick = view.ticks;
     if assets.scanned != Some((camera, tick)) {
         assets.scanned = Some((camera, tick));
         let columns = scan(camera);
@@ -277,7 +300,7 @@ fn update_weather(
     }
 
     let params = WeatherParams {
-        fade: Vec4::new(intensity, (RADIUS * RADIUS) as f32, 0.0, 0.0),
+        fade: Vec4::new(intensity, (RADIUS * RADIUS) as f32, bias, rate),
     };
     if materials
         .get(&assets.material)

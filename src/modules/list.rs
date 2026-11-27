@@ -2,6 +2,9 @@ use std::borrow::Cow;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
+use crate::lang::Key;
+use crate::text::contains_ci;
+
 pub const MAX_GROUPS: usize = 5;
 
 pub const NO_ROW: u16 = u16::MAX;
@@ -9,6 +12,7 @@ pub const NO_ROW: u16 = u16::MAX;
 pub struct Entry {
     pub group: u8,
     pub label: Cow<'static, str>,
+    pub shown: Key,
     pub on: bool,
     pub color: u32,
 }
@@ -24,10 +28,37 @@ pub enum Preset {
 impl Preset {
     pub fn label(self) -> &'static str {
         match self {
-            Preset::Defaults => "Defaults",
-            Preset::Clear => "None",
+            Preset::Defaults => crate::lang::tr!("modmsg.list.preset.defaults"),
+            Preset::Clear => crate::lang::tr!("modmsg.list.preset.none"),
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Match {
+    Exact,
+    Prefix,
+    Inside,
+}
+
+impl Match {
+    pub const ALL: [Match; 3] = [Match::Exact, Match::Prefix, Match::Inside];
+}
+
+fn match_of(text: &str, query: &str) -> Option<Match> {
+    if !contains_ci(text, query) {
+        return None;
+    }
+    let mut rest = text.chars().flat_map(char::to_lowercase);
+    let starts = query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .all(|q| rest.next() == Some(q));
+    Some(match (starts, rest.next()) {
+        (true, None) => Match::Exact,
+        (true, Some(_)) => Match::Prefix,
+        (false, _) => Match::Inside,
+    })
 }
 
 const fn pack(on: bool, color: u32) -> u32 {
@@ -36,6 +67,7 @@ const fn pack(on: bool, color: u32) -> u32 {
 
 struct Table {
     labels: Box<[Cow<'static, str>]>,
+    shown: Box<[Key]>,
     rows: Box<[AtomicU32]>,
     defaults: Box<[u32]>,
     starts: [u32; MAX_GROUPS + 1],
@@ -44,9 +76,10 @@ struct Table {
 
 pub struct BitList {
     pub key: &'static str,
-    pub title: &'static str,
+    title_key: Key,
+    mod_title: &'static str,
     pub width: f32,
-    pub groups: &'static [&'static str],
+    groups: &'static [Key],
     pub colored: bool,
     pub presets: &'static [Preset],
     pub inline: bool,
@@ -60,16 +93,17 @@ pub struct BitList {
 impl BitList {
     pub const fn new(
         key: &'static str,
-        title: &'static str,
+        title: Key,
         width: f32,
-        groups: &'static [&'static str],
+        groups: &'static [Key],
         colored: bool,
         presets: &'static [Preset],
         build: fn() -> Built,
     ) -> BitList {
         BitList {
             key,
-            title,
+            title_key: title,
+            mod_title: "",
             width,
             groups,
             colored,
@@ -88,11 +122,12 @@ impl BitList {
         key: &'static str,
         title: &'static str,
         width: f32,
-        groups: &'static [&'static str],
+        groups: &'static [Key],
         presets: &'static [Preset],
         built: Built,
     ) -> &'static BitList {
-        let mut list = BitList::new(key, title, width, groups, false, presets, unbuilt);
+        let mut list = BitList::new(key, Key::NONE, width, groups, false, presets, unbuilt);
+        list.mod_title = title;
         list.inline = true;
         let table = list.make_table(built);
         let _ = list.table.set(table);
@@ -144,6 +179,11 @@ impl BitList {
 
         let defaults: Box<[u32]> = tagged.iter().map(|(_, e)| pack(e.on, e.color)).collect();
         let rows = defaults.iter().map(|d| AtomicU32::new(*d)).collect();
+        let shown: Box<[Key]> = if tagged.iter().any(|(_, e)| e.shown != Key::NONE) {
+            tagged.iter().map(|(_, e)| e.shown).collect()
+        } else {
+            Box::default()
+        };
         let labels = tagged.into_iter().map(|(_, e)| e.label).collect();
 
         let index: Box<[u16]> = if keys.is_empty() {
@@ -159,6 +199,7 @@ impl BitList {
 
         Table {
             labels,
+            shown,
             rows,
             defaults,
             starts,
@@ -176,6 +217,40 @@ impl BitList {
 
     pub fn label(&self, i: usize) -> &str {
         &self.table().labels[i]
+    }
+
+    pub fn shown(&self, i: usize) -> &str {
+        let t = self.table();
+        match t.shown.get(i) {
+            Some(&k) if k != Key::NONE => k.get(),
+            _ => &*t.labels[i],
+        }
+    }
+
+    pub fn row_match(&self, i: usize, query: &str) -> Option<Match> {
+        let t = self.table();
+        let label = match_of(&t.labels[i], query);
+        match t.shown.get(i) {
+            Some(&k) if k != Key::NONE => match_of(k.get(), query).into_iter().chain(label).min(),
+            _ => label,
+        }
+    }
+
+    pub fn title(&self) -> &'static str {
+        self.title_key.or(self.mod_title)
+    }
+
+    pub fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    pub fn group(&self, g: usize) -> &'static str {
+        self.groups[g].get()
+    }
+
+    pub fn group_matches(&self, g: usize, query: &str) -> bool {
+        let k = self.groups[g];
+        contains_ci(k.get(), query) || contains_ci(k.english(), query)
     }
 
     pub fn group_range(&self, g: usize) -> std::ops::Range<usize> {
@@ -295,6 +370,16 @@ impl BitList {
             _ => false,
         }
     }
+
+    pub fn key_color(&self, key: u32) -> Option<u32> {
+        match self.table().index.get(key as usize) {
+            Some(&i) if i != NO_ROW => {
+                let v = self.table().rows[i as usize].load(Relaxed);
+                (v & 1 != 0).then_some(v >> 8)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(lua_mods)]
@@ -306,7 +391,7 @@ pub fn widest() -> f32 {
     ALL.iter().map(|l| l.width).fold(0.0, f32::max)
 }
 
-pub static ALL: [&BitList; 11] = [
+pub static ALL: [&BitList; 13] = [
     &super::esp::blocks::XRAY,
     &super::esp::blocks::BLOCK_ESP,
     &super::esp::blocks::ORES,
@@ -316,6 +401,8 @@ pub static ALL: [&BitList; 11] = [
     &super::esp::blocks::STORAGE,
     &super::esp::blocks::SCAFFOLD,
     &super::entities::LIST,
+    &super::entities::ESP,
     &super::items::LIST,
     &super::sound_esp::SOUNDS,
+    &super::pathfinder::THROWAWAY,
 ];

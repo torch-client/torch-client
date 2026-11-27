@@ -1,3 +1,5 @@
+use crate::lang::Key;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(u8)]
 pub enum Kind {
@@ -39,6 +41,21 @@ impl Kind {
             Kind::Emerald => "Emerald",
             Kind::Quartz => "Quartz",
             Kind::Debris => "Ancient Debris",
+        }
+    }
+
+    pub const fn shown(self) -> Key {
+        match self {
+            Kind::Coal => const { Key::of("lists.ores.coal") },
+            Kind::Iron => const { Key::of("lists.ores.iron") },
+            Kind::Gold => const { Key::of("lists.ores.gold") },
+            Kind::Redstone => const { Key::of("lists.ores.redstone") },
+            Kind::Diamond => const { Key::of("lists.ores.diamond") },
+            Kind::Lapis => const { Key::of("lists.ores.lapis") },
+            Kind::Copper => const { Key::of("lists.ores.copper") },
+            Kind::Emerald => const { Key::of("lists.ores.emerald") },
+            Kind::Quartz => const { Key::of("lists.ores.quartz") },
+            Kind::Debris => const { Key::of("lists.ores.debris") },
         }
     }
 

@@ -67,6 +67,9 @@ pub(super) fn save(s: &Store, mods: &[Mod]) {
                 persist::module_json(s, module.ix, module.keyed()),
             );
         }
-        m.doc.store(&Json::Object(root).to_string());
+        let text = Json::Object(root).to_string();
+        if m.doc.load().as_deref() != Some(text.as_str()) {
+            m.doc.store(&text);
+        }
     }
 }

@@ -61,6 +61,7 @@ pub struct WaterMaterial(pub Handle<StandardMaterial>);
 pub struct LightmapState {
     flicker: f32,
     flicker_tick: u64,
+    boss_tick: u64,
     flicker_rng: crate::util::javarandom::JavaRandom,
     boss_darkening: [f32; 2],
     water_vision_time: i32,
@@ -77,6 +78,7 @@ impl Default for LightmapState {
         LightmapState {
             flicker: 0.0,
             flicker_tick: 0,
+            boss_tick: 0,
             flicker_rng: crate::util::javarandom::JavaRandom::new(0),
             texels: Vec::new(),
             boss_darkening: [0.0; 2],
@@ -126,8 +128,15 @@ pub(crate) fn update_lightmap(
     gui: Res<crate::gui::GuiState>,
 ) {
     crate::prof_span!("render:update_lightmap");
-    let tick = view.game_time;
+    let tick = view.ticks;
     let behind = tick.wrapping_sub(state.flicker_tick).min(20);
+    let boss_behind = view.world_ticks.wrapping_sub(state.boss_tick).min(20);
+    state.boss_tick = view.world_ticks;
+    for _ in 0..boss_behind {
+        state.boss_darkening[0] = state.boss_darkening[1];
+        state.boss_darkening[1] =
+            super::lightmap::tick_boss_darkening(state.boss_darkening[1], view.boss_darken);
+    }
     let eye_in_water = {
         let [x, y, z] = view.tick_eye();
         crate::util::block_model::eye_fluid_at(x, y, z)
@@ -146,9 +155,6 @@ pub(crate) fn update_lightmap(
         let rng = &mut state.flicker_rng;
         let noise = [rng.next_f32(), rng.next_f32(), rng.next_f32()];
         state.flicker = super::lightmap::tick_flicker(state.flicker, noise);
-        state.boss_darkening[0] = state.boss_darkening[1];
-        state.boss_darkening[1] =
-            super::lightmap::tick_boss_darkening(state.boss_darkening[1], view.boss_darken);
         state.water_vision_time =
             super::lightmap::tick_water_vision(state.water_vision_time, eye_in_water, spectator);
     }
@@ -180,11 +186,11 @@ pub(crate) fn update_lightmap(
         water_vision: state.water_vision,
         conduit_power: view.conduit_power,
         darkness: view.darkness,
-        darkness_age: view.local.age_ticks - 2.0 * view.partial,
+        darkness_age: view.local.age_ticks - (view.partial + view.world_partial),
         boss_darkening: if view.no_render.has(crate::modules::no_render::Part::BossSky) {
             0.0
         } else {
-            boss_prev + (boss - boss_prev) * view.partial
+            boss_prev + (boss - boss_prev) * view.world_partial
         },
     });
     if crate::modules::fullbright::night_vision() {
@@ -207,6 +213,8 @@ pub struct ChunkIndex {
     columns: HashMap<(i32, i32), Column>,
     free_slots: Vec<u32>,
     next_slot: u32,
+    assigned: Vec<u32>,
+    assigned_base: u64,
     generation: u64,
     y_lo: i32,
     y_hi: i32,
@@ -218,6 +226,8 @@ impl Default for ChunkIndex {
             columns: HashMap::new(),
             free_slots: Vec::new(),
             next_slot: 0,
+            assigned: Vec::new(),
+            assigned_base: 0,
             generation: 0,
             y_lo: i32::MAX,
             y_hi: i32::MIN,
@@ -269,6 +279,8 @@ impl ChunkIndex {
             columns,
             free_slots,
             next_slot,
+            assigned,
+            assigned_base,
             generation,
             y_lo,
             y_hi,
@@ -301,6 +313,14 @@ impl ChunkIndex {
                     slot
                 }
             };
+            if held.is_none() {
+                assigned.push(slot);
+                if assigned.len() > *next_slot as usize {
+                    let cut = assigned.len() / 2;
+                    assigned.drain(..cut);
+                    *assigned_base += cut as u64;
+                }
+            }
             ops.push(TerrainOp::Upload {
                 slot,
                 origin,
@@ -312,12 +332,13 @@ impl ChunkIndex {
         *generation += 1;
     }
 
-    pub fn slots_of(&self, cx: i32, cz: i32, sec_y: i32) -> (Option<u32>, Option<u32>) {
-        self.columns
-            .get(&(cx, cz))
-            .and_then(|column| column.sections.get(&sec_y))
-            .map(|slot| (slot.slots[LAYER_OPAQUE], slot.slots[LAYER_WATER]))
-            .unwrap_or((None, None))
+    pub fn assigned_mark(&self) -> u64 {
+        self.assigned_base + self.assigned.len() as u64
+    }
+
+    pub fn assigned_since(&self, mark: u64) -> Option<&[u32]> {
+        let start = mark.checked_sub(self.assigned_base)?;
+        self.assigned.get(start as usize..)
     }
 
     pub fn has_section(&self, cx: i32, cz: i32, sec_y: i32) -> bool {
@@ -350,12 +371,12 @@ impl ChunkIndex {
         (self.y_lo - 16, self.y_hi + 16)
     }
 
-    pub fn sections(&self) -> impl Iterator<Item = ((i32, i32, i32), VisibilitySet)> + '_ {
+    pub fn sections(&self) -> impl Iterator<Item = ((i32, i32, i32), SectionSlot)> + '_ {
         self.columns.iter().flat_map(|(&(cx, cz), column)| {
             column
                 .sections
                 .iter()
-                .map(move |(&sec_y, slot)| ((cx, sec_y, cz), slot.vis))
+                .map(move |(&sec_y, slot)| ((cx, sec_y, cz), *slot))
         })
     }
 
@@ -364,6 +385,8 @@ impl ChunkIndex {
         self.columns.clear();
         self.free_slots.clear();
         self.next_slot = 0;
+        self.assigned_base += self.assigned.len() as u64 + 1;
+        self.assigned.clear();
         self.y_lo = i32::MAX;
         self.y_hi = i32::MIN;
         self.generation += 1;
@@ -780,7 +803,25 @@ fn place_camera(
         transform.rotation = angles.rotation();
         return;
     }
-    let [ix, iy, iz] = view.player_lerp;
+    let spectated_angles = view.spectate.map(|s| {
+        let (yaw, pitch) = crate::modules::sent::Look {
+            yaw: s.y_rot,
+            pitch: s.x_rot,
+        }
+        .camera();
+        CameraAngles { yaw, pitch }
+    });
+    let angles = spectated_angles.as_ref().unwrap_or(angles);
+    let (feet, sleeping, bed_orientation, camera_distance) = match view.spectate {
+        Some(s) => (s.feet, s.sleeping, s.bed_orientation, s.camera_distance),
+        None => (
+            local_camera_feet(view),
+            view.sleeping,
+            view.bed_orientation,
+            view.camera_distance,
+        ),
+    };
+    let [ix, iy, iz] = feet;
     let eye_world = DVec3::new(ix, iy + f64::from(view.camera_eye_height), iz);
     origin.follow(eye_world);
     let eye = origin.to_render(eye_world);
@@ -792,18 +833,24 @@ fn place_camera(
             angles.rotation()
         };
         let back = -(rotation * Vec3::NEG_Z);
-        let entity = azalea::physics::clip::ClipEntity {
-            bottom: view.player_pos[1],
-            descending: view.descending,
+        let entity = match view.spectate {
+            Some(s) => azalea::physics::clip::ClipEntity {
+                bottom: s.feet[1],
+                descending: false,
+            },
+            None => azalea::physics::clip::ClipEntity {
+                bottom: view.player_pos[1],
+                descending: view.descending,
+            },
         };
-        if let Some(zoom) = max_zoom(eye_world, back.as_dvec3(), view.camera_distance, entity) {
+        if let Some(zoom) = max_zoom(eye_world, back.as_dvec3(), camera_distance, entity) {
             *last_zoom = zoom;
         }
-        let zoom = last_zoom.min(view.camera_distance);
+        let zoom = last_zoom.min(camera_distance);
         transform.translation = eye + back * zoom;
         transform.rotation = rotation;
-    } else if view.sleeping {
-        let mc_yaw = match view.bed_orientation {
+    } else if sleeping {
+        let mc_yaw = match bed_orientation {
             Some(dir) => dir.to_y_rot() - 180.0,
             None => 0.0,
         };
@@ -814,6 +861,16 @@ fn place_camera(
         transform.translation = eye;
         transform.rotation = angles.rotation();
     }
+}
+
+fn local_camera_feet(view: &FrameView) -> [f64; 3] {
+    if view.cart_camera
+        && let Some(ride) = &view.cart_ride
+        && let Some(at) = ride.view.sample(view.partial)
+    {
+        return std::array::from_fn(|i| at.pos[i] + (view.player_pos[i] - ride.pos[i]));
+    }
+    view.player_lerp
 }
 
 const CAMERA_CLIP_SPREAD: f64 = 0.1;
@@ -1032,6 +1089,10 @@ fn poll_shared_state(
     {
         let _churn = crate::diag::alloc::scope(crate::diag::alloc::Site::Upload);
         for sec in pending {
+            crate::client::worldsync::hidden::stored(
+                (sec.chunk_x, sec.sec_y >> 4, sec.chunk_z),
+                sec.opaque.hidden,
+            );
             index.store_section(
                 sec.chunk_x,
                 sec.chunk_z,
@@ -1077,6 +1138,14 @@ pub fn partial_ticks(state: &SharedState) -> f32 {
         .last_tick_time
         .map(|t| (t.elapsed().as_secs_f32() / TICK_SECS).min(1.0))
         .unwrap_or(0.0)
+}
+
+pub fn world_partial_ticks(state: &SharedState) -> f32 {
+    if state.session.world_run.runs {
+        partial_ticks(state)
+    } else {
+        1.0
+    }
 }
 
 const TICK_SECS: f32 = 0.05;
@@ -1287,6 +1356,9 @@ impl TagProjector {
             max_health: crate::session::VANILLA_MAX_HEALTH,
             gamemode: crate::gui::hud::TagGamemode::Hidden,
             armor: None,
+            hands: None,
+            dropped_item: false,
+            item_count: 0,
         })
     }
 }
@@ -1298,6 +1370,7 @@ fn dress_player_tag(
     max_health: f32,
     gamemode: Option<crate::session::Gamemode>,
     armor: Option<&std::sync::Arc<[crate::session::SlotStack; 4]>>,
+    hands: Option<&std::sync::Arc<[crate::session::SlotStack; 2]>>,
 ) {
     use crate::gui::hud::TagGamemode;
     use crate::modules::nametags::{Health, Sizing};
@@ -1313,6 +1386,9 @@ fn dress_player_tag(
     tag.armor = armor
         .filter(|a| cfg.armor && a.iter().any(|s| !s.is_empty()))
         .cloned();
+    tag.hands = hands
+        .filter(|h| cfg.held && h.iter().any(|s| !s.is_empty()))
+        .cloned();
 }
 
 fn collect_player_tags(
@@ -1324,7 +1400,11 @@ fn collect_player_tags(
 ) {
     let cfg = crate::modules::nametags::config();
     let on = cfg.is_some();
+    let camera = crate::client::tracking::spectated_id();
     for info in players {
+        if camera == Some(info.id) {
+            continue;
+        }
         if info.hidden_by_team && !on {
             continue;
         }
@@ -1359,12 +1439,20 @@ fn collect_player_tags(
                 info.max_health,
                 info.gamemode,
                 info.armor.as_ref(),
+                info.hands.as_ref(),
             );
         }
         if info.anim.layers().extra_ears {
             tag.y -= 10.0 * tag.scale;
         }
         tags.push(tag);
+    }
+}
+
+fn name_tag_attachment(kind: azalea_registry::builtin::EntityKind, height: f32) -> f32 {
+    match kind {
+        azalea_registry::builtin::EntityKind::Sniffer => height * (2.05 / 1.75),
+        _ => height,
     }
 }
 
@@ -1376,9 +1464,31 @@ fn collect_nametags(
     projector: &TagProjector,
     tags: &mut Vec<crate::gui::hud::NameTag>,
 ) {
+    let camera = crate::client::tracking::spectated_id();
+    let item_labels = crate::modules::nametags::config().is_some_and(|c| c.items);
     for anim in entities {
         let extras = anim.shared();
         if extras.name_spans.is_empty() {
+            if item_labels && !extras.item_label.is_empty() {
+                let at = projector.anchor(anim.position(partial), anim.bounding_box_height() + 0.5);
+                if let Some(mut tag) = projector.project(
+                    &extras.item_label,
+                    None,
+                    at,
+                    NAME_TAG_RANGE,
+                    BELOW_NAME_RANGE,
+                ) {
+                    tag.dropped_item = true;
+                    tag.item_count = extras.item_count;
+                    tags.push(tag);
+                }
+            }
+            continue;
+        }
+        if camera == Some(anim.id)
+            && anim.is_living()
+            && anim.kind != azalea_registry::builtin::EntityKind::ArmorStand
+        {
             continue;
         }
         if !extras.name_visible && crosshair_entity != Some(anim.id) {
@@ -1389,7 +1499,10 @@ fn collect_nametags(
         {
             continue;
         }
-        let at = projector.anchor(anim.position(partial), anim.bounding_box_height() + 0.5);
+        let at = projector.anchor(
+            anim.position(partial),
+            name_tag_attachment(anim.kind, anim.bounding_box_height()) + 0.5,
+        );
         tags.extend(projector.project(
             &extras.name_spans,
             None,
@@ -1852,6 +1965,7 @@ pub(super) fn reset_menu_state(state: &mut crate::gui::GuiState, shared: &Shared
     state.recipe_book.reset();
     state.ghost.clear();
     state.book_clock = None;
+    state.book.clear_overlay();
 }
 
 pub(super) fn enter_screen(
@@ -1908,6 +2022,8 @@ pub(super) fn enter_screen(
         let mut s = shared.0.lock().unwrap();
         s.screen_open = open;
         s.pause_screen = next == crate::gui::Screen::Pause;
+        s.chat_screen = next == crate::gui::Screen::Chat;
+        s.slot_screen = next.is_modal();
         if advancements_closed {
             s.session.seen_advancements.push(None);
         }
@@ -2250,6 +2366,7 @@ fn apply_fov(
         };
 
         let base_fov = state.options.fov as f32 + (target_fov - state.options.fov as f32) * ease.0;
+        crate::modules::zoom::set_fov_ratio(base_fov / (state.options.fov as f32).max(1.0));
         let fov = modify_fov_for_death_or_fluid(
             base_fov * modifier,
             &view,
@@ -2423,14 +2540,31 @@ fn tick_audio(
     });
 }
 
-fn sync_smooth_lighting(state: Res<crate::gui::GuiState>, mut last: Local<Option<bool>>) {
+fn sync_smooth_lighting(
+    state: Res<crate::gui::GuiState>,
+    shared: Res<Shared>,
+    mut last: Local<Option<bool>>,
+) {
     let wanted = state.options.smooth_lighting;
     if *last == Some(wanted) {
         return;
     }
+    let had_previous_value = last.is_some();
     *last = Some(wanted);
     crate::renderer::set_smooth_lighting(wanted);
     forward_lighting_options();
+    if had_previous_value {
+        shared.0.lock().unwrap().remesh_chunks_requested = true;
+    }
+}
+
+fn sync_mouse_options(state: Res<crate::gui::GuiState>, mut last: Local<Option<f64>>) {
+    let wanted = state.options.mouse_sensitivity;
+    if *last == Some(wanted) {
+        return;
+    }
+    *last = Some(wanted);
+    super::input::set_look_scale(wanted);
 }
 
 fn forward_lighting_options() {
@@ -2741,13 +2875,18 @@ pub fn run(
     startup: crate::gui::render::StartupState,
     have_assets: bool,
 ) {
+    let options = crate::gui::GuiOptions::default();
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    let window_size = crate::gui::window_size(&options);
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    let window_size = crate::gui::WINDOW_SIZE_DEFAULT;
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Torch Client".into(),
-                    resolution: (1280u32, 720u32).into(),
+                    resolution: window_size.into(),
                     #[cfg(target_os = "android")]
                     present_mode: bevy::window::PresentMode::AutoNoVsync,
                     #[cfg(not(target_os = "android"))]
@@ -2794,6 +2933,7 @@ pub fn run(
         atlas: gui_atlas,
         shared: shared.clone(),
         startup,
+        options,
     })
     .add_plugins(crate::blockentities::BlockEntityPlugin)
     .add_plugins(crate::renderer::player_model::PlayerModelPlugin)
@@ -2914,8 +3054,14 @@ pub fn run(
     );
     #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(Update, sync_vsync);
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    app.add_systems(
+        Update,
+        super::input::remember_window_size.after(fullscreen_key),
+    );
     app.add_systems(Last, trace_reextracted_meshes)
         .add_systems(Update, sync_smooth_lighting)
+        .add_systems(Update, sync_mouse_options.before(mouse_look))
         .add_systems(Update, sync_lighting_enabled)
         .add_systems(Update, sync_cutout_leaves)
         .add_systems(Update, toggle_screen.after(apply_gui_nav))

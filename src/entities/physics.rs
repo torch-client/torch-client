@@ -17,6 +17,11 @@ pub trait Level {
     fn friction(&self, pos: [i32; 3]) -> f32;
 
     fn speed_factor(&self, pos: [i32; 3]) -> (f32, bool);
+
+    fn rail(&self, pos: [i32; 3]) -> Option<crate::util::rail::RailShape> {
+        let _ = pos;
+        None
+    }
 }
 
 pub const MEMO_CELLS: usize = 64;
@@ -86,6 +91,7 @@ pub enum Motion {
     Arrow,
     Thrown,
     Fireball,
+    Rocket,
 }
 
 impl Motion {
@@ -105,6 +111,7 @@ impl Motion {
             | EntityKind::SmallFireball
             | EntityKind::DragonFireball
             | EntityKind::WitherSkull => Motion::Fireball,
+            EntityKind::FireworkRocket => Motion::Rocket,
             _ => Motion::Server,
         }
     }
@@ -114,7 +121,7 @@ impl Motion {
             Motion::Item | Motion::FallingBlock | Motion::Tnt => 0.04,
             Motion::Arrow => 0.05,
             Motion::Thrown => 0.03,
-            Motion::Fireball | Motion::Server => 0.0,
+            Motion::Fireball | Motion::Rocket | Motion::Server => 0.0,
         }
     }
 }
@@ -125,6 +132,8 @@ pub struct Body {
     pub on_ground: bool,
     pub in_ground: bool,
     pub acceleration_power: f64,
+    pub shot_at_angle: bool,
+    pub horizontal_collision: bool,
 }
 
 pub const INITIAL_ACCELERATION_POWER: f64 = 0.1;
@@ -196,6 +205,7 @@ fn move_self(
     let x_collision = !equal(delta[0], movement[0]);
     let z_collision = !equal(delta[2], movement[2]);
     let horizontal_collision = x_collision || z_collision;
+    body.horizontal_collision = horizontal_collision;
     if delta[1].abs() > 0.0 {
         let vertical_collision = delta[1] != movement[1];
         body.on_ground = vertical_collision && delta[1] < 0.0;
@@ -241,6 +251,21 @@ pub fn step(
 ) -> [f64; 3] {
     match motion {
         Motion::Server => pos,
+
+        Motion::Rocket => {
+            if !body.shot_at_angle {
+                let horizontal = if body.horizontal_collision { 1.0 } else { 1.15 };
+                body.velocity = [
+                    body.velocity[0] * horizontal,
+                    body.velocity[1] + 0.04,
+                    body.velocity[2] * horizontal,
+                ];
+            }
+            let before = body.velocity;
+            pos = move_self(pos, body, memo, shape, level, 0.500001);
+            body.velocity = before;
+            pos
+        }
 
         Motion::Item => {
             if shape.in_water {

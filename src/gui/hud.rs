@@ -71,6 +71,9 @@ pub struct NameTag {
     pub max_health: f32,
     pub gamemode: TagGamemode,
     pub armor: Option<std::sync::Arc<[crate::session::SlotStack; 4]>>,
+    pub hands: Option<std::sync::Arc<[crate::session::SlotStack; 2]>>,
+    pub dropped_item: bool,
+    pub item_count: i32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -294,28 +297,30 @@ pub fn draw(
     if (info.flying || editing) && hud.shown(ElementId::Flying) {
         put(
             ElementId::Flying,
-            line("Flying".to_owned(), FLYING_COLOR, 0.0),
+            line(crate::lang::tr!("hud.flying").to_owned(), FLYING_COLOR, 0.0),
         );
     }
     let status_live = info.status.as_deref().filter(|text| !text.is_empty());
     if (status_live.is_some() || editing) && hud.shown(ElementId::Status) {
-        let text = status_live.unwrap_or("Connecting...").to_owned();
+        let text = status_live
+            .unwrap_or(crate::lang::tr!("hud.status_preview"))
+            .to_owned();
         put(ElementId::Status, line(text, STATUS_COLOR, 0.0));
     }
     if (show_fps || editing) && hud.shown(ElementId::Fps) {
         let mut l = line(
-            format!("FPS: {:.0}", info.fps.max(0.0)),
+            crate::lang::trf!("hud.fps", format_args!("{:.0}", info.fps.max(0.0))),
             TEXT_COLOR,
-            width("FPS: 9999"),
+            width(&crate::lang::trf!("hud.fps", 9999)),
         );
         l.fixed = true;
         put(ElementId::Fps, l);
     }
     if crate::diag::MEMORY_METRICS && hud.shown(ElementId::Ram) {
         let mut l = line(
-            format!("RAM: {}", Bytes(info.runtime.rss_bytes)),
+            crate::lang::trf!("hud.ram", Bytes(info.runtime.rss_bytes)),
             TEXT_COLOR,
-            width("RAM: 9999 GiB"),
+            width(&crate::lang::trf!("hud.ram", "9999 GiB")),
         );
         l.fixed = true;
         put(ElementId::Ram, l);
@@ -323,7 +328,7 @@ pub fn draw(
     if (info.freecam || editing) && hud.shown(ElementId::Freecam) {
         put(
             ElementId::Freecam,
-            line("[ FREECAM ]".to_owned(), GREEN, 0.0),
+            line(crate::lang::tr!("hud.freecam").to_owned(), GREEN, 0.0),
         );
     }
 
@@ -807,6 +812,11 @@ fn network_items(info: &HudInfo) -> Vec<Item<'static>> {
             format!("{} ({})", rate(rt.tx_per_sec), Bytes(rt.tx_total)),
         )
         .into(),
+        row(
+            "Read lag",
+            format!("{} ms ({} queued)", rt.read_lag_ms, rt.rx_queued),
+        )
+        .into(),
     ]
 }
 
@@ -1085,10 +1095,18 @@ fn overview_sections(info: &HudInfo, d: &DebugInfo) -> Vec<(&'static str, Vec<It
 pub fn draw_nametags(p: &mut Painter, _ctx: &ScreenCtx, tags: &[NameTag]) {
     let mut scratch = String::new();
     let mut armor_scratch = ArmorScratch::default();
+    let empty_slot = crate::session::SlotStack::default();
     let cfg = crate::modules::nametags::config();
-    let (on, show_distance, health_number, health_bar) = match cfg {
-        Some(c) => (true, c.distance, c.health.number(), c.health.bar()),
-        None => (false, false, false, false),
+    let (on, show_distance, item_distance, item_count, health_number, health_bar) = match cfg {
+        Some(c) => (
+            true,
+            c.distance,
+            c.item_distance,
+            c.item_count,
+            c.health.number(),
+            c.health.bar(),
+        ),
+        None => (false, false, false, false, false, false),
     };
     let bg = if on { NAMETAG_BG_MODULE } else { NAMETAG_BG };
     let shadow = on;
@@ -1125,11 +1143,22 @@ pub fn draw_nametags(p: &mut Painter, _ctx: &ScreenCtx, tags: &[NameTag]) {
                 let _ = write!(scratch, " {}", hp.max(0.0).round() as i32);
             }
             let health_len = scratch.len();
-            if show_distance {
+            if item_count && tag.dropped_item && tag.item_count > 1 {
+                use std::fmt::Write;
+                let _ = write!(scratch, " x{}", tag.item_count);
+            }
+            let count_len = scratch.len();
+            let distance_on = if tag.dropped_item {
+                item_distance
+            } else {
+                show_distance
+            };
+            if distance_on {
                 use std::fmt::Write;
                 let _ = write!(scratch, " {:.1}m", tag.distance);
             }
-            let (health_text, distance_text) = scratch.split_at(health_len);
+            let (health_text, rest) = scratch.split_at(health_len);
+            let (count_text, distance_text) = rest.split_at(count_len - health_len);
 
             let prefix_w = p.atlas.font.width_str(prefix);
             let name_w = if on {
@@ -1138,8 +1167,9 @@ pub fn draw_nametags(p: &mut Painter, _ctx: &ScreenCtx, tags: &[NameTag]) {
                 p.atlas.font.width(&tag.name)
             };
             let health_w = p.atlas.font.width_str(health_text);
+            let count_w = p.atlas.font.width_str(count_text);
             let distance_w = p.atlas.font.width_str(distance_text);
-            let w = prefix_w + name_w + health_w + distance_w;
+            let w = prefix_w + name_w + health_w + count_w + distance_w;
 
             let mut x = -w / 2.0;
             plate(p, x, y, w);
@@ -1154,6 +1184,9 @@ pub fn draw_nametags(p: &mut Painter, _ctx: &ScreenCtx, tags: &[NameTag]) {
             if !health_text.is_empty() {
                 let ratio = health.map_or(0.0, |hp| health_ratio(hp, tag.max_health));
                 x = p.text_plain(health_text, x, y, health_color(ratio), shadow);
+            }
+            if !count_text.is_empty() {
+                x = p.text_plain(count_text, x, y, crate::text::GRAY, shadow);
             }
             if !distance_text.is_empty() {
                 p.text_plain(distance_text, x, y, DISTANCE_COLOR, shadow);
@@ -1181,10 +1214,14 @@ pub fn draw_nametags(p: &mut Painter, _ctx: &ScreenCtx, tags: &[NameTag]) {
                 );
             }
 
-            if let (Some(armor), Some(cfg)) = (&tag.armor, cfg) {
+            if let (true, Some(cfg)) = (tag.armor.is_some() || tag.hands.is_some(), cfg) {
+                let empty = &empty_slot;
+                let hand = |i: usize| tag.hands.as_ref().map_or(empty, |h| &h[i]);
+                let worn = |i: usize| tag.armor.as_ref().map_or(empty, |a| &a[i]);
+                let row = [hand(0), worn(0), worn(1), worn(2), worn(3), hand(1)];
                 draw_tag_armor(
                     p,
-                    armor,
+                    &row,
                     top - ARMOR_GAP,
                     tag.scale,
                     cfg.durability,
@@ -1196,6 +1233,8 @@ pub fn draw_nametags(p: &mut Painter, _ctx: &ScreenCtx, tags: &[NameTag]) {
     }
 }
 
+const TAG_ROW: usize = 6;
+
 #[derive(Default)]
 struct ArmorScratch {
     labels: String,
@@ -1205,7 +1244,7 @@ struct ArmorScratch {
 
 fn draw_tag_armor(
     p: &mut Painter,
-    armor: &[crate::session::SlotStack; 4],
+    items: &[&crate::session::SlotStack; TAG_ROW],
     bottom: f32,
     tag_scale: f32,
     durability: crate::modules::nametags::Durability,
@@ -1218,8 +1257,8 @@ fn draw_tag_armor(
 
     scratch.labels.clear();
     scratch.lines.clear();
-    let mut columns: [(f32, std::ops::Range<usize>); 4] = Default::default();
-    for (stack, column) in armor.iter().zip(&mut columns) {
+    let mut columns: [(f32, std::ops::Range<usize>); TAG_ROW] = Default::default();
+    for (stack, column) in items.iter().zip(&mut columns) {
         if stack.is_empty() {
             continue;
         }
@@ -1249,7 +1288,7 @@ fn draw_tag_armor(
     let device = p.scale;
     p.scale = device * tag_scale;
     let label = &mut scratch.durability;
-    for (stack, (w, lines)) in armor.iter().zip(&columns) {
+    for (stack, (w, lines)) in items.iter().zip(&columns) {
         if stack.is_empty() {
             continue;
         }
@@ -1402,8 +1441,10 @@ pub struct HudOverlays {
     held: Vec<crate::text::Span>,
     held_ends: f32,
     held_item: &'static str,
+    held_modded: Option<std::num::NonZeroU32>,
     held_custom: Option<Vec<crate::text::Span>>,
     held_potion: Option<crate::items::potions::PotionContents>,
+    stopped: bool,
 }
 
 impl Default for HudOverlays {
@@ -1421,8 +1462,10 @@ impl Default for HudOverlays {
             held: Vec::new(),
             held_ends: 0.0,
             held_item: "",
+            held_modded: None,
             held_custom: None,
             held_potion: None,
+            stopped: false,
         }
     }
 }
@@ -1430,6 +1473,15 @@ impl Default for HudOverlays {
 impl HudOverlays {
     fn title_total(&self) -> f32 {
         self.fade_in + self.stay + self.fade_out
+    }
+
+    fn remaining(&self, ends: f32, now: f32) -> f32 {
+        let left = ends - now;
+        if self.stopped {
+            left.ceil() - 1.0
+        } else {
+            left
+        }
     }
 
     pub fn update(&mut self, snap: &mut crate::gui::Snapshot, time_secs: f32) {
@@ -1474,7 +1526,8 @@ impl HudOverlays {
             self.action_bar_ends = now + ACTION_BAR_TICKS;
             self.action_bar_animated = animated;
         }
-        let left = self.action_bar_ends - now;
+        self.stopped = snap.world_stopped;
+        let left = self.remaining(self.action_bar_ends, now);
         if self.action_bar_animated && left > 0.0 {
             let color = crate::gui::painter::hsv_to_rgb(left / 50.0, 0.7, 0.6);
             for span in &mut self.action_bar {
@@ -1488,17 +1541,20 @@ impl HudOverlays {
         if stack.is_empty() {
             self.held_ends = 0.0;
             self.held_item = "";
+            self.held_modded = None;
             self.held_custom = None;
             self.held_potion = None;
             return;
         }
         if self.held_item == stack.item
+            && self.held_modded == stack.modded
             && self.held_custom == stack.extra.custom_name
             && self.held_potion == stack.extra.potion
         {
             return;
         }
         self.held_item = stack.item;
+        self.held_modded = stack.modded;
         self.held_custom.clone_from(&stack.extra.custom_name);
         self.held_potion.clone_from(&stack.extra.potion);
         self.held = crate::gui::tooltip::styled_hover_name(stack);
@@ -1520,11 +1576,10 @@ fn action_bar_alpha(remaining: f32) -> f32 {
     (remaining * 255.0 / 20.0).floor().min(255.0) / 255.0
 }
 
-fn title_alpha(remaining: f32, fade_in: f32, stay: f32, fade_out: f32) -> f32 {
-    if remaining <= 0.0 {
+fn title_alpha(ticks_left: f32, remaining: f32, fade_in: f32, stay: f32, fade_out: f32) -> f32 {
+    if ticks_left <= 0.0 {
         return 0.0;
     }
-    let ticks_left = remaining.ceil();
     let mut alpha = 255.0;
     if ticks_left > fade_out + stay {
         alpha = ((fade_in + stay + fade_out) - remaining) * 255.0 / fade_in;
@@ -1561,7 +1616,7 @@ pub fn draw_overlays(
             }
         }
 
-        let alpha = action_bar_alpha(ov.action_bar_ends - now);
+        let alpha = action_bar_alpha(ov.remaining(ov.action_bar_ends, now));
         if alpha > 0.0 {
             let width = p.atlas.font.width(&ov.action_bar).ceil();
             let x = (vw / 2.0).floor() - (width / 2.0).floor();
@@ -1570,7 +1625,13 @@ pub fn draw_overlays(
     });
 
     if let Some(title) = ov.title.as_ref().filter(|_| show_title) {
-        let alpha = title_alpha(ov.title_ends - now, ov.fade_in, ov.stay, ov.fade_out);
+        let alpha = title_alpha(
+            (ov.title_ends - now).ceil(),
+            ov.remaining(ov.title_ends, now),
+            ov.fade_in,
+            ov.stay,
+            ov.fade_out,
+        );
         if alpha > 0.0 {
             let (cx, cy) = ((vw / 2.0).floor(), (vh / 2.0).floor());
             let width = p.atlas.font.width(title).ceil();
@@ -1794,6 +1855,10 @@ mod tests {
 
     fn text(s: &str) -> Vec<crate::text::Span> {
         crate::text::styled(s, crate::text::Style::default())
+    }
+
+    fn title_alpha(remaining: f32, fade_in: f32, stay: f32, fade_out: f32) -> f32 {
+        super::title_alpha(remaining.ceil(), remaining, fade_in, stay, fade_out)
     }
 
     #[test]

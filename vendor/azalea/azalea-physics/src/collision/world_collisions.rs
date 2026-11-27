@@ -15,7 +15,7 @@ use azalea_world::{Chunk, World};
 use bevy_ecs::entity::Entity;
 use parking_lot::RwLock;
 
-use super::{BLOCK_SHAPE, Shapes};
+use super::{BLOCK_SHAPE, MovingBlocks, Shapes};
 use crate::collision::{Aabb, BlockWithShape, VoxelShape, box_shape};
 
 static POWDER_SNOW_FALLING_SHAPE: LazyLock<VoxelShape> =
@@ -112,6 +112,45 @@ pub fn get_block_collisions_for(
         );
     }
 
+    block_collisions
+}
+
+pub fn get_block_collisions_with(
+    world: &World,
+    aabb: &Aabb,
+    powder_snow: PowderSnowCollision,
+    moving: Option<&MovingBlocks>,
+) -> Vec<VoxelShape> {
+    let Some(moving) = moving.filter(|moving| !moving.is_empty()) else {
+        return get_block_collisions_for(world, aabb, powder_snow);
+    };
+    let mut state = BlockCollisionsState::new(world, aabb, EntityCollisionContext::of(None))
+        .with_powder_snow(powder_snow);
+    let mut block_collisions = Vec::new();
+
+    let initial_chunk_pos = ChunkPos::from(state.cursor.origin());
+    let initial_chunk = world.chunks.get(&initial_chunk_pos);
+    let initial_chunk = initial_chunk.as_deref().map(RwLock::read);
+
+    while let Some(item) = state.cursor.next() {
+        if moving.covers(item.pos) {
+            continue;
+        }
+        state.compute_next(
+            item,
+            &mut block_collisions,
+            initial_chunk_pos,
+            initial_chunk.as_deref(),
+        );
+    }
+
+    block_collisions.extend(
+        moving
+            .boxes
+            .iter()
+            .filter(|(_, shape)| shape.intersects_aabb(aabb))
+            .map(|(_, shape)| VoxelShape::from(shape)),
+    );
     block_collisions
 }
 

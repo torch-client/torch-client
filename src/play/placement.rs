@@ -1,10 +1,16 @@
+mod attach;
+mod circuit;
+mod pairs;
+
 use std::{
     collections::HashSet,
     str::FromStr,
     sync::{LazyLock, OnceLock},
 };
 
-use crate::blocks::facing::{clockwise, name as direction_name};
+use crate::blocks::facing::{
+    clockwise, counter_clockwise, from_name as direction_from_name, name as direction_name,
+};
 use crate::play::redstone::has_neighbor_signal;
 use azalea::block::{BlockState, BlockTrait};
 use azalea::physics::collision::{
@@ -18,10 +24,14 @@ use azalea_core::{
     position::{BlockPos, Vec3},
 };
 use azalea_inventory::ItemStack;
+use azalea_registry::tags::blocks::{CANDLES, PRESSURE_PLATES, RAILS, WOOL_CARPETS};
 use azalea_registry::{
     Registry,
     builtin::{BlockEntityKind, BlockKind, ItemKind},
-    tags::blocks::{MAINTAINS_FARMLAND, REPLACEABLE, SUPPORTS_BAMBOO},
+    tags::blocks::{
+        COPPER_CHESTS, MAINTAINS_FARMLAND, PREVENTS_NEARBY_LEAF_DECAY, REPLACEABLE, SNOW,
+        SUPPORTS_BAMBOO, WALLS,
+    },
 };
 
 const DIRECTIONS: [Direction; 6] = [
@@ -66,6 +76,7 @@ const MENU_BLOCK_IDS: [&str; 9] = [
     "damaged_anvil",
 ];
 
+#[allow(clippy::too_many_arguments)]
 pub fn predict(
     held: &ItemStack,
     hit: &BlockHitResult,
@@ -76,21 +87,61 @@ pub fn predict(
     height: u32,
     block_at: impl Fn(BlockPos) -> Option<BlockState>,
 ) -> Option<(BlockPos, BlockState)> {
+    let placed = predict_placed(
+        held,
+        hit,
+        yaw,
+        pitch,
+        secondary_use,
+        min_y,
+        height,
+        block_at,
+    )?;
+    placed
+        .partner
+        .is_none()
+        .then_some((placed.pos, placed.state))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placed {
+    pub pos: BlockPos,
+    pub state: BlockState,
+    pub partner: Option<(BlockPos, BlockState)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn predict_placed(
+    held: &ItemStack,
+    hit: &BlockHitResult,
+    yaw: f32,
+    pitch: f32,
+    secondary_use: bool,
+    min_y: i32,
+    height: u32,
+    block_at: impl Fn(BlockPos) -> Option<BlockState>,
+) -> Option<Placed> {
     let ItemStack::Present(item) = held else {
         return None;
     };
 
-    let block = BlockKind::from_str(item.kind.to_str()).ok()?;
-    if block == BlockKind::Air {
+    let item_id = item.known_kind()?.to_str().trim_start_matches("minecraft:");
+    let block = crate::items::placed::placed_block(item_id)?;
+    if block.to_str().trim_start_matches("minecraft:") != item_id
+        && !matches!(
+            block,
+            BlockKind::RedstoneWire | BlockKind::Tripwire | BlockKind::Cocoa
+        )
+    {
         return None;
     }
 
     let clicked_state = block_at(hit.block_pos)?;
 
-    let (pos, replacing_clicked) = if replaceable(clicked_state, block)? {
+    let (pos, replacing_clicked) = if replaceable_by(clicked_state, block, hit, true)? {
         (hit.block_pos, true)
     } else {
-        if has_use_interaction(clicked_state) {
+        if !secondary_use && has_use_interaction(clicked_state) {
             return None;
         }
         (hit.block_pos + hit.direction.normal(), false)
@@ -101,7 +152,7 @@ pub fn predict(
     }
 
     let replaced_state = block_at(pos)?;
-    if !replacing_clicked && !replaceable(replaced_state, block)? {
+    if !replacing_clicked && !replaceable_by(replaced_state, block, hit, false)? {
         return None;
     }
 
@@ -133,11 +184,57 @@ pub fn predict(
     if BlockState::from(block).is_collision_shape_empty() && attachment == Attachment::None {
         return None;
     }
-    if accepts(block, "half", "upper") || accepts(block, "part", "head") {
+    if !survives(state, pos, &block_at) {
         return None;
     }
 
-    Some((pos, state))
+    let partner = match attachment {
+        Attachment::Door | Attachment::Bed => {
+            let (other, other_state) = pairs::partner(state, pos)?;
+            if other.y < min_y || other.y >= min_y + height as i32 {
+                return None;
+            }
+            Some((other, other_state))
+        }
+        _ if accepts(block, "half", "upper") || accepts(block, "part", "head") => return None,
+        _ => None,
+    };
+
+    Some(Placed {
+        pos,
+        state,
+        partner,
+    })
+}
+
+fn survives(
+    state: BlockState,
+    pos: BlockPos,
+    block_at: &dyn Fn(BlockPos) -> Option<BlockState>,
+) -> bool {
+    let kind = state.as_block_kind();
+    let id = kind.to_str();
+    let below = || block_at(pos.down(1)).unwrap_or(BlockState::AIR);
+    if id.ends_with("amethyst_bud") || id.ends_with("amethyst_cluster") {
+        let Some(facing) = Box::<dyn BlockTrait>::from(state)
+            .get_property("facing")
+            .and_then(direction_from_name)
+        else {
+            return false;
+        };
+        return block_at(pos + facing.opposite().normal())
+            .is_some_and(|behind| is_face_sturdy(behind, facing));
+    }
+    if CANDLES.contains(&kind) {
+        return can_support_center(below(), Direction::Up);
+    }
+    if WOOL_CARPETS.contains(&kind) || kind == BlockKind::MossCarpet {
+        return !matches!(
+            below().as_block_kind(),
+            BlockKind::Air | BlockKind::CaveAir | BlockKind::VoidAir
+        );
+    }
+    true
 }
 
 pub fn is_unobstructed(state: BlockState, pos: BlockPos, entities: &[Aabb]) -> bool {
@@ -268,10 +365,56 @@ pub(crate) fn replaceable(state: BlockState, item_block: BlockKind) -> Option<bo
         }
         return Some(property_digit(state, "layers") == Some(1));
     }
-    if kind == item_block && !state.is_collision_shape_full() {
-        return None;
+    if kind == item_block {
+        return if stacks_with_own_item(kind) {
+            None
+        } else {
+            Some(false)
+        };
     }
     Some(REPLACEABLE.contains(&kind))
+}
+
+fn stacks_with_own_item(kind: BlockKind) -> bool {
+    accepts(kind, "type", "double")
+        || kind.to_str().ends_with("candle")
+        || matches!(
+            kind,
+            BlockKind::SeaPickle
+                | BlockKind::TurtleEgg
+                | BlockKind::PinkPetals
+                | BlockKind::Wildflowers
+                | BlockKind::LeafLitter
+                | BlockKind::Vine
+                | BlockKind::GlowLichen
+                | BlockKind::ResinClump
+                | BlockKind::SculkVein
+        )
+}
+
+fn replaceable_by(
+    state: BlockState,
+    item_block: BlockKind,
+    hit: &BlockHitResult,
+    replacing_clicked: bool,
+) -> Option<bool> {
+    if state.as_block_kind() != item_block || !accepts(item_block, "type", "double") {
+        return replaceable(state, item_block);
+    }
+    let slab_type = Box::<dyn BlockTrait>::from(state).get_property("type");
+    if slab_type == Some("double") {
+        return Some(false);
+    }
+    if !replacing_clicked {
+        return Some(true);
+    }
+    let above = hit.location.y - hit.block_pos.y as f64 > 0.5;
+    let horizontal = !matches!(hit.direction, Direction::Up | Direction::Down);
+    Some(if slab_type == Some("bottom") {
+        hit.direction == Direction::Up || (above && horizontal)
+    } else {
+        hit.direction == Direction::Down || (!above && horizontal)
+    })
 }
 
 pub(crate) fn has_use_interaction(state: BlockState) -> bool {
@@ -312,12 +455,28 @@ fn ignores_clicks(id: &str) -> bool {
         || id.ends_with("lightning_rod")
 }
 
+pub(crate) fn is_game_master_block(block: BlockKind) -> bool {
+    matches!(
+        block,
+        BlockKind::CommandBlock
+            | BlockKind::ChainCommandBlock
+            | BlockKind::RepeatingCommandBlock
+            | BlockKind::StructureBlock
+            | BlockKind::Jigsaw
+            | BlockKind::TestBlock
+            | BlockKind::TestInstanceBlock
+    )
+}
+
 #[cold]
 fn block_has_use_interaction(state: BlockState) -> bool {
     let block = Box::<dyn BlockTrait>::from(state);
     let id = block.id();
     if ignores_clicks(id) {
         return false;
+    }
+    if is_game_master_block(state.as_block_kind()) {
+        return true;
     }
     if BLOCK_ENTITY_IDS.contains(&format!("minecraft:{id}").as_str())
         || MENU_BLOCK_IDS.contains(&id)
@@ -348,12 +507,29 @@ fn state_for_placement(
     let mut placed = Box::<dyn BlockTrait>::from(BlockState::from(block));
     let face = hit.direction;
 
+    if replaced_state.as_block_kind() == block && accepts(block, "type", "double") {
+        let mut doubled = Box::<dyn BlockTrait>::from(replaced_state);
+        let _ = doubled.set_property("type", "double");
+        let _ = doubled.set_property("waterlogged", "false");
+        return Some(doubled.as_block_state());
+    }
+
     if let Some(substituted) = substituted_placement(block, pos, replaced_state, block_at) {
         return substituted;
     }
 
     let _ = placed.set_property("axis", axis_name(face));
 
+    let ctx = PlaceContext {
+        hit,
+        yaw,
+        pitch,
+        pos,
+        replaced_state,
+        replacing_clicked,
+        secondary_use,
+        block_at,
+    };
     match attachment {
         Attachment::FaceAttached => {
             return face_attached_placement(
@@ -366,6 +542,19 @@ fn state_for_placement(
                 block_at,
             );
         }
+        Attachment::Wire => return circuit::wire_placement(&ctx),
+        Attachment::Diode => return circuit::diode_placement(block, &ctx),
+        Attachment::Rail => return circuit::rail_placement(block, &ctx),
+        Attachment::PressurePlate => return circuit::pressure_plate_placement(block, &ctx),
+        Attachment::Tripwire => return circuit::tripwire_placement(&ctx),
+        Attachment::TripwireHook => return circuit::tripwire_hook_placement(&ctx),
+        Attachment::Wall(wall, mount) => return attach::standing_or_wall(block, wall, mount, &ctx),
+        Attachment::Cocoa => return attach::cocoa_placement(&ctx),
+        Attachment::Multiface => return attach::multiface_placement(block, &ctx),
+        Attachment::Vine => return attach::vine_placement(&ctx),
+        Attachment::Snow => return attach::snow_placement(&ctx),
+        Attachment::Door => return pairs::door_placement(block, &ctx),
+        Attachment::Bed => return pairs::bed_placement(block, &ctx),
         Attachment::Bell => return bell_placement(placed, face, yaw, pos, block_at),
         Attachment::Lantern => {
             return lantern_placement(
@@ -399,6 +588,35 @@ fn state_for_placement(
         }
         BlockKind::BrownMushroomBlock | BlockKind::RedMushroomBlock | BlockKind::MushroomStem => {
             return huge_mushroom_placement(placed, block, pos, block_at);
+        }
+        BlockKind::Ladder => {
+            return ladder_placement(
+                placed,
+                hit,
+                yaw,
+                pitch,
+                pos,
+                replacing_clicked,
+                replaced_state,
+                block_at,
+            );
+        }
+        _ if matches!(block, BlockKind::Chest | BlockKind::TrappedChest)
+            || COPPER_CHESTS.contains(&block) =>
+        {
+            return chest_placement(
+                placed,
+                block,
+                face,
+                yaw,
+                pos,
+                secondary_use,
+                replaced_state,
+                block_at,
+            );
+        }
+        _ if accepts(block, "persistent", "true") => {
+            return leaves_placement(placed, pos, replaced_state, block_at);
         }
         _ => {}
     }
@@ -450,7 +668,6 @@ fn state_for_placement(
         BlockKind::Crafter => &["triggered"],
         _ if block.to_str().ends_with("fence_gate") => &["open", "powered"],
         _ if block.to_str().ends_with("_shelf") => &["powered"],
-        _ if accepts(block, "rotation", "0") && accepts(block, "powered", "true") => &["powered"],
         _ => &[],
     };
     if !signalled.is_empty() {
@@ -460,11 +677,34 @@ fn state_for_placement(
         }
     }
 
+    if block.to_str().ends_with("fence_gate") {
+        let (a, b) = match player_facing(yaw) {
+            Direction::North | Direction::South => (Direction::West, Direction::East),
+            _ => (Direction::North, Direction::South),
+        };
+        let in_wall = [a, b].into_iter().any(|side| {
+            block_at(pos + side.normal())
+                .is_some_and(|state| WALLS.contains(&state.as_block_kind()))
+        });
+        let _ = placed.set_property("in_wall", bool_str(in_wall));
+    }
+
+    if accepts(block, "snowy", "true") {
+        let above = block_at(pos + Direction::Up.normal()).unwrap_or(BlockState::AIR);
+        let _ = placed.set_property("snowy", bool_str(SNOW.contains(&above.as_block_kind())));
+    }
+
+    if matches!(block, BlockKind::Campfire | BlockKind::SoulCampfire) {
+        let below = block_at(pos + Direction::Down.normal()).unwrap_or(BlockState::AIR);
+        let _ = placed.set_property(
+            "signal_fire",
+            bool_str(below.as_block_kind() == BlockKind::HayBlock),
+        );
+    }
+
     if block == BlockKind::Crafter {
         let _ = placed.set_property("orientation", crafter_orientation(yaw, pitch));
     }
-
-    let _ = placed.set_property("rotation", rotation_segment(yaw));
 
     let id = block.to_str();
     let full_water_rule =
@@ -505,11 +745,16 @@ fn crafter_orientation(yaw: f32, pitch: f32) -> &'static str {
     }
 }
 
-fn rotation_segment(yaw: f32) -> &'static str {
+fn rotation_segment(degrees: f32) -> &'static str {
+    let scaled = degrees * (16.0f32 / 360.0f32);
+    segment_name(((scaled as f64) + 0.5).floor() as i32)
+}
+
+fn segment_name(segment: i32) -> &'static str {
     const NAMES: [&str; 16] = [
         "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
     ];
-    NAMES[(((yaw * (16.0 / 360.0)).round() as i32) & 15) as usize]
+    NAMES[(segment & 15) as usize]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -733,6 +978,140 @@ fn huge_mushroom_placement(
     Some(placed.as_block_state())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn ladder_placement(
+    mut placed: Box<dyn BlockTrait>,
+    hit: &BlockHitResult,
+    yaw: f32,
+    pitch: f32,
+    pos: BlockPos,
+    replacing_clicked: bool,
+    replaced_state: BlockState,
+    block_at: &dyn Fn(BlockPos) -> Option<BlockState>,
+) -> Option<BlockState> {
+    if !replacing_clicked {
+        let behind = block_at(pos + hit.direction.opposite().normal());
+        let chained = behind.is_some_and(|state| {
+            state.as_block_kind() == BlockKind::Ladder
+                && Box::<dyn BlockTrait>::from(state).get_property("facing")
+                    == Some(direction_name(hit.direction))
+        });
+        if chained {
+            return None;
+        }
+    }
+    for direction in nearest_looking_directions(yaw, pitch, hit.direction, replacing_clicked) {
+        if matches!(direction, Direction::Up | Direction::Down) {
+            continue;
+        }
+        if !can_attach(pos, direction, block_at) {
+            continue;
+        }
+        let _ = placed.set_property("facing", direction_name(direction.opposite()));
+        let _ = placed.set_property("waterlogged", bool_str(is_water_source(replaced_state)));
+        return Some(placed.as_block_state());
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chest_placement(
+    mut placed: Box<dyn BlockTrait>,
+    block: BlockKind,
+    face: Direction,
+    yaw: f32,
+    pos: BlockPos,
+    secondary_use: bool,
+    replaced_state: BlockState,
+    block_at: &dyn Fn(BlockPos) -> Option<BlockState>,
+) -> Option<BlockState> {
+    let copper = COPPER_CHESTS.contains(&block);
+    let partner_facing = |direction: Direction| -> Option<Direction> {
+        let state = block_at(pos + direction.normal())?;
+        let kind = state.as_block_kind();
+        let connects = if copper {
+            COPPER_CHESTS.contains(&kind)
+        } else {
+            kind == block
+        };
+        if !connects {
+            return None;
+        }
+        let partner = Box::<dyn BlockTrait>::from(state);
+        if partner.get_property("type") != Some("single") {
+            return None;
+        }
+        direction_from_name(partner.get_property("facing")?)
+    };
+
+    let mut facing = player_facing(yaw).opposite();
+    let mut chest_type = "single";
+    if !matches!(face, Direction::Up | Direction::Down) && secondary_use {
+        if let Some(neighbour) = partner_facing(face.opposite()) {
+            if neighbour != face && neighbour != face.opposite() {
+                facing = neighbour;
+                chest_type = if counter_clockwise(facing) == face.opposite() {
+                    "right"
+                } else {
+                    "left"
+                };
+            }
+        }
+    }
+    if chest_type == "single" && !secondary_use {
+        if partner_facing(clockwise(facing)) == Some(facing) {
+            chest_type = "left";
+        } else if partner_facing(counter_clockwise(facing)) == Some(facing) {
+            chest_type = "right";
+        }
+    }
+    if copper && chest_type != "single" {
+        let connected = if chest_type == "left" {
+            clockwise(facing)
+        } else {
+            counter_clockwise(facing)
+        };
+        if block_at(pos + connected.normal()).map(|state| state.as_block_kind()) != Some(block) {
+            return None;
+        }
+    }
+
+    let _ = placed.set_property("facing", direction_name(facing));
+    let _ = placed.set_property("type", chest_type);
+    let _ = placed.set_property("waterlogged", bool_str(is_water_source(replaced_state)));
+    Some(placed.as_block_state())
+}
+
+fn leaves_placement(
+    mut placed: Box<dyn BlockTrait>,
+    pos: BlockPos,
+    replaced_state: BlockState,
+    block_at: &dyn Fn(BlockPos) -> Option<BlockState>,
+) -> Option<BlockState> {
+    let distance = DIRECTIONS
+        .iter()
+        .map(|direction| {
+            let neighbour = block_at(pos + direction.normal()).unwrap_or(BlockState::AIR);
+            leaf_distance_at(neighbour) + 1
+        })
+        .fold(7, u32::min);
+    let _ = placed.set_property("persistent", "true");
+    let _ = placed.set_property("waterlogged", bool_str(is_water_source(replaced_state)));
+    let _ = placed.set_property("distance", DIGITS[distance as usize]);
+    Some(placed.as_block_state())
+}
+
+fn leaf_distance_at(state: BlockState) -> u32 {
+    let kind = state.as_block_kind();
+    if PREVENTS_NEARBY_LEAF_DECAY.contains(&kind) {
+        0
+    } else if accepts(kind, "persistent", "true") {
+        property_digit(state, "distance").unwrap_or(7)
+    } else {
+        7
+    }
+}
+
 const DIGITS: [&str; 8] = ["0", "1", "2", "3", "4", "5", "6", "7"];
 
 fn property_digit(state: BlockState, name: &str) -> Option<u32> {
@@ -845,6 +1224,19 @@ enum Attachment {
     FaceAttached,
     Bell,
     Lantern,
+    Wire,
+    Diode,
+    Rail,
+    PressurePlate,
+    Tripwire,
+    TripwireHook,
+    Wall(BlockKind, attach::Mount),
+    Cocoa,
+    Multiface,
+    Vine,
+    Snow,
+    Door,
+    Bed,
     None,
 }
 
@@ -853,10 +1245,69 @@ fn attachment(block: BlockKind) -> Attachment {
         Attachment::FaceAttached
     } else if accepts(block, "attachment", "single_wall") {
         Attachment::Bell
-    } else if accepts(block, "hanging", "true") {
+    } else if accepts(block, "hanging", "true") && block.to_str().ends_with("lantern") {
         Attachment::Lantern
+    } else if let Some((wall, mount)) = attach::wall_variant(block) {
+        Attachment::Wall(wall, mount)
     } else {
-        Attachment::None
+        match block {
+            BlockKind::RedstoneWire => Attachment::Wire,
+            BlockKind::Repeater | BlockKind::Comparator => Attachment::Diode,
+            BlockKind::Tripwire => Attachment::Tripwire,
+            BlockKind::TripwireHook => Attachment::TripwireHook,
+            BlockKind::Cocoa => Attachment::Cocoa,
+            BlockKind::GlowLichen | BlockKind::SculkVein | BlockKind::ResinClump => {
+                Attachment::Multiface
+            }
+            BlockKind::Vine => Attachment::Vine,
+            BlockKind::Snow => Attachment::Snow,
+            _ if RAILS.contains(&block) => Attachment::Rail,
+            _ if PRESSURE_PLATES.contains(&block) => Attachment::PressurePlate,
+            _ if accepts(block, "hinge", "left") => Attachment::Door,
+            _ if accepts(block, "part", "head") => Attachment::Bed,
+            _ => Attachment::None,
+        }
+    }
+}
+
+struct PlaceContext<'a> {
+    hit: &'a BlockHitResult,
+    yaw: f32,
+    pitch: f32,
+    pos: BlockPos,
+    replaced_state: BlockState,
+    replacing_clicked: bool,
+    secondary_use: bool,
+    block_at: &'a dyn Fn(BlockPos) -> Option<BlockState>,
+}
+
+impl PlaceContext<'_> {
+    fn at(&self, at: BlockPos) -> BlockState {
+        (self.block_at)(at).unwrap_or(BlockState::AIR)
+    }
+
+    fn horizontal(&self) -> Direction {
+        player_facing(self.yaw)
+    }
+
+    fn looking(&self) -> [Direction; 6] {
+        nearest_looking_directions(
+            self.yaw,
+            self.pitch,
+            self.hit.direction,
+            self.replacing_clicked,
+        )
+    }
+
+    fn first_horizontal(&self, mut holds: impl FnMut(Direction) -> bool) -> Option<Direction> {
+        self.looking()
+            .into_iter()
+            .filter(|d| !matches!(d, Direction::Up | Direction::Down))
+            .find(|&d| holds(d))
+    }
+
+    fn waterlogged(&self) -> &'static str {
+        bool_str(is_water_source(self.replaced_state))
     }
 }
 
@@ -910,6 +1361,18 @@ fn exceptional_facing(
             });
             Some(if chains { clicked.opposite() } else { clicked })
         }
+        BlockKind::BigDripleaf => block_at(pos + Direction::Down.normal())
+            .filter(|below| {
+                matches!(
+                    below.as_block_kind(),
+                    BlockKind::BigDripleaf | BlockKind::BigDripleafStem
+                )
+            })
+            .and_then(|below| {
+                Box::<dyn BlockTrait>::from(below)
+                    .get_property("facing")
+                    .and_then(direction_from_name)
+            }),
         _ => None,
     }
 }
@@ -923,6 +1386,7 @@ fn face_attached_placement(
     replacing_clicked: bool,
     block_at: &dyn Fn(BlockPos) -> Option<BlockState>,
 ) -> Option<BlockState> {
+    let anywhere = placed.as_block_state().as_block_kind() == BlockKind::Grindstone;
     for direction in nearest_looking_directions(yaw, pitch, hit.direction, replacing_clicked) {
         let (face, facing) = match direction {
             Direction::Up => ("ceiling", player_facing(yaw)),
@@ -934,7 +1398,7 @@ fn face_attached_placement(
             "floor" => Direction::Up,
             _ => facing,
         };
-        if !can_attach(pos, connected.opposite(), block_at) {
+        if !anywhere && !can_attach(pos, connected.opposite(), block_at) {
             continue;
         }
         let _ = placed.set_property("face", face);
@@ -1202,6 +1666,25 @@ mod tests {
             } else {
                 BlockState::AIR
             })
+        }
+    }
+
+    #[test]
+    fn game_master_blocks_answer_a_click() {
+        for block in [
+            BlockKind::CommandBlock,
+            BlockKind::ChainCommandBlock,
+            BlockKind::RepeatingCommandBlock,
+            BlockKind::StructureBlock,
+            BlockKind::Jigsaw,
+            BlockKind::TestBlock,
+            BlockKind::TestInstanceBlock,
+        ] {
+            assert!(has_use_interaction(BlockState::from(block)), "{block:?}");
+            assert!(
+                place(ItemKind::Stone, Direction::Up, 1.0, 0.0, block).is_none(),
+                "{block:?}"
+            );
         }
     }
 
@@ -1864,24 +2347,366 @@ mod tests {
     }
 
     #[test]
-    fn a_slab_clicked_with_its_own_item_is_not_predicted() {
+    fn stacking_blocks_clicked_with_their_own_item_are_not_predicted() {
+        assert!(place(ItemKind::Snow, Direction::Up, 1.0, 0., BlockKind::Snow).is_none());
+        assert!(place(ItemKind::Candle, Direction::Up, 1.0, 0., BlockKind::Candle).is_none());
         assert!(
             place(
-                ItemKind::StoneSlab,
+                ItemKind::SeaPickle,
                 Direction::Up,
                 1.0,
                 0.,
-                BlockKind::StoneSlab
+                BlockKind::SeaPickle
             )
             .is_none()
         );
-        assert!(place(ItemKind::Snow, Direction::Up, 1.0, 0., BlockKind::Snow).is_none());
+        assert!(
+            place(
+                ItemKind::TurtleEgg,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::TurtleEgg
+            )
+            .is_none()
+        );
         assert!(place(ItemKind::Stone, Direction::Up, 1.0, 0., BlockKind::Stone).is_some());
     }
 
     #[test]
+    fn a_stair_clicked_with_its_own_item_goes_beside_it() {
+        let (pos, state) = place(
+            ItemKind::StoneStairs,
+            Direction::Up,
+            1.0,
+            0.,
+            BlockKind::StoneStairs,
+        )
+        .expect("a stair on a stair is predictable");
+        assert_eq!(pos, at(0, 1, 0));
+        assert_eq!(state.as_block_kind(), BlockKind::StoneStairs);
+    }
+
+    fn place_in(
+        item: ItemKind,
+        face: Direction,
+        frac_y: f64,
+        yaw: f32,
+        sneak: bool,
+        list: Vec<(BlockPos, BlockState)>,
+    ) -> Option<(BlockPos, BlockState)> {
+        predict(
+            &ItemStack::new(item, 1),
+            &hit(face, frac_y),
+            yaw,
+            0.,
+            sneak,
+            MIN_Y,
+            HEIGHT,
+            cells(list),
+        )
+    }
+
+    #[test]
+    fn a_bottom_slab_clicked_on_its_open_half_becomes_double() {
+        let wet = with(
+            BlockKind::StoneSlab,
+            &[("type", "bottom"), ("waterlogged", "true")],
+        );
+        for (face, frac_y) in [(Direction::Up, 1.0), (Direction::North, 0.75)] {
+            let (pos, state) = place_in(
+                ItemKind::StoneSlab,
+                face,
+                frac_y,
+                0.,
+                false,
+                vec![(TARGET, wet)],
+            )
+            .expect("a slab onto a slab is predictable");
+            assert_eq!(pos, TARGET, "{face:?}");
+            assert_eq!(
+                state,
+                with(
+                    BlockKind::StoneSlab,
+                    &[("type", "double"), ("waterlogged", "false")]
+                ),
+                "{face:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bottom_slab_clicked_low_on_its_side_is_not_doubled() {
+        let bottom = with(BlockKind::StoneSlab, &[("type", "bottom")]);
+        let (pos, state) = place_in(
+            ItemKind::StoneSlab,
+            Direction::North,
+            0.25,
+            0.,
+            false,
+            vec![(TARGET, bottom)],
+        )
+        .expect("a slab beside a slab is predictable");
+        assert_eq!(pos, at(0, 0, -1));
+        assert_eq!(property(state, "type"), Some("bottom"));
+    }
+
+    #[test]
+    fn a_top_slab_doubles_from_below_only() {
+        let top = with(BlockKind::StoneSlab, &[("type", "top")]);
+        let (pos, state) = place_in(
+            ItemKind::StoneSlab,
+            Direction::Down,
+            0.0,
+            0.,
+            false,
+            vec![(TARGET, top)],
+        )
+        .expect("a slab under a top slab is predictable");
+        assert_eq!(pos, TARGET);
+        assert_eq!(property(state, "type"), Some("double"));
+
+        let (pos, state) = place_in(
+            ItemKind::StoneSlab,
+            Direction::Up,
+            1.0,
+            0.,
+            false,
+            vec![(TARGET, top)],
+        )
+        .expect("a slab on a top slab is predictable");
+        assert_eq!(pos, at(0, 1, 0));
+        assert_eq!(property(state, "type"), Some("bottom"));
+    }
+
+    #[test]
+    fn a_double_or_different_slab_is_not_merged() {
+        let double = with(BlockKind::StoneSlab, &[("type", "double")]);
+        let (pos, _) = place_in(
+            ItemKind::StoneSlab,
+            Direction::Up,
+            1.0,
+            0.,
+            false,
+            vec![(TARGET, double)],
+        )
+        .expect("a slab on a double slab is predictable");
+        assert_eq!(pos, at(0, 1, 0));
+
+        let (pos, state) = place(
+            ItemKind::StoneSlab,
+            Direction::Up,
+            1.0,
+            0.,
+            BlockKind::OakSlab,
+        )
+        .expect("a stone slab on an oak slab is predictable");
+        assert_eq!(pos, at(0, 1, 0));
+        assert_eq!(state.as_block_kind(), BlockKind::StoneSlab);
+    }
+
+    #[test]
+    fn a_slab_in_the_neighbouring_cell_is_doubled() {
+        let world = vec![
+            (TARGET, BlockState::from(BlockKind::Stone)),
+            (
+                at(0, 0, -1),
+                with(BlockKind::StoneSlab, &[("type", "bottom")]),
+            ),
+        ];
+        let (pos, state) = place_in(
+            ItemKind::StoneSlab,
+            Direction::North,
+            0.25,
+            0.,
+            false,
+            world,
+        )
+        .expect("a slab into a slab's cell is predictable");
+        assert_eq!(pos, at(0, 0, -1));
+        assert_eq!(property(state, "type"), Some("double"));
+    }
+
+    #[test]
+    fn sneaking_places_against_an_interactive_block() {
+        for clicked in [
+            BlockKind::Chest,
+            BlockKind::CraftingTable,
+            BlockKind::OakDoor,
+        ] {
+            let (pos, state) = predict(
+                &ItemStack::new(ItemKind::Stone, 1),
+                &hit(Direction::Up, 1.0),
+                0.,
+                0.,
+                true,
+                MIN_Y,
+                HEIGHT,
+                world(clicked),
+            )
+            .unwrap_or_else(|| panic!("stone on a sneak-clicked {clicked:?} is predictable"));
+            assert_eq!(pos, at(0, 1, 0), "{clicked:?}");
+            assert_eq!(state, BlockState::from(BlockKind::Stone), "{clicked:?}");
+        }
+    }
+
+    #[test]
+    fn placed_leaves_are_persistent_with_a_distance() {
+        let leaves = |neighbour: Option<BlockState>| {
+            let mut world = vec![(TARGET, BlockState::from(BlockKind::Stone))];
+            world.extend(neighbour.map(|state| (at(1, 1, 0), state)));
+            let (pos, state) = place_in(ItemKind::OakLeaves, Direction::Up, 1.0, 0., false, world)
+                .expect("leaves on stone are predictable");
+            assert_eq!(pos, at(0, 1, 0));
+            assert_eq!(property(state, "persistent"), Some("true"));
+            assert_eq!(property(state, "waterlogged"), Some("false"));
+            property(state, "distance")
+        };
+        assert_eq!(leaves(None), Some("7"));
+        assert_eq!(leaves(Some(BlockState::from(BlockKind::OakLog))), Some("1"));
+        assert_eq!(
+            leaves(Some(with(BlockKind::BirchLeaves, &[("distance", "3")]))),
+            Some("4")
+        );
+        assert_eq!(leaves(Some(scaffolding(0))), Some("7"));
+    }
+
+    #[test]
+    fn a_ladder_hangs_on_the_block_it_was_clicked_against() {
+        let (pos, state) = place(
+            ItemKind::Ladder,
+            Direction::North,
+            0.5,
+            90.,
+            BlockKind::Stone,
+        )
+        .expect("a ladder on the side of stone is predictable");
+        assert_eq!(pos, at(0, 0, -1));
+        assert_eq!(property(state, "facing"), Some("north"));
+    }
+
+    #[test]
+    fn a_ladder_with_no_wall_is_not_predicted() {
+        assert!(place(ItemKind::Ladder, Direction::Up, 1.0, 0., BlockKind::Stone).is_none());
+    }
+
+    fn single_chest() -> BlockState {
+        with(BlockKind::Chest, &[("facing", "north"), ("type", "single")])
+    }
+
+    #[test]
+    fn sneaking_against_a_chest_side_pairs_with_it() {
+        for (face, pos, chest_type) in [
+            (Direction::West, at(-1, 0, 0), "left"),
+            (Direction::East, at(1, 0, 0), "right"),
+        ] {
+            let (placed_at, state) = place_in(
+                ItemKind::Chest,
+                face,
+                0.5,
+                90.,
+                true,
+                vec![(TARGET, single_chest())],
+            )
+            .unwrap_or_else(|| panic!("a chest beside a chest on {face:?} is predictable"));
+            assert_eq!(placed_at, pos, "{face:?}");
+            assert_eq!(property(state, "facing"), Some("north"), "{face:?}");
+            assert_eq!(property(state, "type"), Some(chest_type), "{face:?}");
+        }
+    }
+
+    #[test]
+    fn a_chest_beside_a_matching_chest_pairs_unless_sneaking() {
+        let world = || {
+            vec![
+                (TARGET, BlockState::from(BlockKind::Stone)),
+                (at(1, 1, 0), single_chest()),
+            ]
+        };
+        let (_, state) = place_in(ItemKind::Chest, Direction::Up, 1.0, 0., false, world())
+            .expect("a chest on stone is predictable");
+        assert_eq!(property(state, "facing"), Some("north"));
+        assert_eq!(property(state, "type"), Some("left"));
+
+        let (_, state) = place_in(ItemKind::Chest, Direction::Up, 1.0, 0., true, world())
+            .expect("a chest on stone is predictable");
+        assert_eq!(property(state, "type"), Some("single"));
+    }
+
+    #[test]
+    fn grass_under_snow_is_snowy() {
+        for (above, snowy) in [
+            (BlockState::from(BlockKind::Snow), "true"),
+            (BlockState::AIR, "false"),
+        ] {
+            let world = vec![
+                (TARGET, BlockState::from(BlockKind::Stone)),
+                (at(0, 1, -1), above),
+            ];
+            let (pos, state) = place_in(
+                ItemKind::GrassBlock,
+                Direction::North,
+                0.5,
+                0.,
+                false,
+                world,
+            )
+            .expect("grass beside stone is predictable");
+            assert_eq!(pos, at(0, 0, -1));
+            assert_eq!(property(state, "snowy"), Some(snowy));
+        }
+    }
+
+    #[test]
+    fn a_fence_gate_beside_a_wall_is_in_wall() {
+        let world = vec![
+            (TARGET, BlockState::from(BlockKind::Stone)),
+            (at(1, 1, 0), BlockState::from(BlockKind::CobblestoneWall)),
+        ];
+        let (_, state) = place_in(ItemKind::OakFenceGate, Direction::Up, 1.0, 0., false, world)
+            .expect("a fence gate on stone is predictable");
+        assert_eq!(property(state, "in_wall"), Some("true"));
+    }
+
+    #[test]
+    fn a_campfire_on_hay_is_a_signal_fire() {
+        let (_, state) = place(
+            ItemKind::Campfire,
+            Direction::Up,
+            1.0,
+            0.,
+            BlockKind::HayBlock,
+        )
+        .expect("a campfire on hay is predictable");
+        assert_eq!(property(state, "signal_fire"), Some("true"));
+    }
+
+    #[test]
+    fn a_big_dripleaf_continues_the_stem_below() {
+        let stem = with(BlockKind::BigDripleafStem, &[("facing", "east")]);
+        let block_at = cells(vec![(TARGET, stem)]);
+        let facing = exceptional_facing(
+            BlockKind::BigDripleaf,
+            &hit(Direction::Up, 1.0),
+            0.,
+            0.,
+            at(0, 1, 0),
+            &block_at,
+        );
+        assert_eq!(facing, Some(Direction::East));
+        let alone = exceptional_facing(
+            BlockKind::BigDripleaf,
+            &hit(Direction::Up, 1.0),
+            0.,
+            0.,
+            at(0, 5, 0),
+            &block_at,
+        );
+        assert_eq!(alone, None);
+    }
+
+    #[test]
     fn blocks_that_need_support_are_not_predicted() {
-        assert!(place(ItemKind::Torch, Direction::Up, 1.0, 0., BlockKind::Stone).is_none());
         assert!(
             place(
                 ItemKind::OakSapling,
@@ -1892,7 +2717,16 @@ mod tests {
             )
             .is_none()
         );
-        assert!(place(ItemKind::Rail, Direction::Up, 1.0, 0., BlockKind::Stone).is_none());
+        assert!(
+            place(
+                ItemKind::WheatSeeds,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::Farmland
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2268,5 +3102,732 @@ mod tests {
             &[("half", "upper"), ("open", "false")],
         );
         assert!(door_other_half(lower, opened, TARGET, |_| Some(other)).is_none());
+    }
+
+    fn look_place(
+        item: ItemKind,
+        hit: &BlockHitResult,
+        yaw: f32,
+        pitch: f32,
+        sneak: bool,
+        list: Vec<(BlockPos, BlockState)>,
+    ) -> Option<Placed> {
+        predict_placed(
+            &ItemStack::new(item, 1),
+            hit,
+            yaw,
+            pitch,
+            sneak,
+            MIN_Y,
+            HEIGHT,
+            cells(list),
+        )
+    }
+
+    fn on_stone(mut list: Vec<(BlockPos, BlockState)>) -> Vec<(BlockPos, BlockState)> {
+        list.push((TARGET, BlockState::from(BlockKind::Stone)));
+        list
+    }
+
+    #[test]
+    fn an_observer_placed_looking_north_faces_north() {
+        let placed = look_place(
+            ItemKind::Observer,
+            &hit(Direction::Up, 1.0),
+            180.,
+            0.,
+            false,
+            on_stone(vec![]),
+        )
+        .expect("an observer on stone is predictable");
+        assert_eq!(property(placed.state, "facing"), Some("north"));
+    }
+
+    #[test]
+    fn a_piston_faces_the_player() {
+        for item in [ItemKind::Piston, ItemKind::StickyPiston] {
+            let placed = look_place(
+                item,
+                &hit(Direction::Up, 1.0),
+                180.,
+                0.,
+                false,
+                on_stone(vec![]),
+            )
+            .unwrap_or_else(|| panic!("{item:?} on stone is predictable"));
+            assert_eq!(property(placed.state, "facing"), Some("south"), "{item:?}");
+            assert_eq!(
+                property(placed.state, "extended"),
+                Some("false"),
+                "{item:?}"
+            );
+            let placed = look_place(
+                item,
+                &hit(Direction::Down, 0.0),
+                0.,
+                -90.,
+                false,
+                on_stone(vec![]),
+            )
+            .unwrap_or_else(|| panic!("{item:?} under stone is predictable"));
+            assert_eq!(property(placed.state, "facing"), Some("down"), "{item:?}");
+        }
+    }
+
+    #[test]
+    fn a_dropper_faces_back_along_the_look() {
+        let placed = look_place(
+            ItemKind::Dropper,
+            &hit(Direction::Up, 1.0),
+            90.,
+            0.,
+            false,
+            on_stone(vec![]),
+        )
+        .expect("a dropper on stone is predictable");
+        assert_eq!(property(placed.state, "facing"), Some("east"));
+    }
+
+    #[test]
+    fn a_hopper_clicked_from_below_points_down() {
+        let (_, state) = place(ItemKind::Hopper, Direction::Down, 0.0, 0., BlockKind::Stone)
+            .expect("a hopper under stone is predictable");
+        assert_eq!(property(state, "facing"), Some("down"));
+    }
+
+    #[test]
+    fn a_diode_faces_opposite_the_player() {
+        for item in [ItemKind::Repeater, ItemKind::Comparator] {
+            let (pos, state) = place(item, Direction::Up, 1.0, 0., BlockKind::Stone)
+                .unwrap_or_else(|| panic!("{item:?} on stone is predictable"));
+            assert_eq!(pos, at(0, 1, 0));
+            assert_eq!(property(state, "facing"), Some("north"), "{item:?}");
+        }
+    }
+
+    #[test]
+    fn a_diode_needs_a_rigid_floor() {
+        assert!(
+            place(
+                ItemKind::Repeater,
+                Direction::North,
+                0.5,
+                0.,
+                BlockKind::Stone
+            )
+            .is_none()
+        );
+        assert!(
+            place(
+                ItemKind::Comparator,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::StoneSlab
+            )
+            .is_none()
+        );
+        let on_hopper = look_place(
+            ItemKind::Repeater,
+            &hit(Direction::Up, 1.0),
+            0.,
+            0.,
+            true,
+            vec![(TARGET, BlockState::from(BlockKind::Hopper))],
+        );
+        assert!(on_hopper.is_some(), "a hopper's top is rigid");
+    }
+
+    #[test]
+    fn a_repeater_beside_a_powered_repeater_pointing_in_is_locked() {
+        let side = with(
+            BlockKind::Repeater,
+            &[("facing", "east"), ("powered", "true")],
+        );
+        let placed = look_place(
+            ItemKind::Repeater,
+            &hit(Direction::Up, 1.0),
+            0.,
+            0.,
+            false,
+            on_stone(vec![(at(1, 1, 0), side)]),
+        )
+        .expect("a repeater on stone is predictable");
+        assert_eq!(property(placed.state, "locked"), Some("true"));
+
+        let away = with(
+            BlockKind::Repeater,
+            &[("facing", "west"), ("powered", "true")],
+        );
+        let placed = look_place(
+            ItemKind::Repeater,
+            &hit(Direction::Up, 1.0),
+            0.,
+            0.,
+            false,
+            on_stone(vec![(at(1, 1, 0), away)]),
+        )
+        .expect("a repeater on stone is predictable");
+        assert_eq!(property(placed.state, "locked"), Some("false"));
+    }
+
+    #[test]
+    fn redstone_wire_is_a_cross_alone_and_a_line_beside_wire() {
+        let (pos, state) = place(ItemKind::Redstone, Direction::Up, 1.0, 0., BlockKind::Stone)
+            .expect("redstone on stone is predictable");
+        assert_eq!(pos, at(0, 1, 0));
+        assert_eq!(state.as_block_kind(), BlockKind::RedstoneWire);
+        for side in ["north", "east", "south", "west"] {
+            assert_eq!(property(state, side), Some("side"), "{side}");
+        }
+
+        let wire = BlockState::from(BlockKind::RedstoneWire);
+        let placed = look_place(
+            ItemKind::Redstone,
+            &hit(Direction::Up, 1.0),
+            0.,
+            0.,
+            false,
+            on_stone(vec![(at(1, 1, 0), wire)]),
+        )
+        .expect("redstone on stone is predictable");
+        assert_eq!(property(placed.state, "east"), Some("side"));
+        assert_eq!(property(placed.state, "west"), Some("side"));
+        assert_eq!(property(placed.state, "north"), Some("none"));
+        assert_eq!(property(placed.state, "south"), Some("none"));
+    }
+
+    #[test]
+    fn redstone_wire_needs_a_sturdy_top_or_a_hopper() {
+        assert!(
+            place(
+                ItemKind::Redstone,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::StoneSlab
+            )
+            .is_none()
+        );
+        assert!(
+            place(
+                ItemKind::Redstone,
+                Direction::North,
+                0.5,
+                0.,
+                BlockKind::Stone
+            )
+            .is_none()
+        );
+        let on_hopper = look_place(
+            ItemKind::Redstone,
+            &hit(Direction::Up, 1.0),
+            0.,
+            0.,
+            true,
+            vec![(TARGET, BlockState::from(BlockKind::Hopper))],
+        );
+        assert!(on_hopper.is_some());
+    }
+
+    #[test]
+    fn a_torch_stands_on_a_top_face_and_hangs_on_a_side() {
+        for (item, standing, wall) in [
+            (ItemKind::Torch, BlockKind::Torch, BlockKind::WallTorch),
+            (
+                ItemKind::SoulTorch,
+                BlockKind::SoulTorch,
+                BlockKind::SoulWallTorch,
+            ),
+            (
+                ItemKind::CopperTorch,
+                BlockKind::CopperTorch,
+                BlockKind::CopperWallTorch,
+            ),
+            (
+                ItemKind::RedstoneTorch,
+                BlockKind::RedstoneTorch,
+                BlockKind::RedstoneWallTorch,
+            ),
+        ] {
+            let (pos, state) = place(item, Direction::Up, 1.0, 0., BlockKind::Stone)
+                .unwrap_or_else(|| panic!("{item:?} on stone is predictable"));
+            assert_eq!(pos, at(0, 1, 0));
+            assert_eq!(state.as_block_kind(), standing, "{item:?}");
+
+            let (pos, state) = place(item, Direction::North, 0.5, 0., BlockKind::Stone)
+                .unwrap_or_else(|| panic!("{item:?} on the side of stone is predictable"));
+            assert_eq!(pos, at(0, 0, -1));
+            assert_eq!(state.as_block_kind(), wall, "{item:?}");
+            assert_eq!(property(state, "facing"), Some("north"), "{item:?}");
+        }
+        let (_, state) = place(
+            ItemKind::RedstoneTorch,
+            Direction::North,
+            0.5,
+            0.,
+            BlockKind::Stone,
+        )
+        .expect("a redstone torch on the side of stone is predictable");
+        assert_eq!(property(state, "lit"), Some("true"));
+    }
+
+    #[test]
+    fn a_torch_on_a_fence_side_is_refused() {
+        assert!(
+            place(
+                ItemKind::Torch,
+                Direction::North,
+                0.5,
+                0.,
+                BlockKind::OakFence
+            )
+            .is_none()
+        );
+        assert!(place(ItemKind::Torch, Direction::Up, 1.0, 0., BlockKind::OakFence).is_some());
+    }
+
+    #[test]
+    fn a_grindstone_survives_anywhere() {
+        let (_, state) = place(
+            ItemKind::Grindstone,
+            Direction::Up,
+            1.0,
+            0.,
+            BlockKind::ShortGrass,
+        )
+        .expect("a grindstone needs no support");
+        assert_eq!(property(state, "face"), Some("wall"));
+        assert_eq!(property(state, "facing"), Some("north"));
+    }
+
+    fn top_hit_at(x: f64) -> BlockHitResult {
+        BlockHitResult {
+            location: Vec3 { x, y: 1.0, z: 0.5 },
+            direction: Direction::Up,
+            block_pos: TARGET,
+            inside: false,
+            world_border: false,
+            miss: false,
+        }
+    }
+
+    #[test]
+    fn a_door_hinge_follows_the_click_when_nothing_is_beside_it() {
+        let placed = look_place(
+            ItemKind::OakDoor,
+            &top_hit_at(0.5),
+            0.,
+            0.,
+            false,
+            on_stone(vec![]),
+        )
+        .expect("a door on stone is predictable");
+        assert_eq!(placed.pos, at(0, 1, 0));
+        assert_eq!(property(placed.state, "facing"), Some("south"));
+        assert_eq!(property(placed.state, "half"), Some("lower"));
+        assert_eq!(property(placed.state, "hinge"), Some("left"));
+        let (upper_pos, upper) = placed.partner.expect("a door has an upper half");
+        assert_eq!(upper_pos, at(0, 2, 0));
+        assert_eq!(property(upper, "half"), Some("upper"));
+        assert_eq!(property(upper, "hinge"), Some("left"));
+
+        let placed = look_place(
+            ItemKind::OakDoor,
+            &top_hit_at(0.25),
+            0.,
+            0.,
+            false,
+            on_stone(vec![]),
+        )
+        .expect("a door on stone is predictable");
+        assert_eq!(property(placed.state, "hinge"), Some("right"));
+    }
+
+    #[test]
+    fn a_door_hinge_goes_to_the_wall_or_away_from_a_door() {
+        let wall = vec![(at(-1, 1, 0), BlockState::from(BlockKind::Stone))];
+        let placed = look_place(
+            ItemKind::OakDoor,
+            &top_hit_at(0.5),
+            0.,
+            0.,
+            false,
+            on_stone(wall),
+        )
+        .expect("a door beside stone is predictable");
+        assert_eq!(property(placed.state, "hinge"), Some("right"));
+
+        let door = with(BlockKind::OakDoor, &[("half", "lower")]);
+        let placed = look_place(
+            ItemKind::OakDoor,
+            &top_hit_at(0.5),
+            0.,
+            0.,
+            false,
+            on_stone(vec![(at(1, 1, 0), door)]),
+        )
+        .expect("a door beside a door is predictable");
+        assert_eq!(property(placed.state, "hinge"), Some("right"));
+    }
+
+    #[test]
+    fn a_door_without_room_or_floor_is_refused() {
+        let side = hit(Direction::North, 0.5);
+        assert!(look_place(ItemKind::OakDoor, &side, 0., 0., false, on_stone(vec![])).is_none());
+        let roof = vec![(at(0, 2, 0), BlockState::from(BlockKind::Stone))];
+        assert!(
+            look_place(
+                ItemKind::OakDoor,
+                &top_hit_at(0.5),
+                0.,
+                0.,
+                false,
+                on_stone(roof)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_bed_places_its_head_ahead_of_the_foot() {
+        let placed = look_place(
+            ItemKind::RedBed,
+            &hit(Direction::Up, 1.0),
+            0.,
+            0.,
+            false,
+            on_stone(vec![]),
+        )
+        .expect("a bed on stone is predictable");
+        assert_eq!(placed.pos, at(0, 1, 0));
+        assert_eq!(property(placed.state, "facing"), Some("south"));
+        assert_eq!(property(placed.state, "part"), Some("foot"));
+        let (head_pos, head) = placed.partner.expect("a bed has a head");
+        assert_eq!(head_pos, at(0, 1, 1));
+        assert_eq!(property(head, "part"), Some("head"));
+
+        let blocked = vec![(at(0, 1, 1), BlockState::from(BlockKind::Stone))];
+        assert!(
+            look_place(
+                ItemKind::RedBed,
+                &hit(Direction::Up, 1.0),
+                0.,
+                0.,
+                false,
+                on_stone(blocked)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn trapdoor_halves_follow_the_click() {
+        let (_, state) = place(
+            ItemKind::OakTrapdoor,
+            Direction::North,
+            0.8,
+            0.,
+            BlockKind::Stone,
+        )
+        .expect("a trapdoor on the side of stone is predictable");
+        assert_eq!(property(state, "half"), Some("top"));
+        assert_eq!(property(state, "facing"), Some("north"));
+
+        let (_, state) = place(
+            ItemKind::OakTrapdoor,
+            Direction::Up,
+            1.0,
+            0.,
+            BlockKind::Stone,
+        )
+        .expect("a trapdoor on stone is predictable");
+        assert_eq!(property(state, "half"), Some("bottom"));
+        assert_eq!(property(state, "facing"), Some("north"));
+
+        let (_, state) = place(
+            ItemKind::OakTrapdoor,
+            Direction::Down,
+            0.0,
+            0.,
+            BlockKind::Stone,
+        )
+        .expect("a trapdoor under stone is predictable");
+        assert_eq!(property(state, "half"), Some("top"));
+    }
+
+    #[test]
+    fn a_sign_takes_a_rotation_segment_from_the_yaw() {
+        for (yaw, segment) in [
+            (0., "8"),
+            (11., "8"),
+            (12., "9"),
+            (-11., "8"),
+            (-12., "7"),
+            (90., "12"),
+            (-90., "4"),
+        ] {
+            let (_, state) = place(ItemKind::OakSign, Direction::Up, 1.0, yaw, BlockKind::Stone)
+                .unwrap_or_else(|| panic!("a sign on stone at yaw {yaw} is predictable"));
+            assert_eq!(state.as_block_kind(), BlockKind::OakSign);
+            assert_eq!(property(state, "rotation"), Some(segment), "yaw {yaw}");
+        }
+    }
+
+    #[test]
+    fn rotation_segments_wrap_below_zero_and_past_a_turn() {
+        assert_eq!(rotation_segment(-12.), "15");
+        assert_eq!(rotation_segment(-11.), "0");
+        assert_eq!(rotation_segment(348.), "15");
+    }
+
+    #[test]
+    fn signs_banners_and_skulls_hang_on_a_side_face() {
+        for (item, wall) in [
+            (ItemKind::OakSign, BlockKind::OakWallSign),
+            (ItemKind::WhiteBanner, BlockKind::WhiteWallBanner),
+            (ItemKind::SkeletonSkull, BlockKind::SkeletonWallSkull),
+            (ItemKind::PlayerHead, BlockKind::PlayerWallHead),
+            (ItemKind::TubeCoralFan, BlockKind::TubeCoralWallFan),
+        ] {
+            let (pos, state) = place(item, Direction::North, 0.5, 0., BlockKind::Stone)
+                .unwrap_or_else(|| panic!("{item:?} on the side of stone is predictable"));
+            assert_eq!(pos, at(0, 0, -1));
+            assert_eq!(state.as_block_kind(), wall, "{item:?}");
+            assert_eq!(property(state, "facing"), Some("north"), "{item:?}");
+        }
+    }
+
+    #[test]
+    fn a_sign_on_a_carpet_is_refused() {
+        assert!(
+            place(
+                ItemKind::OakSign,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::WhiteCarpet
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_hanging_sign_under_stone_hangs_flat() {
+        let (pos, state) = place(
+            ItemKind::OakHangingSign,
+            Direction::Down,
+            0.0,
+            0.,
+            BlockKind::Stone,
+        )
+        .expect("a hanging sign under stone is predictable");
+        assert_eq!(pos, at(0, -1, 0));
+        assert_eq!(state.as_block_kind(), BlockKind::OakHangingSign);
+        assert_eq!(property(state, "attached"), Some("false"));
+        assert_eq!(property(state, "rotation"), Some("8"));
+    }
+
+    #[test]
+    fn a_wall_hanging_sign_turns_across_the_clicked_face() {
+        let (_, state) = place(
+            ItemKind::OakHangingSign,
+            Direction::North,
+            0.5,
+            0.,
+            BlockKind::Stone,
+        )
+        .expect("a hanging sign on the side of stone is predictable");
+        assert_eq!(state.as_block_kind(), BlockKind::OakWallHangingSign);
+        assert_eq!(property(state, "facing"), Some("east"));
+    }
+
+    #[test]
+    fn cocoa_faces_its_log() {
+        let (pos, state) = place(
+            ItemKind::CocoaBeans,
+            Direction::North,
+            0.5,
+            0.,
+            BlockKind::JungleLog,
+        )
+        .expect("cocoa on a jungle log is predictable");
+        assert_eq!(pos, at(0, 0, -1));
+        assert_eq!(state.as_block_kind(), BlockKind::Cocoa);
+        assert_eq!(property(state, "facing"), Some("south"));
+        assert!(
+            place(
+                ItemKind::CocoaBeans,
+                Direction::North,
+                0.5,
+                0.,
+                BlockKind::Stone
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_rail_runs_along_the_player_and_needs_a_floor() {
+        let (_, state) = place(ItemKind::Rail, Direction::Up, 1.0, 0., BlockKind::Stone)
+            .expect("a rail on stone is predictable");
+        assert_eq!(property(state, "shape"), Some("north_south"));
+        let (_, state) = place(
+            ItemKind::PoweredRail,
+            Direction::Up,
+            1.0,
+            90.,
+            BlockKind::Stone,
+        )
+        .expect("a powered rail on stone is predictable");
+        assert_eq!(property(state, "shape"), Some("east_west"));
+        assert!(
+            place(
+                ItemKind::DetectorRail,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::StoneSlab
+            )
+            .is_none()
+        );
+        let on_hopper = look_place(
+            ItemKind::ActivatorRail,
+            &hit(Direction::Up, 1.0),
+            0.,
+            0.,
+            true,
+            vec![(TARGET, BlockState::from(BlockKind::Hopper))],
+        );
+        assert!(on_hopper.is_some());
+    }
+
+    #[test]
+    fn a_pressure_plate_needs_a_floor() {
+        assert!(
+            place(
+                ItemKind::StonePressurePlate,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::OakFence
+            )
+            .is_some()
+        );
+        assert!(
+            place(
+                ItemKind::StonePressurePlate,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::ShortGrass
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn tripwire_and_hooks() {
+        let wire = BlockState::from(BlockKind::Tripwire);
+        let placed = look_place(
+            ItemKind::String,
+            &hit(Direction::Up, 1.0),
+            0.,
+            0.,
+            false,
+            on_stone(vec![(at(1, 1, 0), wire)]),
+        )
+        .expect("string on stone is predictable");
+        assert_eq!(placed.state.as_block_kind(), BlockKind::Tripwire);
+        assert_eq!(property(placed.state, "east"), Some("true"));
+        assert_eq!(property(placed.state, "west"), Some("false"));
+
+        let (_, state) = place(
+            ItemKind::TripwireHook,
+            Direction::North,
+            0.5,
+            0.,
+            BlockKind::Stone,
+        )
+        .expect("a hook on the side of stone is predictable");
+        assert_eq!(property(state, "facing"), Some("north"));
+        assert!(
+            place(
+                ItemKind::TripwireHook,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::Stone
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn an_amethyst_bud_needs_a_sturdy_face() {
+        assert!(
+            place(
+                ItemKind::AmethystCluster,
+                Direction::North,
+                0.25,
+                0.,
+                BlockKind::StoneSlab
+            )
+            .is_none()
+        );
+        assert!(
+            place(
+                ItemKind::SmallAmethystBud,
+                Direction::North,
+                0.5,
+                0.,
+                BlockKind::Stone
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn a_snow_layer_needs_a_full_top_and_not_ice() {
+        let (_, state) = place(ItemKind::Snow, Direction::Up, 1.0, 0., BlockKind::Stone)
+            .expect("snow on stone is predictable");
+        assert_eq!(property(state, "layers"), Some("1"));
+        assert!(place(ItemKind::Snow, Direction::Up, 1.0, 0., BlockKind::Ice).is_none());
+    }
+
+    #[test]
+    fn lichen_and_vines_take_the_face_towards_the_click() {
+        for item in [ItemKind::GlowLichen, ItemKind::Vine, ItemKind::SculkVein] {
+            let (pos, state) = place(item, Direction::North, 0.5, 0., BlockKind::Stone)
+                .unwrap_or_else(|| panic!("{item:?} on the side of stone is predictable"));
+            assert_eq!(pos, at(0, 0, -1));
+            assert_eq!(property(state, "south"), Some("true"), "{item:?}");
+            assert_eq!(property(state, "north"), Some("false"), "{item:?}");
+        }
+    }
+
+    #[test]
+    fn candles_and_carpets_need_something_below() {
+        assert!(
+            place(
+                ItemKind::Candle,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::ShortGrass
+            )
+            .is_none()
+        );
+        assert!(
+            place(
+                ItemKind::WhiteCarpet,
+                Direction::Up,
+                1.0,
+                0.,
+                BlockKind::ShortGrass
+            )
+            .is_none()
+        );
+        assert!(place(ItemKind::Candle, Direction::Up, 1.0, 0., BlockKind::Stone).is_some());
     }
 }

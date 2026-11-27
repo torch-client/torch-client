@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::caps::TierName;
 use super::problem::Position;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,10 +118,6 @@ pub(crate) enum Value {
 }
 
 impl Value {
-    #[allow(
-        dead_code,
-        reason = "phase 2 of docs/SHADER_FORMAT.md builds pipelines with these values"
-    )]
     pub(crate) fn override_value(self) -> f64 {
         match self {
             Value::Bool(b) => f64::from(u8::from(b)),
@@ -282,10 +279,6 @@ impl Options {
         self.all.iter()
     }
 
-    #[allow(
-        dead_code,
-        reason = "phase 2 of docs/SHADER_FORMAT.md builds pipelines with these values"
-    )]
     pub(crate) fn overrides<'a>(&'a self, values: &Values) -> Vec<(&'a str, f64)> {
         self.all
             .iter()
@@ -317,10 +310,6 @@ impl Values {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "phase 4 of docs/SHADER_FORMAT.md reads the saved option file"
-    )]
     pub(crate) fn load(text: &str, options: &Options) -> Values {
         let mut values = Values::defaults(options);
         for line in text.lines() {
@@ -387,6 +376,7 @@ pub(crate) struct Preset {
     )]
     pub(crate) name: Option<String>,
     pub(crate) set: Vec<(String, Value)>,
+    pub(crate) default_on: Vec<(TierName, Position)>,
     pub(crate) at: Position,
 }
 
@@ -550,6 +540,7 @@ pub(crate) mod tests {
                 ("shadows".into(), Value::Bool(false)),
                 ("quality".into(), Value::Choice(0)),
             ],
+            default_on: Vec::new(),
             at: Position { line: 1, column: 1 },
         };
         let presets = [low];

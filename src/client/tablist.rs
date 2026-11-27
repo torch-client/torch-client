@@ -4,7 +4,9 @@ use azalea_chat::style::ChatFormatting;
 use azalea_core::objectives::ObjectiveCriteria;
 use azalea_protocol::packets::game::ClientboundGamePacket;
 use azalea_protocol::packets::game::c_set_objective::Method as ObjectiveMethod;
-use azalea_protocol::packets::game::c_set_player_team::{Method as TeamMethod, NameTagVisibility};
+use azalea_protocol::packets::game::c_set_player_team::{
+    CollisionRule, Method as TeamMethod, NameTagVisibility,
+};
 use bevy::platform::collections::HashMap;
 
 use crate::client::chat_text::{to_spans, to_spans_styled};
@@ -86,6 +88,7 @@ struct Team {
     members: Vec<String>,
     nametag_visibility: NameTagVisibility,
     see_friendly_invisibles: bool,
+    collision_rule: CollisionRule,
 }
 
 const SEE_FRIENDLY_INVISIBLES: u8 = 2;
@@ -395,6 +398,7 @@ fn apply_team(s: &mut State, name: &str, method: &TeamMethod) {
                 members: members.clone(),
                 nametag_visibility: params.nametag_visibility,
                 see_friendly_invisibles: params.options & SEE_FRIENDLY_INVISIBLES != 0,
+                collision_rule: params.collision_rule,
             };
             for m in &team.members {
                 s.team_of.insert(m.clone(), name.to_string());
@@ -411,6 +415,7 @@ fn apply_team(s: &mut State, name: &str, method: &TeamMethod) {
                 team.suffix = to_spans_styled(&params.player_suffix, root);
                 team.nametag_visibility = params.nametag_visibility;
                 team.see_friendly_invisibles = params.options & SEE_FRIENDLY_INVISIBLES != 0;
+                team.collision_rule = params.collision_rule;
             }
         }
         TeamMethod::Remove => {
@@ -670,6 +675,14 @@ impl Lookup<'_> {
         self.0.players.get(&uuid).map(|e| e.gamemode)
     }
 
+    pub(crate) fn name(&self, uuid: u128) -> Option<&str> {
+        self.0
+            .players
+            .get(&uuid)
+            .map(|e| e.name.as_str())
+            .filter(|n| !n.is_empty())
+    }
+
     #[cfg(feature = "skins")]
     pub(crate) fn skin(&self, uuid: u128) -> (crate::client::skins::SkinRef, u8) {
         let default = match self.0.players.get(&uuid) {
@@ -697,6 +710,28 @@ impl Lookup<'_> {
         self.0
             .allied(scoreboard_name, viewer)
             .is_some_and(|team| team.see_friendly_invisibles)
+    }
+
+    pub(crate) fn pushes(&self, pusher: &str, local: &str) -> bool {
+        let rule = |name: &str| {
+            self.0
+                .team_of
+                .get(name)
+                .and_then(|t| self.0.teams.get(t))
+                .map_or(CollisionRule::Always, |t| t.collision_rule)
+        };
+        let own = rule(pusher);
+        let theirs = rule(local);
+        if own == CollisionRule::Never || theirs == CollisionRule::Never {
+            return false;
+        }
+        let same_team = self.0.allied(pusher, local).is_some();
+        if (own == CollisionRule::PushOwnTeam || theirs == CollisionRule::PushOwnTeam) && same_team
+        {
+            return false;
+        }
+        (own != CollisionRule::PushOtherTeams && theirs != CollisionRule::PushOtherTeams)
+            || same_team
     }
 }
 
@@ -810,6 +845,7 @@ mod tests {
                 members: vec!["Alice".into()],
                 nametag_visibility: NameTagVisibility::Always,
                 see_friendly_invisibles: false,
+                collision_rule: CollisionRule::Always,
             },
         );
         s.team_of.insert("Alice".into(), "red".into());
@@ -928,6 +964,7 @@ mod tests {
                 members: Vec::new(),
                 nametag_visibility: NameTagVisibility::Always,
                 see_friendly_invisibles: false,
+                collision_rule: CollisionRule::Always,
             },
         );
         s.team_of

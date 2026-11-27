@@ -1,15 +1,13 @@
-mod record;
+pub(super) mod record;
 
 use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 use bevy::render::diagnostic::RecordDiagnostics;
-use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{LoadOp, RenderPassColorAttachment, RenderPassDescriptor};
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::render::view::{ExtractedView, ViewTarget};
 
 use super::compile::{PACK_SET, ScreenStage, Segment, TERRAIN_SET};
-use super::entities::{ENTITY_INSTANCE_SIZE, entity_layout_matches};
 use super::frame::{PackRender, Sized};
 use super::plan::{Attachment, ComputePass, GeometryPass, ScreenPass, StepPass};
 use super::targets::zero_layout;
@@ -55,6 +53,7 @@ pub(crate) fn pack_frame(
     let Some(Sized {
         targets,
         plans,
+        entity_passes,
         setup_done,
         fully_cleared,
         ..
@@ -62,11 +61,12 @@ pub(crate) fn pack_frame(
     else {
         return;
     };
-    let (installed, gpu, frame) = (&*install.installed, &install.gpu, &install.frame);
+    let (installed, gpu, entity_frame) = (&*install.installed, &install.gpu, &install.entity_frame);
     let Some(terrain_group) = world.resource::<TerrainBindGroup>().group.as_ref() else {
         return;
     };
-    let plan = &plans[*frames % plans.len()];
+    let which = *frames % plans.len();
+    let (plan, entity_passes) = (&plans[which], &entity_passes[which]);
     *frames = frames.wrapping_add(1);
     let sources = StreamSources {
         tier: world.resource::<TerrainTier>(),
@@ -200,83 +200,21 @@ pub(crate) fn pack_frame(
     steps(render_context, &plan.stages[ScreenStage::Begin.index()]);
     span.end(render_context.command_encoder());
 
+    let shadow = gpu.shadow_targets.as_ref().map(|t| record::SegmentTargets {
+        depth: &t.depth.view,
+        color: None,
+        draw_group: None,
+    });
     let entity_segment = |render_context: &mut RenderContext, segment: Segment| {
-        let Some(instances) = frame.entity_buffer.as_ref() else {
-            return;
-        };
-        let start = frame
-            .entity_batches
-            .partition_point(|b| b.segment < segment);
-        let end = start + frame.entity_batches[start..].partition_point(|b| b.segment == segment);
-        let meshes = world.resource::<RenderAssets<bevy::render::mesh::RenderMesh>>();
-        let allocator = world.resource::<bevy::render::mesh::allocator::MeshAllocator>();
-        let mut at = start;
-        while at < end {
-            let kind = frame.entity_batches[at].pass;
-            let run = at
-                + frame.entity_batches[at..end]
-                    .iter()
-                    .take_while(|b| b.pass == kind)
-                    .count();
-            let batches = &frame.entity_batches[at..run];
-            at = run;
-            let Some(entities) = &plan.entities[kind.index()] else {
-                continue;
-            };
-            let (opaque, blend) = (&entities.opaque, &entities.blend);
-            let attachments = load_attachments(&entities.attachments);
-            let depth_view = match segment {
-                Segment::Sky => None,
-                Segment::Shadow => gpu.shadow_targets.as_ref().map(|t| &t.depth.view),
-                _ => Some(&targets.depth.view),
-            };
-            let depth = depth_view.map(|view| depth_attachment(view, LoadOp::Load));
-            let mut encoder = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-                label: Some(gpu_label!("entities")),
-                color_attachments: &attachments,
-                depth_stencil_attachment: depth,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            for batch in batches {
-                let (Some(mesh), Some(vertices), Some(textured)) = (
-                    meshes.get(batch.mesh),
-                    allocator.mesh_vertex_slice(&batch.mesh),
-                    entities.groups.get(&batch.texture),
-                ) else {
-                    continue;
-                };
-                if !entity_layout_matches(mesh.layout.0.layout()) {
-                    continue;
-                }
-                encoder.set_render_pipeline(if batch.blend { blend } else { opaque });
-                encoder.set_bind_group(PACK_SET as usize, textured, &[]);
-                encoder.set_vertex_buffer(0, vertices.buffer.slice(..));
-                let from = u64::from(batch.first) * ENTITY_INSTANCE_SIZE;
-                encoder.set_vertex_buffer(
-                    1,
-                    instances.slice(from..from + u64::from(batch.count) * ENTITY_INSTANCE_SIZE),
-                );
-                let base = vertices.range.start;
-                match &mesh.buffer_info {
-                    bevy::render::mesh::RenderMeshBufferInfo::Indexed {
-                        count,
-                        index_format,
-                    } => {
-                        let Some(indices) = allocator.mesh_index_slice(&batch.mesh) else {
-                            continue;
-                        };
-                        encoder.set_index_buffer(indices.buffer.slice(..), *index_format);
-                        let first = indices.range.start;
-                        encoder.draw_indexed(first..first + count, base as i32, 0..batch.count);
-                    }
-                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
-                        encoder.draw(base..base + mesh.vertex_count, 0..batch.count);
-                    }
-                }
-            }
-        }
+        record::entity_segment(
+            render_context,
+            world,
+            entity_frame,
+            entity_passes,
+            segment,
+            &targets.depth.view,
+            shadow.as_ref(),
+        );
     };
     let span = recorder.time_span(render_context.command_encoder(), "shaderpack/shadow");
     if let (Some(shadow), Some(shadow_targets)) = (&plan.shadow, gpu.shadow_targets.as_ref()) {

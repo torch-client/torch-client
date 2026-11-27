@@ -7,6 +7,7 @@ use std::sync::{Mutex, PoisonError};
 use bevy::math::Vec2;
 
 use crate::gui::painter::Painter;
+use crate::lang::Key;
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Rect {
@@ -43,7 +44,7 @@ impl Rect {
 }
 
 macro_rules! elements {
-    ($($(#[$m:meta])* $id:ident = $key:literal, $label:literal, $layer:ident;)*) => {
+    ($($(#[$m:meta])* $id:ident = $key:literal, $label:expr, $layer:ident;)*) => {
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
         #[repr(u8)]
         pub enum ElementId { $($(#[$m])* $id),* }
@@ -61,8 +62,9 @@ macro_rules! elements {
                 match self { $(ElementId::$id => $key),* }
             }
 
-            pub const fn label(self) -> &'static str {
-                match self { $(ElementId::$id => $label),* }
+            pub fn label(self) -> &'static str {
+                const LABELS: [Key; COUNT] = [$($label),*];
+                LABELS[self.index()].get()
             }
 
             pub const fn layer(self) -> Layer {
@@ -73,41 +75,41 @@ macro_rules! elements {
 }
 
 elements! {
-    BossBars = "boss_bars", "Boss bars", Base;
-    Effects = "effects", "Effects", Base;
-    Hotbar = "hotbar", "Hotbar", Base;
-    Chat = "chat", "Chat", Base;
-    Sidebar = "sidebar", "Scoreboard", Base;
-    Fps = "fps", "FPS", Extras;
-    Coords = "coords", "Coordinates", Extras;
-    Direction = "direction", "Direction", Extras;
-    Gamemode = "gamemode", "Gamemode", Extras;
-    Flying = "flying", "Flying", Extras;
-    Status = "status", "Status", Extras;
-    Ram = "ram", "RAM", Extras;
-    Freecam = "freecam", "Freecam", Extras;
-    Pad = "pad", "Movement", Controls;
-    UseButton = "use_button", "Use button", Controls;
-    JumpButton = "jump_button", "Jump button", Controls;
-    ChatButton = "chat_button", "Chat button", Controls;
-    ModButton = "mod_button", "Modules button", Controls;
-    Debug = "debug", "Debug (F3)", Debug;
-    ModPanel0 = "mod_panel_0", "Mod panel", Extras;
-    ModPanel1 = "mod_panel_1", "Mod panel", Extras;
-    ModPanel2 = "mod_panel_2", "Mod panel", Extras;
-    ModPanel3 = "mod_panel_3", "Mod panel", Extras;
-    ModPanel4 = "mod_panel_4", "Mod panel", Extras;
-    ModPanel5 = "mod_panel_5", "Mod panel", Extras;
-    ModPanel6 = "mod_panel_6", "Mod panel", Extras;
-    ModPanel7 = "mod_panel_7", "Mod panel", Extras;
-    ModPanel8 = "mod_panel_8", "Mod panel", Extras;
-    ModPanel9 = "mod_panel_9", "Mod panel", Extras;
-    ModPanel10 = "mod_panel_10", "Mod panel", Extras;
-    ModPanel11 = "mod_panel_11", "Mod panel", Extras;
-    ModPanel12 = "mod_panel_12", "Mod panel", Extras;
-    ModPanel13 = "mod_panel_13", "Mod panel", Extras;
-    ModPanel14 = "mod_panel_14", "Mod panel", Extras;
-    ModPanel15 = "mod_panel_15", "Mod panel", Extras;
+    BossBars = "boss_bars", Key::of("hud_editor.element.boss_bars"), Base;
+    Effects = "effects", Key::of("hud_editor.element.effects"), Base;
+    Hotbar = "hotbar", Key::of("hud_editor.element.hotbar"), Base;
+    Chat = "chat", Key::of("hud_editor.element.chat"), Base;
+    Sidebar = "sidebar", Key::of("hud_editor.element.sidebar"), Base;
+    Fps = "fps", Key::of("hud_editor.element.fps"), Extras;
+    Coords = "coords", Key::of("hud_editor.element.coords"), Extras;
+    Direction = "direction", Key::of("hud_editor.element.direction"), Extras;
+    Gamemode = "gamemode", Key::of("hud_editor.element.gamemode"), Extras;
+    Flying = "flying", Key::of("hud_editor.element.flying"), Extras;
+    Status = "status", Key::of("hud_editor.element.status"), Extras;
+    Ram = "ram", Key::of("hud_editor.element.ram"), Extras;
+    Freecam = "freecam", Key::of("hud_editor.element.freecam"), Extras;
+    Pad = "pad", Key::of("hud_editor.element.pad"), Controls;
+    UseButton = "use_button", Key::of("hud_editor.element.use_button"), Controls;
+    JumpButton = "jump_button", Key::of("hud_editor.element.jump_button"), Controls;
+    ChatButton = "chat_button", Key::of("hud_editor.element.chat_button"), Controls;
+    ModButton = "mod_button", Key::of("hud_editor.element.mod_button"), Controls;
+    Debug = "debug", Key::of("hud_editor.element.debug"), Debug;
+    ModPanel0 = "mod_panel_0", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel1 = "mod_panel_1", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel2 = "mod_panel_2", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel3 = "mod_panel_3", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel4 = "mod_panel_4", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel5 = "mod_panel_5", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel6 = "mod_panel_6", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel7 = "mod_panel_7", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel8 = "mod_panel_8", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel9 = "mod_panel_9", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel10 = "mod_panel_10", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel11 = "mod_panel_11", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel12 = "mod_panel_12", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel13 = "mod_panel_13", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel14 = "mod_panel_14", Key::of("hud_editor.element.mod_panel"), Extras;
+    ModPanel15 = "mod_panel_15", Key::of("hud_editor.element.mod_panel"), Extras;
 }
 
 pub const MOD_PANELS: usize = 16;
@@ -177,14 +179,14 @@ impl Layer {
     #[cfg(not(feature = "mobile_ui"))]
     pub const ALL: [Layer; 3] = [Layer::Base, Layer::Extras, Layer::Debug];
 
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Layer::Base => "Base game",
-            Layer::Extras => "Extras",
+            Layer::Base => crate::lang::tr!("hud_editor.layer.base"),
+            Layer::Extras => crate::lang::tr!("hud_editor.layer.extras"),
             #[cfg(feature = "mobile_ui")]
-            Layer::Areas => "Areas",
-            Layer::Controls => "Controls",
-            Layer::Debug => "Debug",
+            Layer::Areas => crate::lang::tr!("hud_editor.layer.areas"),
+            Layer::Controls => crate::lang::tr!("hud_editor.layer.controls"),
+            Layer::Debug => crate::lang::tr!("hud_editor.layer.debug"),
         }
     }
 }
@@ -541,9 +543,9 @@ impl Home {
 
     pub fn label(self) -> &'static str {
         match self {
-            Home::Left => "Stack upwards (left)",
-            Home::Right => "Stack upwards (right)",
-            Home::Corner => "Stack upwards (corner)",
+            Home::Left => crate::lang::tr!("hud_editor.home.left"),
+            Home::Right => crate::lang::tr!("hud_editor.home.right"),
+            Home::Corner => crate::lang::tr!("hud_editor.home.corner"),
         }
     }
 }

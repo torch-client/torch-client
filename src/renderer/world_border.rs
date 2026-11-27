@@ -170,7 +170,7 @@ fn update_border(
         return;
     };
     let border = &view.border;
-    let partial = view.partial;
+    let partial = view.world_partial;
     let bounds = [
         border.min_x(partial),
         border.max_x(partial),

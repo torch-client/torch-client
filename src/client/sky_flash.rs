@@ -1,10 +1,13 @@
 use azalea_protocol::packets::game::ClientboundGamePacket;
 use azalea_registry::builtin::EntityKind;
 
+use crate::client::tick_rate::WorldTick;
 use crate::session::{SessionState, SharedMutex};
 use crate::util::javarandom::JavaRandom;
 
 const FLASH_TICKS: i32 = 2;
+
+const MAX_BOLTS: usize = 1024;
 
 const START_LIFE: i32 = 2;
 
@@ -49,12 +52,13 @@ impl Bolt {
 pub(crate) fn packet(shared: &SharedMutex, packet: &ClientboundGamePacket) {
     match packet {
         ClientboundGamePacket::AddEntity(p) if p.entity_type == EntityKind::LightningBolt => {
-            shared
-                .lock()
-                .unwrap()
-                .session
-                .lightning
-                .push(Bolt::new(p.id.0));
+            let mut s = shared.lock().unwrap();
+            let bolts = &mut s.session.lightning;
+            bolts.retain(|bolt| bolt.id != p.id.0);
+            if bolts.len() >= MAX_BOLTS {
+                bolts.remove(0);
+            }
+            bolts.push(Bolt::new(p.id.0));
         }
         ClientboundGamePacket::RemoveEntities(p) => {
             let mut s = shared.lock().unwrap();
@@ -74,9 +78,12 @@ pub(crate) fn packet(shared: &SharedMutex, packet: &ClientboundGamePacket) {
     }
 }
 
-pub(crate) fn tick(session: &mut SessionState) {
+pub(crate) fn tick(session: &mut SessionState, world_tick: &WorldTick) {
     let mut lit = false;
     session.lightning.retain_mut(|bolt| {
+        if !world_tick.entity_ticks(bolt.id) {
+            return true;
+        }
         let (alive, flash) = bolt.tick();
         lit |= flash;
         alive
@@ -99,11 +106,12 @@ mod tests {
         let mut bolt = Bolt::new(7);
         bolt.flashes = 0;
         session.lightning.push(bolt);
-        tick(&mut session);
+        let running = WorldTick::default();
+        tick(&mut session, &running);
         assert_eq!(session.sky_flash_time, 1);
-        tick(&mut session);
+        tick(&mut session, &running);
         assert_eq!(session.sky_flash_time, 1);
-        tick(&mut session);
+        tick(&mut session, &running);
         assert_eq!(session.sky_flash_time, 0);
         assert!(session.lightning.is_empty());
     }

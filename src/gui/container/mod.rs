@@ -7,7 +7,7 @@ use crate::session::{ContainerKind, InvAction, SlotStack};
 mod anvil;
 mod banner;
 mod beacon;
-mod book;
+pub(crate) mod book;
 mod enchant;
 mod horse;
 mod merchant;

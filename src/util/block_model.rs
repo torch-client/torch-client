@@ -61,9 +61,15 @@ const fn skip_same_group(kind: azalea_registry::builtin::BlockKind) -> u32 {
 pub const POWDER_SNOW_CULL_GROUP: u32 =
     skip_same_group(azalea_registry::builtin::BlockKind::PowderSnow);
 
+pub const MANGROVE_ROOTS_CULL_GROUP: u32 =
+    skip_same_group(azalea_registry::builtin::BlockKind::MangroveRoots);
+
 fn cull_group(name: &str, block: &dyn BlockTrait) -> u32 {
     if name.ends_with("_leaves") {
         return LEAVES_CULL_GROUP;
+    }
+    if name == "mangrove_roots" {
+        return MANGROVE_ROOTS_CULL_GROUP;
     }
     if SKIP_SAME.contains(&name)
         || name.ends_with("_stained_glass")

@@ -53,7 +53,7 @@ fn default_account_opts(client_id: Option<&str>, scope: Option<&str>) -> Microso
     }
 }
 
-#[derive(Debug)]
+azalea_auth::redacted_debug!(MicrosoftAccount { cache_key, auth_opts, username, uuid, certs ; access_token });
 pub struct MicrosoftAccount {
     cache_key: String,
     auth_opts: MicrosoftAccountOpts,
@@ -111,7 +111,7 @@ impl AccountTrait for MicrosoftAccount {
         public_key: &'a [u8],
         private_key: &'a [u8; 16],
         server_id: &'a str,
-        proxy: Option<reqwest::Proxy>,
+        proxy: Option<azalea_auth::HttpProxy>,
     ) -> BoxFuture<'a, Result<(), ClientSessionServerError>> {
         Box::pin(async move {
             let access_token = self.access_token.lock().clone();
@@ -128,7 +128,7 @@ impl AccountTrait for MicrosoftAccount {
     }
 }
 
-#[derive(Debug)]
+azalea_auth::redacted_debug!(MicrosoftWithAccessTokenAccount { msa, username, uuid, certs ; access_token });
 pub struct MicrosoftWithAccessTokenAccount {
     msa: Mutex<azalea_auth::cache::ExpiringValue<AccessTokenResponse>>,
 
@@ -144,7 +144,7 @@ impl MicrosoftWithAccessTokenAccount {
         client_id: Option<&str>,
         scope: Option<&str>,
     ) -> Result<Self, azalea_auth::AuthError> {
-        let client = reqwest::Client::new();
+        let client = azalea_auth::HttpClient::new();
 
         let mut msa = msa.clone();
 
@@ -208,7 +208,7 @@ impl AccountTrait for MicrosoftWithAccessTokenAccount {
         public_key: &'a [u8],
         private_key: &'a [u8; 16],
         server_id: &'a str,
-        proxy: Option<reqwest::Proxy>,
+        proxy: Option<azalea_auth::HttpProxy>,
     ) -> BoxFuture<'a, Result<(), ClientSessionServerError>> {
         Box::pin(async move {
             let access_token = self.access_token.lock().clone();

@@ -247,7 +247,7 @@ impl Failure {
     }
 
     fn timeout() -> Failure {
-        Failure::other(format!("No answer in {}s", TIMEOUT.as_secs()))
+        Failure::other(crate::lang::trf!("gui.ping.timeout", TIMEOUT.as_secs()))
     }
 }
 

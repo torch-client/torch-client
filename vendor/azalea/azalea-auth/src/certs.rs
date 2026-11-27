@@ -8,7 +8,7 @@ use tracing::trace;
 #[derive(Debug, Error)]
 pub enum FetchCertificatesError {
     #[error("Http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] crate::HttpError),
     #[error("Couldn't parse pkcs8 private key: {0}")]
     Pkcs8(#[from] rsa::pkcs8::Error),
 }
@@ -16,7 +16,10 @@ pub enum FetchCertificatesError {
 pub async fn fetch_certificates(
     minecraft_access_token: &str,
 ) -> Result<Certificates, FetchCertificatesError> {
+    #[cfg(not(target_arch = "wasm32"))]
     let client = crate::http_client().unwrap_or_else(reqwest::Client::new);
+    #[cfg(target_arch = "wasm32")]
+    let client = crate::HttpClient::new();
 
     let res = client
         .post("https://api.minecraftservices.com/player/certificates")
@@ -69,7 +72,8 @@ pub async fn fetch_certificates(
     Ok(certificates)
 }
 
-#[derive(Clone, Debug)]
+crate::redacted_debug!(Certificates { public_key_der, signature_v1, signature_v2, expires_at, refresh_after ; private_key });
+#[derive(Clone)]
 pub struct Certificates {
     pub private_key: RsaPrivateKey,
     pub public_key_der: Vec<u8>,
@@ -99,7 +103,8 @@ pub struct CertificatesResponse {
     pub refreshed_after: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+crate::redacted_debug!(KeyPairResponse { public_key ; private_key });
+#[derive(Deserialize)]
 pub struct KeyPairResponse {
     #[serde(rename = "privateKey")]
     pub private_key: String,

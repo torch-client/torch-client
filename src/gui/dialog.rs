@@ -79,6 +79,7 @@ enum Overlay {
     None,
     Warning,
     Link(String),
+    Command(crate::gui::confirmcommand::CommandPrompt, AfterAction),
 }
 
 #[derive(Default)]
@@ -123,7 +124,7 @@ impl DialogState {
 
     pub fn on_escape(&mut self, shared: &SharedMutex) -> Outcome {
         match &self.overlay {
-            Overlay::Warning | Overlay::Link(_) => {
+            Overlay::Warning | Overlay::Link(_) | Overlay::Command(..) => {
                 self.overlay = Overlay::None;
                 Outcome::default()
             }
@@ -156,8 +157,22 @@ impl DialogState {
     fn press(&mut self, dialog: &Dialog, action: Option<&Action>, shared: &SharedMutex) -> Outcome {
         let values = self.values(dialog);
         let click = action.and_then(|action| action.resolve(&values));
+        if let Some(Click::RunCommand(command)) = &click {
+            let command = command.strip_prefix('/').unwrap_or(command);
+            if let Some(prompt) = crate::gui::confirmcommand::check(command, shared) {
+                self.overlay = Overlay::Command(prompt, dialog.after_action);
+                return Outcome::default();
+            }
+        }
         let mut out = Outcome::default();
-        match dialog.after_action {
+        self.transition(dialog.after_action, &mut out);
+        let Some(click) = click else { return out };
+        self.dispatch(click, shared, &mut out);
+        out
+    }
+
+    fn transition(&mut self, after: AfterAction, out: &mut Outcome) {
+        match after {
             AfterAction::None => {}
             AfterAction::Close => out.nav = Some(self.parent),
             AfterAction::WaitForResponse => {
@@ -167,9 +182,6 @@ impl DialogState {
                 };
             }
         }
-        let Some(click) = click else { return out };
-        self.dispatch(click, shared, &mut out);
-        out
     }
 
     fn dispatch(&mut self, click: Click, shared: &SharedMutex, out: &mut Outcome) {
@@ -182,6 +194,10 @@ impl DialogState {
             }
             Followup::Dialog(dialog) => {
                 self.open(dialog);
+                out.nav = None;
+            }
+            Followup::Confirm(prompt) => {
+                self.overlay = Overlay::Command(prompt, AfterAction::None);
                 out.nav = None;
             }
         }
@@ -335,6 +351,7 @@ pub fn draw(
 ) -> Outcome {
     let masked_input;
     let masked_ctx;
+    let overlay_was_up = state.overlay != Overlay::None;
     let dialog_ctx = if state.overlay == Overlay::None {
         ctx
     } else {
@@ -348,7 +365,19 @@ pub fn draw(
         None => draw_waiting(p, state, dialog_ctx),
     };
     if state.overlay != Overlay::None {
-        draw_overlay(p, state, ctx, &mut out);
+        let fresh_input;
+        let fresh_ctx;
+        let overlay_ctx = if overlay_was_up {
+            ctx
+        } else {
+            fresh_input = crate::gui::render::GuiInput {
+                left_click: false,
+                ..ctx.input.clone()
+            };
+            fresh_ctx = ctx.with_input(&fresh_input);
+            &fresh_ctx
+        };
+        draw_overlay(p, state, overlay_ctx, &mut out, shared);
     }
     out
 }
@@ -947,9 +976,38 @@ fn draw_waiting(p: &mut Painter, state: &mut DialogState, ctx: &ScreenCtx) -> Ou
     out
 }
 
-fn draw_overlay(p: &mut Painter, state: &mut DialogState, ctx: &ScreenCtx, out: &mut Outcome) {
+fn draw_overlay(
+    p: &mut Painter,
+    state: &mut DialogState,
+    ctx: &ScreenCtx,
+    out: &mut Outcome,
+    shared: &SharedMutex,
+) {
     match &state.overlay {
         Overlay::None => (),
+        Overlay::Command(prompt, after) => {
+            let (prompt, after) = (prompt.clone(), *after);
+            let after_is_none = after == AfterAction::Close && state.parent == Screen::None;
+            let Some(answer) = prompt.draw(p, ctx, true, after_is_none) else {
+                return;
+            };
+            state.overlay = Overlay::None;
+            if let crate::gui::confirmcommand::Answer::Back = answer {
+                return;
+            }
+            use crate::gui::confirmcommand::Accepted;
+            match prompt.accept(after_is_none) {
+                Accepted::Run(command) => {
+                    crate::play::dialog::queue_submit(
+                        shared,
+                        crate::play::dialog::Submit::RunCommand(command),
+                    );
+                    state.transition(after, out);
+                }
+                Accepted::Copied => state.transition(after, out),
+                Accepted::Chat(text) => out.chat = Some(text),
+            }
+        }
         Overlay::Link(url) => {
             let url = url.clone();
             if confirmlink::draw(p, ctx, &url) {

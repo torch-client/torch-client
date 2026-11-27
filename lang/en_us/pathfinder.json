@@ -1,0 +1,23 @@
+{
+  "pathfinder.already_following": "Already following %s",
+  "pathfinder.arrived": "Arrived",
+  "pathfinder.cancelled": "Route cancelled",
+  "pathfinder.cancelled.mine": "Route cancelled: a block would not break",
+  "pathfinder.cancelled.place": "Route cancelled: a block could not be placed",
+  "pathfinder.follow_who": "Follow who? Add a player name",
+  "pathfinder.following": "Following %s",
+  "pathfinder.following_now": "Following %s now",
+  "pathfinder.gave_up": "Gave up on %s",
+  "pathfinder.gave_up_restarts": "Gave up: the route started over %s times without getting closer",
+  "pathfinder.getting_away": "%s's getting away",
+  "pathfinder.going_to": "Going to %s %s %s",
+  "pathfinder.lost": "Lost %s",
+  "pathfinder.no_route": "No route to the target",
+  "pathfinder.no_way": "Can't find a way to %s",
+  "pathfinder.self": "That's you",
+  "pathfinder.self.stopped": "That's you, stopped following %s",
+  "pathfinder.stopped": "Stopped",
+  "pathfinder.stopped_following": "Stopped following %s",
+  "pathfinder.unseen": "Can't see %s",
+  "pathfinder.unseen.stopped": "Can't see %s, stopped following %s"
+}

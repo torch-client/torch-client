@@ -1,0 +1,8 @@
+{
+  "keybinds.category.client": "Клиент",
+  "keybinds.spectator_menu": "Меню наблюдателя",
+  "keybinds.freecam": "Свободная камера",
+  "keybinds.pause": "Меню паузы",
+  "keybinds.click_gui": "Меню модулей",
+  "keybinds.hud_editor": "Редактор худа"
+}

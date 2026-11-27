@@ -34,33 +34,30 @@ pub(crate) fn extract_entity_draws(
     parents: Extract<Query<&ChildOf>>,
     visibilities: Extract<Query<&Visibility>>,
     world_camera: Extract<Query<&GlobalTransform, With<crate::renderer::systems::WorldCamera>>>,
-    render: Option<ResMut<PackRender>>,
+    mut packs: EntityPacks,
 ) {
-    let Some(mut render) = render else { return };
-    let Some(install) = render.install.as_deref_mut() else {
+    let Some(EntityOwner {
+        programs,
+        frame,
+        camera,
+        ..
+    }) = packs.entities()
+    else {
         return;
     };
-    let (installed, frame) = (&*install.installed, &mut install.frame);
     frame.entity_draws.clear();
     let reach_centre = world_camera
         .single()
-        .map_or(frame.camera, GlobalTransform::translation);
-    let programs = installed.entities;
-    let shadow_usable = install.usage.shadow;
-    let pass_of = |kind: EntityKind| {
-        std::iter::once(kind)
-            .chain(kind.fallback())
-            .find(|k| programs[k.index()].is_some())
-    };
-    let casters = installed.shadow_casters;
-    let caster_pass = programs[EntityKind::ShadowCaster.index()]
-        .filter(|_| shadow_usable)
-        .map(|_| EntityKind::ShadowCaster);
+        .map_or(camera, GlobalTransform::translation);
+    let pass_of = |kind: EntityKind| programs.pass_of(kind);
+    let casters = programs.casters;
+    let caster_pass = (programs.has(EntityKind::ShadowCaster) && programs.shadow_usable)
+        .then_some(EntityKind::ShadowCaster);
     let local_root = player_rigs
         .as_deref()
         .and_then(|r| r.local_root())
         .filter(|_| casters.player || casters.entities);
-    let caster_reach = installed.constants.shadow_distance * 1.75;
+    let caster_reach = programs.caster_reach;
     let shown_below = |entity: Entity, root: Entity| {
         for node in ancestors(&parents, entity) {
             if node == root {
@@ -86,12 +83,12 @@ pub(crate) fn extract_entity_draws(
     }
     frame.entity_roots.clear();
     if let Some(rigs) = rigs.as_deref()
-        && !installed.entity_ids.is_empty()
+        && !programs.entity_ids.is_empty()
     {
         for (root, kind) in rigs.roots() {
             let name = kind.to_str();
             let name = name.strip_prefix("minecraft:").unwrap_or(name);
-            if let Some(id) = installed.entity_ids.get(name) {
+            if let Some(id) = programs.entity_ids.get(name) {
                 frame.entity_roots.insert(root, *id);
             }
         }
@@ -137,7 +134,7 @@ pub(crate) fn extract_entity_draws(
         let blend = blended(material.alpha_mode);
         let glowing = material.params.mode == LightMode::Emissive as u32;
         let drawn_as = match kind {
-            EntityKind::Entity if glowing && programs[EntityKind::SpiderEyes.index()].is_some() => {
+            EntityKind::Entity if glowing && programs.has(EntityKind::SpiderEyes) => {
                 EntityKind::SpiderEyes
             }
             _ if blend => kind.translucent(),
@@ -240,17 +237,20 @@ pub(crate) fn extract_standard_draws(
     materials: Extract<Res<Assets<StandardMaterial>>>,
     sky_materials: Extract<Res<Assets<crate::renderer::sky::BackdropMaterial>>>,
     hand_materials: Extract<Res<Assets<crate::renderer::hand::HandMaterial>>>,
-    render: Option<ResMut<PackRender>>,
+    mut packs: EntityPacks,
 ) {
     use crate::renderer::sky::SkyPart;
     use crate::shaderpack::features::render_stage;
-    let Some(mut render) = render else { return };
-    let Some(install) = render.install.as_deref_mut() else {
+    let Some(EntityOwner {
+        programs,
+        frame,
+        inputs,
+        ..
+    }) = packs.entities()
+    else {
         return;
     };
-    let (installed, frame) = (&*install.installed, &mut install.frame);
-    let has = |kind: EntityKind| installed.entities[kind.index()].is_some();
-    let inputs = frame.inputs;
+    let has = |kind: EntityKind| programs.has(kind);
     let mut push = |kind: EntityKind,
                     mesh: &Mesh3d,
                     material: &StandardMaterial,
@@ -258,7 +258,8 @@ pub(crate) fn extract_standard_draws(
                     relative: bool,
                     stage: i32,
                     order: u8,
-                    second: bool| {
+                    second: bool,
+                    flags: u32| {
         let (light, item_id) = if kind.is_hand() {
             (inputs.eye_light.as_vec2() * 16.0, inputs.held_items[0])
         } else {
@@ -282,7 +283,7 @@ pub(crate) fn extract_standard_draws(
             stage,
             order,
             relative,
-            flags: 0,
+            flags,
         });
     };
 
@@ -291,17 +292,17 @@ pub(crate) fn extract_standard_draws(
     {
         let (scale, _, translation) = root.to_scale_rotation_translation();
         let local = Mat4::from_scale(scale.recip()) * Mat4::from_translation(-translation);
-        let parts = installed.sky_parts;
+        let parts = programs.sky_parts;
         for (part, mesh, material, transform, visible) in &sky {
             let (kind, stage, order, wanted) = match part {
                 SkyPart::SkyDisc => (EntityKind::SkyBasic, "SKY", 0, parts.sky),
-                SkyPart::SunriseFan => (EntityKind::SkyBasic, "SUNSET", 1, parts.sky),
+                SkyPart::SunriseFan => (EntityKind::SkyBasic, "SUNSET", 1, parts.sunrise),
                 SkyPart::Sun => (EntityKind::SkyTextured, "SUN", 2, parts.sun),
                 SkyPart::Moon => (EntityKind::SkyTextured, "MOON", 3, parts.moon),
                 SkyPart::Stars => (EntityKind::SkyBasic, "STARS", 4, parts.stars),
-                SkyPart::DarkDisc => (EntityKind::SkyBasic, "VOID", 5, parts.sky),
-                SkyPart::EndSky => (EntityKind::SkyTextured, "SKY", 0, parts.sky),
-                SkyPart::EndFlash => (EntityKind::SkyTextured, "SKY", 1, parts.sky),
+                SkyPart::DarkDisc => (EntityKind::SkyBasic, "VOID", 5, parts.void),
+                SkyPart::EndSky => (EntityKind::SkyTextured, "SKY", 0, parts.end),
+                SkyPart::EndFlash => (EntityKind::SkyTextured, "SKY", 1, parts.end_flash),
             };
             if !visible.get() || !wanted || !has(kind) {
                 continue;
@@ -310,6 +311,7 @@ pub(crate) fn extract_standard_draws(
                 continue;
             };
             let second = material.alpha_mode == AlphaMode::Add;
+            let flags = sky_part_id(*part) << SKY_PART_SHIFT;
             push(
                 kind,
                 mesh,
@@ -319,6 +321,7 @@ pub(crate) fn extract_standard_draws(
                 render_stage(stage),
                 order,
                 second,
+                flags,
             );
         }
     }
@@ -341,6 +344,7 @@ pub(crate) fn extract_standard_draws(
                 EntityKind::Clouds.render_stage(),
                 0,
                 fast,
+                0,
             );
         }
     }
@@ -366,6 +370,7 @@ pub(crate) fn extract_standard_draws(
             kind.render_stage(),
             0,
             false,
+            0,
         );
     }
 
@@ -395,6 +400,7 @@ pub(crate) fn extract_standard_draws(
                 kind.render_stage(),
                 0,
                 translucent,
+                0,
             );
         }
     }

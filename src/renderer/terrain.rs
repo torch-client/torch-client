@@ -41,6 +41,7 @@ pub const BLOCK_GAIN: f32 = 2.20;
 struct SunClock {
     ticks: f64,
     started: bool,
+    seen: f64,
 }
 
 #[cfg(feature = "builtin_shaders")]
@@ -176,9 +177,9 @@ impl ShaderQuality {
     #[cfg(feature = "builtin_shaders")]
     pub fn caption(self) -> &'static str {
         match self {
-            ShaderQuality::Fancy => "Fancy",
-            ShaderQuality::Fast => "Fast",
-            ShaderQuality::Mobile => "Mobile",
+            ShaderQuality::Fancy => crate::lang::tr!("renderer.shader_quality.fancy"),
+            ShaderQuality::Fast => crate::lang::tr!("renderer.shader_quality.fast"),
+            ShaderQuality::Mobile => crate::lang::tr!("renderer.shader_quality.mobile"),
         }
     }
 
@@ -442,11 +443,14 @@ fn drive_sun(
         if !clock.started || drift.abs() >= SUN_CLOCK_SNAP {
             clock.started = true;
             clock.ticks = authoritative;
+        } else if !view.world_run.runs {
+            clock.ticks += authoritative - clock.seen;
         } else {
             let base = TICKS_PER_SECOND * rate;
             let correction = (drift / SUN_CLOCK_CATCHUP).clamp(-base * 0.5, base * 0.5);
             clock.ticks += time.delta_secs_f64() * (base + correction);
         }
+        clock.seen = authoritative;
         clock.ticks
     };
     let sky = crate::renderer::timeline::sample(ticks);

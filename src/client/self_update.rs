@@ -145,7 +145,10 @@ pub(crate) fn start() {
             });
         });
     if let Err(e) = started {
-        set_stage(Stage::Failed(format!("Could not start the download: {e}")));
+        set_stage(Stage::Failed(crate::lang::trf!(
+            "client.self_update.start_failed",
+            e
+        )));
     }
 }
 

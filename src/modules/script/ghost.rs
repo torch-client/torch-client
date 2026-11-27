@@ -310,6 +310,10 @@ impl Models {
     }
 }
 
+fn structure_void() -> u16 {
+    BlockState::from(BlockKind::StructureVoid).id()
+}
+
 fn replaceable(s: BlockState) -> bool {
     s.is_air() || matches!(BlockKind::from(s), BlockKind::Water | BlockKind::Lava)
 }
@@ -330,6 +334,7 @@ fn build(
     let total = (GRID * GRID * GRID) as usize;
 
     let mut ghost: Vec<Option<u16>> = vec![None; total];
+    let void = structure_void();
     let (sx, sz) = (r.size[0] as usize, r.size[2] as usize);
     let x0 = (base[0] - 1).max(r.origin[0]);
     let x1 = (base[0] + 17).min(end[0]);
@@ -340,8 +345,9 @@ fn build(
                 let first = row + (x0 - r.origin[0]) as usize;
                 let mut x = x0;
                 r.blocks.each(first..first + (x1 - x0) as usize, |v| {
+                    let id = r.palette.get(v as usize).copied().unwrap_or(0);
                     ghost[cell(x - base[0], y - base[1], z - base[2])] =
-                        Some(r.palette.get(v as usize).copied().unwrap_or(0));
+                        Some(if id == void { 0 } else { id });
                     x += 1;
                 });
             }
@@ -658,9 +664,9 @@ fn add(lua: &Lua, ctx: &Ctx, spec: Table) -> mlua::Result<(Handle, Table)> {
         match palette_state(&v)? {
             Some(s) => palette.push(s.id()),
             None => {
-                palette.push(0);
                 let text = entry_text(&v);
                 let air = matches!(text.as_str(), "minecraft:air" | "air");
+                palette.push(if air { 0 } else { structure_void() });
                 if !air {
                     missed += 1;
                     if missed <= UNKNOWN_LISTED {
@@ -697,6 +703,33 @@ fn add(lua: &Lua, ctx: &Ctx, spec: Table) -> mlua::Result<(Handle, Table)> {
 }
 
 struct Handle(u64);
+
+pub(super) fn handle_id(ud: &AnyUserData) -> Option<u64> {
+    ud.borrow::<Handle>().ok().map(|h| h.0)
+}
+
+struct BuildCells(Indices);
+
+impl crate::modules::builder::Cells for BuildCells {
+    fn get(&self, index: usize) -> u32 {
+        self.0.get(index)
+    }
+
+    fn each(&self, range: std::ops::Range<usize>, f: &mut dyn FnMut(u32)) {
+        self.0.each(range, f);
+    }
+}
+
+pub(super) fn region_for_build(id: u64, owner: usize) -> Option<crate::modules::builder::Region> {
+    let s = STORE.lock().unwrap_or_else(PoisonError::into_inner);
+    let r = s.regions.get(&id).filter(|r| r.owner == owner)?;
+    Some(crate::modules::builder::Region {
+        origin: r.origin,
+        size: r.size,
+        palette: r.palette.clone(),
+        cells: Arc::new(BuildCells(r.blocks.clone())),
+    })
+}
 
 impl UserData for Handle {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {

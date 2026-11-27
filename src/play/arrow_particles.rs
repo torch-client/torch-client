@@ -10,6 +10,7 @@ use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::position::Vec3;
 use azalea_world::WorldName;
 
+use crate::client::tick_rate::WorldTick;
 use crate::play::emit::{self, Viewer};
 use crate::session::{LevelParticle, ParticleEmit, SharedMutex, SideMutex};
 use crate::util::javarandom::JavaRandom;
@@ -79,7 +80,7 @@ fn add(
     emits.push(LevelParticle::add(emit::entity_effect(argb), pos, [0.0; 3]));
 }
 
-pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
+pub(crate) fn tick(bot: &Client, shared: &SharedMutex, world_tick: &WorldTick) {
     let Some(viewer) = Viewer::of(bot) else {
         return;
     };
@@ -135,6 +136,17 @@ pub(crate) fn tick(bot: &Client, shared: &SharedMutex) {
             }
         }
         if arrow.color == -1 {
+            continue;
+        }
+        if !world_tick.entity_ticks(arrow.id) {
+            let in_ground_time = known.map_or(0, |k| k.in_ground_time);
+            tipped.insert(
+                arrow.id,
+                Tipped {
+                    in_ground_time,
+                    color: arrow.color,
+                },
+            );
             continue;
         }
         let in_ground_time = if arrow.in_ground {

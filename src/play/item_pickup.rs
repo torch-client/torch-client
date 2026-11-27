@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use azalea_protocol::packets::game::c_take_item_entity::ClientboundTakeItemEntity;
@@ -11,20 +12,52 @@ use crate::util::mth::lerp_f64;
 
 const LIFE_TIME: u32 = 3;
 
+const MAX_PICKUPS: usize = 16_384;
+
+#[derive(Clone, Debug, Default)]
+pub struct ItemPickups(Arc<VecDeque<ItemPickup>>);
+
+impl ItemPickups {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &ItemPickup> {
+        self.0.iter()
+    }
+
+    pub fn clear(&mut self) {
+        *self = ItemPickups::default();
+    }
+
+    fn push(&mut self, pickup: ItemPickup) {
+        let list = Arc::make_mut(&mut self.0);
+        if list.len() >= MAX_PICKUPS {
+            list.pop_front();
+        }
+        list.push_back(pickup);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ItemPickup {
-    state: EntityState,
+    state: Arc<EntityState>,
     replaces_source: bool,
     target_id: i32,
     life: u32,
     target: [f64; 3],
     target_old: [f64; 3],
+    queued: bool,
 }
 
 impl ItemPickup {
+    pub fn drawn(&self) -> bool {
+        !self.queued
+    }
+
     pub fn sample(&self, partial: f32) -> EntityState {
         let time = ((self.life as f32 + partial) / LIFE_TIME as f32).powi(2);
-        let mut st = self.state.clone();
+        let mut st = EntityState::clone(&self.state);
         st.pos = std::array::from_fn(|i| {
             let target = lerp_f64(partial, self.target_old[i], self.target[i]);
             lerp_f64(time, self.state.pos[i], target)
@@ -93,13 +126,15 @@ pub(crate) fn take(shared: &SharedMutex, p: &ClientboundTakeItemEntity) {
         Some(point) => (p.player_id.0, point),
         None => (local_entity_id(), local_point(session)),
     };
+    let queued = !session.world_run.runs;
     session.item_pickups.push(ItemPickup {
-        state,
+        state: Arc::new(state),
         replaces_source: removed,
         target_id,
         life: 0,
         target,
         target_old: target,
+        queued,
     });
 }
 
@@ -108,7 +143,10 @@ pub(crate) fn tick(session: &mut SessionState) {
         return;
     }
     let mut pickups = std::mem::take(&mut session.item_pickups);
-    pickups.retain_mut(|p| {
+    Arc::make_mut(&mut pickups.0).retain_mut(|p| {
+        if std::mem::take(&mut p.queued) {
+            return true;
+        }
         p.life += 1;
         if p.life == LIFE_TIME {
             return false;

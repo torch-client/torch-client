@@ -24,16 +24,14 @@ pub(crate) enum Class {
     Depth,
 }
 
+pub(crate) const MAX_FORMAT_LIST: usize = 4;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FormatInfo {
     pub(crate) format: Format,
     pub(crate) name: &'static str,
     pub(crate) class: Class,
     pub(crate) baseline: bool,
-    #[allow(
-        dead_code,
-        reason = "phase 2 of docs/SHADER_FORMAT.md binds targets, and picks their sampler by this"
-    )]
     pub(crate) filterable: bool,
 }
 
@@ -57,7 +55,13 @@ pub(crate) const FORMATS: &[FormatInfo] = &[
     ),
     info(Format::R16Float, "r16float", Class::Float, false, true),
     info(Format::Rg16Float, "rg16float", Class::Float, false, true),
-    info(Format::Rgba16Float, "rgba16float", Class::Float, true, true),
+    info(
+        Format::Rgba16Float,
+        "rgba16float",
+        Class::Float,
+        false,
+        true,
+    ),
     info(Format::R32Float, "r32float", Class::Float, false, false),
     info(Format::Rg32Float, "rg32float", Class::Float, false, false),
     info(
@@ -151,6 +155,7 @@ pub(crate) const TIERS: &[Tier] = &[
             Format::Rg11b10Ufloat,
             Format::R16Float,
             Format::Rg16Float,
+            Format::Rgba16Float,
             Format::R32Float,
             Format::Rg32Float,
             Format::Rgba32Float,
@@ -172,6 +177,7 @@ pub(crate) const TIERS: &[Tier] = &[
             Format::Rgb10a2Unorm,
             Format::R16Float,
             Format::Rg16Float,
+            Format::Rgba16Float,
             Format::R32Float,
             Format::Rg32Float,
             Format::Rgba32Float,
@@ -182,7 +188,7 @@ pub(crate) const TIERS: &[Tier] = &[
     },
     Tier {
         name: TierName::WebGl2,
-        loads_packs: false,
+        loads_packs: true,
         compute: false,
         storage_textures: false,
         max_outputs: 4,
@@ -209,6 +215,7 @@ pub(crate) const TIERS: &[Tier] = &[
             Format::Rgb10a2Unorm,
             Format::R16Float,
             Format::Rg16Float,
+            Format::Rgba16Float,
             Format::R32Float,
             Format::Rg32Float,
             Format::Rgba32Float,
@@ -224,20 +231,38 @@ pub(crate) struct Needs {
     pub(crate) compute: bool,
     pub(crate) storage_textures: bool,
     pub(crate) outputs: u32,
-    pub(crate) formats: Vec<Format>,
+    pub(crate) format_lists: Vec<Vec<Format>>,
     pub(crate) sampled_textures: u32,
 }
 
+impl Needs {
+    pub(crate) fn declared_formats(&self) -> Vec<Format> {
+        let mut out: Vec<Format> = self
+            .format_lists
+            .iter()
+            .filter_map(|list| list.last().copied())
+            .filter(|f| !f.info().baseline)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
 impl Tier {
+    pub(crate) fn renders(&self, format: Format) -> bool {
+        format.info().baseline || self.formats.contains(&format)
+    }
+
     pub(crate) fn runs(&self, needs: &Needs) -> bool {
         (!needs.compute || self.compute)
             && (!needs.storage_textures || self.storage_textures)
             && needs.outputs <= self.max_outputs
             && needs.sampled_textures <= self.max_sampled_textures
             && needs
-                .formats
+                .format_lists
                 .iter()
-                .all(|f| f.info().baseline || self.formats.contains(f))
+                .all(|list| list.iter().any(|&f| self.renders(f)))
     }
 }
 
@@ -247,6 +272,18 @@ pub(crate) fn tiers_for(needs: &Needs) -> Vec<TierName> {
         .filter(|tier| tier.runs(needs))
         .map(|tier| tier.name)
         .collect()
+}
+
+pub(crate) fn running() -> TierName {
+    if cfg!(all(target_arch = "wasm32", not(feature = "webgpu"))) {
+        TierName::WebGl2
+    } else if cfg!(target_arch = "wasm32") {
+        TierName::WebGpu
+    } else if cfg!(target_os = "android") {
+        TierName::Android
+    } else {
+        TierName::Desktop
+    }
 }
 
 #[cfg(test)]
@@ -270,7 +307,20 @@ mod tests {
             .filter(|f| f.baseline)
             .map(|f| f.name)
             .collect();
-        assert_eq!(baseline, ["rgba8unorm", "rgba16float", "depth"]);
+        assert_eq!(baseline, ["rgba8unorm", "depth"]);
+    }
+
+    #[test]
+    fn rgba16float_is_in_every_floor_but_webgl2() {
+        let with: Vec<TierName> = TIERS
+            .iter()
+            .filter(|t| t.renders(Format::Rgba16Float))
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(
+            with,
+            [TierName::Desktop, TierName::WebGpu, TierName::Android]
+        );
     }
 
     #[test]
@@ -282,6 +332,21 @@ mod tests {
                 tier.name
             );
         }
+    }
+
+    #[test]
+    fn desktop_and_webgl2_load_packs() {
+        let loading: Vec<TierName> = TIERS
+            .iter()
+            .filter(|t| t.loads_packs)
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(loading, [TierName::Desktop, TierName::WebGl2]);
+    }
+
+    #[test]
+    fn a_native_test_build_is_desktop() {
+        assert_eq!(running(), TierName::Desktop);
     }
 
     #[test]
@@ -306,7 +371,7 @@ mod tests {
         assert_eq!(tiers_for(&needs), [TierName::Desktop, TierName::WebGpu]);
         let needs = Needs {
             outputs: 1,
-            formats: vec![Format::Rg11b10Ufloat],
+            format_lists: vec![vec![Format::Rg11b10Ufloat]],
             ..Needs::default()
         };
         assert_eq!(tiers_for(&needs), [TierName::Desktop]);
@@ -315,5 +380,48 @@ mod tests {
             ..Needs::default()
         };
         assert!(tiers_for(&needs).is_empty());
+    }
+
+    #[test]
+    fn a_format_list_runs_where_one_entry_renders() {
+        let hdr = Needs {
+            outputs: 1,
+            format_lists: vec![vec![Format::Rgba16Float]],
+            ..Needs::default()
+        };
+        assert_eq!(
+            tiers_for(&hdr),
+            [TierName::Desktop, TierName::WebGpu, TierName::Android]
+        );
+        assert_eq!(hdr.declared_formats(), [Format::Rgba16Float]);
+
+        let list = vec![Format::Rgba16Float, Format::Rgba8Unorm];
+        let fallback = Needs {
+            outputs: 1,
+            format_lists: vec![list],
+            ..Needs::default()
+        };
+        assert_eq!(
+            tiers_for(&fallback),
+            [
+                TierName::Desktop,
+                TierName::WebGpu,
+                TierName::WebGl2,
+                TierName::Android
+            ]
+        );
+        assert!(fallback.declared_formats().is_empty());
+
+        let list = vec![Format::Rgba16Float, Format::Rg11b10Ufloat];
+        let both = Needs {
+            outputs: 1,
+            format_lists: vec![list],
+            ..Needs::default()
+        };
+        assert_eq!(
+            tiers_for(&both),
+            [TierName::Desktop, TierName::WebGpu, TierName::Android]
+        );
+        assert_eq!(both.declared_formats(), [Format::Rg11b10Ufloat]);
     }
 }

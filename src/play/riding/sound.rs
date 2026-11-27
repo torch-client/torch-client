@@ -85,6 +85,7 @@ struct Vehicle {
     kind: EntityKind,
     silent: bool,
     velocity: azalea_core::position::Vec3,
+    pos: [f64; 3],
     eye: [f64; 3],
 }
 
@@ -98,6 +99,7 @@ fn read_vehicle(bot: &Client, id: i32) -> Option<Vehicle> {
         kind: ecs.get::<EntityKindComponent>(entity)?.0,
         silent: ecs.get::<Silent>(entity).is_some_and(|s| s.0),
         velocity: ecs.get::<Physics>(entity)?.velocity,
+        pos: [pos.x, pos.y, pos.z],
         eye: [pos.x, pos.y + f64::from(eye_height), pos.z],
     })
 }
@@ -146,7 +148,12 @@ pub(crate) fn tick(bot: &Client) {
     } else {
         (velocity.length() as f32, water_at(vehicle.eye))
     };
-    let moving = if speed >= MIN_SPEED {
+    let should_play = !sounds.minecart
+        || !crate::client::tracking::minecart_improvements()
+        || bot
+            .world()
+            .is_ok_and(|level| super::cart_lerp::on_rails(&level.read(), vehicle.pos));
+    let moving = if speed >= MIN_SPEED && should_play {
         sounds.volume_amplifier * speed.min(1.0) * sounds.volume_max
     } else {
         0.0

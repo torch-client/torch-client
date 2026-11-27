@@ -7,6 +7,7 @@ pub struct Config {
     pub lines: bool,
     pub tracers: bool,
     pub friend_color: bool,
+    pub entities: bool,
 }
 
 pub fn config() -> Option<Config> {
@@ -20,5 +21,6 @@ pub fn config() -> Option<Config> {
         lines,
         tracers: s.flag(setting::TRACERS),
         friend_color: s.flag(setting::FRIEND_COLOR),
+        entities: s.flag(setting::ENTITIES),
     })
 }

@@ -18,6 +18,10 @@ pub fn uncommon_move(ctx: &mut MovesCtx, node: RelBlockPos) {
 }
 
 pub fn descend_forward_1_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
+    if ctx.world.is_block_water(pos) && !ctx.world.is_block_passable(pos.up(1)) {
+        return;
+    }
+    let max_fall = ctx.world.safety().max_fall;
     for dir in CardinalDirection::iter() {
         let dir_delta = RelBlockPos::new(dir.x(), 0, dir.z());
         let gap_horizontal_position = pos + dir_delta;
@@ -26,7 +30,10 @@ pub fn descend_forward_1_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
         let gap_fall_distance = ctx.world.fall_distance(gap_horizontal_position);
         let fall_distance = ctx.world.fall_distance(new_horizontal_position);
 
-        if fall_distance == 0 || fall_distance > 3 || gap_fall_distance < fall_distance {
+        if fall_distance == 0 || fall_distance > max_fall || gap_fall_distance < fall_distance {
+            continue;
+        }
+        if ctx.world.lands_in_danger(gap_horizontal_position, true) {
             continue;
         }
 

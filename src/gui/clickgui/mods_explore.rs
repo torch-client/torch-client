@@ -1,6 +1,7 @@
 use super::mods::{CARD_GAP, CARD_PAD, ERROR, MODS_W, OK, STRIP_W, Style};
 use super::{BIND_H, ClickGuiState, Focus, INDENT, TIP_LINE, Ui, Window};
 use crate::gui::painter::Painter;
+use crate::lang::{Key, tr, trf, trn};
 use crate::modules::script::{self, online};
 
 enum Act {
@@ -12,9 +13,7 @@ enum Act {
     Install(usize),
 }
 
-const ASK: &str = "Nothing here touches the network until you press the button below. It then downloads \
-                   torchclient.com/mods-2026/index.json and every mod zip it lists into memory, now and each time \
-                   this screen opens. A mod is only saved when you press its Install.";
+const ASK: Key = Key::of("clickgui.explore.ask");
 
 impl ClickGuiState {
     pub(super) fn open_explore(&mut self) {
@@ -31,8 +30,9 @@ impl ClickGuiState {
     pub(super) fn explore_window(&mut self, p: &mut Painter, ui: &Ui) {
         let look = self.look;
         let active = self.focus == Focus::On(Window::Config) && self.drag.is_none();
+        let title = tr!("clickgui.mods.explore");
         let Some((x, top, cw, view_h, scroll)) =
-            self.config_shell(p, ui, "Explore mods", self.mods_h, active, MODS_W)
+            self.config_shell(p, ui, title, self.mods_h, active, MODS_W)
         else {
             return;
         };
@@ -47,9 +47,20 @@ impl ClickGuiState {
         let view = online::view();
 
         let half = ((iw - 4.0) * 0.5).floor();
-        if self.button(p, ui, ix, cy, half, bh, "Back", Style::Plain, active) {
+        if self.button(
+            p,
+            ui,
+            ix,
+            cy,
+            half,
+            bh,
+            tr!("clickgui.back"),
+            Style::Plain,
+            active,
+        ) {
             act = Some(Act::Back);
         }
+        let website = tr!("clickgui.explore.open_website");
         if self.button(
             p,
             ui,
@@ -57,7 +68,7 @@ impl ClickGuiState {
             cy,
             iw - half - 4.0,
             bh,
-            "Open website",
+            website,
             Style::Plain,
             active,
         ) {
@@ -67,7 +78,7 @@ impl ClickGuiState {
         cy = self.install_note(p, ui, ix, cy, iw, active);
 
         if !view.allowed {
-            cy = self.paragraph(p, ix, cy, iw, ASK, look.text());
+            cy = self.paragraph(p, ix, cy, iw, ASK.get(), look.text());
             cy += 4.0;
             if self.button(
                 p,
@@ -76,7 +87,7 @@ impl ClickGuiState {
                 cy,
                 iw,
                 bh,
-                "Load mods from online server",
+                tr!("clickgui.explore.allow"),
                 Style::Primary,
                 active,
             ) {
@@ -86,23 +97,21 @@ impl ClickGuiState {
         } else {
             let count = view.listing.as_ref().map_or(0, |l| l.mods.len());
             let status = match &view.phase {
-                online::Phase::Fetching { total: 0, .. } => "Reading the mod list...".to_string(),
+                online::Phase::Fetching { total: 0, .. } => {
+                    tr!("clickgui.explore.reading").to_string()
+                }
                 online::Phase::Fetching { done, total } => {
-                    format!("Downloading {} of {total}...", done + 1)
+                    trf!("clickgui.explore.downloading", done + 1, total)
                 }
                 _ => match &view.listing {
-                    Some(l) => format!(
-                        "{count} mod{}, updated {}",
-                        if count == 1 { "" } else { "s" },
-                        l.updated
-                    ),
+                    Some(l) => trn!("clickgui.explore.listing", count, l.updated),
                     None => String::new(),
                 },
             };
-            const STOP: &str = "Stop loading online";
-            let sw = (p.atlas.font.width_str(STOP) + 12.0).floor();
+            let stop = tr!("clickgui.explore.stop");
+            let sw = (p.atlas.font.width_str(stop) + 12.0).floor();
             self.label(p, &status, ix, cy + 2.0, iw - sw - 4.0, look.text_dim());
-            if self.button(p, ui, ix + iw - sw, cy, sw, bh, STOP, Style::Plain, active) {
+            if self.button(p, ui, ix + iw - sw, cy, sw, bh, stop, Style::Plain, active) {
                 act = Some(Act::Forbid);
             }
             cy += bh + 4.0;
@@ -113,13 +122,13 @@ impl ClickGuiState {
                     ix,
                     cy,
                     iw,
-                    &format!("Could not load the mod list: {e}"),
+                    &trf!("clickgui.explore.load_failed", e),
                     ERROR,
                 );
                 cy += 2.0;
-                const RETRY: &str = "Retry";
-                let rw = (p.atlas.font.width_str(RETRY) + 16.0).floor();
-                if self.button(p, ui, ix, cy, rw, bh, RETRY, Style::Primary, active) {
+                let retry = tr!("clickgui.explore.retry");
+                let rw = (p.atlas.font.width_str(retry) + 16.0).floor();
+                if self.button(p, ui, ix, cy, rw, bh, retry, Style::Primary, active) {
                     act = Some(Act::Retry);
                 }
                 cy += bh + CARD_GAP;
@@ -183,9 +192,9 @@ impl ClickGuiState {
             .as_ref()
             .is_some_and(|v| v.as_deref() == Some(m.version.as_str()));
         let label = match (&have, current) {
-            (None, _) => "Install",
-            (_, true) => "Installed",
-            (_, false) => "Update",
+            (None, _) => tr!("clickgui.mods.install"),
+            (_, true) => tr!("clickgui.explore.installed"),
+            (_, false) => tr!("clickgui.explore.update"),
         };
 
         let h = self.explore_h[i];

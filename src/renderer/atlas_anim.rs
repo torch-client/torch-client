@@ -370,9 +370,13 @@ impl AtlasClock {
 
 pub fn extract_atlas_clock(
     time: Extract<Res<Time<bevy::time::Real>>>,
+    view: Extract<Option<Res<super::FrameView>>>,
     mut clock: ResMut<AtlasClock>,
 ) {
     clock.advance(time.delta_secs());
+    if view.as_ref().is_some_and(|view| !view.world_run.runs) {
+        clock.step = false;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

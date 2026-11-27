@@ -1,10 +1,11 @@
 use std::sync::Mutex;
 
 use seedcrack::cracker::{DECORATOR_MARGIN, LIFT_BITS, LIFT_COUNT, PILLAR_BITS};
-use seedcrack::{Cracker, Hint, Stage};
+use seedcrack::{Band, BedrockNeed, Cracker, Hint, Stage};
 
 use super::HUD_W as W;
 use super::run::{finder_on, to_seedcrack};
+use super::search::hint_text;
 use crate::gui::Snapshot;
 use crate::gui::painter::Painter;
 use crate::modules::hud_panels::TextPanel;
@@ -29,6 +30,9 @@ struct View {
     world_seed: Option<i64>,
     off: bool,
     hints: Vec<Hint>,
+    bedrock: Option<BedrockNeed>,
+    cells: [usize; 3],
+    conflict: bool,
 }
 
 static VIEW: Mutex<Option<View>> = Mutex::new(None);
@@ -52,6 +56,9 @@ pub fn publish(c: &Cracker) {
         v.world_seeds = c.world_seeds().map(<[i64]>::len);
         v.world_seed = c.world_seed();
         v.hints = c.hints();
+        v.bedrock = c.bedrock_hint();
+        v.cells = Band::ALL.map(|b| c.bedrock_cells(b));
+        v.conflict = c.conflict();
     });
 }
 
@@ -67,18 +74,39 @@ pub fn reset() {
 
 fn status(v: &View) -> (String, u32, f32) {
     if v.off {
-        return ("Off on this server".to_string(), RED, 0.0);
+        return (
+            crate::lang::tr!("seed_cracker.hud.off").to_string(),
+            RED,
+            0.0,
+        );
     }
     let stage = v.stage.unwrap_or(Stage::Idle);
-    let pct = v.progress * 100.0;
+    let pct = format!("{:.0}", v.progress * 100.0);
     match stage {
-        Stage::Done => return ("Seed found".to_string(), GREEN, 1.0),
+        Stage::Done => {
+            return (
+                crate::lang::tr!("seed_cracker.hud.found").to_string(),
+                GREEN,
+                1.0,
+            );
+        }
         Stage::LiftLow | Stage::LiftHigh | Stage::Pillars => {
-            return (format!("Searching {pct:.0}%"), YELLOW, v.progress);
+            return (
+                crate::lang::trf!("seed_cracker.hud.searching", pct),
+                YELLOW,
+                v.progress,
+            );
         }
         Stage::WorldByHash | Stage::WorldByDecorators => {
             return (
-                format!("Finding the exact seed {pct:.0}%"),
+                crate::lang::trf!("seed_cracker.hud.exact", pct),
+                YELLOW,
+                v.progress,
+            );
+        }
+        Stage::Bedrock => {
+            return (
+                crate::lang::trf!("seed_cracker.hud.bedrock_search", pct),
                 YELLOW,
                 v.progress,
             );
@@ -86,10 +114,18 @@ fn status(v: &View) -> (String, u32, f32) {
         Stage::Idle => {}
     }
     if v.structure_seeds == Some(0) || v.world_seeds == Some(0) {
-        return ("Finds disagree".to_string(), RED, 0.0);
+        return (
+            crate::lang::tr!("seed_cracker.hud.disagree").to_string(),
+            RED,
+            0.0,
+        );
     }
     if v.structure_seeds.is_some() && v.hashed && v.world_seeds.is_none() {
-        return ("Waiting".to_string(), GRAY, 0.0);
+        return (
+            crate::lang::tr!("seed_cracker.hud.waiting").to_string(),
+            GRAY,
+            0.0,
+        );
     }
     let (have, want) = match v.structure_seeds {
         None => (
@@ -105,19 +141,27 @@ fn status(v: &View) -> (String, u32, f32) {
     let bits = (have / want).min(1.0) as f32;
     let lifting = v.structure_seeds.is_none() && !v.pillars;
     if !lifting || v.liftable >= LIFT_COUNT {
-        return (format!("Collecting {have:.0}/{want:.0} bits"), WHITE, bits);
+        return (
+            crate::lang::trf!(
+                "seed_cracker.hud.collecting",
+                format_args!("{have:.0}"),
+                format_args!("{want:.0}")
+            ),
+            WHITE,
+            bits,
+        );
     }
     let key = v.liftable as f32 / LIFT_COUNT as f32;
     let missing = LIFT_COUNT - v.liftable;
     let text = if have >= want {
-        format!(
-            "Need {missing} more key find{}",
-            if missing == 1 { "" } else { "s" }
-        )
+        crate::lang::trn!("seed_cracker.hud.need_key", missing)
     } else {
-        format!(
-            "Collecting {have:.0}/{want:.0} bits, key {}/{LIFT_COUNT}",
-            v.liftable
+        crate::lang::trf!(
+            "seed_cracker.hud.collecting_key",
+            format_args!("{have:.0}"),
+            format_args!("{want:.0}"),
+            v.liftable,
+            LIFT_COUNT
         )
     };
     (text, YELLOW, (bits + key) / 2.0)
@@ -129,9 +173,9 @@ pub fn draw(p: &mut Painter, _snap: &Snapshot) {
     }
     let Ok(slot) = VIEW.lock() else { return };
     let mut panel = TextPanel::new(p, W);
-    panel.text("Seed Cracker", AQUA);
+    panel.text(crate::lang::tr!("seed_cracker.title"), AQUA);
     let Some(v) = slot.as_ref() else {
-        panel.text("Starting", GRAY);
+        panel.text(crate::lang::tr!("seed_cracker.hud.starting"), GRAY);
         return;
     };
 
@@ -140,7 +184,13 @@ pub fn draw(p: &mut Painter, _snap: &Snapshot) {
     panel.bar(share, if rgb == WHITE { AQUA } else { rgb });
 
     if let Some(seed) = v.world_seed {
-        panel.text(&format!("Seed {seed}"), GREEN);
+        panel.text(&crate::lang::trf!("seed_cracker.hud.seed", seed), GREEN);
+    }
+
+    if v.conflict {
+        panel.text(crate::lang::tr!("seed_cracker.hud.conflict"), RED);
+    } else if let Some(text) = hint_text(v.bedrock, v.cells) {
+        panel.text(&text, WHITE);
     }
 
     let here = to_seedcrack(crate::renderer::dimension::current());
@@ -156,10 +206,17 @@ pub fn draw(p: &mut Painter, _snap: &Snapshot) {
     };
     shown.extend(extra);
     if !shown.is_empty() {
-        panel.text("Best finds:", WHITE);
+        panel.text(crate::lang::tr!("seed_cracker.hud.best"), WHITE);
         for h in shown {
             let rgb = if h.rank == 0 { YELLOW } else { GRAY };
-            panel.text(&format!("{} ~{:.1} bits", h.finder.name(), h.bits), rgb);
+            panel.text(
+                &crate::lang::trf!(
+                    "seed_cracker.hud.hint",
+                    super::finder_label(h.finder),
+                    format_args!("{:.1}", h.bits)
+                ),
+                rgb,
+            );
         }
     }
 }

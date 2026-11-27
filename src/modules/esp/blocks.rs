@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use azalea::block::BlockState;
 
+use crate::lang::Key;
 use crate::modules::list::{BitList, Built, Entry, Preset};
 
 struct Tint {
@@ -53,7 +54,13 @@ static TINTS: &[Tint] = &[
 
 pub(in crate::modules) const LAVA_RGB: u32 = 0xFF_00_00;
 
-static GROUPS: [&str; 5] = ["Ores", "Storage", "Spawners", "Notable", "Other"];
+static GROUPS: [Key; 5] = [
+    Key::of("lists.blocks.group.ores"),
+    Key::of("lists.blocks.group.storage"),
+    Key::of("lists.blocks.group.spawners"),
+    Key::of("lists.blocks.group.notable"),
+    Key::of("lists.blocks.group.other"),
+];
 
 static STORAGE_GROUP: &[&str] = &[
     "chest",
@@ -193,6 +200,7 @@ fn build_with(on: fn(&str) -> bool, color: fn(&str) -> u32) -> Built {
         .map(|n| Entry {
             group: group_of(n),
             label: Cow::Borrowed(*n),
+            shown: Key::NONE,
             on: on(n),
             color: color(n),
         })
@@ -212,6 +220,7 @@ pub(crate) fn mod_list(
         .map(|n| Entry {
             group: group_of(n),
             label: Cow::Borrowed(*n),
+            shown: Key::NONE,
             on: on(n),
             color: 0,
         })
@@ -248,11 +257,24 @@ fn build_storage() -> Built {
 }
 
 pub static XRAY: BitList = BitList::new(
-    "blocks", "Blocks", 214.0, &GROUPS, true, PRESETS, build_xray,
+    "blocks",
+    Key::of("lists.blocks.title.blocks"),
+    214.0,
+    &GROUPS,
+    true,
+    PRESETS,
+    build_xray,
 );
 
-pub static ORES: BitList =
-    BitList::new("ore_esp", "Ores", 214.0, &GROUPS, true, PRESETS, build_ores);
+pub static ORES: BitList = BitList::new(
+    "ore_esp",
+    Key::of("lists.blocks.title.ores"),
+    214.0,
+    &GROUPS,
+    true,
+    PRESETS,
+    build_ores,
+);
 
 fn build_scaffold() -> Built {
     build_with(|_| false, |_| 0)
@@ -260,7 +282,7 @@ fn build_scaffold() -> Built {
 
 pub static SCAFFOLD: BitList = BitList::new(
     "scaffold_blocks",
-    "Filter blocks",
+    Key::of("lists.blocks.title.filter"),
     214.0,
     &GROUPS,
     false,
@@ -274,7 +296,7 @@ fn build_block_esp() -> Built {
 
 pub static BLOCK_ESP: BitList = BitList::new(
     "block_esp",
-    "Blocks",
+    Key::of("lists.blocks.title.blocks"),
     214.0,
     &GROUPS,
     true,
@@ -284,7 +306,7 @@ pub static BLOCK_ESP: BitList = BitList::new(
 
 pub static STORAGE: BitList = BitList::new(
     "storage_esp",
-    "Storage",
+    Key::of("lists.blocks.title.storage"),
     214.0,
     &GROUPS,
     true,

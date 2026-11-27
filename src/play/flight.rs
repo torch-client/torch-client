@@ -213,7 +213,7 @@ pub(crate) fn flight_pre_travel(
 
         let vertical =
             (move_flags & MOVE_JUMP != 0) as i32 - (move_flags & MOVE_DESCEND != 0) as i32;
-        if vertical != 0 {
+        if vertical != 0 && crate::client::tracking::spectated_id().is_none() {
             let base = flying_speed(&abilities, false) as f64;
             physics.velocity.y += vertical as f64 * base * VERTICAL_IMPULSE_FACTOR;
         }

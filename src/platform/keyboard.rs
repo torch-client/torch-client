@@ -26,6 +26,11 @@ pub(crate) fn arm() {
     touch::arm();
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
+pub(crate) fn arm_at(x: f32, y: f32, w: f32, h: f32) {
+    touch::arm_at(x, y, w, h);
+}
+
 #[cfg_attr(
     not(any(target_arch = "wasm32", target_os = "android")),
     allow(dead_code)
@@ -108,6 +113,36 @@ pub(crate) fn dismissed() -> bool {
     return android::dismissed();
     #[cfg(not(target_os = "android"))]
     false
+}
+
+pub(crate) fn enter_is_text() {
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    ENTER_IS_TEXT.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+static ENTER_IS_TEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+pub(crate) fn take_enter_is_text() -> bool {
+    ENTER_IS_TEXT.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+pub(crate) fn soft() -> bool {
+    #[cfg(target_os = "android")]
+    return true;
+    #[cfg(target_arch = "wasm32")]
+    return web::soft();
+}
+
+#[cfg_attr(
+    not(any(target_arch = "wasm32", target_os = "android")),
+    allow(dead_code)
+)]
+pub(crate) fn tap_gave_up() {
+    #[cfg(all(target_arch = "wasm32", feature = "mobile_ui"))]
+    touch::skip_tap();
 }
 
 pub(crate) fn note_tap(inside: bool) {
@@ -455,7 +490,17 @@ mod web {
             return 0.0;
         };
         let covered = (inner - (vv.height() + vv.offset_top())).max(0.0);
+        if covered > SOFT_MIN_CSS && win.navigator().max_touch_points() > 0 && has_focus() {
+            SOFT.store(true, Ordering::Relaxed);
+        }
         (covered * win.device_pixel_ratio()) as f32
+    }
+
+    const SOFT_MIN_CSS: f64 = 120.0;
+    static SOFT: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn soft() -> bool {
+        SOFT.load(Ordering::Relaxed)
     }
 
     pub(super) fn has_focus() -> bool {
@@ -530,12 +575,47 @@ mod touch {
         install();
     }
 
+    static FIELDS: std::sync::Mutex<Vec<(f64, [f32; 4])>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn arm_at(x: f32, y: f32, w: f32, h: f32) {
+        let now = js_sys::Date::now();
+        let rect = [x, y, w, h];
+        if let Ok(mut fields) = FIELDS.lock() {
+            fields.retain(|(at, r)| now - at <= ARM_WINDOW_MS && *r != rect);
+            fields.push((now, rect));
+        }
+        install();
+    }
+
+    fn on_field(client: (f64, f64)) -> bool {
+        let Some(canvas) = canvas() else { return false };
+        let Some(dpr) = web_sys::window().map(|w| w.device_pixel_ratio()) else {
+            return false;
+        };
+        let bounds = canvas.get_bounding_client_rect();
+        let px = ((client.0 - bounds.left()) * dpr) as f32;
+        let py = ((client.1 - bounds.top()) * dpr) as f32;
+        let now = js_sys::Date::now();
+        FIELDS.lock().is_ok_and(|fields| {
+            fields.iter().any(|(at, [x, y, w, h])| {
+                now - at <= ARM_WINDOW_MS && px >= *x && px <= x + w && py >= *y && py <= y + h
+            })
+        })
+    }
+
     pub(super) fn arm_zone(x: f32, y: f32, w: f32, h: f32) {
         ZONE_AT.store(js_sys::Date::now().to_bits(), Ordering::Relaxed);
         for (slot, v) in ZONE.iter().zip([x, y, w, h]) {
             slot.store(v.to_bits(), Ordering::Relaxed);
         }
         install();
+    }
+
+    const SKIP_WINDOW_MS: f64 = 1000.0;
+    static SKIP_AT: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn skip_tap() {
+        SKIP_AT.store(js_sys::Date::now().to_bits(), Ordering::Relaxed);
     }
 
     pub(super) fn disarm() {
@@ -565,10 +645,16 @@ mod touch {
         }
     }
 
-    fn prime(cycle: bool) {
+    fn prime(cycle: bool, client: Option<(f64, f64)>) {
         let armed = f64::from_bits(ARMED_AT.load(Ordering::Relaxed));
         let held = has_focus();
-        if js_sys::Date::now() - armed > ARM_WINDOW_MS || (held && !cycle) {
+        let vouched = js_sys::Date::now() - armed <= ARM_WINDOW_MS || client.is_some_and(on_field);
+        if !vouched || (held && !cycle) {
+            return;
+        }
+        let skipped = f64::from_bits(SKIP_AT.load(Ordering::Relaxed));
+        if !held && !client.is_some_and(on_field) && js_sys::Date::now() - skipped < SKIP_WINDOW_MS
+        {
             return;
         }
         let Some(el) = field() else { return };
@@ -655,13 +741,25 @@ mod touch {
         on_press.forget();
         let on_touch = Closure::<dyn FnMut(TouchEvent)>::new(|event: TouchEvent| {
             if !zone_touch(&event) {
-                prime(true);
+                let at = event
+                    .changed_touches()
+                    .get(0)
+                    .map(|t| (f64::from(t.client_x()), f64::from(t.client_y())));
+                prime(true, at);
             }
         });
         let _ =
             canvas.add_event_listener_with_callback("touchend", on_touch.as_ref().unchecked_ref());
         on_touch.forget();
-        let on_click = Closure::<dyn FnMut()>::new(|| prime(false));
+        let on_click =
+            Closure::<dyn FnMut(wasm_bindgen::JsValue)>::new(|event: wasm_bindgen::JsValue| {
+                let coord = |name: &str| {
+                    js_sys::Reflect::get(&event, &wasm_bindgen::JsValue::from_str(name))
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                };
+                prime(false, coord("clientX").zip(coord("clientY")));
+            });
         let _ = canvas.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
         on_click.forget();
     }

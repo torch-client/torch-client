@@ -205,9 +205,11 @@ impl Mirror {
                 cutout_leaves,
             } => {
                 crate::renderer::set_lighting_enabled(lighting);
+                let moved = crate::renderer::smooth_lighting_enabled() != smooth
+                    || crate::renderer::cutout_leaves_enabled() != cutout_leaves;
                 crate::renderer::set_smooth_lighting(smooth);
-                if crate::renderer::cutout_leaves_enabled() != cutout_leaves {
-                    crate::renderer::set_cutout_leaves(cutout_leaves);
+                crate::renderer::set_cutout_leaves(cutout_leaves);
+                if moved {
                     self.remesh_meshed();
                 }
             }
@@ -240,17 +242,33 @@ impl Mirror {
                     light: crate::client::packets::server_light(&data),
                 });
             }
-            ToWorker::Blocks(blocks) => {
-                let Some(level) = self.level.as_ref() else {
+            ToWorker::Blocks(blocks) => self.write_blocks(blocks),
+            ToWorker::Hidden {
+                version,
+                active,
+                cells,
+                writes,
+            } => {
+                use crate::client::worldsync::hidden;
+                hidden::install(version, active, &cells);
+                self.write_blocks(writes);
+                let Some(world) = self.level.as_ref().map(|l| l.world.clone()) else {
                     return;
                 };
-                let world = level.world.read();
-                for (x, y, z, state) in blocks {
-                    let state = azalea::block::BlockState::try_from(state)
-                        .unwrap_or(azalea::block::BlockState::AIR);
-                    world.set_block_state(BlockPos { x, y, z }, state);
+                for ([x, y, z], what) in cells {
+                    if what == hidden::RELEASED {
+                        continue;
+                    }
+                    for (cx, cz, scope) in
+                        crate::client::worldsync::remesh_jobs(BlockPos { x, y, z })
+                    {
+                        if self.meshed.contains(&(cx, cz)) {
+                            self.queue.push(world.clone(), cx, cz, scope);
+                        }
+                    }
                 }
             }
+            ToWorker::ColumnBiomes(columns) => self.column_biomes(&columns),
             ToWorker::Unload { cx, cz } => self.unload(cx, cz),
             ToWorker::Backlog { pending, received } => {
                 self.page_backlog = pending as usize;
@@ -272,6 +290,7 @@ impl Mirror {
                 self.batch.clear();
                 self.batch.push(LightJob::Reset);
                 crate::client::worker::reset_biome_table();
+                crate::client::worldsync::hidden::reset();
                 let mut s = self.shared.lock().unwrap();
                 s.session.pending_chunks.clear();
                 s.session.pending_edits.clear();
@@ -294,6 +313,18 @@ impl Mirror {
                 );
                 self.remesh_meshed();
             }
+        }
+    }
+
+    fn write_blocks(&self, blocks: Vec<(i32, i32, i32, u32)>) {
+        let Some(level) = self.level.as_ref() else {
+            return;
+        };
+        let world = level.world.read();
+        for (x, y, z, state) in blocks {
+            let state = azalea::block::BlockState::try_from(state)
+                .unwrap_or(azalea::block::BlockState::AIR);
+            world.set_block_state(BlockPos { x, y, z }, state);
         }
     }
 
@@ -389,6 +420,35 @@ impl Mirror {
         });
     }
 
+    fn column_biomes(&mut self, columns: &[(i32, i32, Vec<u8>)]) {
+        let Some(level) = self.level.as_ref() else {
+            return;
+        };
+        for (cx, cz, data) in columns {
+            let Some(chunk) = level.resident.get(&(*cx, *cz)) else {
+                continue;
+            };
+            if let Err(failure) = chunk
+                .write()
+                .replace_biomes(data, crate::client::worker::installed_biome_count())
+            {
+                crate::log_debug!(
+                    "mesh",
+                    "a biome update for {cx},{cz} would not decode at section {}",
+                    failure.section
+                );
+            }
+        }
+        let mut seen = HashSet::new();
+        let changed = columns.iter().map(|&(cx, cz, _)| (cx, cz));
+        for (cx, cz) in crate::client::worldsync::biome_remesh(changed) {
+            if self.meshed.contains(&(cx, cz)) && seen.insert((cx, cz)) {
+                self.queue
+                    .push(level.world.clone(), cx, cz, JobScope::Column);
+            }
+        }
+    }
+
     fn unload(&mut self, cx: i32, cz: i32) {
         self.meshed.remove(&(cx, cz));
         self.queue.forget_chunk(cx, cz);
@@ -466,6 +526,10 @@ impl Mirror {
     }
 
     fn publish_light(&mut self) -> usize {
+        if !crate::renderer::lighting_enabled() {
+            self.clear_light_delta();
+            return 0;
+        }
         if self.dirty.is_empty() && self.added.is_empty() && self.removed.is_empty() {
             return 0;
         }

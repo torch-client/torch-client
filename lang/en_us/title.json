@@ -1,0 +1,11 @@
+{
+  "title.edit_profile": "Edit Profile",
+  "title.disclaimer": "Not affiliated with Mojang or Microsoft.",
+  "title.open_credits": "(Open Credits)",
+  "title.update_available": "Update available: %s",
+  "title.fullscreen": "Fullscreen",
+  "title.exit_fullscreen": "Exit Fullscreen",
+  "title.eagler_mode": "Eagler mode (wss:// enabled)",
+  "title.singleplayer_tip": "Experimental - SteelMC",
+  "title.singleplayer_soon": "Singleplayer (coming soon)"
+}

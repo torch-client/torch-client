@@ -12,6 +12,7 @@ use crate::gui::widgets::{
     centered_row_x,
 };
 use crate::gui::{GuiState, Screen, ScreenCtx};
+use crate::lang::Key;
 use crate::platform::time::Instant;
 use crate::resourcepacks::modrinth::{self, Hit, Query, Sort, Tags};
 use crate::resourcepacks::{self, Compat, Info};
@@ -24,26 +25,29 @@ use super::resourcepacks::{
     entry_text, header, icon_key, plain,
 };
 
-pub(in crate::gui) const EXPLORE: &str = "Explore Packs";
-const TABS: [&str; 2] = ["Installed", "Browse"];
+pub(in crate::gui) const EXPLORE: Key = Key::of("explore_packs.open");
+const TABS: [Key; 2] = [
+    Key::of("explore_packs.tab.installed"),
+    Key::of("explore_packs.tab.browse"),
+];
 const INSTALLED_TAB: usize = 0;
 const BROWSE_TAB: usize = 1;
 
-const PACKS: &str = "Packs Folder";
+const PACKS: Key = Key::of("explore_packs.packs_folder");
 const RESULTS: &str = "Modrinth";
-const DETAILS: &str = "Details";
-const DELETE: &str = "Delete";
-const DOWNLOAD: &str = "Download";
-const DOWNLOADING: &str = "Downloading...";
-const INSTALLED: &str = "Installed";
-const RETRY: &str = "Failed, Retry";
-const DONE: &str = "Done";
-const SCANNING: &str = "Reading the packs folder...";
-const NO_PACKS: &str = "The packs folder is empty";
-const SEARCHING: &str = "Searching...";
-const NO_RESULTS: &str = "No packs found";
-const NOTHING_SELECTED: &str = "Select a pack";
-const LOADING_BODY: &str = "Loading description...";
+const DETAILS: Key = Key::of("explore_packs.details");
+const DELETE: Key = Key::of("explore_packs.delete");
+const DOWNLOAD: Key = Key::of("explore_packs.download");
+const DOWNLOADING: Key = Key::of("explore_packs.downloading");
+const INSTALLED: Key = Key::of("explore_packs.installed");
+const RETRY: Key = Key::of("explore_packs.retry");
+const DONE: Key = Key::of("explore_packs.done");
+const SCANNING: Key = Key::of("explore_packs.scanning");
+const NO_PACKS: Key = Key::of("explore_packs.no_packs");
+const SEARCHING: Key = Key::of("explore_packs.searching");
+const NO_RESULTS: Key = Key::of("explore_packs.no_results");
+const NOTHING_SELECTED: Key = Key::of("explore_packs.nothing_selected");
+const LOADING_BODY: Key = Key::of("explore_packs.loading_body");
 
 const BROWSE_LAYOUT: HeaderFooter =
     HeaderFooter::new(FILTER_Y + WIDGET_HEIGHT + 4.0, HeaderFooter::DEFAULT_H);
@@ -158,7 +162,7 @@ pub struct State {
     loading: bool,
     error: Option<String>,
     selected: Option<usize>,
-    bodies: HashMap<String, Option<String>>,
+    bodies: HashMap<String, Option<Result<String, String>>>,
     preview: Option<(String, Vec<Vec<Span>>)>,
     icons: HashMap<String, Arc<Vec<u8>>>,
     keyed: [Option<String>; ICON_KEYS],
@@ -169,6 +173,7 @@ pub struct State {
 
     changed: bool,
     inbox: Arc<Mutex<Inbox>>,
+    lang_epoch: u32,
 }
 
 impl Default for State {
@@ -203,6 +208,7 @@ impl Default for State {
             browse_panes: Panes::default(),
             changed: false,
             inbox: Arc::default(),
+            lang_epoch: 0,
         }
     }
 }
@@ -277,10 +283,7 @@ impl State {
             }
         }
         for (id, body) in inbox.bodies {
-            let text = body.map_or_else(
-                |e| format!("Could not load the description: {e}"),
-                |md| plain_text(&md),
-            );
+            let text = body.map(|md| plain_text(&md));
             if self.preview.as_ref().is_some_and(|(shown, _)| *shown == id) {
                 self.preview = None;
             }
@@ -478,8 +481,14 @@ impl State {
 pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     let st = &mut state.explore_packs;
     st.drain();
+    let epoch = crate::lang::epoch();
+    if st.lang_epoch != epoch {
+        st.lang_epoch = epoch;
+        st.pack_detail = None;
+        st.preview = None;
+    }
 
-    if let Some(tab) = widgets::tab_bar(p, ctx, &TABS, st.tab) {
+    if let Some(tab) = widgets::tab_bar(p, ctx, &TABS.map(Key::get), st.tab) {
         st.tab = tab;
         if tab == BROWSE_TAB {
             st.search.focus();
@@ -527,7 +536,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
             Some(Download::Done) => (INSTALLED, false),
             Some(Download::Failed) => (RETRY, true),
         };
-        if action(label, active).draw(p, ctx)
+        if action(label.get(), active).draw(p, ctx)
             && let Some(id) = id
         {
             st.download(id);
@@ -537,7 +546,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         pack_details(p, ctx, st, lefts[1], list_y, list_h);
 
         let deletable = st.pack_selected.filter(|&i| st.packs[i].downloaded);
-        if action(DELETE, deletable.is_some()).draw(p, ctx)
+        if action(DELETE.get(), deletable.is_some()).draw(p, ctx)
             && let Some(i) = deletable
         {
             st.delete(i);
@@ -549,7 +558,7 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         footer_y,
         FOOTER_W,
         WIDGET_HEIGHT,
-        DONE,
+        DONE.get(),
     )
     .draw(p, ctx)
     {
@@ -568,8 +577,9 @@ fn filter_row(p: &mut Painter, ctx: &ScreenCtx, st: &mut State, x0: f32) {
     let w = ((FULL_W - 2.0 * FILTER_GAP) / 3.0).floor();
     let f = &mut st.filters;
 
+    let any = crate::lang::tr!("explore_packs.any");
     let version = if f.any_version {
-        "Any".to_owned()
+        any.to_owned()
     } else {
         format!("{}+", modrinth::OLDEST)
     };
@@ -585,7 +595,7 @@ fn filter_row(p: &mut Painter, ctx: &ScreenCtx, st: &mut State, x0: f32) {
         f.any_version = !f.any_version;
     }
 
-    let sort = format!("Sort: {}", f.sort.label());
+    let sort = crate::lang::trf!("explore_packs.sort", f.sort.label());
     if Button::new(x0 + w + FILTER_GAP, FILTER_Y, w, WIDGET_HEIGHT, &sort).draw(p, ctx) {
         let at = Sort::ALL.iter().position(|s| *s == f.sort).unwrap_or(0);
         f.sort = Sort::ALL[(at + 1) % Sort::ALL.len()];
@@ -595,8 +605,8 @@ fn filter_row(p: &mut Painter, ctx: &ScreenCtx, st: &mut State, x0: f32) {
     let name = f
         .resolution
         .and_then(|i| resolutions.get(i))
-        .map_or("Any", String::as_str);
-    let label = format!("Resolution: {name}");
+        .map_or(any, String::as_str);
+    let label = crate::lang::trf!("explore_packs.resolution", name);
     let resolution = Button {
         active: !resolutions.is_empty(),
         ..Button::new(
@@ -732,7 +742,7 @@ fn installed(
         ctx,
         &mut st.installed_panes,
         (left, list_y, list_h),
-        PACKS,
+        PACKS.get(),
         st.packs.len(),
     );
     let mut clicked = None;
@@ -763,7 +773,11 @@ fn installed(
         let name: String = name.iter().map(|span| span.text.as_str()).collect();
         entry_text(p, &name, &pack.info.description, cx, cy, view.text_w);
     }
-    let empty = if st.scanning { SCANNING } else { NO_PACKS };
+    let empty = if st.scanning {
+        SCANNING.get()
+    } else {
+        NO_PACKS.get()
+    };
     view.close(p, st.packs.is_empty().then_some(empty));
 
     if let Some(i) = clicked {
@@ -805,23 +819,27 @@ fn pack_details(
 }
 
 fn pack_lines(p: &Painter, pack: &LocalPack) -> Vec<Vec<Span>> {
+    use crate::lang::tr;
     let source = if pack.downloaded {
-        "Downloaded from Modrinth"
+        tr!("explore_packs.source.downloaded")
     } else {
-        "Added to the folder by hand"
+        tr!("explore_packs.source.by_hand")
     };
     let compat = match pack.info.compat {
-        Compat::Compatible => "Compatible",
-        Compat::TooOld => "Made for an older version",
-        Compat::TooNew => "Made for a newer version",
-        Compat::Unknown => "Broken or incompatible",
+        Compat::Compatible => tr!("explore_packs.compat.compatible"),
+        Compat::TooOld => tr!("explore_packs.compat.too_old"),
+        Compat::TooNew => tr!("explore_packs.compat.too_new"),
+        Compat::Unknown => tr!("explore_packs.compat.unknown"),
     };
     field_lines(
         p,
         vec![
-            ("Size", Bytes(pack.size).to_string()),
-            ("Source", source.to_owned()),
-            ("Compatibility", compat.to_owned()),
+            (
+                tr!("explore_packs.field.size"),
+                Bytes(pack.size).to_string(),
+            ),
+            (tr!("explore_packs.field.source"), source.to_owned()),
+            (tr!("explore_packs.field.compatibility"), compat.to_owned()),
         ],
     )
 }
@@ -859,8 +877,8 @@ fn results(p: &mut Painter, ctx: &ScreenCtx, st: &mut State, left: f32, list_y: 
     }
     let status = match &st.error {
         Some(e) => e.as_str(),
-        None if st.loading || st.sent.is_none() => SEARCHING,
-        None => NO_RESULTS,
+        None if st.loading || st.sent.is_none() => SEARCHING.get(),
+        None => NO_RESULTS.get(),
     };
     view.close(p, (count == 0).then_some(status));
 
@@ -876,7 +894,7 @@ fn preview(p: &mut Painter, ctx: &ScreenCtx, st: &mut State, left: f32, list_y: 
     };
     let id = st.hits[index].project_id.clone();
     if st.preview.as_ref().is_none_or(|(shown, _)| *shown != id) {
-        let body = st.bodies.get(&id).and_then(Option::as_deref);
+        let body = st.bodies.get(&id).and_then(Option::as_ref);
         let lines = preview_lines(p, &st.hits[index], body);
         st.preview = Some((id.clone(), lines));
     }
@@ -919,8 +937,8 @@ fn detail(
 ) {
     let Some(shown) = shown else {
         let clip = p.push_clip(left, list_y, LIST_W, list_h);
-        header(p, DETAILS, left, list_y, LIST_W);
-        centred(p, NOTHING_SELECTED, left, list_y + HEADER_H + PADDING);
+        header(p, DETAILS.get(), left, list_y, LIST_W);
+        centred(p, NOTHING_SELECTED.get(), left, list_y + HEADER_H + PADDING);
         p.pop_clip(clip);
         return;
     };
@@ -938,7 +956,7 @@ fn detail(
     );
     let clip = p.push_clip(left, list_y, LIST_W, list_h);
     let top = (list_y - panes.scroll[1]).floor();
-    header(p, DETAILS, left, top, LIST_W);
+    header(p, DETAILS.get(), left, top, LIST_W);
 
     let (cx, cy) = (
         left + (LIST_W - ROW_W) / 2.0 + PADDING,
@@ -973,13 +991,14 @@ fn detail(
     );
 }
 
-fn preview_lines(p: &Painter, hit: &Hit, body: Option<&str>) -> Vec<Vec<Span>> {
+fn preview_lines(p: &Painter, hit: &Hit, body: Option<&Result<String, String>>) -> Vec<Vec<Span>> {
+    use crate::lang::{tr, trf};
     let mut fields = vec![
-        ("Author", hit.author.clone()),
-        ("Downloads", compact(hit.downloads)),
-        ("Follows", compact(hit.follows)),
+        (tr!("explore_packs.field.author"), hit.author.clone()),
+        (tr!("explore_packs.field.downloads"), compact(hit.downloads)),
+        (tr!("explore_packs.field.follows"), compact(hit.follows)),
         (
-            "Updated",
+            tr!("explore_packs.field.updated"),
             hit.date_modified
                 .get(..10)
                 .unwrap_or(hit.date_modified.as_str())
@@ -987,14 +1006,12 @@ fn preview_lines(p: &Painter, hit: &Hit, body: Option<&str>) -> Vec<Vec<Span>> {
         ),
     ];
     if let (Some(first), Some(last)) = (hit.versions.first(), hit.versions.last()) {
-        fields.push((
-            "Versions",
-            if first == last {
-                first.clone()
-            } else {
-                format!("{first} to {last}")
-            },
-        ));
+        let range = if first == last {
+            first.clone()
+        } else {
+            trf!("explore_packs.version_range", first, last)
+        };
+        fields.push((tr!("explore_packs.field.versions"), range));
     }
     let tags: Vec<&str> = hit
         .categories
@@ -1003,11 +1020,18 @@ fn preview_lines(p: &Painter, hit: &Hit, body: Option<&str>) -> Vec<Vec<Span>> {
         .filter(|c| *c != "minecraft")
         .collect();
     if !tags.is_empty() {
-        fields.push(("Tags", tags.join(", ")));
+        fields.push((tr!("explore_packs.field.tags"), tags.join(", ")));
     }
 
     let mut lines = field_lines(p, fields);
     lines.push(Vec::new());
+    let failed = |e: &String| trf!("explore_packs.body_failed", e);
+    let body = body.map(|body| {
+        body.as_ref().map_or_else(
+            |e| std::borrow::Cow::Owned(failed(e)),
+            |b| b.as_str().into(),
+        )
+    });
     match body {
         Some(body) => {
             for paragraph in body.lines() {
@@ -1019,7 +1043,7 @@ fn preview_lines(p: &Painter, hit: &Hit, body: Option<&str>) -> Vec<Vec<Span>> {
                 }
             }
         }
-        None => lines.push(plain(LOADING_BODY)),
+        None => lines.push(plain(LOADING_BODY.get())),
     }
     lines
 }

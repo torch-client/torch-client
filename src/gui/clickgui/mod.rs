@@ -14,8 +14,11 @@ pub(crate) mod theme;
 use bevy::prelude::Vec2;
 
 use crate::gui::keybinds::Bound;
+use crate::lang::Key;
 use crate::modules::list::BitList;
-use crate::modules::registry::{Category, Kind, Mode, ModuleIx, SettingDef, module, module_count};
+use crate::modules::registry::{
+    Category, Kind, Mode, ModuleIx, SettingDef, module, module_count, option_label,
+};
 use crate::modules::{Value, store};
 use crate::text::contains_ci;
 use picker::{Picker, Row};
@@ -103,6 +106,7 @@ enum CfgRow {
     Slider {
         ctl: Cfg,
         name: &'static str,
+        label: Key,
         min: f32,
         max: f32,
         decimals: u8,
@@ -112,6 +116,7 @@ enum CfgRow {
     },
     Toggle {
         name: &'static str,
+        label: Key,
         field: fn(&mut Look) -> &mut bool,
     },
 }
@@ -135,6 +140,7 @@ const CFG: &[CfgRow] = &[
     CfgRow::Slider {
         ctl: Cfg::Opacity,
         name: "Opacity",
+        label: Key::of("clickgui.config.opacity"),
         min: 30.0,
         max: 100.0,
         decimals: 0,
@@ -145,6 +151,7 @@ const CFG: &[CfgRow] = &[
     CfgRow::Slider {
         ctl: Cfg::Radius,
         name: "Corner radius",
+        label: Key::of("clickgui.config.corner_radius"),
         min: 0.0,
         max: 8.0,
         decimals: 1,
@@ -155,6 +162,7 @@ const CFG: &[CfgRow] = &[
     CfgRow::Slider {
         ctl: Cfg::RowHeight,
         name: "Row height",
+        label: Key::of("clickgui.config.row_height"),
         min: 11.0,
         max: 18.0,
         decimals: 0,
@@ -165,6 +173,7 @@ const CFG: &[CfgRow] = &[
     CfgRow::Slider {
         ctl: Cfg::ColumnWidth,
         name: "Column width",
+        label: Key::of("clickgui.config.column_width"),
         min: 86.0,
         max: 150.0,
         decimals: 0,
@@ -174,23 +183,28 @@ const CFG: &[CfgRow] = &[
     },
     CfgRow::Toggle {
         name: "Dim background",
+        label: Key::of("clickgui.config.dim_background"),
         field: |l| &mut l.scrim,
     },
     CfgRow::Toggle {
         name: "Open animation",
+        label: Key::of("clickgui.config.open_animation"),
         field: |l| &mut l.animate,
     },
     CfgRow::Toggle {
         name: "Text shadow",
+        label: Key::of("clickgui.config.text_shadow"),
         field: |l| &mut l.shadow,
     },
     CfgRow::Toggle {
         name: "Attack friends",
+        label: Key::of("clickgui.config.attack_friends"),
         field: |l| &mut l.attack_friends,
     },
     #[cfg(feature = "audio")]
     CfgRow::Toggle {
         name: "UI Sounds",
+        label: Key::of("clickgui.config.ui_sounds"),
         field: |l| &mut l.ui_sounds,
     },
 ];
@@ -199,7 +213,7 @@ const CFG: &[CfgRow] = &[
 const PROFILE_W: f32 = 92.0;
 
 #[cfg(not(feature = "module_panel"))]
-const PROFILE_TIP: &str = "Which modules may run. Legit permits only what the server cannot see. Ctrl+] raises, Ctrl+[ lowers.";
+const PROFILE_TIP: Key = Key::of("clickgui.profile.tip");
 
 const SCALE_MIN: f32 = 0.6;
 const SCALE_MAX: f32 = 1.8;
@@ -233,7 +247,7 @@ impl Default for Look {
         Look {
             accent: 0,
             surface: 0,
-            scale: 1.0,
+            scale: 0.86,
             opacity: 0.95,
             radius: 4.0,
             row_h: 13.0,
@@ -276,7 +290,7 @@ impl Look {
                 CfgRow::Slider { name, field, .. } => {
                     map.insert(name.into(), (*field(&mut look)).into());
                 }
-                CfgRow::Toggle { name, field } => {
+                CfgRow::Toggle { name, field, .. } => {
                     map.insert(name.into(), (*field(&mut look)).into());
                 }
                 CfgRow::Profile | CfgRow::Accent | CfgRow::Surface | CfgRow::Scale => {}
@@ -325,7 +339,7 @@ impl Look {
                         *field(&mut look) = if whole { v.round() } else { v } / shown;
                     }
                 }
-                CfgRow::Toggle { name, field } => {
+                CfgRow::Toggle { name, field, .. } => {
                     if let Some(on) = map.get(name).and_then(|v| v.as_bool()) {
                         *field(&mut look) = on;
                     }
@@ -494,6 +508,7 @@ struct Hit {
 
 struct Editor {
     slot: u16,
+    id: ModuleIx,
     title: String,
     max_len: usize,
     text: MultiLineTextBox,
@@ -596,13 +611,18 @@ enum Tab {
     Mods,
 }
 
-#[cfg(not(lua_mods))]
-const TABS: [(Tab, &str); 2] = [(Tab::Modules, "Modules"), (Tab::Config, "Config")];
+const TAB_MODULES: Key = Key::of("clickgui.tab.modules");
+const TAB_CONFIG: Key = Key::of("clickgui.tab.config");
 #[cfg(lua_mods)]
-const TABS: [(Tab, &str); 3] = [
-    (Tab::Modules, "Modules"),
-    (Tab::Config, "Config"),
-    (Tab::Mods, "Mods"),
+const TAB_MODS: Key = Key::of("clickgui.tab.mods");
+
+#[cfg(not(lua_mods))]
+const TABS: [(Tab, Key); 2] = [(Tab::Modules, TAB_MODULES), (Tab::Config, TAB_CONFIG)];
+#[cfg(lua_mods)]
+const TABS: [(Tab, Key); 3] = [
+    (Tab::Modules, TAB_MODULES),
+    (Tab::Config, TAB_CONFIG),
+    (Tab::Mods, TAB_MODS),
 ];
 
 const TAB_PAD: f32 = 9.0;
@@ -664,6 +684,7 @@ pub struct ClickGuiState {
     expanded: Option<ModuleIx>,
     dropdown: Option<Control>,
     profile_seen: Mode,
+    lang_seen: u32,
     drag: Option<Drag>,
     focus: Focus,
     hits: Vec<Hit>,
@@ -733,6 +754,7 @@ impl Default for ClickGuiState {
             expanded: None,
             dropdown: None,
             profile_seen: store().profile(),
+            lang_seen: 0,
             drag: None,
             focus: Focus::None,
             hits: Vec::with_capacity(COLUMNS + 5),
@@ -843,6 +865,16 @@ fn differs(a: f32, b: f32) -> bool {
     (a - b).abs() >= EPS
 }
 
+fn editor_title(id: ModuleIx, slot: u16) -> String {
+    let mut title = String::with_capacity(32);
+    title.push_str(module(id).label());
+    if let Some(d) = crate::modules::registry::setting(slot as usize) {
+        title.push_str(" / ");
+        title.push_str(d.label());
+    }
+    title
+}
+
 fn changed(slot: usize, kind: Kind) -> bool {
     match (kind, store().value(slot), Value::default_of(kind)) {
         (Kind::Text { default, .. }, _, _) => !store().with_text(slot, |t| t == default),
@@ -863,6 +895,18 @@ impl ClickGuiState {
         if self.profile_seen != profile {
             self.profile_seen = profile;
             self.refresh_matches();
+        }
+        let lang = crate::lang::epoch();
+        if self.lang_seen != lang {
+            self.lang_seen = lang;
+            self.refresh_matches();
+            match &mut self.overlay {
+                Some(Overlay::Editor(e)) => e.title = editor_title(e.id, e.slot),
+                Some(Overlay::Picker(k)) => k.built = None,
+                _ => {}
+            }
+            #[cfg(lua_mods)]
+            self.relabel_mod_editor();
         }
         self.top_bar(p, ui);
         match self.tab {
@@ -1078,7 +1122,7 @@ impl ClickGuiState {
             let need = panel::MIN_W + 2.0 * GAP;
             if !self.scale_set && need > ui.vw {
                 let was = self.look.scale;
-                self.look.scale = (was * ui.vw / need).clamp(AUTO_SCALE_MIN, 1.0);
+                self.look.scale = (was * ui.vw / need).clamp(AUTO_SCALE_MIN, was);
                 let ratio = was / self.look.scale;
                 ui.vw *= ratio;
                 ui.vh *= ratio;
@@ -1332,10 +1376,12 @@ impl ClickGuiState {
         if self.field.text.is_empty() {
             return;
         }
+        let q = &self.field.text;
         for m in Category::ALL.iter().flat_map(|c| c.modules()) {
             if store().allowed(m.id)
-                && (contains_ci(m.name, &self.field.text)
-                    || m.aliases().iter().any(|a| contains_ci(a, &self.field.text)))
+                && (contains_ci(m.label(), q)
+                    || contains_ci(m.name, q)
+                    || m.aliases().iter().any(|a| contains_ci(a, q)))
             {
                 self.matches.push(m.id);
             }
@@ -1384,7 +1430,6 @@ impl ClickGuiState {
         &mut self,
         slot: u16,
         id: ModuleIx,
-        name: &'static str,
         max_len: usize,
         font: &crate::text::Font,
         ui: &Ui,
@@ -1399,13 +1444,10 @@ impl ClickGuiState {
         text.inner.focused = true;
         text.inner.browser_keyboard = true;
         let lines = text.line_count(font, EDITOR_W - 2.0 * EDITOR_PAD);
-        let mut title = String::with_capacity(32);
-        title.push_str(module(id).name);
-        title.push_str(" / ");
-        title.push_str(name);
         self.overlay = Some(Overlay::Editor(Editor {
             slot,
-            title,
+            id,
+            title: editor_title(id, slot),
             max_len,
             text,
             top: 0,
@@ -1511,10 +1553,10 @@ impl ClickGuiState {
                     look.header()
                 },
             );
-            const LABEL: &str = "Reset layout";
-            let tw = p.atlas.font.width_str(LABEL);
+            let label = crate::lang::tr!("clickgui.reset_layout");
+            let tw = p.atlas.font.width_str(label);
             p.text_plain(
-                LABEL,
+                label,
                 GAP + ((BUTTON_W - tw) * 0.5).floor(),
                 text_y(y, BUTTON_H),
                 if hovered { theme::TEXT_ON } else { look.text() },
@@ -1534,7 +1576,8 @@ impl ClickGuiState {
     #[cfg(not(feature = "module_panel"))]
     fn tab_strip(&mut self, p: &mut Painter, ui: &Ui, y: f32, active: bool) {
         let look = self.look;
-        let widths = TABS.map(|(_, name)| (p.atlas.font.width_str(name) + 2.0 * TAB_PAD).floor());
+        let widths =
+            TABS.map(|(_, name)| (p.atlas.font.width_str(name.get()) + 2.0 * TAB_PAD).floor());
         let strip_w = widths.iter().sum::<f32>() + 2.0 * STRIP_PAD;
         let sx = ((ui.vw - strip_w) * 0.5).floor();
         p.rounded_rect(sx, y, strip_w, BUTTON_H, TAB_RADIUS, look.header());
@@ -1555,7 +1598,7 @@ impl ClickGuiState {
                 );
             }
             p.text_plain(
-                name,
+                name.get(),
                 (tx + TAB_PAD).floor(),
                 text_y(y, BUTTON_H),
                 if on { theme::TEXT_ON } else { look.text() },
@@ -1584,9 +1627,10 @@ impl ClickGuiState {
             x,
             GAP,
             PROFILE_W,
-            "Profile",
+            crate::lang::tr!("clickgui.profile"),
             now as u8,
             &Mode::NAMES,
+            &Mode::KEYS,
             Control::BarProfile,
             active,
         );
@@ -1597,7 +1641,7 @@ impl ClickGuiState {
             && self.dropdown != Some(Control::BarProfile)
             && let Some(cursor) = ui.mouse()
         {
-            self.tip = Some((PROFILE_TIP, cursor.x, cursor.y));
+            self.tip = Some((PROFILE_TIP.get(), cursor.x, cursor.y));
         }
         self.record(Focus::Bar, 0.0, 0.0, ui.vw, GAP + TOP_H);
         if self.dropdown == Some(Control::BarProfile) {
@@ -1781,11 +1825,13 @@ impl ClickGuiState {
             }
             let ctl = Control::Setting(slot as u16);
             let row_h = self.setting_height(slot, d);
-            if !d.tip.is_empty() && self.hint(ui, x, sy, w, row_h, active) {
+            let about = d.about();
+            if !about.is_empty() && self.hint(ui, x, sy, w, row_h, active) {
                 if let Some(cursor) = ui.mouse() {
-                    self.tip = Some((d.tip, cursor.x, cursor.y));
+                    self.tip = Some((about, cursor.x, cursor.y));
                 }
             }
+            let name = d.label();
             let label_y = match d.kind {
                 Kind::Toggle { .. } => text_y(sy, TOGGLE_H),
                 Kind::Enum { .. } => text_y(sy, ENUM_H - 3.0),
@@ -1812,7 +1858,7 @@ impl ClickGuiState {
             }
             match (d.kind, store().value(slot)) {
                 (Kind::Toggle { .. }, Some(Value::Bool(on))) => {
-                    let v = self.toggle(p, ui, ix, sy, iw, d.name, on, active);
+                    let v = self.toggle(p, ui, ix, sy, iw, name, on, active);
                     if v != on {
                         store().set_value(slot, Value::Bool(v));
                     }
@@ -1830,7 +1876,7 @@ impl ClickGuiState {
                         ix,
                         sy,
                         iw,
-                        d.name,
+                        name,
                         v,
                         min,
                         max,
@@ -1856,34 +1902,42 @@ impl ClickGuiState {
                 ) => {
                     let was = (lo, hi);
                     let (lo, hi) = self.range(
-                        p, ui, ix, sy, iw, d.name, lo, hi, min, max, decimals, log, ctl, active,
+                        p, ui, ix, sy, iw, name, lo, hi, min, max, decimals, log, ctl, active,
                     );
                     if (lo, hi) != was {
                         store().set_value(slot, Value::Range(lo, hi));
                     }
                 }
-                (Kind::Enum { options, .. }, Some(Value::Choice(index))) => {
-                    let v = self.choice(p, ui, ix, sy, iw, d.name, index, options, ctl, active);
+                (Kind::Enum { options, keys, .. }, Some(Value::Choice(index))) => {
+                    let v = self.choice(p, ui, ix, sy, iw, name, index, options, keys, ctl, active);
                     if v != index {
                         store().set_value(slot, Value::Choice(v));
                     }
                 }
                 (Kind::List { list }, _) => {
-                    self.list_button(p, ui, ix, sy, iw, d.name, list, active);
+                    self.list_button(p, ui, ix, sy, iw, name, list, active);
                 }
                 (Kind::Key { .. }, Some(Value::Key(bound))) => {
                     let target = BindTarget::Setting(slot as u16);
-                    self.bind_button(p, ui, ix, sy, iw, d.name, target, bound, active);
+                    self.bind_button(p, ui, ix, sy, iw, name, target, bound, active);
                 }
-                (Kind::Button { text, key }, _) => {
+                (
+                    Kind::Button {
+                        text,
+                        text_key,
+                        key,
+                    },
+                    _,
+                ) => {
                     let builtin = (id.0 as usize) < crate::modules::registry::COUNT;
                     let live = builtin || store().enabled(id);
+                    let text = text_key.or(text);
                     let label = if builtin {
                         crate::modules::builtin_button_text(id, key, text, ui.input.time)
                     } else {
                         text
                     };
-                    if self.action_button(p, ui, ix, sy, iw, d.name, label, live, active) {
+                    if self.action_button(p, ui, ix, sy, iw, name, label, live, active) {
                         if builtin {
                             if crate::modules::builtin_button(id, key, ui.input.time)
                                 == crate::modules::ButtonAction::Close
@@ -1903,17 +1957,19 @@ impl ClickGuiState {
                         max_len,
                         expand,
                         hint,
+                        hint_key,
                         ..
                     },
                     _,
                 ) => {
+                    let hint = hint_key.or(hint);
                     self.text_field(
                         p,
                         ui,
                         ix,
                         sy,
                         iw,
-                        d.name,
+                        name,
                         slot as u16,
                         id,
                         TextSpec {
@@ -1966,6 +2022,9 @@ impl ClickGuiState {
 
         k.query.focused = true;
         let dirty = k.query.handle_input(ui.input);
+        if dirty {
+            self.overlay_win.scroll = 0.0;
+        }
         k.rebuild(dirty);
         let rows = k.rows.len();
         let content =
@@ -1979,7 +2038,7 @@ impl ClickGuiState {
             if collapsed {
                 p.rounded_rect(x, y, pw, HEADER_H, look.radius, look.raised());
                 self.record(Focus::On(Window::Overlay), x, y, pw, HEADER_H);
-                self.title_bar(p, ui, Window::Overlay, x, y, pw, list.title, true, active);
+                self.title_bar(p, ui, Window::Overlay, x, y, pw, list.title(), true, active);
                 return Some(k);
             }
             let head = HEADER_H + picker_head(list);
@@ -1988,11 +2047,21 @@ impl ClickGuiState {
 
             p.rounded_rect(x, y, pw, head + view, look.radius, look.raised());
             self.record(Focus::On(Window::Overlay), x, y, pw, head + view);
-            self.title_bar(p, ui, Window::Overlay, x, y, pw, list.title, false, active);
+            self.title_bar(
+                p,
+                ui,
+                Window::Overlay,
+                x,
+                y,
+                pw,
+                list.title(),
+                false,
+                active,
+            );
             (x, y + HEADER_H, pw, view, scroll)
         };
         #[cfg(feature = "module_panel")]
-        let sheet = self.overlay_sheet(p, ui, list.title, picker_head(list), content, active)?;
+        let sheet = self.overlay_sheet(p, ui, list.title(), picker_head(list), content, active)?;
         #[cfg(feature = "module_panel")]
         let panel::SheetArea {
             x,
@@ -2014,7 +2083,7 @@ impl ClickGuiState {
             fy,
             pw - 10.0,
             FIELD_H,
-            "Search",
+            crate::lang::tr!("clickgui.picker.search_hint"),
         );
 
         if !list.presets.is_empty() {
@@ -2185,7 +2254,13 @@ impl ClickGuiState {
             look.shadow,
         );
         #[cfg(not(feature = "module_panel"))]
-        p.text_plain("Enter to close", x + 5.0, cy, look.text_dim(), look.shadow);
+        p.text_plain(
+            crate::lang::tr!("clickgui.editor.enter_to_close"),
+            x + 5.0,
+            cy,
+            look.text_dim(),
+            look.shadow,
+        );
         #[cfg(feature = "module_panel")]
         p.pop_clip(sheet.clip);
         Some(e)
@@ -2223,13 +2298,6 @@ impl ClickGuiState {
             !open,
             look.text_dim(),
         );
-        p.text_plain(
-            list.groups[g],
-            x + 14.0,
-            text_y(y, BLOCK_H),
-            look.text_title(),
-            look.shadow,
-        );
         self.scratch.clear();
         {
             use std::fmt::Write;
@@ -2237,6 +2305,14 @@ impl ClickGuiState {
         }
         let cw = p.atlas.font.width_str(&self.scratch);
         let sw = PILL_W + 6.0;
+        self.label(
+            p,
+            list.group(g),
+            x + 14.0,
+            text_y(y, BLOCK_H),
+            pw - 14.0 - sw - cw - 8.0,
+            look.text_title(),
+        );
         p.text_plain(
             &self.scratch,
             x + pw - sw - cw - 4.0,
@@ -2278,7 +2354,7 @@ impl ClickGuiState {
         let inset = 10.0;
         let w = pw - inset - 6.0 - chip - if list.colored { 4.0 } else { 0.0 };
 
-        if self.toggle(p, ui, x + inset, y, w, list.label(i), on, active) != on {
+        if self.toggle(p, ui, x + inset, y, w, list.shown(i), on, active) != on {
             list.set_enabled(i, !on);
         }
 
@@ -2398,7 +2474,7 @@ impl ClickGuiState {
         let active = self.focus == Focus::On(Window::Config) && self.drag.is_none();
         let content_h = self.config_content_h();
         let Some((x, top, cw, view_h, scroll)) =
-            self.config_shell(p, ui, "Config", content_h, active, CONFIG_W)
+            self.config_shell(p, ui, TAB_CONFIG.get(), content_h, active, CONFIG_W)
         else {
             return;
         };
@@ -2424,9 +2500,10 @@ impl ClickGuiState {
                         ix,
                         cy,
                         iw,
-                        "Profile",
+                        crate::lang::tr!("clickgui.profile"),
                         profile as u8,
                         &Mode::NAMES,
+                        &Mode::KEYS,
                         Control::Config(Cfg::Profile),
                         active,
                     );
@@ -2435,15 +2512,17 @@ impl ClickGuiState {
                     }
                 }
                 CfgRow::Accent => {
+                    let name = crate::lang::tr!("clickgui.config.accent");
                     self.look.accent =
-                        self.swatches(p, ui, ix, cy, iw, "Accent", look.accent, true, active);
+                        self.swatches(p, ui, ix, cy, iw, name, look.accent, true, active);
                     if self.revert(p, ui, rx, cy + 1.0, look.accent != def.accent, active) {
                         self.look.accent = def.accent;
                     }
                 }
                 CfgRow::Surface => {
+                    let name = crate::lang::tr!("clickgui.config.surface");
                     self.look.surface =
-                        self.swatches(p, ui, ix, cy, iw, "Surface", look.surface, false, active);
+                        self.swatches(p, ui, ix, cy, iw, name, look.surface, false, active);
                     if self.revert(p, ui, rx, cy + 1.0, look.surface != def.surface, active) {
                         self.look.surface = def.surface;
                     }
@@ -2451,13 +2530,14 @@ impl ClickGuiState {
                 CfgRow::Scale => self.scale_row(p, ui, ix, cy, iw, rx, active),
                 CfgRow::Slider {
                     ctl,
-                    name,
+                    label,
                     min,
                     max,
                     decimals,
                     shown,
                     whole,
                     field,
+                    ..
                 } => {
                     let now = *field(&mut { look });
                     let v = self.slider(
@@ -2466,7 +2546,7 @@ impl ClickGuiState {
                         ix,
                         cy,
                         iw,
-                        name,
+                        label.get(),
                         now * shown,
                         min,
                         max,
@@ -2484,9 +2564,9 @@ impl ClickGuiState {
                         *field(&mut self.look) = was;
                     }
                 }
-                CfgRow::Toggle { name, field } => {
+                CfgRow::Toggle { label, field, .. } => {
                     let on = *field(&mut { look });
-                    if self.toggle(p, ui, ix, cy, iw, name, on, active) != on {
+                    if self.toggle(p, ui, ix, cy, iw, label.get(), on, active) != on {
                         *field(&mut self.look) = !on;
                     }
                     let was = *field(&mut { def });
@@ -2527,7 +2607,7 @@ impl ClickGuiState {
             ix,
             cy,
             iw,
-            "Scale",
+            crate::lang::tr!("clickgui.config.scale"),
             was,
             SCALE_MIN * 100.0,
             SCALE_MAX * 100.0,
@@ -2566,9 +2646,9 @@ impl ClickGuiState {
             theme::SURFACES.len()
         };
         let picked_name = if accents {
-            theme::ACCENTS[index as usize % count].name
+            theme::ACCENTS[index as usize % count].name.get()
         } else {
-            theme::SURFACES[index as usize % count].name
+            theme::SURFACES[index as usize % count].name.get()
         };
         let nw = p.atlas.font.width_str(picked_name);
         p.text_plain(
@@ -2746,7 +2826,7 @@ impl ClickGuiState {
                 if over { look.accent() } else { look.text_dim() },
             );
             if self.press(ui, hx, y, hw, 11.0, active) {
-                self.open_editor(slot, id, name, max_len, &p.atlas.font, ui);
+                self.open_editor(slot, id, max_len, &p.atlas.font, ui);
             }
         }
 
@@ -2805,17 +2885,8 @@ impl ClickGuiState {
         active: bool,
     ) {
         let bound = store().bind(id);
-        self.bind_button(
-            p,
-            ui,
-            x,
-            y,
-            w,
-            "Bind",
-            BindTarget::Module(id),
-            bound,
-            active,
-        );
+        let name = crate::lang::tr!("clickgui.bind");
+        self.bind_button(p, ui, x, y, w, name, BindTarget::Module(id), bound, active);
 
         let rx = x + w + 2.0;
         if self.revert(
@@ -3082,11 +3153,13 @@ impl ClickGuiState {
         name: &str,
         index: u8,
         options: &'static [&'static str],
+        keys: &'static [Key],
         id: Control,
         active: bool,
     ) -> u8 {
         let look = self.look;
         let mut index = index;
+        let shown = |i: usize| option_label(options, keys, i);
         let open = self.dropdown == Some(id);
         let box_h = CHOICE_H;
         let hovered = self.lit(ui, x, y, w, box_h, active);
@@ -3102,7 +3175,7 @@ impl ClickGuiState {
                 look.header()
             },
         );
-        let picked = options.get(index as usize).copied().unwrap_or("");
+        let picked = shown(index as usize);
         let vw = p.atlas.font.width_str(picked);
         p.text_plain(
             picked,
@@ -3143,7 +3216,7 @@ impl ClickGuiState {
             look.header(),
         );
         let mut oy = y + box_h + options_h(0);
-        for (i, option) in options.iter().enumerate() {
+        for i in 0..options.len() {
             let on = i as u8 == index;
             let over = self.lit(ui, x, oy, w, OPTION_H, active);
             if on || over {
@@ -3157,7 +3230,7 @@ impl ClickGuiState {
                 );
             }
             p.text_plain(
-                option,
+                shown(i),
                 x + 5.0,
                 text_y(oy, OPTION_H),
                 if on { theme::TEXT_ON } else { look.text() },

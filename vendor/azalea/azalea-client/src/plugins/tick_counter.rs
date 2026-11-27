@@ -1,6 +1,6 @@
-use azalea_core::tick::GameTick;
+use azalea_core::tick::{GameTick, TickRateManager, TickRateSystems};
 use azalea_physics::PhysicsSystems;
-use azalea_world::WorldName;
+use azalea_world::{WorldBorder, WorldName};
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
 
@@ -20,7 +20,30 @@ impl Plugin for TickCounterPlugin {
                 .before(MiningSystems)
                 .before(send_position),
         );
+        app.init_resource::<TickRateManager>()
+            .configure_sets(
+                GameTick,
+                TickRateSystems
+                    .before(PhysicsSystems)
+                    .before(MiningSystems)
+                    .before(send_position),
+            )
+            .add_systems(GameTick, tick_rate.in_set(TickRateSystems))
+            .add_observer(
+                |_: On<Insert, TicksConnected>, mut rate: ResMut<TickRateManager>| {
+                    *rate = TickRateManager::default();
+                },
+            )
+            .add_observer(
+                |_: On<Insert, WorldBorder>, mut rate: ResMut<TickRateManager>| {
+                    *rate = TickRateManager::default();
+                },
+            );
     }
+}
+
+pub fn tick_rate(mut rate: ResMut<TickRateManager>) {
+    rate.tick();
 }
 
 pub fn increment_counter(mut query: Query<&mut TicksConnected, With<WorldName>>) {

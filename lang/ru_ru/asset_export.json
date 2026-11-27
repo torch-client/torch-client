@@ -1,0 +1,17 @@
+{
+  "asset_export.title": "Экспорт ресурсов",
+  "asset_export.language_builtin": "%s: английский (встроенный)",
+  "asset_export.size": "Около %s",
+  "asset_export.export": "Экспортировать",
+  "asset_export.part.jar": "Ресурсы из jar",
+  "asset_export.part.panorama": "Панорама",
+  "asset_export.part.unifont": "Unifont",
+  "asset_export.part.sounds": "Часть звуков",
+  "asset_export.part.languages": "Таблица языков",
+  "asset_export.part.language": "Текущий язык",
+  "asset_export.imported": "Импортировано: %s",
+  "asset_export.imported_reload": "Импортировано: %s. Перезагрузите страницу, чтобы использовать",
+  "asset_export.refused.not_ours": "не файл ресурсов Torch",
+  "asset_export.refused.version": "создан для %s, нужен %s",
+  "asset_export.refused.empty": "в файле нечего импортировать"
+}

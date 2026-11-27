@@ -1,0 +1,15 @@
+{
+  "shaderpacks.title": "Наборы шейдеров",
+  "shaderpacks.open_button": "Наборы шейдеров...",
+  "shaderpacks.none_row": "(нет)",
+  "shaderpacks.no_packs": "В папке shaders нет наборов",
+  "shaderpacks.no_packs_web": "Перетащите набор на страницу или выберите ниже",
+  "shaderpacks.runs_without": "%s: работает без: %s",
+  "shaderpacks.open_folder": "Открыть папку наборов шейдеров",
+  "shaderpacks.done": "Готово",
+  "shaderpacks.reset": "Сбросить",
+  "shaderpacks.profile": "Профиль: %s",
+  "shaderpacks.custom": "Пользовательский",
+  "shaderpacks.on": "ВКЛ",
+  "shaderpacks.off": "ВЫКЛ"
+}

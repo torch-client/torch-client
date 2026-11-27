@@ -3,9 +3,12 @@ use std::ops::Range;
 use super::auto_mace::{AimPoint, MaceSlot};
 use super::auto_mine::{FluidRule, InvFull, LowHealth, MineMode, ReachMode};
 use super::auto_totem::TotemMode;
+use super::better_tooltips::{DEFAULT_DISPLAY as BETTER_TOOLTIPS_DISPLAY, DisplayWhen};
+use super::builder::{BreakMode, BuildMode};
 use super::crystal_aura::CrystalSwitch;
 use super::esp::Shape;
 use super::extra_hud::{Durability, Shown};
+use super::farmer::Crop;
 use super::flight::AntiKick;
 use super::freecam::InputMode;
 use super::fullbright::FullbrightMode;
@@ -13,15 +16,29 @@ use super::list::BitList;
 use super::nametags::{Health, Sizing};
 use super::ore_miner::OreSource;
 use super::scaffold::{BlockFilter, ScaffoldMode, Tower};
+use super::seed_cracker::CrackMode;
 use crate::gui::keybinds::Bound;
+use crate::lang::Key;
 use bevy::input::keyboard::KeyCode;
 
 #[derive(Clone, Copy)]
 pub struct SettingDef {
     pub name: &'static str,
+    pub name_key: Key,
     pub tip: &'static str,
+    pub tip_key: Key,
     pub kind: Kind,
     pub show: Show,
+}
+
+impl SettingDef {
+    pub fn label(&self) -> &'static str {
+        self.name_key.or(self.name)
+    }
+
+    pub fn about(&self) -> &'static str {
+        self.tip_key.or(self.tip)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,6 +95,7 @@ pub enum Kind {
     },
     Enum {
         options: &'static [&'static str],
+        keys: &'static [Key],
         index: u8,
     },
     List {
@@ -88,18 +106,28 @@ pub enum Kind {
         default: &'static str,
         expand: bool,
         hint: &'static str,
+        hint_key: Key,
     },
     Key {
         default: Bound,
     },
     Button {
         text: &'static str,
+        text_key: Key,
         key: &'static str,
     },
 }
 
+pub fn option_label(options: &[&'static str], keys: &[Key], i: usize) -> &'static str {
+    let Some(&english) = options.get(i) else {
+        return "";
+    };
+    keys.get(i).map_or(english, |k| k.or(english))
+}
+
 pub trait Options: Copy + 'static {
     const NAMES: &'static [&'static str];
+    const KEYS: &'static [Key];
     fn from_index(i: u8) -> Self;
 }
 
@@ -115,11 +143,16 @@ macro_rules! options {
 
         impl $crate::modules::registry::Options for $name {
             const NAMES: &'static [&'static str] = &[$($label),*];
+            const KEYS: &'static [$crate::lang::Key] = &[$(
+                $crate::lang::Key::of(concat!("options.", stringify!($name), ".", stringify!($v))),
+            )*];
             fn from_index(i: u8) -> Self {
                 const ALL: &[$name] = &[$($name::$v),*];
                 ALL[(i as usize).min(ALL.len() - 1)]
             }
         }
+
+        const _: &[$crate::lang::Key] = <$name as $crate::modules::registry::Options>::KEYS;
     };
 }
 pub(crate) use options;
@@ -158,6 +191,16 @@ pub enum Mode {
 impl Mode {
     pub const ALL: [Mode; 3] = [Mode::Legit, Mode::Normal, Mode::Blatant];
     pub const NAMES: [&'static str; 3] = ["Legit", "Normal", "Blatant"];
+    pub const KEYS: [Key; 3] = [
+        Key::of("modules.mode.legit"),
+        Key::of("modules.mode.normal"),
+        Key::of("modules.mode.blatant"),
+    ];
+
+    #[cfg_attr(not(lua_mods), allow(dead_code))]
+    pub fn label(self) -> &'static str {
+        Self::KEYS[self as usize].get()
+    }
 
     pub fn step(self, by: i8) -> Mode {
         let i = (self as i8 + by).clamp(0, Self::ALL.len() as i8 - 1);
@@ -187,6 +230,17 @@ impl Category {
         ["Combat", "Render", "World", "Movement", "Misc"][self as usize]
     }
 
+    pub fn label(self) -> &'static str {
+        const KEYS: [Key; 5] = [
+            Key::of("modules.category.combat"),
+            Key::of("modules.category.render"),
+            Key::of("modules.category.world"),
+            Key::of("modules.category.movement"),
+            Key::of("modules.category.misc"),
+        ];
+        KEYS[self as usize].get()
+    }
+
     pub fn modules(self) -> impl Iterator<Item = &'static ModuleDef> {
         modules().filter(move |m| m.category == self)
     }
@@ -206,7 +260,9 @@ impl From<Id> for ModuleIx {
 pub struct ModuleDef {
     pub id: ModuleIx,
     pub name: &'static str,
+    pub name_key: Key,
     pub desc: &'static str,
+    pub desc_key: Key,
     pub category: Category,
     pub mode: Mode,
     first: u16,
@@ -223,6 +279,14 @@ impl ModuleDef {
             .iter()
             .find(|(n, _)| *n == self.name)
             .map_or(&[], |(_, a)| *a)
+    }
+
+    pub fn label(&self) -> &'static str {
+        self.name_key.or(self.name)
+    }
+
+    pub fn about(&self) -> &'static str {
+        self.desc_key.or(self.desc)
     }
 
     pub fn slots(&self) -> Range<usize> {
@@ -335,7 +399,9 @@ pub(super) fn install(extra: Vec<Extra>) {
         modules.push(ModuleDef {
             id: ModuleIx((COUNT + k) as u16),
             name: e.name,
+            name_key: Key::NONE,
             desc: e.desc,
+            desc_key: Key::NONE,
             category: e.category,
             mode: e.mode,
             first: (SETTING_COUNT + at) as u16,
@@ -359,13 +425,26 @@ macro_rules! one {
 }
 
 macro_rules! kind {
-    (Enum<$t:ty> { default: $d:expr }) => {
+    ($index:ident $konst:ident; Enum<$t:ty> { default: $d:expr }) => {
         Kind::Enum {
             options: <$t as Options>::NAMES,
+            keys: <$t as Options>::KEYS,
             index: $d as u8,
         }
     };
-    ($v:ident { $($b:tt)* }) => {
+    ($index:ident $konst:ident; Button { $($b:tt)* }) => {
+        Kind::Button {
+            text_key: Key::of(concat!("modules.", stringify!($index), ".", stringify!($konst), ".text")),
+            $($b)*
+        }
+    };
+    ($index:ident $konst:ident; Text { $($b:tt)* }) => {
+        Kind::Text {
+            hint_key: Key::of(concat!("modules.", stringify!($index), ".", stringify!($konst), ".hint")),
+            $($b)*
+        }
+    };
+    ($index:ident $konst:ident; $v:ident { $($b:tt)* }) => {
         Kind::$v { $($b)* }
     };
 }
@@ -418,7 +497,9 @@ macro_rules! modules {
             ModuleDef {
                 id: ModuleIx(Id::$id as u16),
                 name: stringify!($id),
+                name_key: Key::of(concat!("modules.", stringify!($index), ".name")),
                 desc: $desc,
+                desc_key: Key::of(concat!("modules.", stringify!($index), ".desc")),
                 category: Category::$cat,
                 mode: Mode::$mode,
                 first: BASE[Id::$id as usize],
@@ -433,8 +514,10 @@ macro_rules! modules {
         pub static SETTINGS: [SettingDef; SETTING_COUNT] = [$($(
             SettingDef {
                 name: $sname,
+                name_key: Key::of(concat!("modules.", stringify!($index), ".", stringify!($konst), ".name")),
                 tip: $tip,
-                kind: kind!($v $(<$t>)? { $($body)* }),
+                tip_key: Key::of(concat!("modules.", stringify!($index), ".", stringify!($konst), ".tip")),
+                kind: kind!($index $konst; $v $(<$t>)? { $($body)* }),
                 show: show!($($show)?),
             },
         )*)*];
@@ -466,7 +549,10 @@ const fn slot(id: Id, n: u16) -> u16 {
     BASE[id as usize] + n
 }
 
-const SMART: Show = Show::is(auto_totem::MODE.0, &[TotemMode::Smart as u8]);
+const TOTEM_CHECKS: Show = Show::Any(&[
+    Show::is(auto_totem::MODE.0, &[TotemMode::Smart as u8]),
+    Show::On(offset_of(auto_totem::MAINHAND.0)),
+]);
 
 const SCAFFOLD_LEGIT: Show = Show::is(scaffold::MODE.0, &[ScaffoldMode::Legit as u8]);
 const SCAFFOLD_BRIDGE: Show = Show::is(
@@ -488,7 +574,15 @@ const EXTRA_HUD_EMPTY: Show = Show::is(
     &[Shown::Always as u8, Shown::IfAny as u8],
 );
 
+const BETTER_TOOLTIPS_KEYBIND: Show = Show::is(
+    better_tooltips::DISPLAY_WHEN.0,
+    &[DisplayWhen::Keybind as u8],
+);
+const BETTER_TOOLTIPS_MAPS: Show = Show::On(offset_of(better_tooltips::MAPS.0));
+
 const UI_UTILS_BYPASS: Show = Show::On(offset_of(ui_utils::BYPASS_PACK.0));
+
+const COORD_LOGGER_LINE: Show = Show::On(offset_of(coord_logger::LINE.0));
 
 const AUTO_MINE_AREA: Show = Show::is(auto_mine::MODE.0, &[MineMode::Area as u8]);
 const AUTO_MINE_CORRIDOR: Show = Show::is(auto_mine::MODE.0, &[MineMode::Corridor as u8]);
@@ -497,6 +591,10 @@ const AUTO_MINE_DISCONNECT: Show =
 
 const ORE_MINER_DISCONNECT: Show =
     Show::is(ore_miner::LOW_HEALTH.0, &[LowHealth::Disconnect as u8]);
+
+const AUTO_BUILD_FAST: Show = Show::is(builder::MODE.0, &[BuildMode::Fast as u8]);
+
+const AUTO_BUILD_FLUIDS: Show = Show::On(offset_of(builder::FLUIDS.0));
 
 const TYPED_MAX: &[(u16, f32)] = &[
     (auto_mine::HEALTH.0, i16::MAX as f32),
@@ -517,7 +615,12 @@ pub fn typed_max(slot: usize, max: f32) -> f32 {
         .map_or(max, |(_, m)| *m)
 }
 
-const NAMETAGS_ARMOR: Show = Show::On(offset_of(nametags::ARMOR.0));
+const NAMETAGS_ARMOR: Show = Show::Any(&[
+    Show::On(offset_of(nametags::ARMOR.0)),
+    Show::On(offset_of(nametags::HELD.0)),
+]);
+const PLAYER_ESP_ENTITIES: Show = Show::On(offset_of(player_esp::ENTITIES.0));
+const NAMETAGS_ITEMS: Show = Show::On(offset_of(nametags::ITEMS.0));
 
 modules! {
     TriggerBot / trigger_bot: Combat, Normal,
@@ -619,17 +722,23 @@ modules! {
             "Always refills the offhand whenever it has no totem. Smart waits until one of the checks below fires",
             Enum<TotemMode> { default: TotemMode::Always };
         HEALTH: "Health",
-            "Smart: equip at or under this much health, absorption included. 2 is one heart",
-            Slider { min: 0.0, max: 36.0, value: 10.0, decimals: 0 } if SMART;
+            "Equip at or under this much health, absorption included. 2 is one heart",
+            Slider { min: 0.0, max: 36.0, value: 10.0, decimals: 0 } if TOTEM_CHECKS;
         ELYTRA: "Elytra",
-            "Smart: equip while gliding",
-            Toggle { on: true } if SMART;
+            "Equip while gliding",
+            Toggle { on: true } if TOTEM_CHECKS;
         FALL: "Fall",
-            "Smart: equip when the landing below would deal at least your health in fall damage",
-            Toggle { on: true } if SMART;
+            "Equip when the landing below would deal at least your health in fall damage",
+            Toggle { on: true } if TOTEM_CHECKS;
         EXPLOSION: "Explosion",
-            "Smart: equip when crystals, lit TNT and swelling creepers in range could deal at least your health",
-            Toggle { on: true } if SMART;
+            "Equip when crystals, lit TNT and swelling creepers in range could deal at least your health",
+            Toggle { on: true } if TOTEM_CHECKS;
+        MAINHAND: "Mainhand backup",
+            "With a slot screen open, the offhand already holding a totem and a check above firing, swap a second totem into the held hotbar slot. Once the screen is shut and the offhand has used its totem, F moves this one across",
+            Toggle { on: true };
+        ILLEGIT: "Illegit",
+            "Click the totem straight into the offhand under any screen or none, whatever the cursor holds, instead of only the moves a hand can make",
+            Toggle { on: false };
         DELAY: "Delay",
             "Milliseconds after a move before the next one, rolled fresh inside this range",
             Range { min: 0.0, max: 500.0, low: 0.0, high: 100.0, decimals: 0, log: false };
@@ -748,6 +857,9 @@ modules! {
         LAVA: "Show lava",
             "Draw lava in red, whether or not it is switched on in Blocks",
             Toggle { on: true };
+        LAVRENDER: "Lavrender",
+            "Fade lava out with distance, so lava near you is strong and a far lava sea barely shows. Off draws all lava at the same opacity",
+            Toggle { on: true };
         EXPOSED: "Exposed only",
             "Draw only blocks with at least one side open to air, a fluid or a block that is not a full cube",
             Toggle { on: false };
@@ -769,7 +881,7 @@ modules! {
             List { list: &super::esp::blocks::BLOCK_ESP };
         RANGE: "Range",
             "How far from you in blocks the sweep looks",
-            Slider { min: 16.0, max: 256.0, value: 64.0, decimals: 0 };
+            Slider { min: 16.0, max: 512.0, value: 512.0, decimals: 0 };
         SHAPE: "Shape",
             "Lines draws the outline of a shape, Sides fills its faces, Both does each",
             Enum<Shape> { default: Shape::Both };
@@ -863,11 +975,30 @@ modules! {
             Toggle { on: true };
     }
 
+    NewChunks / new_chunks: World, Legit,
+        "Marks chunks generated as you load them, from liquid that starts flowing next to a source. Only chunks loaded while this is on" {
+        SHOW_OLD: "Show old",
+            "Also mark chunks that already held flowing liquid when they arrived",
+            Toggle { on: true };
+        HEIGHT: "Height",
+            "Y level the marks are drawn at",
+            Slider { min: -64.0, max: 320.0, value: 0.0, decimals: 0 };
+        RANGE: "Range",
+            "How far from you in chunks marks are drawn",
+            Slider { min: 4.0, max: 128.0, value: 32.0, decimals: 0 };
+    }
+
     SeedCracker / seed_cracker: World, Legit,
         "Works out the world seed from structures, End pillars and decorations" {
         FINDERS: "Finders",
             "Which structures and decorations are looked for",
             List { list: &super::seed_cracker::FINDERS };
+        BEDROCK: "Bedrock",
+            "Also read the bedrock at the bottom and top of the Nether and the bottom of the Overworld",
+            Toggle { on: true };
+        MODE: "Mode",
+            "Fast also lifts from finds that are not key and filters candidates sooner",
+            Enum<CrackMode> { default: CrackMode::Normal };
         SHOW_BOXES: "Show boxes",
             "Draw what each finder matched, in its colour",
             Toggle { on: true };
@@ -908,7 +1039,7 @@ modules! {
     }
 
     PlayerEsp / player_esp: Render, Legit,
-        "Draws every player's hitbox through terrain, friends in the accent colour" {
+        "Draws every player's hitbox through terrain, friends in the accent colour, and other entities if picked" {
         SHAPE: "Shape",
             "Lines draws the outline of a shape, Sides fills its faces, Both does each",
             Enum<Shape> { default: Shape::Both };
@@ -921,10 +1052,16 @@ modules! {
         FRIEND_COLOR: "Friend color",
             "Draw friends in the click GUI's accent colour instead of white",
             Toggle { on: true };
+        ENTITIES: "Entities",
+            "Also draw mobs and other entities, the ones picked in the list below",
+            Toggle { on: false };
+        ENTITY_LIST: "Entity list",
+            "Which entities are drawn, and in what colour",
+            List { list: &super::entities::ESP } if PLAYER_ESP_ENTITIES;
     }
 
     Nametags / nametags: Render, Legit,
-        "Enlarges player names and shows health, gamemode, distance and armor" {
+        "Enlarges player names and shows health, gamemode, distance, armor and held items" {
         SCALE: "Scale", "",
             Slider { min: 0.5, max: 4.0, value: 1.6, decimals: 1 };
         SIZING: "Sizing",
@@ -940,12 +1077,24 @@ modules! {
         ARMOR: "Armor",
             "Draw each player's armor above the name, as Meteor does",
             Toggle { on: true };
+        HELD: "Held Item",
+            "Add the main hand item before the armor and the offhand item after it",
+            Toggle { on: true };
         DURABILITY: "Durability",
             "The item's own bar only, or the bar with the uses left or the percentage left written above it",
             Enum<Durability> { default: Durability::Percent } if NAMETAGS_ARMOR;
         ENCHANTS: "Enchants",
             "List each piece's enchantments above it, cut to three letters and a level",
             Toggle { on: true } if NAMETAGS_ARMOR;
+        ITEMS: "Items",
+            "Show the name of every dropped item within vanilla's 64 block tag range",
+            Toggle { on: false };
+        ITEM_COUNT: "Item Count",
+            "Write the stack size in gray after a dropped item's name when it holds more than one",
+            Toggle { on: true } if NAMETAGS_ITEMS;
+        ITEM_DISTANCE: "Item Distance",
+            "Write the distance after a dropped item's name, as Distance does for players",
+            Toggle { on: false } if NAMETAGS_ITEMS;
     }
 
     Zoom / zoom: Render, Legit,
@@ -956,6 +1105,9 @@ modules! {
         DURATION: "Duration",
             "Seconds the zoom takes to ease in or out",
             Slider { min: 0.05, max: 2.0, value: 0.15, decimals: 2 };
+        SLOW_LOOK: "Slow look",
+            "Turn slower while zoomed, by the zoomed FOV over the normal one, so the mouse moves the crosshair across the same share of the view",
+            Toggle { on: true };
     }
 
     ExtraHud / extra_hud: Render, Legit,
@@ -1101,7 +1253,7 @@ modules! {
             "The highest y an ore is mined at",
             Slider { min: -64.0, max: 320.0, value: 320.0, decimals: 0 };
         DIG: "Dig to ores",
-            "Dig through blocks when no walking route reaches an ore. Off walks only",
+            "Dig through blocks where that is quicker than walking around. Off walks only",
             Toggle { on: true };
         VEIN: "Follow veins",
             "After an ore breaks, mine the ores of the same kind touching it before looking further",
@@ -1135,6 +1287,74 @@ modules! {
             Slider { min: 1.0, max: 20.0, value: 6.0, decimals: 0 } if ORE_MINER_DISCONNECT;
         IN_GUI: "Allow in GUI",
             "Keep digging while a screen is open, which no hand could do",
+            Toggle { on: false };
+    }
+
+    AutoBuild / builder: World, Normal,
+        "Builds the placed schematic block by block" {
+        MODE: "Mode",
+            "Legit turns the camera to every click. Fast sends Blocks per tick clicks with a look the camera does not show",
+            Enum<BuildMode> { default: BuildMode::Legit };
+        BREAK: "Break",
+            "All mismatches also clears blocks where the schematic has air. Only where a block goes leaves those standing",
+            Enum<BreakMode> { default: BreakMode::All };
+        PER_TICK: "Blocks per tick",
+            "Clicks sent per tick in Fast mode",
+            Slider { min: 1.0, max: 8.0, value: 2.0, decimals: 0 } if AUTO_BUILD_FAST;
+        DIG: "Dig on the way",
+            "Routes may dig through blocks where that is quicker than walking around. Off walks, pillars and bridges only",
+            Toggle { on: true };
+        SCAFFOLD: "Remove scaffolding",
+            "At the end, break the blocks routes put down outside the schematic",
+            Toggle { on: true };
+        FLY: "Fly in creative",
+            "In creative, fly between spots instead of walking, pillaring and bridging; the flight you had is put back at the end",
+            Toggle { on: true };
+        AIR: "Air place",
+            "Place blocks with nothing beside them by clicking the empty cell itself. Vanilla servers accept it; anti-cheat plugins may not",
+            Toggle { on: false };
+        TURN: "Turn speed",
+            "Degrees per second the aim may travel, rolled fresh inside this range for every block",
+            Range { min: 45.0, max: 900.0, low: 180.0, high: 400.0, decimals: 0, log: false };
+        DELAY: "Delay",
+            "Milliseconds before each block is placed or dug, rolled fresh inside this range",
+            Range { min: 0.0, max: 600.0, low: 40.0, high: 120.0, decimals: 0, log: false };
+        IN_GUI: "Allow in GUI",
+            "Keep building while a screen is open, which no hand could do",
+            Toggle { on: false };
+        FLUIDS: "Fluids",
+            "Pour the schematic's water and lava with buckets, waterlog blocks, and take away sources where air goes. Off leaves fluids as they are",
+            Toggle { on: true };
+        REFILL: "Refill water",
+            "In survival, once every water bucket is poured, fill the empty ones at a water source that refills itself, then go on",
+            Toggle { on: true } if AUTO_BUILD_FLUIDS;
+    }
+
+    AutoFarm / farmer: World, Normal,
+        "Harvests the crop around where you switch it on, then walks back there and stops" {
+        CROP: "Crop",
+            "What is harvested. Sugar cane breaks the second block of every stalk two or more high and leaves the bottom block to grow",
+            Enum<Crop> { default: Crop::SugarCane };
+        RANGE: "Range",
+            "How far from where it was switched on, in blocks across the ground, stalks are harvested. Read when it switches on",
+            Slider { min: 4.0, max: 128.0, value: 32.0, decimals: 0 };
+        COLLECT: "Collect drops",
+            "After the last stalk, walk to the dropped items of the crop in range before going back",
+            Toggle { on: true };
+        TURN: "Turn speed",
+            "Degrees per second the aim may travel, rolled fresh inside this range for every block",
+            Range { min: 45.0, max: 900.0, low: 180.0, high: 400.0, decimals: 0, log: false };
+        DELAY: "Delay",
+            "Ticks to wait after a stalk breaks before the next is hit",
+            Slider { min: 0.0, max: 40.0, value: 0.0, decimals: 0 };
+        RENDER: "Render",
+            "Show the start block, the stalk being broken and the nearest stalks to go in the world",
+            Toggle { on: true };
+        HUD: "Progress HUD",
+            "Show the state, the stalks harvested and to go, and a bar of the share done",
+            Toggle { on: true };
+        IN_GUI: "Allow in GUI",
+            "Keep harvesting while a screen is open, which no hand could do",
             Toggle { on: false };
     }
 
@@ -1254,6 +1474,34 @@ modules! {
             Toggle { on: false };
     }
 
+    Pathfinder / pathfinder: Movement, Legit,
+        "Settings for .goto and .follow routes; they apply whether this is on or off" {
+        PARKOUR: "Parkour",
+            "Let .goto and .follow plan sprint jumps across gaps",
+            Toggle { on: true };
+        DIG: "Dig",
+            "Let .goto and .follow break blocks where that is quicker than walking around",
+            Toggle { on: false };
+        PLACE: "Place",
+            "Let .goto and .follow pillar up and bridge gaps with throwaway blocks you carry",
+            Toggle { on: false };
+        THROWAWAY: "Throwaway blocks",
+            "Blocks a route may place; the first in this list that you carry is used",
+            List { list: &super::pathfinder::THROWAWAY };
+        TURN_SPEED: "Turn speed",
+            "Degrees per second the camera turns toward where a route looks",
+            Slider { min: 45.0, max: 900.0, value: 360.0, decimals: 0 };
+        FOLLOW_DISTANCE: "Follow distance",
+            "Blocks from the player's feet .follow stops at",
+            Slider { min: 2.0, max: 16.0, value: 3.0, decimals: 0 };
+        AVOID_HAZARDS: "Avoid hazards",
+            "Keep every route out of and away from lava, fire, magma, cactus, berry bushes, wither roses and downward bubble columns",
+            Toggle { on: true };
+        MAX_FALL: "Max fall",
+            "Longest drop a route takes onto dry ground; above 3 the fall hurts, drops into deep enough water are always allowed",
+            Slider { min: 1.0, max: 20.0, value: 3.0, decimals: 0 };
+    }
+
     AutoSell / auto_sell: Misc, Normal,
         "Types the sell command whenever a chosen item is in your inventory" {
         ITEMS: "Items",
@@ -1262,6 +1510,41 @@ modules! {
         COMMAND: "Command",
             "Sent once per sale, %s replaced with the item's id. A leading / is optional and stripped either way",
             Text { max_len: 128, default: "sellall inventory %s", expand: false, hint: "Type a command" };
+    }
+
+    GamemodeNotifier / gamemode_notifier: Misc, Legit,
+        "Says in chat when another player's gamemode changes" {
+        SURVIVAL: "Survival",
+            "Report changes to survival",
+            Toggle { on: true };
+        CREATIVE: "Creative",
+            "Report changes to creative",
+            Toggle { on: true };
+        ADVENTURE: "Adventure",
+            "Report changes to adventure",
+            Toggle { on: true };
+        SPECTATOR: "Spectator",
+            "Report changes to spectator",
+            Toggle { on: true };
+    }
+
+    CoordLogger / coord_logger: World, Legit,
+        "Says where withers spawn, dragons die and end portals open. 26.2 servers send only the direction past 32 blocks; older ones may send the position" {
+        WITHER: "Wither spawns",
+            "Report a wither spawning",
+            Toggle { on: true };
+        DRAGON: "Dragon deaths",
+            "Report an ender dragon dying",
+            Toggle { on: true };
+        END_PORTAL: "End portals",
+            "Report an end portal opening",
+            Toggle { on: true };
+        LINE: "Draw direction",
+            "Draw a line toward an event the server gave only a direction for",
+            Toggle { on: true };
+        LINE_SECONDS: "Line seconds",
+            "How long the direction line stays",
+            Slider { min: 5.0, max: 600.0, value: 60.0, decimals: 0 } if COORD_LOGGER_LINE;
     }
 
     Special / special: Misc, Legit,
@@ -1279,10 +1562,46 @@ modules! {
     }
 
     BetterTooltips / better_tooltips: Misc, Legit,
-        "Adds extra rows to item tooltips" {
+        "Adds previews and extra rows to item tooltips" {
+        DISPLAY_WHEN: "Display when",
+            "Keybind shows previews only while the preview key is held, Always shows them on every tooltip",
+            Enum<DisplayWhen> { default: BETTER_TOOLTIPS_DISPLAY };
+        PREVIEW_KEY: "Preview key",
+            "Hold this over an item to see its preview",
+            Key { default: Bound::Key(KeyCode::AltLeft) } if BETTER_TOOLTIPS_KEYBIND;
+        CONTAINERS: "Containers",
+            "Preview a shulker box's or other container item's contents as a grid of slots",
+            Toggle { on: true };
+        COMPACT_CONTAINERS: "Compact containers",
+            "List a container's contents merged by item, most first, instead of slot by slot",
+            Toggle { on: true };
+        BOOKS: "Books",
+            "Preview the first page of a book",
+            Toggle { on: true };
+        BANNERS: "Banners",
+            "Preview a banner, a patterned shield or a banner pattern's design, enlarged",
+            Toggle { on: true };
+        MAPS: "Maps",
+            "Preview a map's picture, once the server has sent it",
+            Toggle { on: true };
+        MAP_SCALE: "Map scale",
+            "Size of the map preview: 1 is 128 GUI pixels, the size of a map held in hand",
+            Slider { min: 0.25, max: 2.0, value: 1.0, decimals: 2 } if BETTER_TOOLTIPS_MAPS;
+        BUCKETS: "Buckets",
+            "Show a bucketed mob's variant, size, age and health",
+            Toggle { on: true };
+        STATUS_EFFECTS: "Status effects",
+            "List the effects a food or a suspicious stew gives, with their chance",
+            Toggle { on: true };
         FOOD_VALUES: "Food values",
             "Show a food's hunger and saturation as rows of icons at the bottom of its tooltip, as AppleSkin does",
             Toggle { on: true };
+        SHOW_HIDDEN_TOOLTIP: "Show hidden tooltip",
+            "Show the tooltip of an item whose tooltip the server hid",
+            Toggle { on: false };
+        SHOW_HIDDEN_COMPONENTS: "Show hidden components",
+            "Show the rows the server hid, such as enchantments, lore and attributes",
+            Toggle { on: false };
     }
 
     Spam / spam: Misc, Blatant,
@@ -1354,6 +1673,7 @@ mod tests {
         assert_eq!(name(spam::SUFFIX_LENGTH.0), "Suffix length");
         assert_eq!(name(vclip::DISTANCE.0), "Distance");
         assert_eq!(name(commands::PREFIX.0), "Prefix");
+        assert_eq!(name(better_tooltips::FOOD_VALUES.0), "Food values");
         for m in &MODULES {
             assert!(std::ptr::eq(module(m.id), m));
         }

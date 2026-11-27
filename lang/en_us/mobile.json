@@ -1,0 +1,12 @@
+{
+  "mobile.pad.sneak": "SNK",
+  "mobile.pad.sprint": "SPR",
+  "mobile.pad.jump": "JMP",
+  "mobile.pad.inventory": "INV",
+  "mobile.pad.pause": "ESC",
+  "mobile.jump": "JUMP",
+  "mobile.use": "USE",
+  "mobile.chat": "CHAT",
+  "mobile.mod": "MOD",
+  "mobile.swap": "SWAP"
+}

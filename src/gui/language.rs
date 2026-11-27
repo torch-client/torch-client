@@ -61,7 +61,10 @@ impl State {
         search.focus();
         *self = State {
             search,
-            selected: language::current(),
+            selected: match language::fetch() {
+                Fetch::Fetching(code) => code,
+                _ => language::current(),
+            },
             scroll: 0.0,
             scroll_drag: None,
             center_pending: true,

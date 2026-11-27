@@ -68,7 +68,7 @@ fn hidden() {
     focus::next(false);
 }
 
-fn cycle(p: &mut Painter, ctx: &ScreenCtx, button: &Button) -> i32 {
+pub(in crate::gui) fn cycle(p: &mut Painter, ctx: &ScreenCtx, button: &Button) -> i32 {
     if button.draw(p, ctx) {
         return if ctx.input.shift { -1 } else { 1 };
     }
@@ -81,12 +81,12 @@ fn cycle(p: &mut Painter, ctx: &ScreenCtx, button: &Button) -> i32 {
     0
 }
 
-fn step<T: Copy + PartialEq>(values: &[T], current: T, delta: i32) -> T {
+pub(in crate::gui) fn step<T: Copy + PartialEq>(values: &[T], current: T, delta: i32) -> T {
     let index = values.iter().position(|v| *v == current).unwrap_or(0) as i32;
     values[(index + delta).rem_euclid(values.len() as i32) as usize]
 }
 
-fn on_off(value: bool) -> &'static str {
+pub(in crate::gui) fn on_off(value: bool) -> &'static str {
     if value {
         label!("options.on")
     } else {

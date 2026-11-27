@@ -8,6 +8,8 @@ assets/minecraft/atlases/
 
 assets/minecraft/particles/
 
+assets/minecraft/waypoint_style/
+
 assets/minecraft/equipment/
 
 assets/minecraft/texts/

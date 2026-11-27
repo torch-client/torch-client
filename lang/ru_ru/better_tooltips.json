@@ -1,0 +1,15 @@
+{
+  "better_tooltips.axolotl.blue": "Синий",
+  "better_tooltips.axolotl.cyan": "Бирюзовый",
+  "better_tooltips.axolotl.gold": "Золотой",
+  "better_tooltips.axolotl.lucy": "Люси",
+  "better_tooltips.axolotl.wild": "Дикий",
+  "better_tooltips.bucket.baby": "Детёныш",
+  "better_tooltips.bucket.health": "Здоровье: %s",
+  "better_tooltips.bucket.size": "Размер: %s",
+  "better_tooltips.bucket.variant": "Вариант: %s",
+  "better_tooltips.hold_to_preview": "Удерживайте %s для просмотра",
+  "better_tooltips.salmon.large": "Большой",
+  "better_tooltips.salmon.medium": "Средний",
+  "better_tooltips.salmon.small": "Маленький"
+}

@@ -56,9 +56,9 @@ pub fn tick(bot: &Client, shared: &SharedMutex) {
         crate::modules::chat_math::show_local(
             &mut st.session,
             if cfg!(feature = "mobile_ui") {
-                "AutoMine: tap a block for the first corner, then USE on a block for the second"
+                crate::lang::tr!("auto_mine.pick.touch")
             } else {
-                "AutoMine: left click a block for the first corner, right click a block for the second"
+                crate::lang::tr!("auto_mine.pick.mouse")
             },
         );
     }

@@ -15,13 +15,16 @@ use crate::session::SharedMutex;
 use crate::{CHUNK_Q, SHARED, blockentities, lighting};
 
 pub(crate) fn install_block_change_hook() {
+    crate::play::interaction::install_local_break_hook();
     let hook_installed =
         azalea_world::block_change::set_block_change_hook(Box::new(|pos, old, new| {
             crate::blockentities::feed::on_block_change(pos, new);
+            hidden::on_write(pos, new);
             if crate::modules::esp::any_enabled() {
                 crate::modules::esp::mark_dirty();
             }
             crate::modules::auto_mine::block_changed(pos, old, new);
+            crate::modules::builder::block_changed(pos.x, pos.y, pos.z);
             #[cfg(lua_mods)]
             {
                 crate::modules::script::ghost::block_changed(pos.x, pos.y, pos.z);
@@ -164,6 +167,502 @@ pub(crate) fn remesh_jobs(pos: AzBlockPos) -> Vec<(i32, i32, JobScope)> {
         v.push((cx, cz + 1, JobScope::Section(sy)));
     }
     v
+}
+
+pub(crate) mod hidden {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    use azalea_registry::builtin::BlockKind;
+    use bevy::platform::collections::{HashMap as FastMap, HashSet as FastSet};
+
+    use crate::blockentities::sim::piston::{Delta, MoveState};
+
+    type Cell = [i32; 3];
+    pub(crate) type Section = (i32, i32, i32);
+
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    #[derive(Clone, Copy)]
+    struct Owner {
+        seq: u64,
+        hidden: bool,
+    }
+
+    struct Move {
+        seq: u64,
+        start: u32,
+        gate: [Option<Section>; 2],
+        shown: Option<(u32, Section)>,
+    }
+
+    type CellMap = FastMap<Section, Arc<FastMap<Cell, Owner>>>;
+
+    #[derive(Default)]
+    struct State {
+        version: u32,
+        cells: Arc<CellMap>,
+        moves: FastMap<Cell, Move>,
+        sections: FastMap<Section, u32>,
+        gated: Vec<Cell>,
+        ending: Vec<Cell>,
+        #[cfg(target_arch = "wasm32")]
+        log: Vec<(Cell, u8)>,
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) const SHOWN: u8 = 0;
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) const HIDDEN: u8 = 1;
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) const RELEASED: u8 = 2;
+
+    global!(fn state() -> parking_lot::Mutex<State>);
+
+    impl State {
+        fn stored_at(&self, sec: &Section) -> u32 {
+            self.sections.get(sec).copied().unwrap_or(0)
+        }
+
+        fn is_shown(&self, m: &Move) -> bool {
+            m.shown
+                .is_some_and(|(version, sec)| version == 0 || self.stored_at(&sec) >= version)
+        }
+
+        fn owner(&self, cell: &Cell) -> Option<Owner> {
+            self.cells.get(&section_of(cell))?.get(cell).copied()
+        }
+
+        fn set_owner(&mut self, cell: Cell, owner: Option<Owner>) {
+            let cells = Arc::make_mut(&mut self.cells);
+            let sec = section_of(&cell);
+            match owner {
+                Some(owner) => {
+                    Arc::make_mut(cells.entry(sec).or_default()).insert(cell, owner);
+                }
+                None => {
+                    let Some(section) = cells.get_mut(&sec) else {
+                        return;
+                    };
+                    let section = Arc::make_mut(section);
+                    section.remove(&cell);
+                    if section.is_empty() {
+                        cells.remove(&sec);
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        fn note(&mut self, cell: Cell, what: u8) {
+            if crate::client::mesh_worker::active() {
+                self.log.push((cell, what));
+            }
+        }
+
+        fn end(&mut self, pos: Cell, version: u32, sec: Section) {
+            if let Some(m) = self.moves.get_mut(&pos) {
+                if m.shown.is_none() {
+                    self.ending.push(pos);
+                }
+                m.shown = Some((version, sec));
+                if version != 0 {
+                    self.sections.entry(sec).or_insert(0);
+                }
+            }
+        }
+    }
+
+    fn section_of(cell: &Cell) -> Section {
+        (cell[0] >> 4, cell[1] >> 4, cell[2] >> 4)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn is_active() -> bool {
+        ACTIVE.load(Ordering::Acquire)
+    }
+
+    pub(crate) struct Cells {
+        pub version: u32,
+        cells: Arc<CellMap>,
+    }
+
+    impl Cells {
+        pub fn within(&self, min: Cell, max: Cell) -> FastSet<Cell> {
+            let mut out = FastSet::default();
+            if self.cells.is_empty() {
+                return out;
+            }
+            let inside = |cell: &Cell| (0..3).all(|i| (min[i]..=max[i]).contains(&cell[i]));
+            let (lo, hi) = (section_of(&min), section_of(&max));
+            for x in lo.0..=hi.0 {
+                for y in lo.1..=hi.1 {
+                    for z in lo.2..=hi.2 {
+                        let Some(section) = self.cells.get(&(x, y, z)) else {
+                            continue;
+                        };
+                        out.extend(
+                            section
+                                .iter()
+                                .filter(|(cell, owner)| owner.hidden && inside(*cell))
+                                .map(|(cell, _)| *cell),
+                        );
+                    }
+                }
+            }
+            out
+        }
+    }
+
+    pub(crate) fn snapshot() -> Option<Cells> {
+        if !ACTIVE.load(Ordering::Acquire) {
+            return None;
+        }
+        let state = state().lock();
+        Some(Cells {
+            version: state.version,
+            cells: state.cells.clone(),
+        })
+    }
+
+    pub(crate) fn stored(sec: Section, version: u32) {
+        if version == 0 || !ACTIVE.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(at) = state().lock().sections.get_mut(&sec) {
+            *at = (*at).max(version);
+        }
+    }
+
+    pub(crate) fn withheld() -> FastSet<Cell> {
+        let mut out = FastSet::default();
+        if !ACTIVE.load(Ordering::Acquire) {
+            return out;
+        }
+        let state = state().lock();
+        for pos in &state.gated {
+            if let Some(m) = state.moves.get(pos)
+                && m.gate
+                    .iter()
+                    .flatten()
+                    .any(|sec| state.stored_at(sec) < m.start)
+            {
+                out.insert(*pos);
+            }
+        }
+        for pos in &state.ending {
+            if let Some(m) = state.moves.get(pos)
+                && state.is_shown(m)
+            {
+                out.insert(*pos);
+            }
+        }
+        out
+    }
+
+    pub(crate) fn on_write(pos: AzBlockPos, new: azalea::block::BlockState) {
+        if !ACTIVE.load(Ordering::Acquire) {
+            return;
+        }
+        let ends = BlockKind::from(new) != BlockKind::MovingPiston;
+        let cell = [pos.x, pos.y, pos.z];
+        let mut guard = state().lock();
+        let state = &mut *guard;
+        let owner = state.owner(&cell).filter(|owner| owner.hidden);
+        let ended = ends && state.moves.contains_key(&cell);
+        if owner.is_none() && !ended {
+            return;
+        }
+        state.version += 1;
+        if let Some(owner) = owner {
+            state.set_owner(
+                cell,
+                Some(Owner {
+                    hidden: false,
+                    ..owner
+                }),
+            );
+            #[cfg(target_arch = "wasm32")]
+            state.note(cell, RELEASED);
+        }
+        if ended {
+            let version = state.version;
+            state.end(cell, version, section_of(&cell));
+        }
+    }
+
+    pub(crate) fn sync(delta: &Delta) -> Vec<Cell> {
+        let was_active = ACTIVE.load(Ordering::Acquire);
+        if !was_active && delta.is_empty() {
+            return Vec::new();
+        }
+        let meshed: FastSet<(i32, i32)> = {
+            let columns: FastSet<(i32, i32)> = {
+                let state = state().lock();
+                delta
+                    .cells
+                    .iter()
+                    .map(|(c, _)| c)
+                    .chain(&state.ending)
+                    .map(|c| (c[0] >> 4, c[2] >> 4))
+                    .collect()
+            };
+            let meshed = meshed_chunks().lock().unwrap();
+            columns
+                .into_iter()
+                .filter(|col| meshed.contains(col))
+                .collect()
+        };
+        let mut changed: Vec<Cell> = Vec::new();
+        let mut landed: Vec<Cell> = Vec::new();
+        let active;
+        {
+            let mut guard = state().lock();
+            let state = &mut *guard;
+            state.gated.clear();
+
+            let mut added: FastSet<Cell> = FastSet::default();
+            let mut again: FastSet<Cell> = FastSet::default();
+            for &(cell, want) in &delta.cells {
+                match (want, state.owner(&cell)) {
+                    (Some(seq), None) => {
+                        state.set_owner(cell, Some(Owner { seq, hidden: true }));
+                        added.insert(cell);
+                    }
+                    (Some(seq), Some(owner)) if seq > owner.seq => {
+                        state.set_owner(cell, Some(Owner { seq, hidden: true }));
+                        if !owner.hidden {
+                            added.insert(cell);
+                        }
+                    }
+                    (Some(_), Some(_)) | (None, None) => {}
+                    (None, Some(owner)) => {
+                        state.set_owner(cell, None);
+                        if owner.hidden {
+                            again.insert(cell);
+                        }
+                    }
+                }
+            }
+            if !added.is_empty() || !again.is_empty() {
+                state.version += 1;
+            }
+            let version = state.version;
+            #[cfg(target_arch = "wasm32")]
+            for (cells, what) in [(&added, HIDDEN), (&again, SHOWN)] {
+                for cell in cells {
+                    state.note(*cell, what);
+                }
+            }
+
+            for &(pos, change) in &delta.moves {
+                match change {
+                    MoveState::Live { seq, cells } => {
+                        if state.moves.get(&pos).is_some_and(|m| m.seq == seq) {
+                            continue;
+                        }
+                        let cells = || cells.iter().flatten();
+                        let mut gate = [None; 2];
+                        if cells().all(|c| added.contains(c)) {
+                            for (slot, c) in gate.iter_mut().zip(cells()) {
+                                let sec = section_of(c);
+                                *slot = meshed.contains(&(sec.0, sec.2)).then_some(sec);
+                            }
+                        }
+                        for sec in gate.iter().flatten() {
+                            state.sections.entry(*sec).or_insert(0);
+                        }
+                        if gate.iter().any(Option::is_some) {
+                            state.gated.push(pos);
+                        }
+                        let m = Move {
+                            seq,
+                            start: version,
+                            gate,
+                            shown: None,
+                        };
+                        state.moves.insert(pos, m);
+                    }
+                    MoveState::Left { seq } => {
+                        if state
+                            .moves
+                            .get(&pos)
+                            .is_some_and(|m| m.seq == seq && m.shown.is_none())
+                        {
+                            let version = if again.contains(&pos) { version } else { 0 };
+                            state.end(pos, version, section_of(&pos));
+                        }
+                    }
+                    MoveState::Gone => {
+                        state.moves.remove(&pos);
+                    }
+                }
+            }
+
+            let mut ending = std::mem::take(&mut state.ending);
+            ending.retain(|pos| {
+                let Some(m) = state.moves.get(pos).filter(|m| m.shown.is_some()) else {
+                    return false;
+                };
+                if state.is_shown(m) || !meshed.contains(&(pos[0] >> 4, pos[2] >> 4)) {
+                    landed.push(*pos);
+                }
+                true
+            });
+            state.ending = ending;
+
+            if state.sections.len() > 64 && state.sections.len() > 4 * state.moves.len() {
+                let used: FastSet<Section> = state
+                    .moves
+                    .values()
+                    .flat_map(|m| {
+                        m.gate
+                            .into_iter()
+                            .flatten()
+                            .chain(m.shown.map(|(_, sec)| sec))
+                    })
+                    .collect();
+                state.sections.retain(|sec, _| used.contains(sec));
+            }
+            active = !state.moves.is_empty() || !state.cells.is_empty();
+            if !active {
+                state.sections.clear();
+            }
+            ACTIVE.store(active, Ordering::Release);
+            changed.extend(added);
+            changed.extend(again);
+        }
+        if !changed.is_empty() || active != was_active {
+            remesh(&changed);
+        }
+        landed
+    }
+
+    fn remesh(changed: &[Cell]) {
+        if crate::client::mesh_worker::forward_hidden() {
+            return;
+        }
+        let (Some(world), Some(q)) = (current_world().lock().unwrap().clone(), CHUNK_Q.get())
+        else {
+            return;
+        };
+        let mut jobs: HashSet<(i32, i32, JobScope)> = changed
+            .iter()
+            .flat_map(|c| remesh_jobs(AzBlockPos::new(c[0], c[1], c[2])))
+            .collect();
+        {
+            let meshed = meshed_chunks().lock().unwrap();
+            jobs.retain(|(cx, cz, _)| meshed.contains(&(*cx, *cz)));
+        }
+        crate::diag::add(crate::diag::Stat::MeshJobs, jobs.len() as u64);
+        for (cx, cz, scope) in jobs {
+            q.push(world.clone(), cx, cz, scope);
+        }
+    }
+
+    pub(crate) fn reset() {
+        {
+            let mut state = state().lock();
+            *state = State {
+                version: state.version + 1,
+                ..State::default()
+            };
+            if !ACTIVE.swap(false, Ordering::AcqRel) {
+                return;
+            }
+        }
+        crate::client::mesh_worker::forward_hidden();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn export() -> (u32, bool, Vec<(Cell, u8)>) {
+        let mut state = state().lock();
+        (
+            state.version,
+            ACTIVE.load(Ordering::Acquire),
+            std::mem::take(&mut state.log),
+        )
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn install(version: u32, active: bool, cells: &[(Cell, u8)]) {
+        let mut state = state().lock();
+        state.version = version;
+        if !active {
+            state.cells = Arc::default();
+        }
+        for &(cell, what) in cells.iter().filter(|_| active) {
+            let owner = (what == HIDDEN).then_some(Owner {
+                seq: 0,
+                hidden: true,
+            });
+            state.set_owner(cell, owner);
+        }
+        ACTIVE.store(active, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_copy_is_drawn_between_the_mesh_without_and_the_mesh_with_its_block() {
+            reset();
+            let (origin, dest) = ([1, 64, 1], [2, 64, 1]);
+            let sec = section_of(&origin);
+            meshed_chunks().lock().unwrap().insert((0, 0));
+            let hidden = |cells: &Cells| cells.within([0; 3], [15, 79, 15]);
+            let drawn = |pos| !withheld().contains(&pos);
+            let start = |seq| Delta {
+                cells: vec![(origin, Some(seq))],
+                moves: vec![(
+                    dest,
+                    MoveState::Live {
+                        seq,
+                        cells: [None, Some(origin)],
+                    },
+                )],
+            };
+            assert!(sync(&start(7)).is_empty());
+            let cells = snapshot().unwrap();
+            assert!(hidden(&cells).contains(&origin));
+            assert!(!drawn(dest));
+            stored(sec, cells.version);
+            assert!(drawn(dest));
+
+            let stone = azalea::block::BlockState::from(BlockKind::Stone);
+            on_write(AzBlockPos::new(2, 64, 1), stone);
+            assert!(drawn(dest));
+            stored(sec, snapshot().unwrap().version);
+            assert!(!drawn(dest));
+            let left = Delta {
+                cells: Vec::new(),
+                moves: vec![(dest, MoveState::Left { seq: 7 })],
+            };
+            assert_eq!(sync(&left), vec![dest]);
+
+            on_write(AzBlockPos::new(1, 64, 1), stone);
+            assert!(hidden(&snapshot().unwrap()).is_empty());
+            sync(&start(7));
+            assert!(hidden(&snapshot().unwrap()).is_empty());
+            sync(&start(8));
+            assert!(hidden(&snapshot().unwrap()).contains(&origin));
+            assert!(!drawn(dest));
+
+            let equal = Delta {
+                cells: vec![(origin, None), (dest, None)],
+                moves: vec![(dest, MoveState::Left { seq: 8 })],
+            };
+            assert_eq!(sync(&equal), vec![dest]);
+            let gone = Delta {
+                cells: Vec::new(),
+                moves: vec![(dest, MoveState::Gone)],
+            };
+            sync(&gone);
+            assert!(snapshot().is_none());
+            meshed_chunks().lock().unwrap().remove(&(0, 0));
+        }
+    }
 }
 
 static CHUNK_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -317,7 +816,7 @@ pub(crate) fn mesh_waiting_columns(bot: &Client) {
         }
     }
     let to_worker = crate::client::mesh_worker::active();
-    if !to_worker {
+    if !to_worker && crate::renderer::lighting_enabled() {
         let map = light_map().read();
         candidates.retain(|((x, z), _)| map.is_lit(lighting::ColumnPos { x: *x, z: *z }));
     }
@@ -373,7 +872,10 @@ pub(crate) fn chunk_decode_failed(
     pos: azalea_core::position::ChunkPos,
     failure: &azalea_world::chunk::ChunkDecodeFailure,
 ) {
-    crate::diag::bump(crate::diag::Stat::ChunkDecodeFailed);
+    let biome_update = failure.part == azalea_world::chunk::BIOME_UPDATE;
+    if !biome_update {
+        crate::diag::bump(crate::diag::Stat::ChunkDecodeFailed);
+    }
     {
         let mut logged = decode_logged().lock().unwrap();
         let now = crate::platform::time::Instant::now();
@@ -391,7 +893,7 @@ pub(crate) fn chunk_decode_failed(
     log_warn!(
         "chunks",
         "column {},{}: section {} of {} would not decode ({}: {} bits per entry sent, read at {}, \
-         {} palette{}): {}. Kept the {} sections below it; the rest of the column is air.",
+         {} palette{}): {}. {}",
         pos.x,
         pos.z,
         failure.section,
@@ -411,7 +913,14 @@ pub(crate) fn chunk_decode_failed(
             ""
         },
         failure.error,
-        failure.section
+        if biome_update {
+            "The column keeps the biomes it had.".to_string()
+        } else {
+            format!(
+                "Kept the {} sections below it; the rest of the column is air.",
+                failure.section
+            )
+        }
     );
 }
 
@@ -503,6 +1012,56 @@ pub(crate) fn note_chunk_received(
         mesh: ready,
         light: packet.map(|p| crate::client::packets::server_light(&p.light_data)),
     });
+}
+
+pub(crate) fn note_biomes_changed(
+    world: &azalea::local_player::WorldHolder,
+    packet: &azalea_protocol::packets::game::c_chunks_biomes::ClientboundChunksBiomes,
+) {
+    let loaded: Vec<_> = {
+        let partial = world.partial.read();
+        packet
+            .chunk_biome_data
+            .iter()
+            .filter(|data| partial.chunks.limited_get(&data.pos).is_some())
+            .collect()
+    };
+    if loaded.is_empty() {
+        return;
+    }
+    bump_chunk_generation();
+    #[cfg(feature = "render_lod")]
+    for data in &loaded {
+        crate::client::lod::note_column(data.pos.x, data.pos.z);
+    }
+    if crate::client::mesh_worker::forward_biomes(&world.shared, &loaded) {
+        return;
+    }
+    let Some(q) = CHUNK_Q.get() else { return };
+    let mut cols = Vec::new();
+    {
+        let meshed = meshed_chunks().lock().unwrap();
+        let mut seen = HashSet::new();
+        for (x, z) in biome_remesh(loaded.iter().map(|data| (data.pos.x, data.pos.z))) {
+            if meshed.contains(&(x, z)) && seen.insert((x, z)) {
+                cols.push((x, z));
+            }
+        }
+    }
+    crate::diag::add(crate::diag::Stat::MeshJobs, cols.len() as u64);
+    for (cx, cz) in cols {
+        q.push(world.shared.clone(), cx, cz, JobScope::Column);
+    }
+}
+
+pub(crate) fn biome_remesh(
+    changed: impl Iterator<Item = (i32, i32)>,
+) -> impl Iterator<Item = (i32, i32)> {
+    changed.flat_map(|(x, z)| {
+        std::iter::once((0, 0))
+            .chain(NEIGHBOURS)
+            .map(move |(dx, dz)| (x + dx, z + dz))
+    })
 }
 
 pub(crate) fn send_server_light(cx: i32, cz: i32, light: lighting::ServerLight) {

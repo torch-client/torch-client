@@ -209,7 +209,7 @@ enum Poll {
 }
 
 async fn poll_for_token(
-    client: &reqwest::Client,
+    client: &azalea_auth::HttpClient,
     code: &azalea_auth::DeviceCodeResponse,
     generation: u64,
 ) -> Poll {
@@ -457,7 +457,7 @@ impl azalea::account::AccountTrait for MicrosoftAccount {
         public_key: &'a [u8],
         private_key: &'a [u8; 16],
         server_id: &'a str,
-        proxy: Option<reqwest::Proxy>,
+        proxy: Option<azalea_auth::HttpProxy>,
     ) -> std::pin::Pin<
         Box<
             dyn Future<Output = Result<(), azalea_auth::sessionserver::ClientSessionServerError>>
@@ -489,19 +489,27 @@ impl azalea::account::AccountTrait for MicrosoftAccount {
     }
 }
 
-pub(crate) fn client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+pub(crate) fn client() -> &'static azalea_auth::HttpClient {
+    static CLIENT: OnceLock<azalea_auth::HttpClient> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        crate::install_crypto_provider();
-        #[cfg(target_os = "android")]
-        if let Some(tls) = crate::android_tls_config() {
-            let client = reqwest::Client::builder()
-                .tls_backend_preconfigured(tls)
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
-            azalea_auth::set_http_client(client.clone());
-            return client;
+        #[cfg(target_arch = "wasm32")]
+        {
+            azalea_auth::http::set_transport(crate::eagler::https::send);
+            azalea_auth::HttpClient::new()
         }
-        reqwest::Client::new()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::install_crypto_provider();
+            #[cfg(target_os = "android")]
+            if let Some(tls) = crate::android_tls_config() {
+                let client = reqwest::Client::builder()
+                    .tls_backend_preconfigured(tls)
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+                azalea_auth::set_http_client(client.clone());
+                return client;
+            }
+            reqwest::Client::new()
+        }
     })
 }

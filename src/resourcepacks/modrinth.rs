@@ -60,11 +60,11 @@ impl Sort {
 
     pub fn label(self) -> &'static str {
         match self {
-            Sort::Relevance => "Relevance",
-            Sort::Downloads => "Downloads",
-            Sort::Follows => "Follows",
-            Sort::Newest => "Newest",
-            Sort::Updated => "Updated",
+            Sort::Relevance => crate::lang::tr!("resourcepacks.sort.relevance"),
+            Sort::Downloads => crate::lang::tr!("resourcepacks.sort.downloads"),
+            Sort::Follows => crate::lang::tr!("resourcepacks.sort.follows"),
+            Sort::Newest => crate::lang::tr!("resourcepacks.sort.newest"),
+            Sort::Updated => crate::lang::tr!("resourcepacks.sort.updated"),
         }
     }
 }

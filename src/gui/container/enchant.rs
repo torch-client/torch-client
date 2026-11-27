@@ -53,6 +53,7 @@ pub fn draw(
         let cannot_afford =
             (gold_count < i as i32 + 1 || snap.xp_level < cost as u32) && !infinite_materials;
         let hovered = !cannot_afford && ctx.hovering(left + 60.0, row_y, 108.0, 19.0);
+        let over_clue = ctx.hovering(left + 60.0, row_y, 108.0, 17.0);
 
         let (slot_sprite, level_sprite, name_rgb) = if cannot_afford {
             (
@@ -96,7 +97,7 @@ pub fn draw(
 
         let level_clue = snap.container_data[7 + i];
         let enchant_clue = snap.container_data[4 + i];
-        if hovered && level_clue >= 0 && enchant_clue >= 0 {
+        if over_clue && level_clue >= 0 && enchant_clue >= 0 {
             if let Some(m) = mouse {
                 draw_clue_tooltip(
                     p,
@@ -290,8 +291,10 @@ fn draw_clue_tooltip(
     match clue_name {
         Some(name) => full_name.push_str(&translate_enchantment(name)),
         None => {
-            full_name.push_str("Enchantment #");
-            full_name.push_str(Digits::new(enchant_id.max(0) as u32).as_str());
+            full_name.push_str(&crate::lang::trf!(
+                "gui.enchant.unknown",
+                Digits::new(enchant_id.max(0) as u32).as_str()
+            ));
         }
     }
     if level != 1 {

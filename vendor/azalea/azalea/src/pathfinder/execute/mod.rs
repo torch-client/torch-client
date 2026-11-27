@@ -277,6 +277,8 @@ pub fn timeout_movement(
         &Inventory,
         Option<&CustomPathfinderState>,
         Option<&mut SimulatingPathState>,
+        Option<&ExecutorIntent>,
+        Option<&Physics>,
     )>,
     worlds: Res<Worlds>,
 ) {
@@ -290,6 +292,8 @@ pub fn timeout_movement(
         inventory,
         custom_state,
         simulating_path_state,
+        intent,
+        physics,
     ) in &mut query
     {
         if !executing_path.path.is_empty() {
@@ -343,7 +347,18 @@ pub fn timeout_movement(
             }
         }
 
+        if let Some(place) = intent.and_then(|i| i.place)
+            && place.distance_squared_to(position.into()) < 6_i32.pow(2)
+        {
+            executing_path.ticks_since_last_node_reached = 0;
+            continue;
+        }
+
         let mut timeout = 2 * 20;
+
+        if physics.is_some_and(|p| p.is_in_water()) {
+            timeout = WATER_NODE_TIMEOUT;
+        }
 
         if simulating_path_state.is_some() {
             timeout = 5 * 20;
@@ -368,6 +383,8 @@ pub fn timeout_movement(
         }
     }
 }
+
+const WATER_NODE_TIMEOUT: usize = 100;
 
 #[allow(clippy::too_many_arguments)]
 fn patch_path_from_timeout(

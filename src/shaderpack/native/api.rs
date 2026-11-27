@@ -36,10 +36,27 @@ impl Wgsl for [f32; 3] {
     const ALIGN: usize = 16;
 }
 
+impl Wgsl for [i32; 3] {
+    const TYPE: &'static str = "vec3<i32>";
+    const ALIGN: usize = 16;
+}
+
+impl Wgsl for [f32; 4] {
+    const TYPE: &'static str = "vec4<f32>";
+    const ALIGN: usize = 16;
+}
+
 impl Wgsl for [[f32; 4]; 4] {
     const TYPE: &'static str = "mat4x4<f32>";
     const ALIGN: usize = 16;
 }
+
+impl Wgsl for [[[f32; 4]; 4]; MAX_CASCADES] {
+    const TYPE: &'static str = "array<mat4x4<f32>, 4>";
+    const ALIGN: usize = 16;
+}
+
+pub(crate) const MAX_CASCADES: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Member {
@@ -83,7 +100,7 @@ macro_rules! frame_struct {
         $(#[doc = $sdoc])*
         #[repr(C)]
         #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-        #[allow(dead_code, reason = "phase 2 of docs/SHADER_FORMAT.md fills the uniform; phase 1 reads only the layout")]
+        #[allow(dead_code, reason = "the renderer writes every member and the GPU reads them; nothing in Rust reads one back")]
         pub(crate) struct $name {
             $( $(#[doc = $doc])* pub(crate) $field: $ty, )+
         }
@@ -124,12 +141,17 @@ frame_struct! {
         projection_inverse: [[f32; 4]; 4],
         previous_view: [[f32; 4]; 4],
         previous_projection: [[f32; 4]; 4],
+        hand_projection: [[f32; 4]; 4],
         position: [f32; 3],
         near: f32,
         far: f32,
         _pad0: u32,
         _pad1: u32,
         _pad2: u32,
+        block: [i32; 3],
+        _pad3: u32,
+        fraction: [f32; 3],
+        _pad4: u32,
     }
 }
 
@@ -156,6 +178,8 @@ frame_struct! {
         fog_end: f32,
         fog_color: [f32; 3],
         _pad0: u32,
+        light_floor: [f32; 3],
+        _pad1: u32,
     }
 }
 
@@ -189,8 +213,11 @@ frame_struct! {
         projection: [[f32; 4]; 4],
         resolution: f32,
         distance: f32,
+        count: u32,
         _pad0: u32,
-        _pad1: u32,
+        cascades: [[[f32; 4]; 4]; MAX_CASCADES],
+        far: [f32; 4],
+        texel: [f32; 4],
     }
 }
 
@@ -314,7 +341,7 @@ pub(crate) const SURFACE: StructDef = StructDef {
         m(
             "emission",
             Ty::F32,
-            "0 to 1; 0 until the client has specular atlases.",
+            "0 to 1: a block's light level over 15 for terrain, 1 for the sky, 0 elsewhere.",
         ),
         m(
             "roughness",
@@ -391,6 +418,11 @@ static INPUTS: [StructDef; 8] = [
                 Ty::Vec3F,
                 "A point of the sky relative to the camera; `normalize` it for the view direction.",
             ),
+            m(
+                "part",
+                Ty::U32,
+                "Which part of the sky this fragment is: one of the `SKY_PART_*` constants.",
+            ),
         ],
     },
     StructDef {
@@ -430,6 +462,16 @@ static INPUTS: [StructDef; 8] = [
                 "mid_block",
                 Ty::Vec3F,
                 "From this point to the centre of its block, in blocks.",
+            ),
+            m(
+                "block_lit",
+                Ty::Vec3F,
+                "The lightmap's block-only row at this vertex's block light, less `frame.sky.light_floor`, linear rgb. Read per vertex and interpolated, as the built-in terrain reads it.",
+            ),
+            m(
+                "sky_lit",
+                Ty::Vec3F,
+                "The lightmap's sky-only column at this vertex's sky light, less `frame.sky.light_floor`, linear rgb. Read per vertex and interpolated.",
             ),
         ],
     },
@@ -606,6 +648,101 @@ impl Input {
             Input::Compute => "compute",
         }
     }
+
+    fn engine_varyings(self) -> &'static [MemberDef] {
+        const TERRAIN: &[MemberDef] = &[
+            m(
+                "torch_material",
+                Ty::U32,
+                "The block's `MATERIAL_*` number, or 0.",
+            ),
+            m(
+                "torch_emission",
+                Ty::F32,
+                "The block's light level over 15.",
+            ),
+        ];
+        const SKY: &[MemberDef] = &[
+            m("torch_uv", Ty::Vec2F, "The mesh's texture coordinate."),
+            m(
+                "torch_color",
+                Ty::Vec4F,
+                "The vertex colour times the tint.",
+            ),
+            m("torch_normal", Ty::Vec3F, "World space, unit length."),
+            m(
+                "torch_light",
+                Ty::Vec2F,
+                "Block light and sky light, 0 to 1.",
+            ),
+        ];
+        const CLOUD: &[MemberDef] = &[
+            m("torch_uv", Ty::Vec2F, "The mesh's texture coordinate."),
+            m(
+                "torch_light",
+                Ty::Vec2F,
+                "Block light and sky light, 0 to 1.",
+            ),
+        ];
+        const WEATHER: &[MemberDef] = &[m("torch_normal", Ty::Vec3F, "World space, unit length.")];
+        match self {
+            Input::Terrain => TERRAIN,
+            Input::Sky => SKY,
+            Input::Cloud => CLOUD,
+            Input::Weather => WEATHER,
+            Input::Entity | Input::Vertex | Input::Screen | Input::Compute => &[],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SkyPart {
+    Disc,
+    DarkDisc,
+    Sunrise,
+    Sun,
+    Moon,
+    Stars,
+    End,
+    EndFlash,
+}
+
+impl SkyPart {
+    pub(crate) const ALL: [SkyPart; 8] = [
+        SkyPart::Disc,
+        SkyPart::DarkDisc,
+        SkyPart::Sunrise,
+        SkyPart::Sun,
+        SkyPart::Moon,
+        SkyPart::Stars,
+        SkyPart::End,
+        SkyPart::EndFlash,
+    ];
+
+    pub(crate) const fn id(self) -> u32 {
+        self as u32 + 1
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            SkyPart::Disc => "disc",
+            SkyPart::DarkDisc => "dark_disc",
+            SkyPart::Sunrise => "sunrise",
+            SkyPart::Sun => "sun",
+            SkyPart::Moon => "moon",
+            SkyPart::Stars => "stars",
+            SkyPart::End => "end",
+            SkyPart::EndFlash => "end_flash",
+        }
+    }
+
+    pub(crate) fn parse(name: &str) -> Option<SkyPart> {
+        SkyPart::ALL.into_iter().find(|part| part.name() == name)
+    }
+
+    fn constant(self) -> String {
+        format!("SKY_PART_{}", self.name().to_ascii_uppercase())
+    }
 }
 
 fn is_engine_struct(name: &str) -> bool {
@@ -726,7 +863,120 @@ impl Stage {
     pub(crate) fn info(self) -> &'static StageInfo {
         &STAGES[self as usize]
     }
+
+    pub(crate) fn draw(self) -> &'static StageDraw {
+        &STAGE_DRAWS[self as usize]
+    }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TerrainStream {
+    Solid,
+    Cutout,
+    Water,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "the renderer's geometry draw reads the lists")]
+pub(crate) enum Draws {
+    Terrain(&'static [TerrainStream]),
+    Entities(&'static [&'static str]),
+    Nothing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StageDraw {
+    pub(crate) draws: Draws,
+    pub(crate) cutout: bool,
+}
+
+static STAGE_DRAWS: [StageDraw; 9] = [
+    StageDraw {
+        draws: Draws::Entities(&["SkyBasic", "SkyTextured"]),
+        cutout: false,
+    },
+    StageDraw {
+        draws: Draws::Terrain(&[TerrainStream::Solid, TerrainStream::Cutout]),
+        cutout: true,
+    },
+    StageDraw {
+        draws: Draws::Entities(&["Entity", "EntityTranslucent"]),
+        cutout: true,
+    },
+    StageDraw {
+        draws: Draws::Entities(&["Block", "BlockTranslucent"]),
+        cutout: true,
+    },
+    StageDraw {
+        draws: Draws::Entities(&["Hand", "HandWater"]),
+        cutout: true,
+    },
+    StageDraw {
+        draws: Draws::Terrain(&[TerrainStream::Water]),
+        cutout: false,
+    },
+    StageDraw {
+        draws: Draws::Entities(&["Particle", "ParticleTranslucent"]),
+        cutout: true,
+    },
+    StageDraw {
+        draws: Draws::Entities(&["Clouds"]),
+        cutout: false,
+    },
+    StageDraw {
+        draws: Draws::Nothing,
+        cutout: false,
+    },
+];
+
+const CUTOFF: f32 = 0.1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TerrainTier {
+    Direct,
+    Indirect,
+}
+
+#[cfg(test)]
+impl TerrainTier {
+    pub(crate) const ALL: [TerrainTier; 2] = [TerrainTier::Direct, TerrainTier::Indirect];
+}
+
+#[allow(
+    dead_code,
+    reason = "the renderer's geometry draw asserts its own constant against it"
+)]
+pub(crate) const TERRAIN_GROUP: u32 = 1;
+
+#[allow(
+    dead_code,
+    reason = "the renderer's geometry draw asserts its own constant against it"
+)]
+pub(crate) const SLOT_TABLE_BINDING: u32 = 5;
+
+#[allow(
+    dead_code,
+    reason = "the renderer's geometry draw asserts its own constant against it"
+)]
+pub(crate) const PACK_QUADS_GROUP: u32 = 2;
+
+#[allow(
+    dead_code,
+    reason = "the renderer's geometry draw asserts its own constant against it"
+)]
+pub(crate) const ORIGIN_ROW: u32 = 256;
+
+#[allow(
+    dead_code,
+    reason = "the renderer's geometry draw asserts its own constant against it"
+)]
+pub(crate) const QUAD_ROW: u32 = 2048;
+
+#[allow(
+    dead_code,
+    reason = "the renderer's geometry draw asserts its own constant against it"
+)]
+pub(crate) const SLOT_WORDS: u32 = 6;
 
 pub(crate) const ENCODE: &str = "encode";
 
@@ -735,6 +985,19 @@ pub(crate) const DISPLACE: &str = "displace";
 pub(crate) const SHADOW: &str = "shadow";
 
 const SHADOW_TARGET: &str = "shadow_color";
+
+pub(crate) const SHADOW_COLOR_FORMAT: Format = Format::Rgba8Unorm;
+
+#[allow(
+    dead_code,
+    reason = "the renderer's shadow pass asserts its own constant against it"
+)]
+pub(crate) const SHADOW_DRAW_GROUP: u32 = 3;
+
+pub(crate) const SHADOW_ENTITY_DRAWS: Draws = Draws::Entities(&["ShadowCaster"]);
+
+pub(crate) const SHADOW_TERRAIN_DRAWS: Draws =
+    Draws::Terrain(&[TerrainStream::Solid, TerrainStream::Cutout]);
 
 fn texel_wgsl(class: Class) -> &'static str {
     match class {
@@ -761,21 +1024,40 @@ fn sample_kind(class: Class) -> SampleKind {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PreludeTarget {
     pub(crate) id: String,
-    format: Format,
+    formats: Vec<Format>,
+    chosen: usize,
     pub(crate) history: bool,
 }
 
 impl PreludeTarget {
-    pub(crate) fn new(id: String, format: Format, history: bool) -> Option<PreludeTarget> {
-        (format.info().class != Class::Depth).then_some(PreludeTarget {
+    pub(crate) fn new(
+        id: String,
+        formats: Vec<Format>,
+        chosen: usize,
+        history: bool,
+    ) -> Option<PreludeTarget> {
+        let class = formats.first()?.info().class;
+        let valid = class != Class::Depth
+            && formats.iter().all(|f| f.info().class == class)
+            && chosen < formats.len();
+        valid.then_some(PreludeTarget {
             id,
-            format,
+            formats,
+            chosen,
             history,
         })
     }
 
     pub(crate) fn class(&self) -> Class {
-        self.format.info().class
+        self.formats[0].info().class
+    }
+
+    fn format(&self) -> Format {
+        self.formats[self.chosen]
+    }
+
+    fn format_constant(&self) -> Option<String> {
+        (self.formats.len() > 1).then(|| format!("FORMAT_{}", self.id.to_ascii_uppercase()))
     }
 }
 
@@ -824,8 +1106,13 @@ pub(crate) enum ModuleKind {
         writes: Vec<usize>,
         stages: Vec<Stage>,
         vertex: bool,
+        terrain: TerrainTier,
     },
-    Shadow,
+    Shadow {
+        color: bool,
+        displace: bool,
+        terrain: TerrainTier,
+    },
     Screen {
         function: String,
         output: ScreenOutput,
@@ -844,14 +1131,32 @@ impl ModuleKind {
             ModuleKind::Screen { function, .. } | ModuleKind::Compute { function, .. } => {
                 Some(function)
             }
-            ModuleKind::Geometry { .. } | ModuleKind::Shadow => None,
+            ModuleKind::Geometry { .. } | ModuleKind::Shadow { .. } => None,
         }
     }
 
     fn storage_writes(&self) -> &[usize] {
         match self {
             ModuleKind::Compute { writes, .. } => writes,
-            ModuleKind::Screen { .. } | ModuleKind::Geometry { .. } | ModuleKind::Shadow => &[],
+            ModuleKind::Screen { .. } | ModuleKind::Geometry { .. } | ModuleKind::Shadow { .. } => {
+                &[]
+            }
+        }
+    }
+
+    fn draws_meshes(&self) -> bool {
+        matches!(
+            self,
+            ModuleKind::Geometry { .. } | ModuleKind::Shadow { .. }
+        )
+    }
+
+    pub(crate) fn terrain(&self) -> Option<TerrainTier> {
+        match self {
+            ModuleKind::Geometry { terrain, .. } | ModuleKind::Shadow { terrain, .. } => {
+                Some(*terrain)
+            }
+            ModuleKind::Screen { .. } | ModuleKind::Compute { .. } => None,
         }
     }
 
@@ -865,7 +1170,18 @@ impl ModuleKind {
                 }
                 out
             }
-            ModuleKind::Shadow => vec![SHADOW],
+            ModuleKind::Shadow {
+                color, displace, ..
+            } => {
+                let mut out = Vec::new();
+                if *color {
+                    out.push(SHADOW);
+                }
+                if *displace {
+                    out.push(DISPLACE);
+                }
+                out
+            }
             ModuleKind::Screen { function, .. } | ModuleKind::Compute { function, .. } => {
                 vec![function.as_str()]
             }
@@ -900,6 +1216,7 @@ pub(crate) enum Resource {
     Lightmap,
     Noise,
     SceneColor,
+    EntityTexture,
     Target(usize),
     TargetPrevious(usize),
     Texture(usize),
@@ -922,107 +1239,145 @@ pub(crate) enum SampleKind {
     Depth,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewDimension {
+    D2,
+    D2Array,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Binding {
     pub(crate) name: String,
     pub(crate) binding: u32,
     pub(crate) resource: Resource,
     pub(crate) kind: BindingKind,
+    #[allow(dead_code, reason = "the renderer's bind group layouts read it")]
+    pub(crate) dimension: ViewDimension,
     ty: String,
 }
 
 struct Fixed {
     name: &'static str,
+    binding: u32,
     resource: Resource,
     since: u32,
 }
 
-const FIXED: [Fixed; 12] = [
+const FIXED: [Fixed; 13] = [
     Fixed {
         name: "frame",
+        binding: 0,
         resource: Resource::Frame,
         since: 0,
     },
     Fixed {
         name: "linear_clamp",
+        binding: 1,
         resource: Resource::LinearClamp,
         since: 0,
     },
     Fixed {
         name: "linear_repeat",
+        binding: 2,
         resource: Resource::LinearRepeat,
         since: 0,
     },
     Fixed {
         name: "nearest_clamp",
+        binding: 3,
         resource: Resource::NearestClamp,
         since: 0,
     },
     Fixed {
         name: "shadow_compare",
+        binding: 4,
         resource: Resource::ShadowCompare,
         since: 0,
     },
     Fixed {
         name: "scene_depth",
+        binding: 5,
         resource: Resource::SceneDepth,
         since: 0,
     },
     Fixed {
         name: "shadow_depth",
+        binding: 6,
         resource: Resource::ShadowDepth,
         since: 0,
     },
     Fixed {
         name: "shadow_color",
+        binding: 7,
         resource: Resource::ShadowColor,
         since: 0,
     },
     Fixed {
         name: "block_atlas",
+        binding: 8,
         resource: Resource::BlockAtlas,
         since: 0,
     },
     Fixed {
         name: "lightmap",
+        binding: 9,
         resource: Resource::Lightmap,
         since: 0,
     },
     Fixed {
         name: "noise",
+        binding: 10,
         resource: Resource::Noise,
         since: 0,
     },
     Fixed {
         name: "scene_color",
+        binding: 11,
         resource: Resource::SceneColor,
+        since: 0,
+    },
+    Fixed {
+        name: "entity_texture",
+        binding: 11,
+        resource: Resource::EntityTexture,
         since: 0,
     },
 ];
 
+const FIRST_PACK_BINDING: u32 = 12;
+
+const _: () = {
+    let mut i = 0;
+    while i < FIXED.len() {
+        assert!(FIXED[i].binding < FIRST_PACK_BINDING);
+        i += 1;
+    }
+};
+
 pub(crate) fn bindings(pack: &PackInterface, kind: &ModuleKind) -> Vec<Binding> {
-    bindings_writing(pack, kind.storage_writes())
+    bindings_writing(pack, kind.storage_writes(), kind.draws_meshes())
 }
 
-fn bindings_writing(pack: &PackInterface, outs: &[usize]) -> Vec<Binding> {
+fn bindings_writing(pack: &PackInterface, outs: &[usize], meshes: bool) -> Vec<Binding> {
     let mut list = Vec::new();
-    for (number, fixed) in FIXED.iter().enumerate() {
+    for fixed in &FIXED {
         let present = fixed.since <= pack.api.minor
             && match fixed.resource {
                 Resource::ShadowColor => pack.shadow_color,
-                Resource::SceneColor => pack.post_only,
+                Resource::SceneColor => pack.post_only && !meshes,
+                Resource::EntityTexture => meshes,
                 _ => true,
             };
         if present {
             list.push(binding(
                 pack,
                 fixed.name.to_owned(),
-                number as u32,
+                fixed.binding,
                 fixed.resource,
             ));
         }
     }
-    let mut next = FIXED.len() as u32;
+    let mut next = FIRST_PACK_BINDING;
     let mut add = |name: String, resource: Resource| {
         list.push(binding(pack, name, next, resource));
         next += 1;
@@ -1055,6 +1410,10 @@ fn binding(pack: &PackInterface, name: String, number: u32, resource: Resource) 
             "texture_2d<f32>".to_owned(),
         )
     };
+    let dimension = match resource {
+        Resource::ShadowDepth | Resource::ShadowColor => ViewDimension::D2Array,
+        _ => ViewDimension::D2,
+    };
     let (kind, ty) = match resource {
         Resource::Frame => (BindingKind::Uniform, Frame::LAYOUT.name.to_owned()),
         Resource::LinearClamp | Resource::LinearRepeat | Resource::NearestClamp => {
@@ -1064,15 +1423,20 @@ fn binding(pack: &PackInterface, name: String, number: u32, resource: Resource) 
             BindingKind::ComparisonSampler,
             "sampler_comparison".to_owned(),
         ),
-        Resource::SceneDepth | Resource::ShadowDepth => (
+        Resource::SceneDepth => float(),
+        Resource::ShadowDepth => (
             BindingKind::Texture(SampleKind::Depth),
-            "texture_depth_2d".to_owned(),
+            "texture_depth_2d_array".to_owned(),
         ),
-        Resource::ShadowColor
-        | Resource::BlockAtlas
+        Resource::ShadowColor => (
+            BindingKind::Texture(SampleKind::Float),
+            "texture_2d_array<f32>".to_owned(),
+        ),
+        Resource::BlockAtlas
         | Resource::Lightmap
         | Resource::Noise
         | Resource::SceneColor
+        | Resource::EntityTexture
         | Resource::Texture(_) => float(),
         Resource::Target(index) | Resource::TargetPrevious(index) => {
             let class = pack.targets[index].class();
@@ -1085,7 +1449,7 @@ fn binding(pack: &PackInterface, name: String, number: u32, resource: Resource) 
             BindingKind::StorageTexture,
             format!(
                 "texture_storage_2d<{}, write>",
-                pack.targets[index].format.name()
+                pack.targets[index].format().name()
             ),
         ),
     };
@@ -1094,6 +1458,7 @@ fn binding(pack: &PackInterface, name: String, number: u32, resource: Resource) 
         binding: number,
         resource,
         kind,
+        dimension,
         ty,
     }
 }
@@ -1112,6 +1477,7 @@ enum What {
     Target(usize),
     TargetPrevious(usize),
     TargetOut(usize),
+    Format(usize),
     Texture(usize),
     Option(usize),
     Material(usize),
@@ -1135,6 +1501,7 @@ impl What {
             What::Target(_) => "a target",
             What::TargetPrevious(_) => "a target's history (`<id>_prev`)",
             What::TargetOut(_) => "a compute output (`<id>_out`)",
+            What::Format(_) => "a format constant (`FORMAT_<ID>`)",
             What::Texture(_) => "a texture",
             What::Option(_) => "an option",
             What::Material(_) => "a material constant (`MATERIAL_<ID>`)",
@@ -1145,9 +1512,10 @@ impl What {
     fn owner(self) -> Option<Owner> {
         match self {
             What::Engine => None,
-            What::Target(index) | What::TargetPrevious(index) | What::TargetOut(index) => {
-                Some(Owner::Target(index))
-            }
+            What::Target(index)
+            | What::TargetPrevious(index)
+            | What::TargetOut(index)
+            | What::Format(index) => Some(Owner::Target(index)),
             What::Texture(index) => Some(Owner::Texture(index)),
             What::Option(index) | What::Choice(index) => Some(Owner::Option(index)),
             What::Material(index) => Some(Owner::Material(index)),
@@ -1173,6 +1541,10 @@ struct Decl {
     text: String,
 }
 
+const SHADOW_FUNCTIONS: [&str; 2] = ["shadow_cascade", "shadow_light"];
+
+const SHADOW_WGSL: &str = include_str!("wgsl/shadow.wgsl");
+
 fn declarations(pack: &PackInterface, bindings: &[Binding]) -> Vec<Decl> {
     let mut decls = Vec::new();
     let engine_structs = [&SURFACE, &FRAGMENT_INFO].into_iter().chain(INPUTS.iter());
@@ -1192,20 +1564,40 @@ fn declarations(pack: &PackInterface, bindings: &[Binding]) -> Vec<Decl> {
             text: s.wgsl(),
         });
     }
+    decls.push(Decl {
+        name: SHADOW_FUNCTIONS[0].to_owned(),
+        since: 0,
+        what: What::Engine,
+        text: SHADOW_WGSL.to_owned(),
+    });
+    for part in SkyPart::ALL {
+        let name = part.constant();
+        let text = format!("const {name}: u32 = {}u;\n", part.id());
+        decls.push(Decl {
+            name,
+            since: 0,
+            what: What::Engine,
+            text,
+        });
+    }
     for b in bindings {
-        let space = if b.kind == BindingKind::Uniform {
-            "<uniform>"
-        } else {
-            ""
-        };
         decls.push(Decl {
             name: b.name.clone(),
             since: 0,
             what: What::of(b.resource),
-            text: format!(
-                "@group({GLOBALS_GROUP}) @binding({}) var{space} {}: {};\n",
-                b.binding, b.name, b.ty
-            ),
+            text: global_declaration(b),
+        });
+    }
+    for (index, target) in pack.targets.iter().enumerate() {
+        let Some(name) = target.format_constant() else {
+            continue;
+        };
+        let text = format!("const {name}: u32 = {}u;\n", target.chosen);
+        decls.push(Decl {
+            name,
+            since: 0,
+            what: What::Format(index),
+            text,
         });
     }
     for (index, id) in pack.materials.iter().enumerate() {
@@ -1236,6 +1628,18 @@ fn declarations(pack: &PackInterface, bindings: &[Binding]) -> Vec<Decl> {
     decls
 }
 
+fn global_declaration(b: &Binding) -> String {
+    let space = if b.kind == BindingKind::Uniform {
+        "<uniform>"
+    } else {
+        ""
+    };
+    format!(
+        "@group({GLOBALS_GROUP}) @binding({}) var{space} {}: {};\n",
+        b.binding, b.name, b.ty
+    )
+}
+
 fn emit(decls: &[Decl], api: Api) -> String {
     let mut out = String::new();
     for decl in decls.iter().filter(|d| d.since <= api.minor) {
@@ -1261,8 +1665,13 @@ pub(crate) fn check_interface(pack: &PackInterface) -> Vec<NameProblem> {
         .map(|fixed| (fixed.name.to_owned(), What::Engine))
         .collect();
     names.push((SCREEN_TARGET.to_owned(), What::Engine));
+    names.extend(
+        SHADOW_FUNCTIONS
+            .iter()
+            .map(|name| ((*name).to_owned(), What::Engine)),
+    );
     let every_target: Vec<usize> = (0..pack.targets.len()).collect();
-    let bindings = bindings_writing(pack, &every_target);
+    let bindings = bindings_writing(pack, &every_target, true);
     names.extend(
         declarations(pack, &bindings)
             .into_iter()
@@ -1336,34 +1745,111 @@ pub(crate) fn fragment_entry(stage: Stage) -> String {
     format!("{ENGINE_PREFIX}{}_fragment", stage.info().function)
 }
 
+pub(crate) fn cutout_entry(stage: Stage) -> String {
+    format!("{ENGINE_PREFIX}{}_cutout_fragment", stage.info().function)
+}
+
 pub(crate) fn vertex_entry(input: Input) -> String {
     format!("{ENGINE_PREFIX}{}_vertex", input.stem())
+}
+
+const HAND_VERTEX: &str = "torch_hand_vertex";
+
+pub(crate) fn stage_vertex_entry(stage: Stage) -> String {
+    match stage {
+        Stage::Hand => HAND_VERTEX.to_owned(),
+        _ => vertex_entry(stage.info().input),
+    }
 }
 
 pub(crate) fn entries(pack: &PackInterface, kind: &ModuleKind) -> Entries {
     entries_with(pack, kind, geometry_seam)
 }
 
-fn geometry_seam(input: Input) -> Option<&'static str> {
+const MESH_WGSL: &str = include_str!("wgsl/mesh.wgsl");
+const TERRAIN_WGSL: &str = include_str!("wgsl/terrain.wgsl");
+const TERRAIN_VERTEX_WGSL: &str = include_str!("wgsl/terrain_vertex.wgsl");
+const SHADOW_PASS_WGSL: &str = include_str!("wgsl/shadow_pass.wgsl");
+const TERRAIN_DIRECT_WGSL: &str = include_str!("wgsl/terrain_direct.wgsl");
+const TERRAIN_INDIRECT_WGSL: &str = include_str!("wgsl/terrain_indirect.wgsl");
+const SKY_WGSL: &str = include_str!("wgsl/sky.wgsl");
+const ENTITY_WGSL: &str = include_str!("wgsl/entity.wgsl");
+const HAND_WGSL: &str = include_str!("wgsl/hand.wgsl");
+const CLOUD_WGSL: &str = include_str!("wgsl/cloud.wgsl");
+const WEATHER_WGSL: &str = include_str!("wgsl/weather.wgsl");
+
+#[derive(Clone, Debug)]
+struct SeamPart {
+    shared: Option<&'static str>,
+    text: String,
+    stages: &'static [(Stage, &'static str)],
+}
+
+type Seam = fn(Input, TerrainTier) -> Option<SeamPart>;
+
+fn geometry_seam(input: Input, terrain: TerrainTier) -> Option<SeamPart> {
+    let mesh = |text: &str, stages: &'static [(Stage, &'static str)]| {
+        Some(SeamPart {
+            shared: Some(MESH_WGSL),
+            text: text.to_owned(),
+            stages,
+        })
+    };
     match input {
-        Input::Sky | Input::Terrain | Input::Entity | Input::Cloud | Input::Weather => None,
+        Input::Terrain => {
+            let text = format!("{}\n{TERRAIN_VERTEX_WGSL}", terrain_decode(terrain));
+            Some(SeamPart {
+                shared: None,
+                text,
+                stages: &[],
+            })
+        }
+        Input::Sky => mesh(SKY_WGSL, &[]),
+        Input::Entity => mesh(ENTITY_WGSL, &[(Stage::Hand, HAND_WGSL)]),
+        Input::Cloud => mesh(CLOUD_WGSL, &[]),
+        Input::Weather => mesh(WEATHER_WGSL, &[]),
         Input::Vertex | Input::Screen | Input::Compute => None,
     }
 }
 
-fn entries_with(
-    pack: &PackInterface,
-    kind: &ModuleKind,
-    seam: fn(Input) -> Option<&'static str>,
-) -> Entries {
+fn terrain_decode(terrain: TerrainTier) -> String {
+    let origin = match terrain {
+        TerrainTier::Direct => TERRAIN_DIRECT_WGSL,
+        TerrainTier::Indirect => TERRAIN_INDIRECT_WGSL,
+    };
+    format!("{TERRAIN_WGSL}\n{origin}")
+}
+
+fn displace_function(vertex: bool) -> String {
+    let body = if vertex {
+        format!("return {DISPLACE}(torch_in);")
+    } else {
+        "return vec3<f32>(0.0);".to_owned()
+    };
+    format!("fn torch_displace(torch_in: VertexInput) -> vec3<f32> {{\n    {body}\n}}\n\n")
+}
+
+fn entries_with(pack: &PackInterface, kind: &ModuleKind, seam: Seam) -> Entries {
     match kind {
         ModuleKind::Geometry {
             group,
             writes,
             stages,
-            ..
-        } => geometry_entries(&outputs(pack, writes), *group, stages, seam),
-        ModuleKind::Shadow => shadow_entries(seam),
+            vertex,
+            terrain,
+        } => geometry_entries(
+            &outputs(pack, writes),
+            *group,
+            stages,
+            *vertex,
+            *terrain,
+            seam,
+        ),
+        ModuleKind::Shadow {
+            color,
+            displace,
+            terrain,
+        } => shadow_entries(*color, *displace, *terrain),
         ModuleKind::Screen {
             function,
             output,
@@ -1467,11 +1953,12 @@ fn varyings_struct(input: Input) -> String {
         "struct {} {{\n    @builtin(position) clip: vec4<f32>,\n",
         varyings_name(input)
     );
-    let carried = input
+    let own = input
         .def()
         .members
         .iter()
         .filter(|member| member.ty != Ty::Surface);
+    let carried = own.chain(input.engine_varyings());
     for (location, member) in carried.enumerate() {
         let flat = if member.ty.flat() {
             " @interpolate(flat)"
@@ -1509,7 +1996,9 @@ fn geometry_entries(
     outputs: &[(&str, Class)],
     group: Group,
     defined: &[Stage],
-    seam: fn(Input) -> Option<&'static str>,
+    displace: bool,
+    terrain: TerrainTier,
+    seam: Seam,
 ) -> Entries {
     let stages: Vec<Stage> = group.stages().collect();
     let mut inputs: Vec<Input> = Vec::new();
@@ -1518,10 +2007,10 @@ fn geometry_entries(
             inputs.push(stage.info().input);
         }
     }
-    let Some(seams) = inputs
+    let Some(parts) = inputs
         .iter()
-        .map(|&input| seam(input))
-        .collect::<Option<Vec<&str>>>()
+        .map(|&input| seam(input, terrain))
+        .collect::<Option<Vec<SeamPart>>>()
     else {
         return Entries::default();
     };
@@ -1530,12 +2019,32 @@ fn geometry_entries(
     }
     let out = group.output_struct();
     let mut text = output_struct(out, outputs);
+    if inputs.contains(&Input::Terrain) {
+        text.push_str(&displace_function(displace));
+    }
+    let mut shared: Vec<&str> = Vec::new();
+    for part in &parts {
+        if let Some(part_shared) = part.shared
+            && !shared.contains(&part_shared)
+        {
+            shared.push(part_shared);
+            text.push_str(part_shared);
+            text.push('\n');
+        }
+    }
     let mut names = Vec::new();
-    for (&input, seam_text) in inputs.iter().zip(seams) {
+    for (&input, part) in inputs.iter().zip(&parts) {
         text.push_str(&varyings_struct(input));
-        text.push_str(seam_text);
+        text.push_str(&part.text);
         text.push('\n');
         names.push(vertex_entry(input));
+        for &(stage, stage_text) in part.stages {
+            if stages.contains(&stage) {
+                text.push_str(stage_text);
+                text.push('\n');
+                names.push(stage_vertex_entry(stage));
+            }
+        }
     }
     for stage in stages {
         let info = stage.info();
@@ -1544,45 +2053,156 @@ fn geometry_entries(
         } else {
             format!("{ENGINE_PREFIX}{}_base(torch_v)", info.input.stem())
         };
+        let fragment = |name: &str, test: &str| {
+            format!(
+                "@fragment\nfn {name}(torch_v: {varyings}, @builtin(front_facing) torch_facing: bool) -> {out} {{\n    \
+                 let torch_s = {surface};\n\
+                 {test}    \
+                 let torch_e = {ENCODE}(torch_s, FragmentInfo(torch_v.clip.xy, torch_v.clip.z, torch_facing, torch_v.position));\n    \
+                 return {};\n}}\n\n",
+                output_value(out, "torch_e", outputs),
+                varyings = varyings_name(info.input),
+            )
+        };
         let name = fragment_entry(stage);
-        text.push_str(&format!(
-            "@fragment\nfn {name}(torch_v: {varyings}, @builtin(front_facing) torch_facing: bool) -> {out} {{\n    \
-             let torch_s = {surface};\n    \
-             let torch_e = {ENCODE}(torch_s, FragmentInfo(torch_v.clip.xy, torch_v.clip.z, torch_facing, torch_v.position));\n    \
-             return {};\n}}\n\n",
-            output_value(out, "torch_e", outputs),
-            varyings = varyings_name(info.input),
-        ));
+        text.push_str(&fragment(&name, ""));
         names.push(name);
+        if stage.draw().cutout {
+            let name = cutout_entry(stage);
+            text.push_str(&fragment(
+                &name,
+                &format!("    if torch_s.color.a < {CUTOFF:?} {{\n        discard;\n    }}\n"),
+            ));
+            names.push(name);
+        }
     }
     Entries { text, names }
 }
 
-pub(crate) const SHADOW_FRAGMENT: &str = "torch_shadow_fragment";
+pub(crate) const OVERLAY_VERTEX: &str = "torch_overlay_vertex";
+pub(crate) const OVERLAY_CRACKS: &str = "torch_overlay_cracks_fragment";
+pub(crate) const OVERLAY_LINE: &str = "torch_overlay_line_fragment";
 
-fn shadow_entries(seam: fn(Input) -> Option<&'static str>) -> Entries {
-    let input = Input::Terrain;
-    let Some(seam_text) = seam(input) else {
-        return Entries::default();
+const OVERLAY_WGSL: &str = include_str!("wgsl/overlay.wgsl");
+
+const OVERLAY_GLOBALS: [Resource; 3] = [
+    Resource::Frame,
+    Resource::NearestClamp,
+    Resource::EntityTexture,
+];
+
+pub(crate) fn overlay_module() -> (String, Vec<Binding>) {
+    let none = PackInterface {
+        api: super::manifest::API,
+        targets: Vec::new(),
+        textures: Vec::new(),
+        options: Vec::new(),
+        materials: Vec::new(),
+        shadow_color: false,
+        post_only: false,
     };
+    let bindings: Vec<Binding> = bindings_writing(&none, &[], true)
+        .into_iter()
+        .filter(|b| OVERLAY_GLOBALS.contains(&b.resource))
+        .collect();
+    let mut text = String::new();
+    for s in &FRAME_STRUCTS {
+        text.push_str(&s.wgsl());
+        text.push('\n');
+    }
+    for b in &bindings {
+        text.push_str(&global_declaration(b));
+    }
+    text.push('\n');
+    text.push_str(MESH_WGSL);
+    text.push('\n');
+    text.push_str(OVERLAY_WGSL);
+    (text, bindings)
+}
+
+pub(crate) const SHADOW_TERRAIN_VERTEX: &str = "torch_shadow_terrain_vertex";
+pub(crate) const SHADOW_TERRAIN_FRAGMENT: &str = "torch_shadow_terrain_fragment";
+pub(crate) const SHADOW_TERRAIN_CUTOUT: &str = "torch_shadow_terrain_cutout_fragment";
+pub(crate) const SHADOW_ENTITY_VERTEX: &str = "torch_shadow_entity_vertex";
+pub(crate) const SHADOW_ENTITY_FRAGMENT: &str = "torch_shadow_entity_fragment";
+pub(crate) const SHADOW_ENTITY_CUTOUT: &str = "torch_shadow_entity_cutout_fragment";
+
+fn shadow_entries(color: bool, displace: bool, terrain: TerrainTier) -> Entries {
+    let input = Input::Terrain;
+    let varyings = varyings_name(input);
     let out = "torch_shadow_out";
     let outputs = shadow_outputs();
-    let mut text = output_struct(out, &outputs);
-    text.push_str(&varyings_struct(input));
-    text.push_str(seam_text);
-    text.push('\n');
-    text.push_str(&format!(
-        "@fragment\nfn {SHADOW_FRAGMENT}(torch_v: {}) -> {out} {{\n    \
-         let torch_c = {SHADOW}({});\n    \
-         return {};\n}}\n",
-        varyings_name(input),
-        input_value(input),
-        output_value(out, "torch_c", &outputs),
-    ));
-    Entries {
-        text,
-        names: vec![vertex_entry(input), SHADOW_FRAGMENT.to_owned()],
+    let mut text = String::new();
+    if color {
+        text.push_str(&output_struct(out, &outputs));
     }
+    text.push_str(&displace_function(displace));
+    text.push_str(MESH_WGSL);
+    text.push('\n');
+    text.push_str(&varyings_struct(input));
+    text.push_str(&terrain_decode(terrain));
+    text.push('\n');
+    let lit = if color {
+        "return torch_terrain_lit(torch_v, torch_light);"
+    } else {
+        "return torch_v;"
+    };
+    text.push_str(&format!(
+        "fn torch_shadow_terrain_lit(torch_v: {varyings}, torch_light: vec4<f32>) -> {varyings} {{\n    {lit}\n}}\n\n"
+    ));
+    text.push_str(SHADOW_PASS_WGSL);
+    text.push('\n');
+
+    let discard =
+        |value: &str| format!("    if {value} < {CUTOFF:?} {{\n        discard;\n    }}\n");
+    let mut names = vec![
+        SHADOW_TERRAIN_VERTEX.to_owned(),
+        SHADOW_ENTITY_VERTEX.to_owned(),
+    ];
+    let mesh = "torch_shadow_mesh_varyings";
+    if color {
+        let write = output_value(out, "torch_c", &outputs);
+        let shade = format!(
+            "    let torch_i = {};\n    let torch_c = {SHADOW}(torch_i);\n",
+            input_value(input)
+        );
+        let ret = format!("    return {write};\n");
+        text.push_str(&format!(
+            "@fragment\nfn {SHADOW_TERRAIN_FRAGMENT}(torch_v: {varyings}) -> {out} {{\n{shade}{ret}}}\n\n"
+        ));
+        text.push_str(&format!(
+            "@fragment\nfn {SHADOW_TERRAIN_CUTOUT}(torch_v: {varyings}) -> {out} {{\n{shade}{}{ret}}}\n\n",
+            discard("torch_i.base.color.a"),
+        ));
+        let texel = "    let torch_c = torch_mesh_texel(torch_v.uv) * torch_v.color;\n";
+        text.push_str(&format!(
+            "@fragment\nfn {SHADOW_ENTITY_FRAGMENT}(torch_v: {mesh}) -> {out} {{\n{texel}    return {write};\n}}\n\n"
+        ));
+        text.push_str(&format!(
+            "@fragment\nfn {SHADOW_ENTITY_CUTOUT}(torch_v: {mesh}) -> {out} {{\n{texel}{}    return {write};\n}}\n",
+            discard("torch_c.a"),
+        ));
+        names.extend(
+            [
+                SHADOW_TERRAIN_FRAGMENT,
+                SHADOW_TERRAIN_CUTOUT,
+                SHADOW_ENTITY_FRAGMENT,
+                SHADOW_ENTITY_CUTOUT,
+            ]
+            .map(str::to_owned),
+        );
+    } else {
+        text.push_str(&format!(
+            "@fragment\nfn {SHADOW_TERRAIN_CUTOUT}(torch_v: {varyings}) {{\n{}}}\n\n",
+            discard("torch_terrain_base(torch_v).color.a"),
+        ));
+        text.push_str(&format!(
+            "@fragment\nfn {SHADOW_ENTITY_CUTOUT}(torch_v: {mesh}) {{\n{}}}\n",
+            discard("(torch_mesh_texel(torch_v.uv) * torch_v.color).a"),
+        ));
+        names.extend([SHADOW_TERRAIN_CUTOUT, SHADOW_ENTITY_CUTOUT].map(str::to_owned));
+    }
+    Entries { text, names }
 }
 
 pub(crate) fn check_rules(module: &naga::Module, composed: &Composed) -> Vec<Problem> {
@@ -1743,6 +2363,7 @@ pub(crate) fn check_signatures(
             writes,
             stages,
             vertex,
+            ..
         } => {
             for stage in stages {
                 let info = stage.info();
@@ -1768,12 +2389,26 @@ pub(crate) fn check_signatures(
                 });
             }
         }
-        ModuleKind::Shadow => expected.push(Expected {
-            function: SHADOW,
-            why: "[shadow] sets `color = true`".to_owned(),
-            args: vec![Input::Terrain.name()],
-            returns: Returns::Outputs(shadow_outputs()),
-        }),
+        ModuleKind::Shadow {
+            color, displace, ..
+        } => {
+            if *color {
+                expected.push(Expected {
+                    function: SHADOW,
+                    why: "[shadow] sets `color = true`".to_owned(),
+                    args: vec![Input::Terrain.name()],
+                    returns: Returns::Outputs(shadow_outputs()),
+                });
+            }
+            if *displace {
+                expected.push(Expected {
+                    function: DISPLACE,
+                    why: format!("the {} group sets `vertex = true`", Group::Opaque.name()),
+                    args: vec![Input::Vertex.name()],
+                    returns: Returns::Vec3F,
+                });
+            }
+        }
         ModuleKind::Screen {
             function, output, ..
         } => expected.push(Expected {
@@ -2073,14 +2708,15 @@ fn used_where<'c>(
 
 #[cfg(test)]
 pub(crate) fn test_pack() -> PackInterface {
-    let target =
-        |id: &str, format, history| PreludeTarget::new(id.to_owned(), format, history).unwrap();
+    let target = |id: &str, formats: &[Format], history| {
+        PreludeTarget::new(id.to_owned(), formats.to_vec(), 0, history).unwrap()
+    };
     PackInterface {
         api: super::manifest::API,
         targets: vec![
-            target("lit", Format::Rgba16Float, true),
-            target("albedo", Format::Rgba8Unorm, false),
-            target("ids", Format::R32Uint, false),
+            target("lit", &[Format::Rgba16Float, Format::Rgba8Unorm], true),
+            target("albedo", &[Format::Rgba8Unorm], false),
+            target("ids", &[Format::R32Uint], false),
         ],
         textures: vec!["clouds_tex".to_owned()],
         options: vec![
@@ -2175,7 +2811,8 @@ mod tests {
         text.push_str(
             "@group(0) @binding(0) var<uniform> frame: Frame;\n\
              @fragment fn f() -> @location(0) vec4<f32> {\n    \
-             return vec4<f32>(frame.view.size, frame.time.seconds, frame.player.held_light.y);\n}\n",
+             let c = (frame.shadow.cascades[frame.shadow.count] * vec4<f32>(frame.sky.light_floor, 1.0)).x;\n    \
+             return vec4<f32>(frame.view.size, frame.time.seconds, frame.player.held_light.y + c);\n}\n",
         );
         let (module, _) = validate(&text);
         let sizes = [
@@ -2210,7 +2847,30 @@ mod tests {
             assert_eq!(theirs, ours, "{}", s.name);
             assert_eq!(*span as usize, rust_size, "{}", s.name);
         }
-        assert_eq!(size_of::<Frame>(), 736);
+        assert_eq!(size_of::<FrameCamera>(), 512);
+        assert_eq!(size_of::<FrameSky>(), 80);
+        assert_eq!(size_of::<FrameShadow>(), 432);
+        assert_eq!(size_of::<Frame>(), 1136);
+    }
+
+    #[test]
+    fn overlay_module_validates() {
+        let (text, bindings) = overlay_module();
+        let (module, _) = validate(&text);
+        for entry in [OVERLAY_VERTEX, OVERLAY_CRACKS, OVERLAY_LINE] {
+            assert!(
+                module.entry_points.iter().any(|e| e.name == entry),
+                "{entry}"
+            );
+        }
+        let named: Vec<(&str, u32)> = bindings
+            .iter()
+            .map(|b| (b.name.as_str(), b.binding))
+            .collect();
+        assert_eq!(
+            named,
+            [("frame", 0), ("nearest_clamp", 3), ("entity_texture", 11)]
+        );
     }
 
     #[test]
@@ -2271,11 +2931,31 @@ mod tests {
         );
         assert_eq!(list[13].kind, BindingKind::Texture(SampleKind::Uint));
         assert_eq!(list[16].resource, Resource::TargetOut(1));
+        let arrays: Vec<&str> = list
+            .iter()
+            .filter(|b| b.dimension == ViewDimension::D2Array)
+            .map(|b| b.name.as_str())
+            .collect();
+        assert_eq!(arrays, ["shadow_depth", "shadow_color"]);
+        assert_eq!(list[6].kind, BindingKind::Texture(SampleKind::Depth));
+        assert_eq!(list[7].kind, BindingKind::Texture(SampleKind::Float));
         assert_eq!(
             bindings(&pack, &kind),
             list,
             "the same inputs give the same numbers"
         );
+
+        let geometry = bindings(&pack, &opaque_kind(TerrainTier::Direct));
+        let found = geometry
+            .iter()
+            .find(|b| b.resource == Resource::EntityTexture)
+            .expect("declared");
+        assert_eq!((found.name.as_str(), found.binding), ("entity_texture", 11));
+        assert_eq!(
+            geometry.iter().find(|b| b.name == "lit").map(|b| b.binding),
+            Some(12)
+        );
+        assert!(!list.iter().any(|b| b.resource == Resource::EntityTexture));
     }
 
     #[test]
@@ -2346,22 +3026,27 @@ mod tests {
         assert_eq!(used, ["lit_out"]);
     }
 
-    fn test_seam(input: Input) -> Option<&'static str> {
-        match input {
-            Input::Sky => Some(
+    fn test_seam(input: Input, _: TerrainTier) -> Option<SeamPart> {
+        let text = match input {
+            Input::Sky => {
                 "fn torch_sky_base(v: torch_sky_varyings) -> Surface {\n    \
-                 return Surface(vec4<f32>(normalize(v.position), 1.0), vec3<f32>(0.0, 1.0, 0.0), vec2<f32>(1.0), 0.0, 1.0, 0.0, 0u, vec4<f32>(0.0));\n}\n",
-            ),
-            Input::Terrain => Some(
+                 return Surface(vec4<f32>(normalize(v.position), 1.0), vec3<f32>(0.0, 1.0, 0.0), vec2<f32>(1.0), 0.0, 1.0, 0.0, 0u, vec4<f32>(0.0));\n}\n"
+            }
+            Input::Terrain => {
                 "fn torch_terrain_base(v: torch_terrain_varyings) -> Surface {\n    \
-                 return Surface(textureSample(block_atlas, nearest_clamp, v.uv) * v.color, v.normal, v.light, 0.0, 1.0, 0.0, 0u, vec4<f32>(0.0));\n}\n",
-            ),
-            Input::Entity => Some(
+                 return Surface(textureSample(block_atlas, nearest_clamp, v.uv) * v.color, v.normal, v.light, 0.0, 1.0, 0.0, 0u, vec4<f32>(0.0));\n}\n"
+            }
+            Input::Entity => {
                 "fn torch_entity_base(v: torch_entity_varyings) -> Surface {\n    \
-                 return Surface(v.color, v.normal, v.light, 0.0, 1.0, 0.0, 0u, v.overlay);\n}\n",
-            ),
-            _ => None,
-        }
+                 return Surface(v.color, v.normal, v.light, 0.0, 1.0, 0.0, 0u, v.overlay);\n}\n"
+            }
+            _ => return None,
+        };
+        Some(SeamPart {
+            shared: None,
+            text: text.to_owned(),
+            stages: &[],
+        })
     }
 
     const OPAQUE: &str = "struct Opaque { albedo: vec4<f32>, ids: vec4<u32> }\n\
@@ -2374,19 +3059,20 @@ mod tests {
                               return s;\n\
                           }\n";
 
-    fn opaque_kind() -> ModuleKind {
+    fn opaque_kind(terrain: TerrainTier) -> ModuleKind {
         ModuleKind::Geometry {
             group: Group::Opaque,
             writes: vec![1, 2],
             stages: vec![Stage::Terrain],
             vertex: false,
+            terrain,
         }
     }
 
     #[test]
     fn geometry_fragment_entries_validate() {
         let pack = test_pack();
-        let kind = opaque_kind();
+        let kind = opaque_kind(TerrainTier::Indirect);
         let bindings = bindings(&pack, &kind);
         let entries = entries_with(&pack, &kind, test_seam);
         let text = format!("{}{OPAQUE}\n{}", prelude(&pack, &bindings), entries.text);
@@ -2406,10 +3092,208 @@ mod tests {
         );
 
         let composed = build(OPAQUE, &kind);
-        assert!(composed.entry_points().is_empty());
         let (module, _) = validate(composed.text());
+        for name in &fragments {
+            assert!(composed.entry_points().contains(name), "{name}");
+        }
         none(&check_signatures(&module, &composed, &pack, &kind));
         none(&check_rules(&module, &composed));
+    }
+
+    #[test]
+    fn geometry_entry_points_are_listed_in_order() {
+        let composed = build(OPAQUE, &opaque_kind(TerrainTier::Direct));
+        assert_eq!(
+            composed.entry_points(),
+            [
+                "torch_sky_vertex",
+                "torch_terrain_vertex",
+                "torch_entity_vertex",
+                "torch_hand_vertex",
+                "torch_sky_fragment",
+                "torch_terrain_fragment",
+                "torch_terrain_cutout_fragment",
+                "torch_entity_fragment",
+                "torch_entity_cutout_fragment",
+                "torch_block_entity_fragment",
+                "torch_block_entity_cutout_fragment",
+                "torch_hand_fragment",
+                "torch_hand_cutout_fragment",
+            ]
+        );
+        for stage in Stage::ALL {
+            let vertex = stage_vertex_entry(stage);
+            assert_eq!(vertex == HAND_VERTEX, stage == Stage::Hand, "{vertex}");
+        }
+    }
+
+    #[test]
+    fn every_seam_validates_in_both_tiers() {
+        let pack = test_pack();
+        let encode =
+            "fn encode(s: Surface, at: FragmentInfo) -> vec4<f32> {\n    return s.color;\n}\n";
+        for terrain in TerrainTier::ALL {
+            for group in [Group::Opaque, Group::Translucent] {
+                let kind = ModuleKind::Geometry {
+                    group,
+                    writes: vec![1],
+                    stages: Vec::new(),
+                    vertex: false,
+                    terrain,
+                };
+                let composed = build(encode, &kind);
+                let (module, info) = validate(composed.text());
+                none(&check_rules(&module, &composed));
+                for stage in group.stages() {
+                    let vertex = stage_vertex_entry(stage);
+                    assert!(
+                        module.entry_points.iter().any(|e| e.name == vertex),
+                        "{vertex}"
+                    );
+                    assert!(composed.entry_points().contains(&fragment_entry(stage)));
+                }
+                let names: Vec<&str> = composed.entry_points().iter().map(String::as_str).collect();
+                let used: Vec<&str> = used_globals(&module, &info, &composed, &names)
+                    .iter()
+                    .map(|b| b.name.as_str())
+                    .collect();
+                let expected = [
+                    "frame",
+                    "linear_clamp",
+                    "nearest_clamp",
+                    "block_atlas",
+                    "lightmap",
+                    "entity_texture",
+                ];
+                assert_eq!(used, expected, "{group:?}");
+                assert!(
+                    !used.contains(&"shadow_depth") && !used.contains(&"shadow_compare"),
+                    "{group:?}"
+                );
+                let storage = composed.text().contains("var<storage");
+                assert_eq!(storage, terrain == TerrainTier::Indirect, "{terrain:?}");
+                if terrain == TerrainTier::Direct {
+                    naga::valid::Validator::new(
+                        naga::valid::ValidationFlags::all(),
+                        naga::valid::Capabilities::empty(),
+                    )
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(composed.text())));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_seam_files_agree_with_the_constants() {
+        let slot_table = format!("@group({TERRAIN_GROUP}) @binding({SLOT_TABLE_BINDING})");
+        assert!(
+            TERRAIN_DIRECT_WGSL
+                .contains(&format!("{slot_table} var torch_origins: texture_2d<i32>;"))
+        );
+        assert!(
+            TERRAIN_DIRECT_WGSL.contains(&format!("const torch_origin_row: i32 = {ORIGIN_ROW};"))
+        );
+        assert!(TERRAIN_INDIRECT_WGSL.contains(&format!(
+            "{slot_table} var<storage, read> torch_slot_table:"
+        )));
+        assert!(
+            TERRAIN_INDIRECT_WGSL
+                .contains(&format!("const torch_slot_words: u32 = {SLOT_WORDS}u;"))
+        );
+        assert!(TERRAIN_WGSL.contains(&format!(
+            "@group({PACK_QUADS_GROUP}) @binding(0) var torch_pack_quads: texture_2d<u32>;"
+        )));
+        assert!(TERRAIN_WGSL.contains(&format!("const torch_quad_row: u32 = {QUAD_ROW}u;")));
+    }
+
+    fn statements(block: &naga::Block) -> Vec<&naga::Statement> {
+        let mut out = Vec::new();
+        for statement in block.iter() {
+            out.push(statement);
+            match statement {
+                naga::Statement::Block(inner) => out.extend(statements(inner)),
+                naga::Statement::If { accept, reject, .. } => {
+                    out.extend(statements(accept));
+                    out.extend(statements(reject));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_cutout_entry_discards() {
+        for group in [Group::Opaque, Group::Translucent] {
+            let kind = ModuleKind::Geometry {
+                group,
+                writes: vec![1],
+                stages: Vec::new(),
+                vertex: false,
+                terrain: TerrainTier::Indirect,
+            };
+            let composed = build(
+                "fn encode(s: Surface, at: FragmentInfo) -> vec4<f32> {\n    return s.color;\n}\n",
+                &kind,
+            );
+            let (module, _) = validate(composed.text());
+            let kills = |name: &str| {
+                let entry = module
+                    .entry_points
+                    .iter()
+                    .find(|e| e.name == name)
+                    .unwrap_or_else(|| panic!("no {name}"));
+                statements(&entry.function.body)
+                    .iter()
+                    .any(|s| matches!(s, naga::Statement::Kill))
+            };
+            for stage in group.stages() {
+                assert!(!kills(&fragment_entry(stage)), "{stage:?}");
+                let cutout = cutout_entry(stage);
+                assert_eq!(
+                    composed.entry_points().contains(&cutout),
+                    stage.draw().cutout,
+                    "{stage:?}"
+                );
+                if stage.draw().cutout {
+                    assert!(kills(&cutout), "{stage:?}");
+                }
+            }
+        }
+        assert!(Stage::Terrain.draw().cutout && !Stage::Water.draw().cutout);
+    }
+
+    #[test]
+    fn a_group_with_displace_moves_the_terrain() {
+        let text = "fn encode(s: Surface, at: FragmentInfo) -> vec4<f32> {\n    return s.color;\n}\n\
+                    fn displace(in: VertexInput) -> vec3<f32> {\n    \
+                        let sway = sin(frame.time.seconds + in.position.x) * 0.05;\n    \
+                        return select(vec3<f32>(0.0), vec3<f32>(sway, 0.0, 0.0), in.material == MATERIAL_FOLIAGE);\n\
+                    }\n";
+        for terrain in TerrainTier::ALL {
+            let kind = ModuleKind::Geometry {
+                group: Group::Translucent,
+                writes: vec![1],
+                stages: Vec::new(),
+                vertex: true,
+                terrain,
+            };
+            let composed = build(text, &kind);
+            let (module, _) = validate(composed.text());
+            none(&check_signatures(&module, &composed, &test_pack(), &kind));
+            assert!(composed.text().contains("return displace(torch_in);"));
+        }
+        let still = ModuleKind::Geometry {
+            group: Group::Translucent,
+            writes: vec![1],
+            stages: Vec::new(),
+            vertex: false,
+            terrain: TerrainTier::Indirect,
+        };
+        let composed = build(text, &still);
+        validate(composed.text());
+        assert!(!composed.text().contains("return displace(torch_in);"));
     }
 
     #[test]
@@ -2420,13 +3304,14 @@ mod tests {
             writes: vec![1, 2],
             stages: vec![Stage::Terrain, Stage::Hand],
             vertex: true,
+            terrain: TerrainTier::Indirect,
         };
         let text = "struct Opaque { albedo: vec4<f32>, ids: vec4<f32>, extra: f32 }\n\
                     fn encode(s: Surface, at: FragmentInfo) -> Opaque { return Opaque(s.color, s.color, 0.0); }\n\
                     fn terrain(in: EntityInput) -> Surface { return in.base; }\n\
                     fn displace(in: VertexInput) -> vec4<f32> { return vec4<f32>(0.0); }\n";
         let composed = build(text, &kind);
-        let (module, _) = validate(composed.text());
+        let module = parse(composed.without_entries());
         let problems = check_signatures(&module, &composed, &pack, &kind);
         let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
         assert_eq!(problems.len(), 5, "{messages:#?}");
@@ -2604,39 +3489,297 @@ mod tests {
         repeated.targets[1].history = true;
         let problems = check_interface(&repeated);
         assert!(problems.is_empty(), "{problems:#?}");
+
+        let mut format = test_pack();
+        format.options.push(PreludeOption {
+            id: "format".to_owned(),
+            kind: Kind::Choice {
+                values: vec!["lit".to_owned(), "dark".to_owned()],
+            },
+        });
+        let problems = check_interface(&format);
+        assert_eq!(problems.len(), 1, "{problems:#?}");
+        assert!(
+            problems[0]
+                .message
+                .contains("`FORMAT_LIT` is both a format constant"),
+            "{problems:#?}"
+        );
+        assert_eq!(problems[0].owner, Some(Owner::Option(2)));
+    }
+
+    #[test]
+    fn the_sky_parts_are_prelude_constants() {
+        let text = prelude(&test_pack(), &bindings(&test_pack(), &screen_kind(vec![1])));
+        assert!(text.contains("const SKY_PART_DISC: u32 = 1u;"), "{text}");
+        assert!(text.contains("const SKY_PART_SUN: u32 = 4u;"), "{text}");
+        assert!(
+            text.contains("const SKY_PART_END_FLASH: u32 = 8u;"),
+            "{text}"
+        );
+        assert_eq!(SkyPart::ALL.map(SkyPart::id), [1, 2, 3, 4, 5, 6, 7, 8]);
+        let mut pack = test_pack();
+        pack.options.push(PreludeOption {
+            id: "sky_part".to_owned(),
+            kind: Kind::Choice {
+                values: vec!["sun".to_owned(), "moon".to_owned()],
+            },
+        });
+        assert_eq!(check_interface(&pack).len(), 2);
+    }
+
+    #[test]
+    fn a_format_list_declares_its_choice() {
+        let compute = ModuleKind::Compute {
+            function: "voxelize".to_owned(),
+            writes: vec![0],
+            workgroup: [8, 8, 1],
+        };
+        for kind in [
+            screen_kind(vec![1]),
+            compute.clone(),
+            shadow_kind(true, false, TerrainTier::Indirect),
+        ] {
+            let text = prelude(&test_pack(), &bindings(&test_pack(), &kind));
+            assert!(text.contains("const FORMAT_LIT: u32 = 0u;"), "{text}");
+            assert!(
+                !text.contains("FORMAT_ALBEDO") && !text.contains("FORMAT_IDS"),
+                "{text}"
+            );
+        }
+        let mut pack = test_pack();
+        pack.targets[0].chosen = 1;
+        let text = prelude(&pack, &bindings(&pack, &compute));
+        assert!(text.contains("const FORMAT_LIT: u32 = 1u;"), "{text}");
+        assert!(
+            text.contains("var lit_out: texture_storage_2d<rgba8unorm, write>;"),
+            "{text}"
+        );
+        let text = prelude(&test_pack(), &bindings(&test_pack(), &compute));
+        assert!(
+            text.contains("var lit_out: texture_storage_2d<rgba16float, write>;"),
+            "{text}"
+        );
+
+        let lists = [Format::Rgba16Float, Format::R32Uint];
+        assert!(
+            PreludeTarget::new("x".to_owned(), lists.to_vec(), 0, false).is_none(),
+            "mixed classes"
+        );
+        assert!(
+            PreludeTarget::new("x".to_owned(), vec![Format::Rgba8Unorm], 1, false).is_none(),
+            "past the end"
+        );
+        assert!(
+            PreludeTarget::new("x".to_owned(), Vec::new(), 0, false).is_none(),
+            "empty"
+        );
+    }
+
+    fn shadow_kind(color: bool, displace: bool, terrain: TerrainTier) -> ModuleKind {
+        ModuleKind::Shadow {
+            color,
+            displace,
+            terrain,
+        }
+    }
+
+    fn validate_webgl2(module: &naga::Module, text: &str) {
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(text)));
+    }
+
+    const SHADOW_COLOUR: &str = "fn shadow(in: TerrainInput) -> vec4<f32> {\n    return vec4<f32>(in.base.color.rgb * (in.block_lit + in.sky_lit), 1.0);\n}\n";
+
+    #[test]
+    fn a_depth_only_shadow_module_validates() {
+        let read = memory_reader(&[]);
+        for terrain in TerrainTier::ALL {
+            let kind = shadow_kind(false, false, terrain);
+            let composed =
+                super::super::compose::compose_files(&test_pack(), &[], &kind, &read).unwrap();
+            assert_eq!(composed.file(), super::super::manifest::FILE);
+            assert_eq!(composed.files().count(), 0);
+            let (module, info) = validate(composed.text());
+            validate_webgl2(&module, composed.text());
+            none(&check_rules(&module, &composed));
+            none(&check_signatures(&module, &composed, &test_pack(), &kind));
+            assert_eq!(
+                composed.entry_points(),
+                [
+                    SHADOW_TERRAIN_VERTEX,
+                    SHADOW_ENTITY_VERTEX,
+                    SHADOW_TERRAIN_CUTOUT,
+                    SHADOW_ENTITY_CUTOUT
+                ]
+            );
+            for cutout in [SHADOW_TERRAIN_CUTOUT, SHADOW_ENTITY_CUTOUT] {
+                let entry = module
+                    .entry_points
+                    .iter()
+                    .find(|e| e.name == cutout)
+                    .expect("declared");
+                assert!(entry.function.result.is_none(), "{cutout} writes nothing");
+                assert!(
+                    statements(&entry.function.body)
+                        .iter()
+                        .any(|s| matches!(s, naga::Statement::Kill)),
+                    "{cutout}"
+                );
+            }
+            let names: Vec<&str> = composed.entry_points().iter().map(String::as_str).collect();
+            let used: Vec<&str> = used_globals(&module, &info, &composed, &names)
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect();
+            assert_eq!(
+                used,
+                ["frame", "nearest_clamp", "block_atlas", "entity_texture"],
+                "{terrain:?}"
+            );
+            assert_eq!(
+                composed.text().contains("var<storage"),
+                terrain == TerrainTier::Indirect
+            );
+            assert!(composed.text().contains(&format!(
+                "@group({SHADOW_DRAW_GROUP}) @binding(0) var<uniform> torch_shadow_draw: vec4<u32>;"
+            )));
+        }
     }
 
     #[test]
     fn a_shadow_colour_module_validates() {
         let pack = test_pack();
-        let text = "fn shadow(in: TerrainInput) -> vec4<f32> {\n    return in.base.color;\n}\n";
-        let bindings = bindings(&pack, &ModuleKind::Shadow);
-        let entries = entries_with(&pack, &ModuleKind::Shadow, test_seam);
-        validate(&format!(
-            "{}{text}\n{}",
-            prelude(&pack, &bindings),
-            entries.text
-        ));
-        assert_eq!(
-            entries.names,
-            [vertex_entry(Input::Terrain), SHADOW_FRAGMENT.to_owned()]
-        );
-
-        let composed = build(text, &ModuleKind::Shadow);
-        let (module, _) = validate(composed.text());
-        none(&check_signatures(
-            &module,
-            &composed,
-            &pack,
-            &ModuleKind::Shadow,
-        ));
+        for terrain in TerrainTier::ALL {
+            let kind = shadow_kind(true, false, terrain);
+            let composed = build(SHADOW_COLOUR, &kind);
+            assert_eq!(composed.file(), "p.wgsl");
+            let (module, info) = validate(composed.text());
+            if terrain == TerrainTier::Direct {
+                validate_webgl2(&module, composed.text());
+            }
+            none(&check_rules(&module, &composed));
+            none(&check_signatures(&module, &composed, &pack, &kind));
+            assert_eq!(
+                composed.entry_points(),
+                [
+                    SHADOW_TERRAIN_VERTEX,
+                    SHADOW_ENTITY_VERTEX,
+                    SHADOW_TERRAIN_FRAGMENT,
+                    SHADOW_TERRAIN_CUTOUT,
+                    SHADOW_ENTITY_FRAGMENT,
+                    SHADOW_ENTITY_CUTOUT,
+                ]
+            );
+            let names: Vec<&str> = composed.entry_points().iter().map(String::as_str).collect();
+            let used: Vec<&str> = used_globals(&module, &info, &composed, &names)
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect();
+            assert_eq!(
+                used,
+                [
+                    "frame",
+                    "linear_clamp",
+                    "nearest_clamp",
+                    "block_atlas",
+                    "lightmap",
+                    "entity_texture"
+                ]
+            );
+        }
+        let kind = shadow_kind(true, false, TerrainTier::Indirect);
         let wrong = build(
             "fn shadow(in: TerrainInput) -> Surface {\n    return in.base;\n}\n",
-            &ModuleKind::Shadow,
+            &kind,
         );
-        let (module, _) = validate(wrong.text());
-        let problems = check_signatures(&module, &wrong, &pack, &ModuleKind::Shadow);
+        let module = parse(wrong.without_entries());
+        let problems = check_signatures(&module, &wrong, &pack, &kind);
         assert_eq!(lines(&problems), [1], "{problems:#?}");
+    }
+
+    #[test]
+    fn a_shadow_module_displaces_the_terrain() {
+        let text = "fn displace(in: VertexInput) -> vec3<f32> {\n    return vec3<f32>(sin(frame.time.seconds), 0.0, 0.0);\n}\n";
+        let kind = shadow_kind(false, true, TerrainTier::Direct);
+        let composed = build(text, &kind);
+        let (module, _) = validate(composed.text());
+        validate_webgl2(&module, composed.text());
+        none(&check_signatures(&module, &composed, &test_pack(), &kind));
+        assert!(composed.text().contains("return displace(torch_in);"));
+        let wrong = build(
+            "fn displace(in: VertexInput) -> f32 {\n    return 0.0;\n}\n",
+            &kind,
+        );
+        let module = parse(wrong.without_entries());
+        assert_eq!(
+            check_signatures(&module, &wrong, &test_pack(), &kind).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_shadow_functions_bind_only_where_called() {
+        let calls = "fn lighting(in: ScreenInput) -> vec4<f32> {\n    \
+                         let p = vec3<f32>(in.uv, 1.0);\n    \
+                         let sun = shadow_light(p, vec3<f32>(0.0, 1.0, 0.0));\n    \
+                         return vec4<f32>(sun, f32(shadow_cascade(p)), 0.0, 1.0);\n}\n";
+        let (composed, module) = screen_module(calls);
+        let info = validator()
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(composed.text())));
+        validate_webgl2(&module, composed.text());
+        let used: Vec<&str> =
+            used_globals(&module, &info, &composed, &[SCREEN_VERTEX, SCREEN_FRAGMENT])
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect();
+        assert_eq!(used, ["frame", "shadow_compare", "shadow_depth"]);
+
+        let (composed, module) = screen_module(LIGHTING);
+        let info = validator()
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(composed.text())));
+        let used: Vec<&str> =
+            used_globals(&module, &info, &composed, &[SCREEN_VERTEX, SCREEN_FRAGMENT])
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect();
+        assert_eq!(used, ["frame"]);
+        assert!(
+            composed
+                .text()
+                .contains("fn shadow_light(position: vec3<f32>, normal: vec3<f32>) -> f32 {")
+        );
+        assert!(
+            composed
+                .text()
+                .contains("var shadow_depth: texture_depth_2d_array;")
+        );
+    }
+
+    #[test]
+    fn shadow_names_are_engine_names() {
+        assert!(SHADOW_PASS_WGSL.contains(&format!(
+            "@group({SHADOW_DRAW_GROUP}) @binding(0) var<uniform> torch_shadow_draw:"
+        )));
+        let mut pack = test_pack();
+        pack.options.push(PreludeOption {
+            id: "shadow_light".to_owned(),
+            kind: Kind::Bool,
+        });
+        let problems = check_interface(&pack);
+        assert_eq!(problems.len(), 1, "{problems:#?}");
+        assert!(
+            problems[0]
+                .message
+                .contains("`shadow_light` is both a name the engine declares and an option"),
+            "{problems:#?}"
+        );
     }
 
     #[test]
@@ -2647,6 +3790,50 @@ mod tests {
         assert_eq!(
             names(&FRAGMENT_INFO),
             ["pixel", "depth", "front_facing", "position"]
+        );
+        assert_eq!(
+            names(Input::Vertex.def()),
+            [
+                "position",
+                "uv",
+                "mid_uv",
+                "normal",
+                "light",
+                "material",
+                "mid_block"
+            ]
+        );
+        assert_eq!(
+            names(Input::Terrain.def()),
+            [
+                "base",
+                "position",
+                "uv",
+                "mid_uv",
+                "color",
+                "light",
+                "normal",
+                "tangent",
+                "mid_block",
+                "block_lit",
+                "sky_lit"
+            ]
+        );
+        let terrain_varyings =
+            Input::Terrain.def().members.len() - 1 + Input::Terrain.engine_varyings().len();
+        assert_eq!(terrain_varyings, 12);
+        assert_eq!(
+            names(&SURFACE),
+            [
+                "color",
+                "normal",
+                "light",
+                "emission",
+                "roughness",
+                "metalness",
+                "material",
+                "custom"
+            ]
         );
         for stage in Stage::ALL {
             let def = stage.info().input.def();

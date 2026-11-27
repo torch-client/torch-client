@@ -12,6 +12,7 @@ use azalea_protocol::packets::game::{
     s_player_command::{Action as PlayerCommand, ServerboundPlayerCommand},
     s_seen_advancements::{Action as SeenAction, ServerboundSeenAdvancements},
     s_set_command_block::ServerboundSetCommandBlock,
+    s_set_command_minecart::ServerboundSetCommandMinecart,
     s_sign_update::ServerboundSignUpdate,
     s_teleport_to_entity::ServerboundTeleportToEntity,
 };
@@ -26,7 +27,7 @@ use crate::client::{chat_sign, chat_text, viewwindow, worldsync};
 use crate::play::entity_feed::{bed_orientation_at, collect_entities};
 use crate::play::interaction;
 use crate::play::inventory_bridge::{
-    apply_inv_actions, container_kind, potion_contents, slot_stack,
+    apply_inv_actions, attach_book_events, container_kind, potion_contents, slot_stack,
 };
 use crate::renderer::{AnimInput, HumanoidAnim};
 use crate::session::{
@@ -76,9 +77,14 @@ struct TickSnapshot {
     xp_progress: f32,
     xp_level: u32,
     border: azalea::world::WorldBorder,
+    spectate: Option<crate::session::Spectate>,
 }
 
-fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot> {
+fn read_tick_snapshot(
+    bot: &Client,
+    shared: &SharedMutex,
+    world_tick: &crate::client::tick_rate::WorldTick,
+) -> Option<TickSnapshot> {
     if let Ok(world) = bot.world() {
         set_current_world(&world);
     }
@@ -106,27 +112,50 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
     let (local_anim, reads) = tick_local_anim(bot, shared, pos);
     #[cfg(feature = "skins")]
     let local_skin = local_skin(bot, reads.skin_parts);
-    let entity_anims = collect_entities(bot, &seen_players, &mut other_positions);
-    crate::play::tracking_emitter::tick(bot, shared);
-    crate::play::effect_particles::tick(bot, shared);
+    let camera_id = crate::client::tracking::spectated_id();
+    let (entity_anims, camera_anim) = collect_entities(
+        bot,
+        &seen_players,
+        &mut other_positions,
+        camera_id,
+        reads.first_person,
+        world_tick,
+    );
+    let spectate = camera_id.and_then(|id| {
+        resolve_spectate(
+            shared,
+            id,
+            &mut other_positions,
+            camera_anim,
+            reads.first_person,
+        )
+    });
+    crate::play::tracking_emitter::tick(bot, shared, world_tick.runs());
+    crate::play::effect_particles::tick(bot, shared, world_tick);
     crate::play::powder_snow::tick(bot, shared);
-    crate::play::area_cloud::tick(bot, shared);
-    crate::play::arrow_particles::tick(bot, shared);
-    crate::play::item_use::tick(bot, shared);
+    crate::play::area_cloud::tick(bot, shared, world_tick);
+    crate::play::arrow_particles::tick(bot, shared, world_tick);
+    crate::play::item_use::tick(bot, shared, world_tick);
     #[cfg(feature = "audio")]
     crate::play::riding::sound::tick(bot);
-    let end_ticks = shared
-        .lock()
-        .unwrap()
-        .session
-        .end_clock
-        .tick(crate::client::tracking::game_time() + 1);
+    let end_ticks = {
+        let mut s = shared.lock().unwrap();
+        let clock = &mut s.session.end_clock;
+        if world_tick.runs() {
+            clock.tick(crate::client::tracking::game_time() + 1)
+        } else {
+            clock.ticks()
+        }
+    };
     #[cfg(feature = "audio")]
-    crate::play::entity_sounds::tick(bot, end_ticks);
+    crate::play::entity_sounds::tick(bot, end_ticks, world_tick);
     #[cfg(not(feature = "audio"))]
     let _ = end_ticks;
 
-    GAME_TIME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if world_tick.runs() {
+        GAME_TIME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    crate::client::tracking::advance_client_ticks();
 
     crate::client::cooldowns::tick();
 
@@ -174,9 +203,17 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
         let menu_slots: Arc<[SlotStack]> = bot
             .menu()
             .map(|menu| {
+                let lectern = matches!(menu, azalea_inventory::Menu::Lectern { .. });
                 menu.slots()
                     .iter()
-                    .map(|s| slot_stack(s, registries, advanced_tooltips))
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let mut out = slot_stack(s, registries, advanced_tooltips);
+                        if lectern && i == 0 {
+                            attach_book_events(s, &mut out, registries);
+                        }
+                        out
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -185,12 +222,20 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
             .as_ref()
             .map(|inv| inv.inventory_menu.slots())
             .unwrap_or_default();
+        let main_hand = bot.selected_hotbar_slot().unwrap_or(0) as usize;
         let hotbar: Arc<[SlotStack]> = player_slots
             .get(36..46)
             .map(|slots| {
                 slots
                     .iter()
-                    .map(|s| slot_stack(s, registries, advanced_tooltips))
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let mut out = slot_stack(s, registries, advanced_tooltips);
+                        if i == main_hand || i == 9 {
+                            attach_book_events(s, &mut out, registries);
+                        }
+                        out
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -258,7 +303,7 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
     if let Some(world) = &world {
         use crate::blockentities::sim::PlayerSeen;
         let own_uuid = bot.profile().map(|p| p.uuid.as_u128()).unwrap_or(0);
-        let (game_time, players) = {
+        let (game_time, client_ticks, players) = {
             let s = shared.lock().unwrap();
             let own = PlayerSeen {
                 feet: s.session.player_pos,
@@ -270,14 +315,12 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
                 uuid: p.uuid,
                 height: p.body.bounding_box[1],
             });
-            (
-                s.session.game_time,
-                std::iter::once(own).chain(others).collect::<Vec<_>>(),
-            )
+            let players = std::iter::once(own).chain(others).collect::<Vec<_>>();
+            (s.session.game_time, s.session.client_ticks, players)
         };
         let snapshot = {
             let world = world.read();
-            blockentities::feed::publish(&world, game_time, &players)
+            blockentities::feed::publish(&world, game_time, &players, world_tick.runs())
         };
         blockentities::sim::flush(shared);
         if let Some(snapshot) = snapshot {
@@ -287,6 +330,7 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
                 std::mem::replace(&mut s.session.block_entities, snapshot)
             };
         }
+        blockentities::sim::piston::publish(client_ticks);
     }
 
     let hotbar_sel = bot.selected_hotbar_slot().unwrap_or(0);
@@ -450,6 +494,59 @@ fn read_tick_snapshot(bot: &Client, shared: &SharedMutex) -> Option<TickSnapshot
             .component::<azalea::world::WorldBorder>()
             .map(|b| *b)
             .unwrap_or_default(),
+        spectate,
+    })
+}
+
+fn resolve_spectate(
+    shared: &SharedMutex,
+    id: i32,
+    players: &mut Vec<crate::session::OtherPlayerInfo>,
+    camera_anim: Option<crate::entities::feed::EntityAnim>,
+    first_person: bool,
+) -> Option<crate::session::Spectate> {
+    use crate::session::{Spectate, SpectateTarget};
+
+    let vehicle = crate::client::tracking::passengers()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, riders)| riders.contains(&id))
+        .map(|(vehicle, _)| *vehicle);
+    let camera_distance = {
+        let map = crate::client::tracking::attributes().lock().unwrap();
+        EntityAttributes::of(&map, id).camera_distance(vehicle.and_then(|v| map.get(&v)))
+    };
+
+    if let Some(i) = players.iter().position(|p| p.id == id) {
+        let info = &players[i];
+        let anim = info.anim.clone();
+        let eye_height = info.body.eye_height;
+        if first_person && !anim.sample(1.0).sleeping {
+            players.remove(i);
+        }
+        return Some(Spectate {
+            id,
+            target: SpectateTarget::Player(Box::new(anim)),
+            eye_height,
+            camera_distance,
+            frozen: false,
+        });
+    }
+    if let Some(anim) = camera_anim {
+        return Some(Spectate {
+            id,
+            eye_height: anim.eye_height(),
+            target: SpectateTarget::Entity(Box::new(anim)),
+            camera_distance,
+            frozen: false,
+        });
+    }
+    let s = shared.lock().unwrap();
+    let last = s.session.spectate.as_ref().filter(|v| v.id == id)?;
+    Some(Spectate {
+        frozen: true,
+        ..last.clone()
     })
 }
 
@@ -789,9 +886,16 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
     let applied_clicks = inv_actions.len();
     let closing = inv_actions.iter().any(|a| matches!(a, InvAction::Close));
     let applied = apply_inv_actions(bot, inv_actions, horse);
-    if applied.creative_cursor.is_some() || !applied.horse_selected.is_empty() {
+    if applied.creative_cursor.is_some()
+        || !applied.horse_selected.is_empty()
+        || !applied.chat.is_empty()
+    {
         let mut s = shared.lock().unwrap();
         let session = &mut s.session;
+        #[cfg(feature = "click_gui")]
+        for line in applied.chat {
+            crate::modules::chat_math::show_local_spans(session, line);
+        }
         if applied.creative_cursor.is_some() {
             session.creative_cursor = applied.creative_cursor;
         }
@@ -812,8 +916,11 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
     }
     #[cfg(feature = "ui_utils")]
     crate::modules::ui_utils::tick(bot, shared);
+    #[cfg(all(feature = "click_gui", not(feature = "ui_utils")))]
+    crate::modules::ui_utils::tick(shared);
 
-    let Some(snapshot) = read_tick_snapshot(bot, shared) else {
+    let world_tick = crate::client::tick_rate::WorldTick::of(bot);
+    let Some(snapshot) = read_tick_snapshot(bot, shared, &world_tick) else {
         return;
     };
     let TickSnapshot {
@@ -858,13 +965,21 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
         xp_progress,
         xp_level,
         border,
+        spectate,
     } = snapshot;
 
-    let env =
-        crate::client::envprobe::sample(bot, [pos.x, pos.y + local_body.eye_height as f64, pos.z]);
+    let env_eye = match &spectate {
+        Some(view) => {
+            let feet = view.frame(1.0).feet;
+            [feet[0], feet[1] + view.eye_height as f64, feet[2]]
+        }
+        None => [pos.x, pos.y + local_body.eye_height as f64, pos.z],
+    };
+    let env = crate::client::envprobe::sample(bot, env_eye);
 
     let _old_others;
     let _old_entities;
+    let _old_spectate;
     let mut _old_menu = None;
     let mut _old_hotbar = None;
     let mut _old_armor = None;
@@ -881,6 +996,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
         command_block_update,
         game_master_send,
         command_block_pos,
+        command_minecart,
         sign_edit_open_pos,
         edit_book,
         seen_advancements,
@@ -891,9 +1007,16 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
         let mut s = shared.lock().unwrap();
         s.session.player_pos_prev = s.session.player_pos;
         s.session.player_pos = [pos.x, pos.y, pos.z];
+        s.session.cart_ride = crate::play::riding::cart_lerp::local_ride();
         s.session.last_tick_time = Some(crate::platform::time::Instant::now());
-        s.session.game_time = s.session.game_time.wrapping_add(1);
-        s.session.day_clock.advance();
+        s.session.tick_rate = crate::session::TickRate(world_tick.rate);
+        s.session.world_run = world_tick.run;
+        s.session.client_ticks = s.session.client_ticks.wrapping_add(1);
+        if world_tick.runs() {
+            s.session.world_ticks = s.session.world_ticks.wrapping_add(1);
+            s.session.game_time = s.session.game_time.wrapping_add(1);
+            s.session.day_clock.advance();
+        }
         if let Some(env) = env {
             s.session.env_prev = s.session.env.or(Some(env));
             s.session.env = Some(env);
@@ -1061,11 +1184,17 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
             crate::play::mob_effects::effect_blend_factor(&s.session.active_effects, "nausea", 1.0);
         let portal = s.session.portal_effect.cur;
         s.session.spinning_effect.tick(portal, nausea);
-        crate::play::item_pickup::tick(&mut s.session);
+        if world_tick.runs() {
+            crate::play::item_pickup::tick(&mut s.session);
+        }
         crate::client::hotbar_pop::tick(&mut s.session);
-        crate::client::sky_flash::tick(&mut s.session);
-        let eye_target = crate::renderer::systems::session_eye_height(&s.session);
+        crate::client::sky_flash::tick(&mut s.session, &world_tick);
+        let eye_target = match &spectate {
+            Some(view) => view.eye_height,
+            None => crate::renderer::systems::session_eye_height(&s.session),
+        };
         s.session.camera_eye.tick(eye_target);
+        _old_spectate = std::mem::replace(&mut s.session.spectate, spectate);
         s.session.sleep_timer = if sleeping {
             (s.session.sleep_timer + 1).min(100)
         } else if s.session.sleep_timer > 0 {
@@ -1079,13 +1208,13 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
         s.session.item_swap = item_swap;
         if s.session.xp_seen {
             if xp_progress != s.session.xp_progress {
-                s.session.xp_display_tick = GAME_TIME.load(std::sync::atomic::Ordering::Relaxed);
+                s.session.xp_display_tick = crate::client::tracking::client_ticks();
             }
         } else {
             s.session.xp_seen = true;
         }
         if s.session.container_kind == ContainerKind::Anvil {
-            s.session.xp_display_tick = GAME_TIME.load(std::sync::atomic::Ordering::Relaxed);
+            s.session.xp_display_tick = crate::client::tracking::client_ticks();
         }
         s.session.xp_progress = xp_progress;
         s.session.xp_level = xp_level;
@@ -1102,6 +1231,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
             s.session.command_block_update.take(),
             std::mem::take(&mut s.session.game_master_send),
             s.session.command_block_pos,
+            s.session.command_minecart,
             s.session.sign_edit_open_pos,
             s.session.edit_book.take(),
             std::mem::take(&mut s.session.seen_advancements),
@@ -1139,15 +1269,7 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
     }
 
     if swap_hands {
-        crate::client::outbox::send(
-            bot,
-            ServerboundPlayerAction {
-                action: Action::SwapItemWithOffhand,
-                pos: AzBlockPos::new(0, 0, 0),
-                direction: Direction::Down,
-                seq: 0,
-            },
-        );
+        interaction::swap_hands(bot);
     }
 
     for (drop, held) in drops {
@@ -1203,6 +1325,23 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
     {
         shared.lock().unwrap().session.command_block_pos = None;
     }
+    if let Some(id) = command_minecart {
+        let gone = bot
+            .ecs
+            .read()
+            .get::<azalea::entity::indexing::EntityIdIndex>(bot.entity)
+            .is_none_or(|index| {
+                index
+                    .get_by_minecraft_entity(azalea_core::entity_id::MinecraftEntityId(id))
+                    .is_none()
+            });
+        if gone {
+            let mut s = shared.lock().unwrap();
+            if s.session.command_minecart == Some(id) {
+                s.session.command_minecart = None;
+            }
+        }
+    }
 
     if let Some(sign_pos) = sign_edit_open_pos {
         let still_sign = bot
@@ -1232,14 +1371,37 @@ pub(crate) fn handle_tick(bot: &Client, shared: &SharedMutex) {
     }
 
     if let Some(update) = command_block_update {
-        bot.write_packet(ServerboundSetCommandBlock {
-            pos: update.pos,
-            command: update.command,
-            mode: update.mode,
-            track_output: update.track_output,
-            conditional: update.conditional,
-            automatic: update.automatic,
-        });
+        use crate::session::CommandBlockUpdate as U;
+        match update {
+            U::Block {
+                pos,
+                command,
+                mode,
+                track_output,
+                conditional,
+                automatic,
+            } => {
+                bot.write_packet(ServerboundSetCommandBlock {
+                    pos,
+                    command,
+                    mode,
+                    track_output,
+                    conditional,
+                    automatic,
+                });
+            }
+            U::Minecart {
+                id,
+                command,
+                track_output,
+            } => {
+                bot.write_packet(ServerboundSetCommandMinecart {
+                    entity: id as u32,
+                    command,
+                    track_output,
+                });
+            }
+        }
     }
 
     for packet in game_master_send {
@@ -1435,8 +1597,7 @@ fn hold_unsigned(
     (signing, waited): (bool, u32),
 ) -> (Vec<String>, bool) {
     const SIGNING_WAIT_TICKS: u32 = 60;
-    const UNAVAILABLE: &str =
-        "Signed chat is on, but this client has no signing certificate yet. Sent unsigned.";
+    const UNAVAILABLE: crate::lang::Key = crate::lang::Key::of("client.chat.signing_unavailable");
 
     if outgoing.is_empty() || !signing {
         return (outgoing, signing);
@@ -1455,7 +1616,7 @@ fn hold_unsigned(
     s.session.chat_signing_wait = waited + 1;
     if s.session.chat_signing_wait > SIGNING_WAIT_TICKS {
         s.session.chat_signing_wait = 0;
-        s.session.chat_send_error = Some(UNAVAILABLE.to_string());
+        s.session.chat_send_error = Some(UNAVAILABLE.get().to_string());
         return (outgoing, false);
     }
     let mut queue = outgoing;
@@ -1624,7 +1785,9 @@ fn collect_other_players(bot: &Client) -> (Vec<OtherPlayerInfo>, HashSet<i32>) {
                     .value_or_default(azalea_registry::builtin::Attribute::BelowNameDistance)
                     as f32,
                 armor: equip.get(&id).map(|e| e.armor.clone()),
+                hands: equip.get(&id).map(|e| e.hands.clone()),
                 anim: anim.clone(),
+                cart_ride: None,
             });
         }
     });
@@ -1642,7 +1805,7 @@ fn tick_local_anim(
     use azalea::entity::Pose;
     use azalea::entity::metadata;
 
-    let (yaw, camera_pitch, sprinting, attacking, main_hand, off_hand, armor, head, prefs, reads) = {
+    let (yaw, camera_pitch, sprinting, main_hand, off_hand, armor, head, prefs, reads) = {
         let s = shared.lock().unwrap();
         let hand = |i: usize| {
             s.session
@@ -1675,7 +1838,6 @@ fn tick_local_anim(
             s.camera_yaw,
             s.camera_pitch,
             s.move_flags & crate::session::MOVE_SPRINT != 0,
-            s.session.attack_held || s.session.attack_clicked,
             hand(s.session.hotbar_selected.min(8) as usize),
             hand(9),
             s.session.armor,
@@ -1756,9 +1918,6 @@ fn tick_local_anim(
     let mut anims = anim_states().lock().unwrap();
     let anim = anims.entry(LOCAL_ANIM_ID).or_default();
     anim.set_swing_effect(swing_effect);
-    if attacking {
-        anim.swing(prefs.main_hand_left);
-    }
     anim.tick(input);
     if let Some(boat_yaw) = boat_yaw {
         anim.turn_in_boat(boat_yaw);
@@ -2099,6 +2258,23 @@ fn publish_passenger(bot: &Client) {
     }
 }
 
+fn publish_controlled_camera(bot: &Client) {
+    use azalea::movement::NotControlledCamera;
+
+    let want = crate::client::tracking::spectated_id().is_some();
+    let have = bot.component::<NotControlledCamera>().is_ok();
+    if have == want {
+        return;
+    }
+    let mut ecs = bot.ecs.write();
+    let mut player = ecs.entity_mut(bot.entity);
+    if want {
+        player.insert(NotControlledCamera);
+    } else {
+        player.remove::<NotControlledCamera>();
+    }
+}
+
 fn apply_movement(bot: &Client, flags: u8, auto_jump_enabled: bool) {
     let fwd = flags & 1 != 0;
     let back = flags & 2 != 0;
@@ -2108,6 +2284,7 @@ fn apply_movement(bot: &Client, flags: u8, auto_jump_enabled: bool) {
     let sneak = flags & crate::session::MOVE_SNEAK != 0;
     let sprint = flags & 32 != 0;
     publish_passenger(bot);
+    publish_controlled_camera(bot);
     crate::play::riding::set_keys(crate::play::riding::Keys {
         left,
         right,

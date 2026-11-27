@@ -21,6 +21,7 @@ use super::Edge;
 use super::list::Entry;
 use super::list::{BitList, Built};
 use super::registry::Id;
+use crate::lang::Key;
 
 #[cfg(feature = "seed_cracker")]
 pub use run::tick;
@@ -41,7 +42,47 @@ static REQUEST: AtomicU8 = AtomicU8::new(0);
 #[cfg(feature = "seed_cracker")]
 const OWNER: &str = "seed_cracker";
 
-static GROUPS: [&str; 2] = ["Overworld", "End"];
+static GROUPS: [Key; 2] = [
+    Key::of("lists.finders.group.overworld"),
+    Key::of("lists.finders.group.end"),
+];
+
+#[cfg(feature = "seed_cracker")]
+pub(crate) const fn finder_key(kind: seedcrack::FinderKind) -> Key {
+    use seedcrack::FinderKind as F;
+    match kind {
+        F::BuriedTreasure => const { Key::of("lists.finders.buried_treasure") },
+        F::DesertPyramid => const { Key::of("lists.finders.desert_pyramid") },
+        F::JungleTemple => const { Key::of("lists.finders.jungle_temple") },
+        F::SwampHut => const { Key::of("lists.finders.swamp_hut") },
+        F::Igloo => const { Key::of("lists.finders.igloo") },
+        F::Shipwreck => const { Key::of("lists.finders.shipwreck") },
+        F::Monument => const { Key::of("lists.finders.monument") },
+        F::Outpost => const { Key::of("lists.finders.outpost") },
+        F::TrialChambers => const { Key::of("lists.finders.trial_chambers") },
+        F::EndCity => const { Key::of("lists.finders.end_city") },
+        F::EndPillars => const { Key::of("lists.finders.end_pillars") },
+        F::EndGateway => const { Key::of("lists.finders.end_gateway") },
+        F::Dungeon => const { Key::of("lists.finders.dungeon") },
+        F::DesertWell => const { Key::of("lists.finders.desert_well") },
+    }
+}
+
+#[cfg(feature = "seed_cracker")]
+pub(crate) fn finder_label(kind: seedcrack::FinderKind) -> &'static str {
+    finder_key(kind).get()
+}
+
+#[cfg(feature = "seed_cracker")]
+pub(crate) fn decorator_label(kind: seedcrack::DecoratorKind) -> &'static str {
+    use seedcrack::DecoratorKind as D;
+    match kind {
+        D::Dungeon => crate::lang::tr!("lists.finders.decorator.dungeon"),
+        D::DeepDungeon => crate::lang::tr!("lists.finders.decorator.deep_dungeon"),
+        D::DesertWell => crate::lang::tr!("lists.finders.decorator.desert_well"),
+        D::EndGateway => crate::lang::tr!("lists.finders.decorator.end_gateway"),
+    }
+}
 
 #[cfg(feature = "seed_cracker")]
 fn build_finders() -> Built {
@@ -50,6 +91,7 @@ fn build_finders() -> Built {
         .map(|k| Entry {
             group: (k.dimension() == seedcrack::Dimension::End) as u8,
             label: Cow::Borrowed(k.name()),
+            shown: finder_key(*k),
             on: true,
             color: 0,
         })
@@ -64,13 +106,22 @@ fn build_finders() -> Built {
 
 pub static FINDERS: BitList = BitList::new(
     "seed_cracker",
-    "Finders",
+    Key::of("lists.finders.title"),
     214.0,
     &GROUPS,
     false,
     super::esp::blocks::PRESETS,
     build_finders,
 );
+
+use super::registry::options;
+
+options! {
+    pub enum CrackMode {
+        Normal = "Normal",
+        Fast = "Fast",
+    }
+}
 
 pub const HUD_W: f32 = 160.0;
 pub const HUD_H: f32 = super::hud_panels::TextPanel::height(10, 1);
@@ -89,6 +140,9 @@ pub enum Request {
     Status = 1,
     Clear = 2,
     Restart = 3,
+    TrustBedrock = 4,
+    TrustStructures = 5,
+    ExportBedrock = 6,
 }
 
 #[cfg(feature = "seed_cracker")]
@@ -102,6 +156,9 @@ fn take_request() -> Option<Request> {
         1 => Some(Request::Status),
         2 => Some(Request::Clear),
         3 => Some(Request::Restart),
+        4 => Some(Request::TrustBedrock),
+        5 => Some(Request::TrustStructures),
+        6 => Some(Request::ExportBedrock),
         _ => None,
     }
 }
@@ -153,7 +210,7 @@ pub fn tick(_bot: &azalea::Client, shared: &crate::session::SharedMutex) {
         let mut s = shared.lock().unwrap();
         super::chat_math::show_local_colored(
             &mut s.session,
-            "Seed Cracker: not in this build (the seed_cracker feature)",
+            crate::lang::tr!("seed_cracker.not_built"),
             super::chat_math::RED,
         );
     }

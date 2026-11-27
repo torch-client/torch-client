@@ -150,8 +150,8 @@ pub(crate) const FILES: &[(&str, &str)] = &[
 
 const TOTAL: u16 = FILES.len() as u16;
 
-const NO_ANSWER: &str = "GitHub did not answer";
-const DAMAGED: &str = "A button texture arrived damaged";
+const NO_ANSWER: crate::lang::Key = crate::lang::Key::of("client.bedrock_art.no_answer");
+const DAMAGED: crate::lang::Key = crate::lang::Key::of("client.bedrock_art.damaged");
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Status {
@@ -204,7 +204,7 @@ pub(crate) fn request() {
             }
             Err(e) => {
                 log_warn!(TAG, "{}", e.detail);
-                *STATUS.lock() = Status::Failed(e.short);
+                *STATUS.lock() = Status::Failed(e.key.or(e.short));
             }
         }
     });
@@ -263,7 +263,7 @@ async fn fetch_one(name: &str, blob: &str) -> Result<Vec<u8>, Failure> {
     let body = crate::platform::http::get_bytes(&url, 0, &mut |got, _| got <= MAX_BYTES as u64)
         .await
         .map_err(|e| {
-            let mut failure = Failure::http(NO_ANSWER, e);
+            let mut failure = Failure::http(NO_ANSWER.get(), e);
             failure.detail = format!("{url}: {}", failure.detail);
             failure
         })?;
@@ -271,12 +271,12 @@ async fn fetch_one(name: &str, blob: &str) -> Result<Vec<u8>, Failure> {
         crate::platform::http::Fetched::Body(bytes) => bytes,
         crate::platform::http::Fetched::Cancelled => {
             return Err(Failure::new(
-                DAMAGED,
+                DAMAGED.get(),
                 format!("{name}: more than {MAX_BYTES} bytes"),
             ));
         }
     };
-    verify(name, blob, &bytes).map_err(|detail| Failure::new(DAMAGED, detail))?;
+    verify(name, blob, &bytes).map_err(|detail| Failure::new(DAMAGED.get(), detail))?;
     Ok(bytes)
 }
 

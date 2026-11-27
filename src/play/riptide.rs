@@ -9,7 +9,7 @@ use azalea::entity::{
 };
 use azalea::local_player::TabList;
 use azalea::physics::collision::entity_collisions::{AabbQuery, CollidableEntityQuery};
-use azalea::physics::collision::{MoveCtx, MoverType, move_colliding};
+use azalea::physics::collision::{MoveCtx, MoverType, MovingBlocks, move_colliding};
 use azalea::physics::travel::travel;
 use azalea::physics::{PhysicsSystems, ai_step};
 use azalea::world::{WorldBorder, WorldName, Worlds};
@@ -177,6 +177,7 @@ fn launch(
             &OnClimbable,
             &Pose,
             Option<&WorldBorder>,
+            Option<&MovingBlocks>,
         ),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
@@ -200,6 +201,7 @@ fn launch(
         on_climbable,
         pose,
         border,
+        moving,
     ) in &mut query
     {
         commands.entity(entity).remove::<PendingRiptide>();
@@ -231,6 +233,7 @@ fn launch(
             stands_on_lava: false,
             fall_flying: false,
             border,
+            moving,
             direction: *direction,
             sprinting: *sprinting,
             on_climbable: *on_climbable,

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::lang::Key;
 use crate::util::hash::sha1_hex;
 use crate::util::zip;
 use crate::{log_info, log_warn};
@@ -598,7 +599,7 @@ pub(crate) struct Download {
     done: AtomicU64,
     total: AtomicU64,
     cancel: AtomicBool,
-    error: Mutex<&'static str>,
+    error: Mutex<(Key, &'static str)>,
     sound_done: AtomicU64,
     sound_total: AtomicU64,
     sound_active: AtomicBool,
@@ -612,7 +613,7 @@ pub(crate) fn download() -> &'static Download {
         done: AtomicU64::new(0),
         total: AtomicU64::new(0),
         cancel: AtomicBool::new(false),
-        error: Mutex::new(""),
+        error: Mutex::new((Key::NONE, "")),
         sound_done: AtomicU64::new(0),
         sound_total: AtomicU64::new(0),
         sound_active: AtomicBool::new(false),
@@ -719,7 +720,12 @@ impl Download {
     }
 
     pub(crate) fn error(&self) -> &'static str {
-        *self.error.lock().unwrap()
+        let (key, english) = *self.error.lock().unwrap();
+        key.or(english)
+    }
+
+    pub(crate) fn network_failed(&self) -> bool {
+        self.error.lock().unwrap().0 == NETWORK_FAILURE
     }
 
     pub(crate) fn sound_progress(&self) -> (u64, u64) {
@@ -747,13 +753,14 @@ impl Download {
         self.stage.store(stage.code(), Ordering::Relaxed);
     }
 
-    fn fail(&self, short: &'static str, detail: impl std::fmt::Display) {
+    fn fail(&self, short: impl Phrase, detail: impl std::fmt::Display) {
         log_warn!("assets", "download failed: {detail}");
-        *self.error.lock().unwrap() = short;
+        let (english, key) = short.split();
+        *self.error.lock().unwrap() = (key, english);
         self.set(Stage::Failed);
     }
 
-    pub(crate) fn report_failure(&self, short: &'static str, detail: impl std::fmt::Display) {
+    pub(crate) fn report_failure(&self, short: Key, detail: impl std::fmt::Display) {
         self.fail(short, detail);
     }
 
@@ -774,7 +781,7 @@ impl Download {
         self.sound_done.store(0, Ordering::Relaxed);
         self.sound_total.store(0, Ordering::Relaxed);
         self.sound_skip.store(!sounds, Ordering::Relaxed);
-        *self.error.lock().unwrap() = "";
+        *self.error.lock().unwrap() = (Key::NONE, "");
         self.set(Stage::Asking);
 
         #[cfg(target_arch = "wasm32")]
@@ -838,10 +845,10 @@ impl Download {
         let meta = get_json(&pick_version(&manifest, version)?).await?;
         let index_url = meta["assetIndex"]["url"]
             .as_str()
-            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+            .ok_or_else(|| Failure::plain(NO_INDEX))?;
         let index_id = meta["assetIndex"]["id"]
             .as_str()
-            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+            .ok_or_else(|| Failure::plain(NO_INDEX))?;
 
         if mounted.as_deref() != Some(index_id) {
             log_warn!(
@@ -863,7 +870,7 @@ impl Download {
                 return Ok(false);
             };
             store::save_index(index_id, &pack(objects))
-                .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+                .map_err(|e| Failure::new(CANNOT_WRITE, e))?;
             RESTART_PENDING.store(true, Ordering::Relaxed);
         }
 
@@ -893,7 +900,7 @@ impl Download {
                 self.total.store(0, Ordering::Relaxed);
                 self.set(Stage::Cancelled);
             }
-            Err(e) => self.fail(e.short, e.detail),
+            Err(e) => self.fail(e.phrase(), e.detail),
         }
     }
 
@@ -909,16 +916,16 @@ impl Download {
         let client = &meta["downloads"]["client"];
         let url = client["url"]
             .as_str()
-            .ok_or_else(|| Failure::plain("Mojang sent no download link"))?;
+            .ok_or_else(|| Failure::plain(NO_LINK))?;
         let sha1 = client["sha1"].as_str().unwrap_or("");
         let size = client["size"].as_u64().unwrap_or(0);
 
         let id = meta["assetIndex"]["id"]
             .as_str()
-            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+            .ok_or_else(|| Failure::plain(NO_INDEX))?;
         let index_url = meta["assetIndex"]["url"]
             .as_str()
-            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+            .ok_or_else(|| Failure::plain(NO_INDEX))?;
         let index = get_json(index_url).await?;
         let kept = Kept::current();
         #[cfg(all(feature = "audio", target_arch = "wasm32"))]
@@ -978,7 +985,7 @@ impl Download {
                     {
                         let packed = pack(objects);
                         store::save_index(id, &packed)
-                            .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+                            .map_err(|e| Failure::new(CANNOT_WRITE, e))?;
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
@@ -1018,8 +1025,7 @@ impl Download {
         entries.retain(|(k, _)| k != META_KEY);
         entries.push((META_KEY.to_owned(), meta_blob(version, index_id.as_deref())));
         let packed = pack(entries);
-        store::save_version(version, &packed)
-            .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+        store::save_version(version, &packed).map_err(|e| Failure::new(CANNOT_WRITE, e))?;
         #[cfg(all(target_arch = "wasm32", feature = "asset_download"))]
         if had_kept {
             transfer::forget_kept();
@@ -1065,7 +1071,7 @@ impl Download {
                 None => Err(e),
             },
         }
-        .map_err(|e| Failure::http("The download was interrupted", e))?;
+        .map_err(|e| Failure::http(INTERRUPTED, e))?;
 
         let bytes = match body {
             crate::platform::http::Fetched::Body(bytes) => bytes,
@@ -1075,7 +1081,7 @@ impl Download {
         let got = sha1_hex(&bytes);
         if !sha1.is_empty() && got != sha1 {
             return Err(Failure::new(
-                "The download arrived damaged",
+                DOWNLOAD_DAMAGED,
                 format!("sha1 {got}, expected {sha1}"),
             ));
         }
@@ -1083,8 +1089,7 @@ impl Download {
     }
 
     fn collect(&self, jar: &[u8]) -> Result<Option<Vec<(String, Vec<u8>)>>, Failure> {
-        let entries =
-            zip::entries(jar).map_err(|e| Failure::new("The jar is not a readable archive", e))?;
+        let entries = zip::entries(jar).map_err(|e| Failure::new(JAR_UNREADABLE, e))?;
 
         self.set(Stage::Extracting);
         log_info!("assets", "reading {} entries", entries.len());
@@ -1101,14 +1106,12 @@ impl Download {
             if key.is_empty() || key.ends_with('/') || !kept(&key) {
                 continue;
             }
-            let bytes = zip::read(jar, entry)
-                .map_err(|e| Failure::new("The jar is not a readable archive", e))?;
+            let bytes = zip::read(jar, entry).map_err(|e| Failure::new(JAR_UNREADABLE, e))?;
             out.push((key, bytes));
         }
 
         if let Some(entry) = entries.iter().find(|e| e.name == PACK_ICON_SOURCE) {
-            let bytes = zip::read(jar, entry)
-                .map_err(|e| Failure::new("The jar is not a readable archive", e))?;
+            let bytes = zip::read(jar, entry).map_err(|e| Failure::new(JAR_UNREADABLE, e))?;
             out.push((PACK_ICON_KEY.to_owned(), bytes));
         }
 
@@ -1138,7 +1141,7 @@ impl Download {
             let url = object_url(&hash);
             let body = crate::platform::http::get_bytes(&url, 0, &mut |_, _| !self.cancelled())
                 .await
-                .map_err(|e| Failure::http("Could not reach Mojang", e))?;
+                .map_err(|e| Failure::http(NO_ANSWER, e))?;
             let bytes = match body {
                 crate::platform::http::Fetched::Body(bytes) => bytes,
                 crate::platform::http::Fetched::Cancelled => return Ok(None),
@@ -1147,7 +1150,7 @@ impl Download {
             let got = sha1_hex(&bytes);
             if got != hash {
                 return Err(Failure::new(
-                    "An asset arrived damaged",
+                    ASSET_DAMAGED,
                     format!("{key}: sha1 {got}, expected {hash}"),
                 ));
             }
@@ -1202,10 +1205,10 @@ impl Download {
             return Ok(false);
         };
         #[cfg(feature = "small_audio")]
-        let defs_text = crate::audio::subset::trim(&defs_text)
-            .map_err(|e| Failure::new("sounds.json will not parse", e))?;
+        let defs_text =
+            crate::audio::subset::trim(&defs_text).map_err(|e| Failure::new(SOUNDS_PARSE, e))?;
         let defs = crate::audio::defs::Defs::parse(&defs_text)
-            .map_err(|e| Failure::new("sounds.json will not parse", e))?;
+            .map_err(|e| Failure::new(SOUNDS_PARSE, e))?;
         let wanted = sound_files(&index, &defs);
         let total = listed_size(&wanted);
         self.sound_total.store(total, Ordering::Relaxed);
@@ -1242,15 +1245,14 @@ impl Download {
                         let bytes = match crate::platform::http::get_bytes_blocking(&url) {
                             Ok(bytes) => bytes,
                             Err(e) => {
-                                *failed.lock().unwrap() =
-                                    Some(Failure::http("A sound could not be fetched", e));
+                                *failed.lock().unwrap() = Some(Failure::http(SOUND_FETCH, e));
                                 return;
                             }
                         };
                         let got = sha1_hex(&bytes);
                         if got != *hash {
                             *failed.lock().unwrap() = Some(Failure::new(
-                                "A sound arrived damaged",
+                                SOUND_DAMAGED,
                                 format!("{key}: sha1 {got}, expected {hash}"),
                             ));
                             return;
@@ -1275,20 +1277,20 @@ impl Download {
         log_info!("assets", "packing {} sounds", entries.len());
         let packed = pack(entries);
         crate::audio::store::save(index_id, &packed, &defs_text)
-            .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+            .map_err(|e| Failure::new(CANNOT_WRITE, e))?;
         Ok(true)
     }
 
     #[cfg(feature = "audio")]
     async fn fetch_sound_defs(&self, index: &serde_json::Value) -> Result<Option<String>, Failure> {
         let (hash, _) = index_object(index, "minecraft/sounds.json")
-            .ok_or_else(|| Failure::plain("The asset index lists no sounds.json"))?;
+            .ok_or_else(|| Failure::plain(NO_SOUNDS_JSON))?;
         let Some(bytes) = get_object(&hash, &|| self.cancelled()).await? else {
             return Ok(None);
         };
         String::from_utf8(bytes)
             .map(Some)
-            .map_err(|e| Failure::new("sounds.json is not text", e))
+            .map_err(|e| Failure::new(SOUNDS_NOT_TEXT, e))
     }
 
     #[cfg(all(feature = "audio", target_arch = "wasm32"))]
@@ -1317,10 +1319,9 @@ impl Download {
         let Some(full) = self.fetch_sound_defs(index).await? else {
             return Ok(None);
         };
-        let trimmed =
-            subset::trim(&full).map_err(|e| Failure::new("sounds.json will not parse", e))?;
-        let defs = crate::audio::defs::Defs::parse(&trimmed)
-            .map_err(|e| Failure::new("sounds.json will not parse", e))?;
+        let trimmed = subset::trim(&full).map_err(|e| Failure::new(SOUNDS_PARSE, e))?;
+        let defs =
+            crate::audio::defs::Defs::parse(&trimmed).map_err(|e| Failure::new(SOUNDS_PARSE, e))?;
         let wanted = sound_files(index, &defs);
         let total = listed_size(&wanted);
         self.sound_total.store(total, Ordering::Relaxed);
@@ -1375,7 +1376,7 @@ impl Download {
         let meta = get_json(&pick_version(&manifest, version)?).await?;
         let index_url = meta["assetIndex"]["url"]
             .as_str()
-            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+            .ok_or_else(|| Failure::plain(NO_INDEX))?;
         let index = get_json(index_url).await?;
         let Some(objects) = self
             .fetch_objects(&index, |key| object_wanted(missing, key))
@@ -1384,7 +1385,7 @@ impl Download {
             return Ok(false);
         };
         if objects.is_empty() {
-            return Err(Failure::plain("Mojang lists none of the missing assets"));
+            return Err(Failure::plain(NONE_LISTED));
         }
 
         let mut entries = transfer::current_entries();
@@ -1394,8 +1395,7 @@ impl Download {
                 None => entries.push((key, bytes)),
             }
         }
-        store::save_version(version, &pack(entries))
-            .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+        store::save_version(version, &pack(entries)).map_err(|e| Failure::new(CANNOT_WRITE, e))?;
         if let Err(e) = call_page("keepStoredAssets") {
             log_warn!("assets", "{e}; the assets last until the tab closes");
         }
@@ -1413,7 +1413,7 @@ impl Download {
         let meta = get_json(&pick_version(&manifest, version)?).await?;
         let index_url = meta["assetIndex"]["url"]
             .as_str()
-            .ok_or_else(|| Failure::plain("Mojang sent no asset index"))?;
+            .ok_or_else(|| Failure::plain(NO_INDEX))?;
         let index = get_json(index_url).await?;
         self.set(Stage::Sounds);
         let Some(sounds) = self.web_sound_run(&index).await? else {
@@ -1425,8 +1425,7 @@ impl Download {
             key.as_str() != sounds_store::DEFS_KEY && !key.starts_with(sounds_store::PREFIX)
         });
         entries.extend(sounds.iter().cloned());
-        store::save_version(version, &pack(entries))
-            .map_err(|e| Failure::new("Cannot write to the assets folder", e))?;
+        store::save_version(version, &pack(entries)).map_err(|e| Failure::new(CANNOT_WRITE, e))?;
         if let Err(e) = call_page("keepStoredAssets") {
             log_warn!("assets", "{e}; the sounds last until the tab closes");
         }
@@ -1511,7 +1510,7 @@ fn listed_objects(
 ) -> Result<Vec<Listed>, Failure> {
     let objects = index["objects"]
         .as_object()
-        .ok_or_else(|| Failure::plain("Mojang sent something unreadable"))?;
+        .ok_or_else(|| Failure::plain(UNREADABLE))?;
     Ok(objects
         .iter()
         .filter_map(|(name, info)| {
@@ -1545,7 +1544,7 @@ pub(super) async fn get_object(
     let url = object_url(hash);
     let body = crate::platform::http::get_bytes(&url, 0, &mut |_, _| !cancelled())
         .await
-        .map_err(|e| Failure::http("Mojang's asset store did not answer", e))?;
+        .map_err(|e| Failure::http(STORE_NO_ANSWER, e))?;
     let bytes = match body {
         crate::platform::http::Fetched::Body(bytes) => bytes,
         crate::platform::http::Fetched::Cancelled => return Ok(None),
@@ -1553,7 +1552,7 @@ pub(super) async fn get_object(
     let got = sha1_hex(&bytes);
     if got != hash {
         return Err(Failure::new(
-            "An asset arrived damaged",
+            ASSET_DAMAGED,
             format!("sha1 {got}, expected {hash}"),
         ));
     }
@@ -1643,13 +1642,13 @@ impl SoundTask {
     fn spawn(dl: &'static Download, meta: &serde_json::Value) -> Result<SoundTask, Failure> {
         let index = &meta["assetIndex"];
         let (Some(url), Some(id)) = (index["url"].as_str(), index["id"].as_str()) else {
-            return Err(Failure::plain("Mojang sent no asset index"));
+            return Err(Failure::plain(NO_INDEX));
         };
         let (url, id) = (url.to_owned(), id.to_owned());
         let handle = std::thread::Builder::new()
             .name("sound-download".into())
             .spawn(move || crate::platform::executor::block_on(dl.install_sounds(&url, &id)))
-            .map_err(|e| Failure::new("A sound could not be fetched", e))?;
+            .map_err(|e| Failure::new(SOUND_FETCH, e))?;
         Ok(SoundTask {
             dl,
             handle: Some(handle),
@@ -1663,7 +1662,7 @@ impl SoundTask {
         }
         let result = handle
             .join()
-            .unwrap_or_else(|_| Err(Failure::plain("A sound could not be fetched")));
+            .unwrap_or_else(|_| Err(Failure::plain(SOUND_FETCH)));
         self.dl.settle_sounds(result)
     }
 }
@@ -1736,22 +1735,70 @@ fn unifont_is_stubbed<'a>(get: impl Fn(&str) -> Option<&'a [u8]>) -> bool {
     }
 }
 
-pub(crate) const NETWORK_FAILURE: &str = "Network connection problem";
+pub(crate) const NETWORK_FAILURE: Key = Key::of("install.fail.network");
+const NO_ANSWER: Key = Key::of("install.fail.no_answer");
+const STORE_NO_ANSWER: Key = Key::of("install.fail.store_no_answer");
+const UNREADABLE: Key = Key::of("install.fail.unreadable");
+const NO_VERSION: Key = Key::of("install.fail.no_version");
+const NO_INDEX: Key = Key::of("install.fail.no_index");
+const NO_LINK: Key = Key::of("install.fail.no_link");
+#[cfg(target_arch = "wasm32")]
+const NONE_LISTED: Key = Key::of("install.fail.none_listed");
+const INTERRUPTED: Key = Key::of("install.fail.interrupted");
+const DOWNLOAD_DAMAGED: Key = Key::of("install.fail.download_damaged");
+const ASSET_DAMAGED: Key = Key::of("install.fail.asset_damaged");
+const JAR_UNREADABLE: Key = Key::of("install.fail.jar_unreadable");
+const CANNOT_WRITE: Key = Key::of("install.fail.cannot_write");
+#[cfg(feature = "audio")]
+const NO_SOUNDS_JSON: Key = Key::of("install.fail.no_sounds_json");
+#[cfg(feature = "audio")]
+const SOUNDS_NOT_TEXT: Key = Key::of("install.fail.sounds_not_text");
+#[cfg(feature = "audio")]
+const SOUNDS_PARSE: Key = Key::of("install.fail.sounds_parse");
+#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+const SOUND_FETCH: Key = Key::of("install.fail.sound_fetch");
+#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+const SOUND_DAMAGED: Key = Key::of("install.fail.sound_damaged");
+
+pub(super) trait Phrase {
+    fn split(self) -> (&'static str, Key);
+}
+
+impl Phrase for &'static str {
+    fn split(self) -> (&'static str, Key) {
+        (self, Key::NONE)
+    }
+}
+
+impl Phrase for Key {
+    fn split(self) -> (&'static str, Key) {
+        (self.english(), self)
+    }
+}
+
+impl Phrase for (&'static str, Key) {
+    fn split(self) -> (&'static str, Key) {
+        self
+    }
+}
 
 pub(super) struct Failure {
     pub(super) short: &'static str,
+    pub(super) key: Key,
     pub(super) detail: String,
 }
 
 impl Failure {
-    pub(super) fn new(short: &'static str, detail: impl std::fmt::Display) -> Failure {
+    pub(super) fn new(short: impl Phrase, detail: impl std::fmt::Display) -> Failure {
+        let (short, key) = short.split();
         Failure {
             short,
+            key,
             detail: detail.to_string(),
         }
     }
 
-    pub(super) fn http(short: &'static str, e: crate::platform::http::HttpError) -> Failure {
+    pub(super) fn http(short: impl Phrase, e: crate::platform::http::HttpError) -> Failure {
         if e.network {
             Failure::new(NETWORK_FAILURE, e)
         } else {
@@ -1759,9 +1806,15 @@ impl Failure {
         }
     }
 
-    pub(super) fn plain(short: &'static str) -> Failure {
+    fn phrase(&self) -> (&'static str, Key) {
+        (self.short, self.key)
+    }
+
+    pub(super) fn plain(short: impl Phrase) -> Failure {
+        let (short, key) = short.split();
         Failure {
             short,
+            key,
             detail: short.to_string(),
         }
     }
@@ -1778,8 +1831,8 @@ pub(super) async fn get_json(url: &str) -> Result<serde_json::Value, Failure> {
             None => Err(e),
         },
     }
-    .map_err(|e| Failure::http("Could not reach Mojang", e))?;
-    serde_json::from_str(&text).map_err(|e| Failure::new("Mojang sent something unreadable", e))
+    .map_err(|e| Failure::http(NO_ANSWER, e))?;
+    serde_json::from_str(&text).map_err(|e| Failure::new(UNREADABLE, e))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1795,17 +1848,12 @@ fn fallback_url(_: &str) -> Option<String> {
 pub(super) fn pick_version(manifest: &serde_json::Value, version: &str) -> Result<String, Failure> {
     manifest["versions"]
         .as_array()
-        .ok_or_else(|| Failure::plain("Mojang sent something unreadable"))?
+        .ok_or_else(|| Failure::plain(UNREADABLE))?
         .iter()
         .find(|v| v["id"].as_str() == Some(version))
         .and_then(|v| v["url"].as_str())
         .map(str::to_string)
-        .ok_or_else(|| {
-            Failure::new(
-                "Mojang has no version to install",
-                format!("the manifest lists no {version}"),
-            )
-        })
+        .ok_or_else(|| Failure::new(NO_VERSION, format!("the manifest lists no {version}")))
 }
 
 #[cfg(test)]

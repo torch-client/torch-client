@@ -1,6 +1,11 @@
-use azalea_buf::AzBuf;
+use std::{
+    io::{self, Cursor, Write},
+    num::NonZeroU32,
+};
+
+use azalea_buf::{AzBuf, AzBufVar, BufReadError};
 use azalea_core::{checksum::Checksum, registry_holder::RegistryHolder};
-use azalea_inventory::{ItemStack, operations::ClickType};
+use azalea_inventory::{ItemStack, operations::ClickType, read_item_kind, write_item_kind};
 use azalea_protocol_macros::ServerboundGamePacket;
 use azalea_registry::builtin::{DataComponentKind, ItemKind};
 use indexmap::IndexMap;
@@ -21,12 +26,28 @@ pub struct ServerboundContainerClick {
 #[derive(AzBuf, Clone, Debug, PartialEq)]
 pub struct HashedStack(pub Option<HashedActualItem>);
 
-#[derive(AzBuf, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HashedActualItem {
     pub kind: ItemKind,
-    #[var]
     pub count: i32,
     pub components: HashedPatchMap,
+    pub modded_kind: Option<NonZeroU32>,
+}
+impl AzBuf for HashedActualItem {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        let (kind, modded_kind) = read_item_kind(buf)?;
+        Ok(Self {
+            kind,
+            count: i32::azalea_read_var(buf)?,
+            components: HashedPatchMap::azalea_read(buf)?,
+            modded_kind,
+        })
+    }
+    fn azalea_write(&self, buf: &mut impl Write) -> io::Result<()> {
+        write_item_kind(self.kind, self.modded_kind, buf)?;
+        self.count.azalea_write_var(buf)?;
+        self.components.azalea_write(buf)
+    }
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq)]
@@ -62,6 +83,7 @@ impl HashedStack {
             kind: item.kind,
             count: item.count,
             components,
+            modded_kind: item.modded_kind(),
         };
         Self(Some(item))
     }

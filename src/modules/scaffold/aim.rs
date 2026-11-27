@@ -11,7 +11,7 @@ use crate::modules::sent::{Look, look_at, view_vector};
 use crate::modules::{MS_PER_TICK, roll, turn};
 use crate::util::mth::wrap_degrees;
 
-pub(super) struct WorldCells<'a> {
+pub(in crate::modules) struct WorldCells<'a> {
     pub world: &'a azalea_world::World,
     pub item: BlockKind,
 }
@@ -309,7 +309,7 @@ pub(super) fn acceptable(c: &impl Cells, me: &Me, pos: BlockPos, target_y: i32) 
     dx * dx + dz * dz <= max
 }
 
-pub(super) fn face_click(hit: &BlockHitResult) -> BlockHitResult {
+pub(in crate::modules) fn face_click(hit: &BlockHitResult) -> BlockHitResult {
     let p = hit.block_pos;
     let inner = |v: f64| v.clamp(0.02, 0.98);
     let mut r = [

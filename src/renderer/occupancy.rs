@@ -236,10 +236,11 @@ impl Occupancy {
 
     #[inline]
     pub fn takes_fluid_overlay(&self, x: i32, y: i32, z: i32) -> bool {
+        use crate::util::block_model::{MANGROVE_ROOTS_CULL_GROUP, POWDER_SNOW_CULL_GROUP};
         match self.index(x, y, z) {
             Some(i) => {
                 let group = self.cull_group[i];
-                group != 0 && group != crate::util::block_model::POWDER_SNOW_CULL_GROUP
+                group != 0 && group != POWDER_SNOW_CULL_GROUP && group != MANGROVE_ROOTS_CULL_GROUP
             }
             None => false,
         }

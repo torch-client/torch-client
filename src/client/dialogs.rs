@@ -89,9 +89,36 @@ fn relay_config_packets(
                 shared.lock().unwrap().session.server_links = links(&p.links);
             }
             ClientboundConfigPacket::UpdateTags(p) => update_tags(&p.tags),
+            ClientboundConfigPacket::CustomPayload(p) => brand(shared, &p.identifier, &p.data),
+            ClientboundConfigPacket::UpdateEnabledFeatures(p) => {
+                crate::client::tracking::MINECART_IMPROVEMENTS.store(
+                    has_minecart_improvements(&p.features),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
             _ => {}
         }
     }
+}
+
+pub(crate) fn brand(
+    shared: &crate::session::SharedMutex,
+    channel: &azalea_registry::identifier::Identifier,
+    data: &[u8],
+) {
+    use azalea_buf::AzBuf;
+    if *channel != azalea_registry::identifier::Identifier::new("minecraft:brand") {
+        return;
+    }
+    match String::azalea_read(&mut std::io::Cursor::new(data)) {
+        Ok(name) => shared.lock().unwrap().session.server_info.brand = Some(name),
+        Err(e) => log_warn!("net", "unreadable server brand: {e}"),
+    }
+}
+
+fn has_minecart_improvements(features: &[azalea_registry::identifier::Identifier]) -> bool {
+    let flag = azalea_registry::identifier::Identifier::new("minecraft:minecart_improvements");
+    features.iter().any(|f| *f == flag)
 }
 
 fn send_dialog_submits(
@@ -153,5 +180,28 @@ fn nbt(payload: Option<simdnbt::owned::NbtTag>) -> simdnbt::owned::Nbt {
             simdnbt::owned::Nbt::new(simdnbt::Mutf8String::from(""), compound)
         }
         _ => simdnbt::owned::Nbt::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use azalea_registry::identifier::Identifier;
+
+    use super::has_minecart_improvements;
+
+    #[test]
+    fn minecart_flag_is_found_with_or_without_namespace() {
+        let vanilla = Identifier::new("minecraft:vanilla");
+        assert!(!has_minecart_improvements(&[vanilla.clone()]));
+        assert!(has_minecart_improvements(&[
+            vanilla.clone(),
+            Identifier::new("minecraft:minecart_improvements"),
+        ]));
+        assert!(has_minecart_improvements(&[Identifier::new(
+            "minecart_improvements"
+        )]));
+        assert!(!has_minecart_improvements(&[Identifier::new(
+            "other:minecart_improvements"
+        )]));
     }
 }

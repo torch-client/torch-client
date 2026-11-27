@@ -47,7 +47,7 @@ fn ease(t: f32) -> f32 {
 
 struct Running {
     item: HeldItem,
-    start: f32,
+    start: f64,
     swing: [f32; 2],
 }
 
@@ -118,7 +118,7 @@ fn sync_item_activation(
     mut item_mesh: Query<&mut Mesh3d, With<ActivationItemNode>>,
 ) {
     let state = &mut *state;
-    let now = view.local.age_ticks;
+    let now = view.world_time;
     match &view.item_activation {
         None => state.running = None,
         Some(activation) if view.no_render.has(crate::modules::no_render::Part::Totem) => {
@@ -133,7 +133,7 @@ fn sync_item_activation(
             ];
             state.running = Some(Running {
                 item: activation.item.clone(),
-                start: now.floor(),
+                start: view.world_ticks as f64,
                 swing,
             });
         }
@@ -142,7 +142,7 @@ fn sync_item_activation(
     let progress = state
         .running
         .as_ref()
-        .map(|r| (now - r.start) / LENGTH_TICKS);
+        .map(|r| (now - r.start) as f32 / LENGTH_TICKS);
     if progress.is_some_and(|p| !(0.0..1.0).contains(&p)) {
         state.running = None;
     }

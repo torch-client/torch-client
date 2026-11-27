@@ -1,4 +1,5 @@
 pub(crate) mod api;
+pub(crate) mod build;
 pub(crate) mod caps;
 pub(crate) mod check;
 pub(crate) mod compose;

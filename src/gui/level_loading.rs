@@ -17,6 +17,7 @@ pub struct State {
     pub reason: LevelLoadingReason,
     pub opened_at: Option<crate::platform::time::Instant>,
     pub connecting: bool,
+    pub transferring: bool,
 }
 
 pub const SHOWN_AT_MOST: std::time::Duration = std::time::Duration::from_secs(3);
@@ -31,8 +32,14 @@ impl State {
 
     pub fn begin_connect(&mut self) {
         self.connecting = true;
+        self.transferring = false;
         self.reason = LevelLoadingReason::Other;
         self.opened_at = None;
+    }
+
+    pub fn begin_transfer(&mut self) {
+        self.begin_connect();
+        self.transferring = true;
     }
 
     pub fn overdue(&self) -> bool {
@@ -53,10 +60,12 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) -> Option<Sc
 
     let x_center = (ctx.vw / 2.0).floor();
     let text_top = (ctx.vh / 2.0).floor() - TEXT_ABOVE_CENTRE;
-    let text = if state.level_loading.connecting {
-        label!("connect.connecting")
-    } else {
+    let text = if !state.level_loading.connecting {
         label!("multiplayer.downloadingTerrain")
+    } else if state.level_loading.transferring {
+        label!("connect.transferring")
+    } else {
+        label!("connect.connecting")
     };
     p.text_centered(text, x_center, text_top, 0xFFFFFF, true);
 

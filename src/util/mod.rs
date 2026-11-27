@@ -12,8 +12,12 @@ pub(crate) mod fall;
 pub(crate) mod hash;
 pub(crate) mod interp;
 pub(crate) mod javarandom;
+#[cfg(any(feature = "multi_language", test))]
+#[cfg_attr(not(feature = "multi_language"), allow(dead_code))]
+pub(crate) mod keyboard_layout;
 pub(crate) mod level_events;
 pub(crate) mod map_color;
+pub(crate) mod minecart_lerp;
 pub(crate) mod mth;
 pub(crate) mod named_cycle;
 #[cfg(any(feature = "shader_support", resource_packs, lua_mods))]
@@ -21,7 +25,10 @@ pub(crate) mod named_cycle;
 pub(crate) mod pack;
 pub(crate) mod particle_assets;
 pub(crate) mod particles;
+pub(crate) mod placeholders;
+pub(crate) mod rail;
 pub(crate) mod reload;
+pub mod snbt;
 pub(crate) mod variants;
 #[cfg_attr(not(feature = "multiversion"), allow(dead_code))]
 pub(crate) mod wire;
@@ -43,6 +50,16 @@ pub(crate) fn session_protocol() -> i32 {
 #[cfg(not(feature = "multiversion"))]
 pub(crate) fn session_protocol() -> i32 {
     azalea_protocol::packets::PROTOCOL_VERSION
+}
+
+#[cfg(feature = "multiversion")]
+pub(crate) fn session_version_name() -> Option<&'static str> {
+    crate::protocol::version::ProtocolVersion::from_protocol(session_protocol()).map(|v| v.name)
+}
+
+#[cfg(not(feature = "multiversion"))]
+pub(crate) fn session_version_name() -> Option<&'static str> {
+    Some(crate::ASSET_VERSION)
 }
 
 macro_rules! global {

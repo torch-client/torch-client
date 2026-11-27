@@ -9,10 +9,10 @@ use azalea_registry::builtin::MobEffect;
 use azalea_world::World;
 
 use super::{
-    BlockWithShape, MoveCtx, VoxelShape, entity_collisions::get_entity_collisions,
-    world_collisions::get_block_collisions_for,
+    BlockWithShape, MoveCtx, MovingBlocks, entity_collisions::get_entity_collisions,
+    world_collisions::get_block_collisions_with,
 };
-use crate::block_jump_factor;
+use crate::block_jump_factor_with;
 
 pub fn update_auto_jump(ctx: &mut MoveCtx, start: Vec3) {
     let Some(state) = ctx.physics_state else {
@@ -23,7 +23,7 @@ pub fn update_auto_jump(ctx: &mut MoveCtx, start: Vec3) {
         || ctx.physics.auto_jump_time > 0
         || !ctx.physics.on_ground()
         || state.move_vector.length_squared() <= 0.
-        || block_jump_factor(ctx.world, Position::new(position)) < 1.
+        || block_jump_factor_with(ctx.world, ctx.moving, Position::new(position)) < 1.
     {
         return;
     }
@@ -56,17 +56,17 @@ pub fn update_auto_jump(ctx: &mut MoveCtx, start: Vec3) {
         return;
     }
 
-    let world = ctx.world;
+    let (world, moving) = (ctx.world, ctx.moving);
     let bounds = ctx.physics.bounding_box;
     let width = (bounds.max.x - bounds.min.x) as f32;
     let height = (bounds.max.y - bounds.min.y) as f32;
 
     let mut ceiling = BlockPos::from(position.up(height as f64));
-    if !collision_shape(world, ceiling).is_empty() {
+    if collision_top(world, moving, ceiling).is_some() {
         return;
     }
     ceiling = ceiling.up(1);
-    if !collision_shape(world, ceiling).is_empty() {
+    if collision_top(world, moving, ceiling).is_some() {
         return;
     }
 
@@ -97,7 +97,7 @@ pub fn update_auto_jump(ctx: &mut MoveCtx, start: Vec3) {
         ctx.aabb_query,
         ctx.collidable_entity_query,
     );
-    shapes.extend(get_block_collisions_for(world, &test_box, ctx.powder_snow()));
+    shapes.extend(get_block_collisions_with(world, &test_box, ctx.powder_snow(), moving));
 
     let mut obstacle_height = None;
     for shape_box in shapes.iter().flat_map(|shape| shape.to_aabbs()) {
@@ -111,16 +111,15 @@ pub fn update_auto_jump(ctx: &mut MoveCtx, start: Vec3) {
         let mut steps = 1;
         while (steps as f32) < jump_height {
             let above = obstacle_pos.up(steps);
-            let shape = collision_shape(world, above);
-            if !shape.is_empty() {
-                obstacle = (*shape).max(Axis::Y) as f32 + above.y as f32;
+            if let Some(top) = collision_top(world, moving, above) {
+                obstacle = top as f32 + above.y as f32;
                 if obstacle as f64 - position.y > jump_height as f64 {
                     return;
                 }
             }
             if steps > 1 {
                 ceiling = ceiling.up(1);
-                if !collision_shape(world, ceiling).is_empty() {
+                if collision_top(world, moving, ceiling).is_some() {
                     return;
                 }
             }
@@ -138,6 +137,17 @@ pub fn update_auto_jump(ctx: &mut MoveCtx, start: Vec3) {
     }
 }
 
-fn collision_shape(world: &World, pos: BlockPos) -> std::borrow::Cow<'static, VoxelShape> {
-    world.get_block_state(pos).unwrap_or_default().collision_shape(pos)
+fn collision_top(world: &World, moving: Option<&MovingBlocks>, pos: BlockPos) -> Option<f64> {
+    if let Some(moving) = moving
+        && moving.covers(pos)
+    {
+        return moving
+            .boxes
+            .iter()
+            .filter(|(cell, _)| *cell == pos)
+            .map(|(_, shape)| shape.max.y - f64::from(pos.y))
+            .reduce(f64::max);
+    }
+    let shape = world.get_block_state(pos).unwrap_or_default().collision_shape(pos);
+    (!shape.is_empty()).then(|| (*shape).max(Axis::Y))
 }

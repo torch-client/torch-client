@@ -6,12 +6,13 @@ use crate::gui::painter::Painter;
 use crate::gui::tooltip::label;
 use crate::gui::widgets::{Button, WIDGET_HEIGHT};
 use crate::gui::{GuiState, Screen, ScreenCtx};
+use crate::lang::{Key, tr, trf};
 
-const TITLE: &str = "Update available";
-const FAILED_TITLE: &str = "The update failed";
-const DONT_SHOW: &str = "Don't show me again";
-const TRY_AGAIN: &str = "Try Again";
-const RELEASES_PAGE: &str = "Releases Page";
+const TITLE: Key = Key::of("selfupdate.title");
+const FAILED_TITLE: Key = Key::of("selfupdate.failed_title");
+const DONT_SHOW: Key = Key::of("selfupdate.dont_show");
+const TRY_AGAIN: Key = Key::of("selfupdate.try_again");
+const RELEASES_PAGE: Key = Key::of("selfupdate.releases_page");
 
 const ROW_BUTTON_W: f32 = 120.0;
 const ROW_MARGIN: f32 = 16.0;
@@ -27,9 +28,9 @@ pub fn draw(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
     match self_update::stage() {
         Stage::Idle => prompt(p, state, ctx),
         Stage::Asking | Stage::Downloading => downloading(p, ctx),
-        Stage::Installing => status(p, ctx, "Installing"),
+        Stage::Installing => status(p, ctx, tr!("selfupdate.installing")),
         Stage::Done => {
-            status(p, ctx, "Restarting");
+            status(p, ctx, tr!("selfupdate.restarting"));
             state.quit = true;
         }
         Stage::Failed(error) => failed(p, state, ctx, &error),
@@ -41,20 +42,17 @@ fn prompt(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx) {
         state.nav = Some(Screen::Title);
         return;
     };
-    let message = format!(
-        "Torch Client {tag} is out, and this is {}.\nDownload and install it now?\nThe client restarts when it finishes.",
-        env!("CARGO_PKG_VERSION"),
-    );
-    let warning = format!("Don't show me again skips every release up to {tag}.");
+    let message = trf!("selfupdate.prompt", tag, env!("CARGO_PKG_VERSION"));
+    let warning = trf!("selfupdate.skip_warning", tag);
     let buttons = [
         label!("gui.yes").to_owned(),
         label!("gui.no").to_owned(),
-        DONT_SHOW.to_owned(),
+        DONT_SHOW.get().to_owned(),
     ];
     let chosen = draw_box(
         p,
         ctx,
-        TITLE,
+        TITLE.get(),
         &message,
         Some(warning.as_str()),
         &buttons,
@@ -81,7 +79,13 @@ fn downloading(p: &mut Painter, ctx: &ScreenCtx) {
     } else {
         0.0
     };
-    p.text_centered("Downloading the update", cx, mid - 30.0, 0xFFFFFF, true);
+    p.text_centered(
+        tr!("selfupdate.downloading"),
+        cx,
+        mid - 30.0,
+        0xFFFFFF,
+        true,
+    );
     bar(p, ctx, mid - 14.0, frac);
     p.text_centered(&of_total(done, total), cx, mid + 2.0, 0xA0A0A8, true);
 
@@ -105,14 +109,14 @@ fn status(p: &mut Painter, ctx: &ScreenCtx, text: &str) {
 
 fn failed(p: &mut Painter, state: &mut GuiState, ctx: &ScreenCtx, error: &str) {
     let buttons = [
-        TRY_AGAIN.to_owned(),
-        RELEASES_PAGE.to_owned(),
+        TRY_AGAIN.get().to_owned(),
+        RELEASES_PAGE.get().to_owned(),
         label!("gui.back").to_owned(),
     ];
     let chosen = draw_box(
         p,
         ctx,
-        FAILED_TITLE,
+        FAILED_TITLE.get(),
         error,
         None,
         &buttons,

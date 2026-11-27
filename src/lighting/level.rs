@@ -627,6 +627,11 @@ impl LightWorker {
             v.borrow_mut().clear();
         }
 
+        if !crate::renderer::lighting_enabled() {
+            Self::run_unlit(batch, level, view, map, changed, stats, on_dirty);
+            return;
+        }
+
         let mut columns_added: Vec<ColumnPos> = Vec::new();
         let mut columns_removed: Vec<ColumnPos> = Vec::new();
         let mut to_mesh: Vec<(Arc<RwLock<World>>, ColumnPos)> = Vec::new();
@@ -726,6 +731,56 @@ impl LightWorker {
             crate::prof_span!("light:on_dirty");
             let world = v.borrow().world.clone();
             on_dirty(&world, &dirty, &to_mesh);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_unlit<F>(
+        batch: Vec<LightJob>,
+        level: &mut Option<LevelLight>,
+        view: &mut Option<std::cell::RefCell<WorldView>>,
+        map: &Arc<RwLock<LightMap>>,
+        changed: &mut Option<Vec<SectionPos>>,
+        stats: bool,
+        on_dirty: &mut F,
+    ) where
+        F: FnMut(&Arc<RwLock<World>>, &[SectionPos], &[(Arc<RwLock<World>>, ColumnPos)]),
+    {
+        if level.is_some() || view.is_some() {
+            *level = None;
+            *view = None;
+            *map.write() = LightMap::default();
+            if let Some(changed) = changed.as_mut() {
+                changed.clear();
+            }
+            if stats {
+                use std::sync::atomic::Ordering::Relaxed;
+                ENGINE_BYTES.store(0, Relaxed);
+                ENGINE_SECTIONS.store(0, Relaxed);
+            }
+        }
+
+        let mut to_mesh: Vec<(Arc<RwLock<World>>, ColumnPos)> = Vec::new();
+        for job in batch {
+            match job {
+                LightJob::Reset => to_mesh.clear(),
+                LightJob::Unload { col } => to_mesh.retain(|(_, c)| *c != col),
+                LightJob::Chunk { world, mesh, .. } => {
+                    to_mesh.extend(mesh.into_iter().map(|c| (world.clone(), c)));
+                }
+                LightJob::Light { .. } | LightJob::Block { .. } => {}
+            }
+        }
+        let mut start = 0;
+        while start < to_mesh.len() {
+            let world = to_mesh[start].0.clone();
+            let end = to_mesh[start..]
+                .iter()
+                .position(|(w, _)| !Arc::ptr_eq(w, &world))
+                .map_or(to_mesh.len(), |n| start + n);
+            crate::prof_span!("light:on_dirty");
+            on_dirty(&world, &[], &to_mesh[start..end]);
+            start = end;
         }
     }
 }

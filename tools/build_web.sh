@@ -65,6 +65,50 @@ if [[ -n "$RUSTC_COMMIT" ]]; then
 fi
 export RUSTFLAGS="${RUSTFLAGS:-} $REMAP"
 
+if python3 tools/artifact_name.py has microsoft_web "$@" \
+    && [[ -z "${CC_wasm32_unknown_unknown:-}${TARGET_CC:-}" ]]; then
+  wasm_cc=
+  if [[ -n "${WASM_CLANG:-}" ]]; then
+    wasm_cc=$(command -v "$WASM_CLANG" || echo "$WASM_CLANG")
+    if [[ "${wasm_cc##*/}" == clang++* ]]; then
+      wasm_cc="$(dirname "$wasm_cc")/clang${wasm_cc##*/clang++}"
+    fi
+  elif [[ -n "${WASI_SDK_PATH:-}" ]]; then
+    wasm_cc="$WASI_SDK_PATH/bin/clang"
+  else
+    for name in clang clang-20 clang-19 clang-18 clang-17 clang-16 clang-15; do
+      if command -v "$name" >/dev/null 2>&1; then
+        wasm_cc=$(command -v "$name")
+        break
+      fi
+    done
+    if [[ -z "$wasm_cc" ]]; then
+      ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+      if [[ -z "$ndk" ]]; then
+        sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
+        ndk=$(ls -d "$sdk"/ndk/*/ 2>/dev/null | sort -V | tail -1 || true)
+      fi
+      if [[ -n "$ndk" ]]; then
+        wasm_cc="${ndk%/}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+      fi
+    fi
+  fi
+  if [[ -z "$wasm_cc" || ! -x "$wasm_cc" ]] \
+      || ! "$wasm_cc" --print-targets 2>/dev/null | grep wasm32 >/dev/null; then
+    echo "microsoft_web needs a clang with the wasm32 backend to build ring, and none was found${wasm_cc:+ ($wasm_cc is missing or has no wasm32 target)}; set WASM_CLANG to one" >&2
+    exit 1
+  fi
+  wasm_ar="$(dirname "$wasm_cc")/llvm-ar${wasm_cc##*/clang}"
+  [[ -x "$wasm_ar" ]] || wasm_ar="$(dirname "$wasm_cc")/llvm-ar"
+  [[ -x "$wasm_ar" ]] || wasm_ar=$(command -v llvm-ar || true)
+  if [[ -z "$wasm_ar" ]]; then
+    echo "microsoft_web needs llvm-ar to build ring for wasm32, and there is none beside $wasm_cc or on PATH" >&2
+    exit 1
+  fi
+  export CC_wasm32_unknown_unknown="$wasm_cc" AR_wasm32_unknown_unknown="$wasm_ar"
+  echo "==> ring's C for wasm32: $wasm_cc, $wasm_ar"
+fi
+
 echo "==> cargo rustc --lib --crate-type cdylib --profile $PROFILE --target $TARGET $*"
 cargo rustc --lib --crate-type cdylib --profile "$PROFILE" --target "$TARGET" "$@"
 mark "cargo"

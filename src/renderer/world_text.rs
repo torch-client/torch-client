@@ -58,6 +58,13 @@ impl Pass {
         matches!(self, Pass::SeeThrough)
     }
 
+    fn depth_bias(self) -> i32 {
+        match self {
+            Pass::Normal => 10,
+            Pass::SeeThrough | Pass::MapLabels => 0,
+        }
+    }
+
     fn layering(self) -> i8 {
         match self {
             Pass::MapLabels => 2,
@@ -424,7 +431,7 @@ fn setup(
             params: EntityParams::new(LightMode::Text, 0.0, Lit::full_bright()),
             glint_texture: None,
             alpha_mode: AlphaMode::Blend,
-            depth_bias: 0,
+            depth_bias: pass.depth_bias(),
             sort_bias: 0.0,
             see_through: pass.see_through(),
             layering: pass.layering(),

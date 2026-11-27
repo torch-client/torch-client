@@ -1,4 +1,4 @@
-use azalea_core::tick::GameTick;
+use azalea_core::tick::{GameTick, TickRateManager};
 use azalea_entity::LocalEntity;
 use azalea_physics::PhysicsSystems;
 use azalea_protocol::packets::game::ServerboundClientTickEnd;
@@ -22,7 +22,10 @@ impl Plugin for TickEndPlugin {
     }
 }
 
-fn tick_world_border(mut query: Query<&mut WorldBorder>) {
+fn tick_world_border(mut query: Query<&mut WorldBorder>, rate: Option<Res<TickRateManager>>) {
+    if rate.is_some_and(|rate| !rate.runs_normally()) {
+        return;
+    }
     for mut border in &mut query {
         if border.is_moving() {
             border.tick();

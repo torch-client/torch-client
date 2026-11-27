@@ -26,6 +26,9 @@ md-5.workspace = true
 [features]
 signing = ["dep:azalea-buf"]
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
 [[bench]]
 harness = false
 name = "my_benchmark"

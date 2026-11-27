@@ -397,7 +397,8 @@ impl Field {
         let client = if st.options.commands_only {
             None
         } else {
-            crate::modules::commands::completion().filter(|(lead, _)| value.starts_with(*lead))
+            crate::modules::commands::completion_at(&value, cursor)
+                .filter(|(lead, _)| value.starts_with(*lead))
         };
         let options = match &client {
             Some((lead, _)) => commands::Options {

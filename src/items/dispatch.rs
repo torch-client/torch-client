@@ -239,16 +239,22 @@ impl Needles {
         spawn: Option<[i32; 3]>,
         death: Option<[i32; 3]>,
         level: &'static str,
+        runs: bool,
     ) -> ItemWorld {
         let sun = positive_modulo(sun_angle / std::f32::consts::TAU, 1.0);
         let moon = moon_phase as f32 / MOON_PHASE_COUNT;
+        let toward = 0.5 - (positive_modulo(yaw / 360.0, 1.0) - 0.25);
+        if !runs {
+            self.world.needle = toward;
+        }
         if self.tick != Some(game_time) {
             self.tick = Some(game_time);
             let random = self.random.next_f32();
             let clock_random = self.random.next_f32();
-            let yaw01 = positive_modulo(yaw / 360.0, 1.0);
             self.world.random = random;
-            self.world.needle = self.needle.update(0.5 - (yaw01 - 0.25), 0.8);
+            if runs {
+                self.world.needle = self.needle.update(toward, 0.8);
+            }
             self.world.spin = self.spin.update(random, 0.8);
             self.world.daytime = self.daytime.update(sun, 0.9);
             self.world.clock = self.clock.update(clock_random, 0.9);

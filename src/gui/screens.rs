@@ -45,10 +45,11 @@ pub fn draw(
             subtitle_text: s.session.subtitle_text.take(),
             title_times: s.session.title_times.take(),
             titles_clear: s.session.titles_clear.take(),
+            world_stopped: !s.session.world_run.runs,
             menu_slots,
             hotbar: s.session.hotbar.clone(),
             hotbar_pop: {
-                let partial = crate::renderer::systems::partial_ticks(&s);
+                let partial = crate::renderer::systems::world_partial_ticks(&s);
                 s.session.hotbar_pop.map(|pop| f32::from(pop) - partial)
             },
             armor: s.session.armor_stacks.clone(),
@@ -118,9 +119,10 @@ pub fn draw(
             xp_level: s.session.xp_level,
             xp_recent_gain: s.session.xp_seen
                 && s.session.xp_display_tick.saturating_add(100)
-                    > crate::client::tracking::GAME_TIME.load(std::sync::atomic::Ordering::Relaxed),
+                    > crate::client::tracking::client_ticks(),
             waypoints: s.session.waypoints.clone(),
             eye_pos: [eye_pos[0], eye_pos[1] + eye_height, eye_pos[2]],
+            feet_pos: eye_pos,
             camera_yaw: s.camera_yaw,
             camera_pitch: s.camera_pitch,
             sleep_timer: s.session.sleep_timer,
@@ -398,7 +400,7 @@ pub fn draw(
             ctx.vw,
             ctx.vh,
             ElementId::Debug,
-            "Debug (F3), off",
+            crate::lang::tr!("gui.screens.debug_ghost"),
             |p| {
                 hud::draw_debug(p, &ctx, &state.hud, &hud::DebugInfo::default());
             },
@@ -464,12 +466,14 @@ pub fn draw(
         Screen::Options
         | Screen::VideoSettings
         | Screen::Controls
+        | Screen::MouseSettings
         | Screen::GameSettings
         | Screen::ManageStorage => {
             backdrop(p, state, &ctx);
             match state.screen {
                 Screen::VideoSettings => options::draw_video(p, state, &ctx),
                 Screen::Controls => options::draw_controls(p, state, &ctx),
+                Screen::MouseSettings => options::draw_mouse(p, state, &ctx),
                 Screen::GameSettings => options::draw_game(p, state, &ctx),
                 Screen::ManageStorage => options::draw_manage_storage(p, state, &ctx),
                 _ => options::draw(p, state, &ctx),
@@ -550,6 +554,56 @@ pub fn draw(
         }
         Screen::DirectConnect => {
             multiplayer::draw_direct(p, state, &ctx);
+            None
+        }
+        #[cfg(singleplayer)]
+        Screen::SelectWorld => {
+            crate::gui::worlds::select::draw(p, state, &ctx);
+            None
+        }
+        #[cfg(singleplayer)]
+        Screen::CreateWorld => {
+            crate::gui::worlds::create::draw(p, state, &ctx);
+            None
+        }
+        #[cfg(singleplayer)]
+        Screen::EditWorld => {
+            crate::gui::worlds::edit::draw(p, state, &ctx);
+            None
+        }
+        #[cfg(singleplayer)]
+        Screen::WorldGameRules => {
+            crate::gui::worlds::gamerules::draw(p, state, &ctx);
+            None
+        }
+        #[cfg(singleplayer)]
+        Screen::WorldExperiments => {
+            crate::gui::worlds::experiments::draw(p, state, &ctx);
+            None
+        }
+        #[cfg(singleplayer)]
+        Screen::WorldDataPacks => {
+            crate::gui::worlds::datapacks::draw(p, state, &ctx);
+            None
+        }
+        #[cfg(singleplayer)]
+        Screen::WorldFlat => {
+            crate::gui::worlds::flat::draw(p, state, &ctx);
+            None
+        }
+        #[cfg(singleplayer)]
+        Screen::WorldBuffet => {
+            crate::gui::worlds::buffet::draw(p, state, &ctx);
+            None
+        }
+        #[cfg(singleplayer)]
+        Screen::WorldOptimize => {
+            crate::gui::worlds::optimize::draw(p, state, &ctx);
+            None
+        }
+        #[cfg(singleplayer)]
+        Screen::MultiplayerOptions => {
+            crate::gui::worlds::lan::draw(p, state, &ctx);
             None
         }
         #[cfg(any(feature = "eagler", target_arch = "wasm32"))]
@@ -748,8 +802,9 @@ pub fn draw(
             None
         }
         Screen::BookView => {
-            if let Some(next) = book::draw_view(p, &mut state.book, &ctx) {
-                state.nav = Some(next);
+            let advanced = state.advanced_tooltips;
+            if let Some(out) = book::draw_view(p, &mut state.book, &ctx, shared, advanced) {
+                apply_book_out(out, state, shared);
             }
             None
         }
@@ -869,6 +924,9 @@ pub fn draw(
         }
     }
 
+    if let Some(click) = state.book.lectern_click.take() {
+        container::book::click(state, click, &snap, shared, &mut actions);
+    }
     if !actions.is_empty() {
         let mut s = shared.lock().unwrap();
         for action in &actions {
@@ -1257,6 +1315,7 @@ fn draw_locator_bar(p: &mut Painter, vw: f32, vh: f32, snap: &Snapshot) {
 
     let mc_yaw = wrap_degrees(-snap.camera_yaw - 180.0);
     let screen_mid = ((vw - 9.0) / 2.0).ceil();
+    let styles = crate::gui::waypoint_style::styles();
 
     for wp in snap.waypoints.iter() {
         let (dx, dz, horiz_dist, dy) = waypoint_delta(snap, wp);
@@ -1268,19 +1327,17 @@ fn draw_locator_bar(p: &mut Painter, vw: f32, vh: f32, snap: &Snapshot) {
         let dot_pos = (angle * 173.0 / 2.0 / 60.0).floor();
         let x = screen_mid + dot_pos;
 
-        let sprite = if wp.style == "bowtie" {
-            "hud/locator_bar_dot/bowtie".to_string()
+        let style = if wp.foreign_style {
+            crate::gui::waypoint_style::DEFAULT
         } else {
-            format!(
-                "hud/locator_bar_dot/default_{}",
-                dot_style_index(horiz_dist)
-            )
+            wp.style.as_str()
         };
+        let sprite = styles.get(style).sprite(style_distance(snap, wp));
         let color = wp
             .color
             .map(pack_color)
             .unwrap_or_else(|| identity_color(&wp.id));
-        p.sprite_tinted(&sprite, x, top - 2.0, 9.0, 9.0, color);
+        p.sprite_tinted(sprite, x, top - 2.0, 9.0, 9.0, color);
 
         let vertical_angle = dy.atan2(horiz_dist as f64).to_degrees() as f32;
         let pitch_delta = vertical_angle - snap.camera_pitch;
@@ -1328,17 +1385,29 @@ fn identity_color(id: &crate::session::WaypointKey) -> u32 {
     0xFF00_0000 | scaled(r) << 16 | scaled(g) << 8 | scaled(b)
 }
 
-fn dot_style_index(distance: f32) -> u32 {
-    const NEAR: f32 = 128.0;
-    const FAR: f32 = 332.0;
-    if distance < NEAR {
-        0
-    } else if distance >= FAR {
-        3
-    } else {
-        let t = (distance - NEAR) / (FAR - NEAR);
-        1 + (t * 2.0).floor() as u32
-    }
+fn style_distance(snap: &Snapshot, wp: &crate::session::WaypointInfo) -> f32 {
+    use crate::session::WaypointPos;
+    let [px, py, pz] = snap.feet_pos;
+    let squared = match wp.pos {
+        WaypointPos::Block([bx, by, bz]) => {
+            let (dx, dy, dz) = (
+                bx as f64 + 0.5 - px,
+                by as f64 + 0.5 - py,
+                bz as f64 + 0.5 - pz,
+            );
+            dx * dx + dy * dy + dz * dz
+        }
+        WaypointPos::Chunk { x, z } => {
+            let (dx, dy, dz) = (
+                (x * 16 + 8) as f64 + 0.5 - px,
+                py.floor() + 0.5 - py,
+                (z * 16 + 8) as f64 + 0.5 - pz,
+            );
+            dx * dx + dy * dy + dz * dz
+        }
+        WaypointPos::Azimuth(_) => return f32::INFINITY,
+    };
+    (squared as f32).sqrt()
 }
 
 fn waypoint_delta(snap: &Snapshot, wp: &crate::session::WaypointInfo) -> (f32, f32, f32, f64) {
@@ -1634,6 +1703,10 @@ fn apply_book_out(out: book::BookOut, state: &mut GuiState, shared: &SharedMutex
         book::BookOut::Send(req) => {
             shared.lock().unwrap().session.edit_book = Some(req);
             state.nav = Some(Screen::None);
+        }
+        book::BookOut::Chat(text) => {
+            state.chat.open(&text);
+            state.nav = Some(Screen::Chat);
         }
     }
 }

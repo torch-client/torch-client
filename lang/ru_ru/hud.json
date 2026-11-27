@@ -1,0 +1,7 @@
+{
+  "hud.flying": "Полёт",
+  "hud.status_preview": "Подключение...",
+  "hud.fps": "FPS: %s",
+  "hud.ram": "ОЗУ: %s",
+  "hud.freecam": "[ ФРИКАМ ]"
+}

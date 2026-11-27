@@ -117,6 +117,7 @@ pub struct ChatState {
     warning: Option<(String, u32)>,
     tag_tooltip: Option<(u64, Vec<Vec<Span>>)>,
     link_prompt: Option<String>,
+    command_prompt: Option<crate::gui::confirmcommand::CommandPrompt>,
     #[cfg(feature = "mobile_ui")]
     mobile_last_tap: Option<(Caret, u32)>,
     #[cfg(feature = "mobile_ui")]
@@ -150,6 +151,7 @@ impl Default for ChatState {
             warning: None,
             tag_tooltip: None,
             link_prompt: None,
+            command_prompt: None,
             #[cfg(feature = "mobile_ui")]
             mobile_last_tap: None,
             #[cfg(feature = "mobile_ui")]
@@ -209,7 +211,7 @@ impl ChatState {
     }
 
     pub fn dismiss_link_prompt(&mut self) -> bool {
-        self.link_prompt.take().is_some()
+        self.link_prompt.take().is_some() | self.command_prompt.take().is_some()
     }
 
     pub fn close(&mut self) {
@@ -220,6 +222,7 @@ impl ChatState {
         self.reset_scroll();
         self.field.suggest = suggestions::State::default();
         self.link_prompt = None;
+        self.command_prompt = None;
     }
 
     pub fn submit(&mut self) -> Option<String> {
@@ -629,7 +632,7 @@ pub fn draw(
     }
     if let Some(reason) = error {
         let font = &p.atlas.font;
-        chat.push_error(&format!("Message not sent: {reason}"), font, tick);
+        chat.push_error(&crate::lang::trf!("gui.chat.not_sent", reason), font, tick);
         chat.warning = Some((reason, tick));
     }
 
@@ -644,7 +647,7 @@ pub fn draw(
         }
     }
 
-    let prompt_up = chat.link_prompt.is_some();
+    let prompt_up = chat.link_prompt.is_some() || chat.command_prompt.is_some();
     if focused && !prompt_up {
         handle_input(p, chat, ctx, shared);
     }
@@ -656,18 +659,43 @@ pub fn draw(
     if focused {
         draw_input(p, chat, ctx);
         suggestions::draw(p, &mut chat.field, ctx, SUGGEST, suggest_anchor(ctx));
-        if visible
-            && chat.link_prompt.is_none()
-            && !draw_span_tooltip(p, chat, ctx, advanced_tooltips)
-        {
+        if visible && !prompt_up && !draw_span_tooltip(p, chat, ctx, advanced_tooltips) {
             draw_tag_tooltip(p, chat, ctx);
         }
     }
+    let fresh_input;
+    let prompt_ctx = if prompt_up {
+        ctx.with_input(ctx.input)
+    } else {
+        fresh_input = GuiInput {
+            left_click: false,
+            ..ctx.input.clone()
+        };
+        ctx.with_input(&fresh_input)
+    };
+    let ctx = &prompt_ctx;
     if focused
         && let Some(url) = chat.link_prompt.clone()
         && confirmlink::draw(p, ctx, &url)
     {
         chat.link_prompt = None;
+    }
+    if focused
+        && let Some(prompt) = chat.command_prompt.clone()
+        && let Some(answer) = prompt.draw(p, ctx, true, false)
+    {
+        chat.command_prompt = None;
+        if let crate::gui::confirmcommand::Answer::Accept = answer {
+            use crate::gui::confirmcommand::Accepted;
+            match prompt.accept(false) {
+                Accepted::Run(command) => crate::play::dialog::queue_submit(
+                    shared,
+                    crate::play::dialog::Submit::RunCommand(command),
+                ),
+                Accepted::Chat(text) => chat.field.input.set_text(&text),
+                Accepted::Copied => {}
+            }
+        }
     }
 }
 
@@ -769,6 +797,7 @@ fn click_span(
             chat.field.suggest.allow = true;
         }
         Followup::Link(url) => chat.link_prompt = Some(url),
+        Followup::Confirm(prompt) => chat.command_prompt = Some(prompt),
         Followup::Dialog(dialog) => {
             shared.lock().unwrap().session.dialog_show = Some(dialog);
         }
@@ -1077,7 +1106,7 @@ fn draw_line_text(
     p.text(&inverted, x0, y, false);
 }
 
-fn slice_spans(spans: &[Span], from: usize, to: usize) -> Vec<Span> {
+pub(in crate::gui) fn slice_spans(spans: &[Span], from: usize, to: usize) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
     let mut i = 0usize;
     for span in spans {

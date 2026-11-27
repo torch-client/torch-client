@@ -1,0 +1,11 @@
+{
+  "title.edit_profile": "Изменить профиль",
+  "title.disclaimer": "Не связано с Mojang или Microsoft.",
+  "title.open_credits": "(Открыть титры)",
+  "title.update_available": "Доступно обновление: %s",
+  "title.fullscreen": "Полноэкранный режим",
+  "title.exit_fullscreen": "Выйти из полноэкранного режима",
+  "title.eagler_mode": "Режим Eagler (wss:// включён)",
+  "title.singleplayer_tip": "Экспериментально - SteelMC",
+  "title.singleplayer_soon": "Одиночная игра (скоро)"
+}

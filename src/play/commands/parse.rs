@@ -31,7 +31,7 @@ impl Context {
 pub struct Parse {
     pub chain: Vec<Context>,
     pub cursor: usize,
-    pub errors: Vec<(usize, ParseError)>,
+    pub errors: Vec<(usize, ParseError, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +45,7 @@ impl ParseError {
     fn message(&self) -> String {
         match self {
             ParseError::LiteralIncorrect(expected) => format!("Expected literal {expected}"),
-            ParseError::Argument(message) => format!("Could not parse command: {message}"),
+            ParseError::Argument(message) => message.clone(),
             ParseError::ExpectedSeparator => {
                 "Expected whitespace to end one argument, but found trailing data".to_string()
             }
@@ -83,7 +83,7 @@ impl Parse {
         }
     }
 
-    fn can_read(&self, input: &[char]) -> bool {
+    pub(super) fn can_read(&self, input: &[char]) -> bool {
         self.cursor < input.len()
     }
 
@@ -93,12 +93,22 @@ impl Parse {
 }
 
 pub fn parse(tree: &CommandTree, input: &[char], start: usize) -> Parse {
+    parse_as(tree, input, start, true)
+}
+
+pub(super) fn parse_as(
+    tree: &CommandTree,
+    input: &[char],
+    start: usize,
+    allow_restricted: bool,
+) -> Parse {
     parse_nodes(
         tree,
         tree.root,
         input,
         start,
         Context::new(tree.root, start),
+        allow_restricted,
     )
 }
 
@@ -108,20 +118,24 @@ fn parse_nodes(
     input: &[char],
     cursor: usize,
     context_so_far: Context,
+    allow_restricted: bool,
 ) -> Parse {
-    let mut errors: Vec<(usize, ParseError)> = Vec::new();
+    let mut errors: Vec<(usize, ParseError, usize)> = Vec::new();
     let mut potentials: Vec<Parse> = Vec::new();
 
     for child in tree.relevant_children(node, input, cursor) {
+        if !allow_restricted && tree.node(child).restricted {
+            continue;
+        }
         let mut context = context_so_far.clone();
         let mut reader = cursor;
 
         if let Err(error) = parse_child(tree, child, input, &mut reader, &mut context) {
-            errors.push((child, error));
+            errors.push((child, error, reader));
             continue;
         }
         if input.get(reader).is_some_and(|&c| c != ' ') {
-            errors.push((child, ParseError::ExpectedSeparator));
+            errors.push((child, ParseError::ExpectedSeparator, reader));
             continue;
         }
 
@@ -135,7 +149,14 @@ fn parse_nodes(
             match tree.node(child).redirect {
                 Some(redirect) => {
                     let child_context = Context::new(redirect, reader);
-                    let sub = parse_nodes(tree, redirect, input, reader, child_context);
+                    let sub = parse_nodes(
+                        tree,
+                        redirect,
+                        input,
+                        reader,
+                        child_context,
+                        allow_restricted,
+                    );
                     let mut chain = vec![context];
                     chain.extend(sub.chain);
                     return Parse {
@@ -144,7 +165,14 @@ fn parse_nodes(
                         errors: sub.errors,
                     };
                 }
-                None => potentials.push(parse_nodes(tree, child, input, reader, context)),
+                None => potentials.push(parse_nodes(
+                    tree,
+                    child,
+                    input,
+                    reader,
+                    context,
+                    allow_restricted,
+                )),
             }
         } else {
             potentials.push(Parse::single(context, reader));
@@ -213,7 +241,7 @@ fn read_unquoted(input: &[char], cursor: &mut usize) -> String {
     read_while(input, cursor, is_unquoted_char).iter().collect()
 }
 
-fn is_unquoted_char(c: char) -> bool {
+pub(super) fn is_unquoted_char(c: char) -> bool {
     c.is_ascii_digit() || c.is_ascii_alphabetic() || matches!(c, '_' | '-' | '.' | '+')
 }
 
@@ -307,12 +335,14 @@ fn read_id_with_state(input: &[char], cursor: &mut usize) -> Result<(), String> 
 pub(super) const SELECTORS: [&str; 6] = ["@p", "@a", "@r", "@s", "@e", "@n"];
 
 fn read_selector(input: &[char], cursor: &mut usize) -> Result<(), String> {
+    let start = *cursor;
     if input.get(*cursor) == Some(&'@') {
         *cursor += 1;
         let Some(&kind) = input.get(*cursor) else {
             return Err("Missing selector type".to_string());
         };
         if !SELECTORS.iter().any(|s| s.ends_with(kind)) {
+            *cursor = start;
             return Err(format!("Unknown selector type '@{kind}'"));
         }
         *cursor += 1;
@@ -321,7 +351,6 @@ fn read_selector(input: &[char], cursor: &mut usize) -> Result<(), String> {
         }
         return Ok(());
     }
-    let start = *cursor;
     let name = read_quotable(input, cursor)?;
     let length = name.chars().count();
     if length == 0 || (length > 16 && !is_uuid(&name)) {
@@ -363,7 +392,7 @@ fn read_world_coordinate(input: &[char], cursor: &mut usize, integer: bool) -> R
 
 fn read_local_coordinate(input: &[char], cursor: &mut usize) -> Result<(), String> {
     match input.get(*cursor) {
-        None => return Err(incomplete(3)),
+        None => return Err("Expected a coordinate".to_string()),
         Some('^') => {}
         Some(_) => return Err(MIXED_COORDINATES.to_string()),
     }
@@ -387,11 +416,15 @@ fn read_bounded<T: std::str::FromStr>(
     cursor: &mut usize,
     kind: &str,
 ) -> Result<T, String> {
+    let start = *cursor;
     let word = read_number_word(input, cursor);
     if word.is_empty() {
         return Err(format!("Expected {kind}"));
     }
-    word.parse().map_err(|_| format!("Invalid {kind} '{word}'"))
+    word.parse().map_err(|_| {
+        *cursor = start;
+        format!("Invalid {kind} '{word}'")
+    })
 }
 
 const MIXED_COORDINATES: &str =
@@ -408,15 +441,20 @@ fn read_coordinates(
     integer: bool,
     local: bool,
 ) -> Result<(), String> {
+    let start = *cursor;
     let is_local = local && input.get(*cursor) == Some(&'^');
     for i in 0..axes {
         if i > 0 {
             if input.get(*cursor) != Some(&' ') {
+                *cursor = start;
                 return Err(incomplete(axes));
             }
             *cursor += 1;
         }
         if is_local {
+            if input.get(*cursor).is_some_and(|&c| c != '^') {
+                *cursor = start;
+            }
             read_local_coordinate(input, cursor)?;
         } else {
             read_world_coordinate(input, cursor, integer)?;
@@ -449,32 +487,36 @@ pub(super) fn parse_argument(
     input: &[char],
     cursor: &mut usize,
 ) -> Result<(), String> {
+    let start = *cursor;
     match parser {
         BrigadierParser::Bool => {
             let word = read_unquoted(input, cursor);
             match word.as_str() {
                 "true" | "false" => Ok(()),
                 "" => Err("Expected boolean".to_string()),
-                other => Err(format!(
-                    "Invalid boolean: expected 'true' or 'false' but found '{other}'"
-                )),
+                other => {
+                    *cursor = start;
+                    Err(format!(
+                        "Invalid boolean: expected 'true' or 'false' but found '{other}'"
+                    ))
+                }
             }
         }
         BrigadierParser::Integer(n) => {
             let v: i32 = read_bounded(input, cursor, "integer")?;
-            check_range("Integer", v, n.min, n.max)
+            check_range("Integer", v, n.min, n.max).inspect_err(|_| *cursor = start)
         }
         BrigadierParser::Long(n) => {
             let v: i64 = read_bounded(input, cursor, "long")?;
-            check_range("Long", v, n.min, n.max)
+            check_range("Long", v, n.min, n.max).inspect_err(|_| *cursor = start)
         }
         BrigadierParser::Float(n) => {
             let v: f32 = read_bounded(input, cursor, "float")?;
-            check_range("Float", v, n.min, n.max)
+            check_range("Float", v, n.min, n.max).inspect_err(|_| *cursor = start)
         }
         BrigadierParser::Double(n) => {
             let v: f64 = read_bounded(input, cursor, "double")?;
-            check_range("Double", v, n.min, n.max)
+            check_range("Double", v, n.min, n.max).inspect_err(|_| *cursor = start)
         }
         BrigadierParser::String(kind) => match kind {
             BrigadierString::SingleWord => {

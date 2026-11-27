@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use seedcrack::{Dimension, FinderKind, Yields};
 
+use crate::modules::registry::commands as prefix_setting;
+use crate::modules::store;
 use crate::play::dialog::{ActionButton, AfterAction, Body, Dialog, Kind};
 use crate::session::SharedMutex;
 use crate::text::{AQUA, GRAY, Span, WHITE, YELLOW};
@@ -21,7 +23,7 @@ fn structures(dim: Dimension, keep: impl Fn(bool) -> bool) -> String {
         .filter(|k| k.dimension() == dim)
         .filter_map(|k| match k.yields() {
             Yields::Structure(set) if keep(set.placement().liftable()) => {
-                Some((set.placement().expected_bits(), k.name()))
+                Some((set.placement().expected_bits(), super::finder_label(k)))
             }
             _ => None,
         })
@@ -45,33 +47,27 @@ fn decorations() -> String {
 pub fn show(shared: &SharedMutex) {
     let lift = seedcrack::cracker::LIFT_COUNT;
     let body = vec![
-        line(
-            "Explore with the module on. Finds are read as chunks load and the seed is worked out by itself; \
-             the HUD panel shows how far along it is. The numbers are bits: how much one find narrows the seed.",
-            GRAY,
-        ),
-        line(format!("Key finds, you need {lift}:"), YELLOW),
+        line(crate::lang::tr!("seed_cracker.help.intro"), GRAY),
+        line(crate::lang::trf!("seed_cracker.help.key", lift), YELLOW),
         line(structures(Dimension::Overworld, |liftable| liftable), GRAY),
-        line("Extra finds, they add bits but are not key:", AQUA),
+        line(crate::lang::tr!("seed_cracker.help.extra"), AQUA),
         line(structures(Dimension::Overworld, |liftable| !liftable), GRAY),
-        line("The End:", AQUA),
-        line(
-            "Fly past the obsidian pillars near the centre, then find end cities until the bar fills. \
-             This route needs no key finds.",
-            GRAY,
-        ),
-        line(
-            "Decorations, only needed when the server hides its seed:",
-            AQUA,
-        ),
+        line(crate::lang::tr!("seed_cracker.help.end"), AQUA),
+        line(crate::lang::tr!("seed_cracker.help.end_route"), GRAY),
+        line(crate::lang::tr!("seed_cracker.help.decorations"), AQUA),
         line(decorations(), GRAY),
-        line("The Nether has nothing to find yet.", GRAY),
+        line(crate::lang::tr!("seed_cracker.help.bedrock"), AQUA),
+        line(crate::lang::tr!("seed_cracker.help.nether"), GRAY),
         line(
-            "Once found, the seed appears in chat: click it to copy.",
+            crate::lang::trf!(
+                "seed_cracker.help.trust",
+                store().text(prefix_setting::PREFIX)
+            ),
             GRAY,
         ),
+        line(crate::lang::tr!("seed_cracker.help.copy"), GRAY),
     ];
-    let title = vec![Span::colored("Seed Cracker", AQUA)];
+    let title = vec![Span::colored(crate::lang::tr!("seed_cracker.title"), AQUA)];
     let dialog = Dialog {
         title: title.clone(),
         external_title: title,
@@ -82,7 +78,10 @@ pub fn show(shared: &SharedMutex) {
         inputs: Vec::new(),
         kind: Kind::Simple {
             actions: vec![ActionButton {
-                label: vec![Span::colored("Done", WHITE)],
+                label: vec![Span::colored(
+                    crate::lang::tr!("seed_cracker.help.done"),
+                    WHITE,
+                )],
                 tooltip: None,
                 width: 150.0,
                 action: None,

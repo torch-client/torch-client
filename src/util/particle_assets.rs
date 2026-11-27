@@ -11,6 +11,7 @@ pub(crate) struct ParticleAtlasData {
     pub image: bevy::image::Image,
     pub rows: u32,
     pub sheets: HashMap<String, Vec<u32>>,
+    pub frametimes: HashMap<String, u32>,
 }
 
 pub(crate) fn tile_uv(tile: u32, rows: u32) -> [f32; 4] {
@@ -72,7 +73,7 @@ fn load_sprites() -> HashMap<String, Vec<String>> {
 
 pub(crate) fn build_atlas() -> ParticleAtlasData {
     let dir = crate::assets_root().join("textures/particle");
-    let mut entries: Vec<(String, image::RgbaImage)> = Vec::new();
+    let mut entries: Vec<(String, Vec<image::RgbaImage>, u32)> = Vec::new();
     for path in crate::platform::assets::read_dir(&dir) {
         if path.extension().is_none_or(|ext| ext != "png") {
             continue;
@@ -86,28 +87,52 @@ pub(crate) fn build_atlas() -> ParticleAtlasData {
         let Ok(decoded) = image::load_from_memory(&bytes) else {
             continue;
         };
-        entries.push((stem, fit_tile(decoded.to_rgba8())));
+        let rgba = decoded.to_rgba8();
+        let (frames, frametime) = match read_animation(&path) {
+            Some(animation) => (split_frames(&rgba, &animation), animation.frametime),
+            None => (vec![rgba], 0),
+        };
+        if frames.is_empty() {
+            continue;
+        }
+        entries.push((stem, frames.into_iter().map(fit_tile).collect(), frametime));
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let rows = (entries.len() as u32).max(1).div_ceil(PARTICLE_ATLAS_COLS);
+    let tile_count: u32 = entries.iter().map(|e| e.1.len() as u32).sum();
+    let rows = tile_count.max(1).div_ceil(PARTICLE_ATLAS_COLS);
     let atlas_w = PARTICLE_ATLAS_COLS * PARTICLE_TILE_PX;
     let atlas_h = rows * PARTICLE_TILE_PX;
     let mut data = vec![0u8; (atlas_w * atlas_h * 4) as usize];
-    let mut tiles: HashMap<&str, u32> = HashMap::with_capacity(entries.len());
-    for (index, (stem, rgba)) in entries.iter().enumerate() {
-        let tile = index as u32;
-        blit(&mut data, tile, atlas_w, rgba);
-        tiles.insert(stem.as_str(), tile);
+    let mut tiles: HashMap<&str, (Vec<u32>, u32)> = HashMap::with_capacity(entries.len());
+    let mut next_tile = 0u32;
+    for (stem, frames, frametime) in &entries {
+        let mut list = Vec::with_capacity(frames.len());
+        for frame in frames {
+            blit(&mut data, next_tile, atlas_w, frame);
+            list.push(next_tile);
+            next_tile += 1;
+        }
+        tiles.insert(stem.as_str(), (list, *frametime));
     }
 
     let mut sheets: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut frametimes: HashMap<String, u32> = HashMap::new();
     for (particle_type, sprites) in particle_sprites().iter() {
-        let resolved: Vec<u32> = sprites
-            .iter()
-            .filter_map(|sprite| tiles.get(sprite.as_str()).copied())
-            .collect();
+        let mut resolved: Vec<u32> = Vec::new();
+        let mut frametime = 0;
+        for sprite in sprites {
+            if let Some((list, time)) = tiles.get(sprite.as_str()) {
+                resolved.extend_from_slice(list);
+                if *time > 0 {
+                    frametime = *time;
+                }
+            }
+        }
         if !resolved.is_empty() {
+            if frametime > 0 {
+                frametimes.insert(particle_type.clone(), frametime);
+            }
             sheets.insert(particle_type.clone(), resolved);
         }
     }
@@ -127,12 +152,79 @@ pub(crate) fn build_atlas() -> ParticleAtlasData {
         ),
         rows,
         sheets,
+        frametimes,
     }
+}
+
+struct Animation {
+    frametime: u32,
+    frames: Option<Vec<u32>>,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+fn read_animation(png: &std::path::Path) -> Option<Animation> {
+    use serde_json::Value;
+    let mut name = png.file_name()?.to_os_string();
+    name.push(".mcmeta");
+    let text = crate::platform::assets::read_to_string(png.with_file_name(name))?;
+    let json = serde_json::from_str::<Value>(&text).ok()?;
+    let animation = json.get("animation")?;
+    let int = |key: &str| {
+        animation
+            .get(key)
+            .and_then(Value::as_u64)
+            .map(|v| v.min(u64::from(u32::MAX)) as u32)
+    };
+    let frames = animation
+        .get("frames")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|f| {
+                    f.as_u64()
+                        .or_else(|| f.get("index").and_then(Value::as_u64))
+                })
+                .map(|i| i.min(u64::from(u32::MAX)) as u32)
+                .collect()
+        });
+    Some(Animation {
+        frametime: int("frametime").unwrap_or(1).max(1),
+        frames,
+        width: int("width"),
+        height: int("height"),
+    })
+}
+
+fn split_frames(src: &image::RgbaImage, animation: &Animation) -> Vec<image::RgbaImage> {
+    let (w, h) = (src.width(), src.height());
+    let side = w.min(h);
+    let (fw, fh) = match (animation.width, animation.height) {
+        (Some(fw), Some(fh)) => (fw, fh),
+        (Some(fw), None) => (fw, h),
+        (None, Some(fh)) => (w, fh),
+        (None, None) => (side, side),
+    };
+    if fw == 0 || fh == 0 || fw > w || fh > h {
+        return Vec::new();
+    }
+    let cols = w / fw;
+    let count = cols * (h / fh);
+    let order: Vec<u32> = animation
+        .frames
+        .clone()
+        .unwrap_or_else(|| (0..count).collect());
+    order
+        .into_iter()
+        .filter(|&i| i < count)
+        .map(|i| {
+            image::imageops::crop_imm(src, (i % cols) * fw, (i / cols) * fh, fw, fh).to_image()
+        })
+        .collect()
 }
 
 fn fit_tile(src: image::RgbaImage) -> image::RgbaImage {
     let (w, h) = (src.width().max(1), src.height().max(1));
-    let (w, h) = if h > w && h % w == 0 { (w, w) } else { (w, h) };
     let size = PARTICLE_TILE_PX;
     let mut out = image::RgbaImage::new(size, size);
     for y in 0..size {

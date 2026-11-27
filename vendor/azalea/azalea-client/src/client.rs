@@ -29,7 +29,6 @@ use crate::{
     block_update::{QueuedBlockChangedAcks, QueuedServerBlockUpdates},
     chunks::ChunkBatchInfo,
     connection::RawConnection,
-    cookies::ServerCookies,
     interact::BlockStatePredictionHandler,
     local_player::{Experience, Hunger, PermissionLevel, TabList, TabListResource, WorldHolder},
     mining,
@@ -58,7 +57,6 @@ pub struct JoinedClientBundle {
     pub chunk_batch_info: ChunkBatchInfo,
     pub hunger: Hunger,
     pub experience: Experience,
-    pub cookies: ServerCookies,
 
     pub entity_id_index: EntityIdIndex,
 

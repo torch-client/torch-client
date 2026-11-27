@@ -547,6 +547,32 @@ fn touch_pointer(touches: &Touches, active: &mut Option<u64>) -> Option<(Vec2, b
         .map(|t| (t.position(), true, false, true))
 }
 
+#[cfg(all(target_os = "android", feature = "mobile_ui"))]
+fn drop_under_keyboard(
+    touch: Option<(Vec2, bool, bool, bool)>,
+    window: &Window,
+    active: &mut Option<u64>,
+) -> Option<(Vec2, bool, bool, bool)> {
+    let (pos, pressed, ..) = touch?;
+    if !crate::platform::keyboard::has_focus() {
+        return touch;
+    }
+    let inset = crate::platform::keyboard::inset_px();
+    let h = window.physical_height() as f32;
+    let y = pos.y * window.scale_factor();
+    if inset <= 0.0 || y < h - inset {
+        return touch;
+    }
+    if pressed {
+        crate::log_info!(
+            "input",
+            "touch at y {y:.0} of {h:.0} is under the soft keyboard ({inset:.0}px): ignored"
+        );
+    }
+    *active = None;
+    None
+}
+
 pub(crate) fn collect_input(
     mut input: ResMut<GuiInput>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -592,6 +618,8 @@ pub(crate) fn collect_input(
     };
     #[cfg(not(feature = "mobile_ui"))]
     let touch: Option<(Vec2, bool, bool, bool)> = None;
+    #[cfg(all(target_os = "android", feature = "mobile_ui"))]
+    let touch = drop_under_keyboard(touch, window, &mut active_touch);
 
     let cursor = window.physical_cursor_position();
     #[cfg(feature = "mobile_ui")]
